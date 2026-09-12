@@ -1,0 +1,48 @@
+# Case ID
+
+P001
+
+## Existing Fuzz Harness H0
+
+No pre-commit harness file exists at the changed harness path.
+
+## Production Source Change (S0 -> S1)
+
+Harness changes, commit messages, tests, outcomes, and future evidence are excluded. The source diff is complete.
+
+~~~~diff
+diff --git a/dec/decode.c b/dec/decode.c
+index ab38ee1..4a43aac 100644
+--- a/dec/decode.c
++++ b/dec/decode.c
+@@ -1738,9 +1738,14 @@ postReadDistance:
+         int len = i;
+         if (transform_idx == 0) {
+           memcpy(&s->ringbuffer[pos], word, (size_t)len);
++          BROTLI_LOG(("[ProcessCommandsInternal] dictionary word: [%.*s]\n",
++                      len, word));
+         } else {
+           len = TransformDictionaryWord(
+               &s->ringbuffer[pos], word, len, transform_idx);
++          BROTLI_LOG(("[ProcessCommandsInternal] dictionary word: [%.*s],"
++                      " transform_idx = %d, transformed: [%.*s]\n",
++                      i, word, transform_idx, len, &s->ringbuffer[pos]));
+         }
+         pos += len;
+         s->meta_block_remaining_len -= len;
+@@ -2030,10 +2035,8 @@ BrotliDecoderResult BrotliDecoderDecompressStream(
+         s->state = BROTLI_STATE_HUFFMAN_CODE_0;
+         break;
+       case BROTLI_STATE_UNCOMPRESSED: {
+-        int bytes_copied = s->meta_block_remaining_len;
+         result = CopyUncompressedBlockToOutput(
+             available_out, next_out, total_out, s);
+-        bytes_copied -= s->meta_block_remaining_len;
+         if (result != BROTLI_DECODER_SUCCESS) {
+           break;
+         }
+~~~~
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.

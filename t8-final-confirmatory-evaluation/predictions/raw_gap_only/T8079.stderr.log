@@ -1,0 +1,167 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8079-j8pmhoak
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fd-647b-7801-a7d5-909c148b8ab0
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8079
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `fuzz/bplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * bplist_fuzzer.cc
+ * binary plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_bin(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/src/bplist.c b/src/bplist.c
+index 308b787..1187c7a 100644
+--- a/src/bplist.c
++++ b/src/bplist.c
+@@ -834,64 +834,70 @@ static plist_t parse_bin_node(struct bplist_data *bplist, const char** object)
+ static plist_t parse_bin_node_at_index(struct bplist_data *bplist, uint32_t node_index)
+ {
+     int i = 0;
+     const char* ptr = NULL;
+     plist_t plist = NULL;
+     const char* idx_ptr = NULL;
+ 
+     if (node_index >= bplist->num_objects) {
+         PLIST_BIN_ERR("node index (%u) must be smaller than the number of objects (%" PRIu64 ")\n", node_index, bplist->num_objects);
+         bplist->err = PLIST_ERR_PARSE;
+         return NULL;
+     }
+ 
+     idx_ptr = bplist->offset_table + node_index * bplist->offset_size;
+     if (idx_ptr < bplist->offset_table ||
+         idx_ptr >= bplist->offset_table + bplist->num_objects * bplist->offset_size) {
+         PLIST_BIN_ERR("node index %u points outside of valid range\n", node_index);
+         bplist->err = PLIST_ERR_PARSE;
+         return NULL;
+     }
+ 
+-    ptr = bplist->data + UINT_TO_HOST(idx_ptr, bplist->offset_size);
++    uint64_t node_offset = UINT_TO_HOST(idx_ptr, bplist->offset_size);
++    if (node_offset > (uint64_t)bplist->size) {
++        PLIST_BIN_ERR("node offset overflow (%llu)\n", node_offset);
++        bplist->err = PLIST_ERR_PARSE;
++        return NULL;
++    }
++    ptr = bplist->data + node_offset;
+     /* make sure the node offset is in a sane range */
+     if ((ptr < bplist->data+BPLIST_MAGIC_SIZE+BPLIST_VERSION_SIZE) || (ptr >= bplist->offset_table)) {
+         PLIST_BIN_ERR("offset for node index %u points outside of valid range\n", node_index);
+         bplist->err = PLIST_ERR_PARSE;
+         return NULL;
+     }
+ 
+     /* check nesting depth */
+     if (bplist->level > PLIST_MAX_NESTING_DEPTH) {
+         PLIST_BIN_ERR("maximum nesting depth (%u) exceeded\n",(unsigned)PLIST_MAX_NESTING_DEPTH);
+         bplist->err = PLIST_ERR_MAX_NESTING;
+         return NULL;
+     }
+ 
+     /* store node_index for current recursion level */
+     if ((uint32_t)ptr_array_size(bplist->used_indexes) < bplist->level+1) {
+         while ((uint32_t)ptr_array_size(bplist->used_indexes) < bplist->level+1) {
+             ptr_array_add(bplist->used_indexes, (void*)(uintptr_t)node_index);
+         }
+     } else {
+ 	ptr_array_set(bplist->used_indexes, (void*)(uintptr_t)node_index, bplist->level);
+     }
+ 
+     /* recursion check */
+     if (bplist->level > 0) {
+         for (i = bplist->level-1; i >= 0; i--) {
+             void *node_i = ptr_array_index(bplist->used_indexes, i);
+             void *node_level = ptr_array_index(bplist->used_indexes, bplist->level);
+             if (node_i == node_level) {
+                 PLIST_BIN_ERR("recursion detected in binary plist\n");
+                 bplist->err = PLIST_ERR_CIRCULAR_REF;
+                 return NULL;
+             }
+         }
+     }
+ 
+     /* finally parse node */
+     bplist->level++;
+     plist = parse_bin_node(bplist, &ptr);
+     bplist->level--;
+     return plist;
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8079","gap_exists":false,"gap_type":[],"confidence":99,"affected_functions":["plist_from_bin","parse_bin_node_at_index"],"reason":"H0 already fuzzes the binary-plist parsing entry point implicated by the change: it passes arbitrary bytes and their exact size to plist_from_bin, whose parsing path includes parse_bin_node_at_index. Malformed offset-table values can therefore exercise the new node_offset versus bplist->size validation without any additional API sequence, state, or configuration.","evidence":["H0 calls plist_from_bin(reinterpret_cast<const char*>(data), size, &root_node) for every fuzzer input.","The production change is inside parse_bin_node_at_index and validates node_offset decoded from idx_ptr in the binary plist offset table.","H0 supplies both attacker-controlled binary-plist bytes (data) and input length (size), covering the two values involved in the new bounds check."],"recommended_action":"Keep H0; optionally add malformed binary-plist corpus seeds with oversized offset-table entries to improve path discovery, but no new harness entry point is required."}
+tokens used
+4,735

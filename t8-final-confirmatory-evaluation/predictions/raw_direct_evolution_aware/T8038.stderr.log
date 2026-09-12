@@ -1,0 +1,4668 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-direct_evolution_aware-T8038-3evbrm2e
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a09405-6438-7661-9b07-f80ae2deff90
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8038
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `test/tools/ossfuzz/protoToYul.cpp`
+
+~~~~cpp
+/*
+	This file is part of solidity.
+
+	solidity is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	solidity is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with solidity.  If not, see <http://www.gnu.org/licenses/>.
+*/
+// SPDX-License-Identifier: GPL-3.0
+
+#include <test/tools/ossfuzz/protoToYul.h>
+#include <test/tools/ossfuzz/yulOptimizerFuzzDictionary.h>
+
+#include <libyul/Exceptions.h>
+
+#include <libsolutil/StringUtils.h>
+
+#include <range/v3/algorithm/all_of.hpp>
+
+#include <boost/algorithm/string.hpp>
+#include <boost/algorithm/string/split.hpp>
+
+#include <range/v3/action/remove_if.hpp>
+
+#include <algorithm>
+
+using namespace solidity::yul::test::yul_fuzzer;
+using namespace solidity::yul::test;
+using namespace solidity::langutil;
+using namespace solidity::util;
+using namespace solidity;
+
+std::string ProtoConverter::dictionaryToken(HexPrefix _p)
+{
+	std::string token;
+	// If dictionary constant is requested while converting
+	// for loop condition, then return zero so that we don't
+	// generate infinite for loops.
+	if (m_inForCond)
+		token = "0";
+	else
+	{
+		unsigned indexVar = m_inputSize * m_inputSize + counter();
+		token = hexDictionary[indexVar % hexDictionary.size()];
+		yulAssert(token.size() <= 64, "Proto Fuzzer: Dictionary token too large");
+	}
+
+	return _p == HexPrefix::Add ? "0x" + token : token;
+}
+
+std::string ProtoConverter::createHex(std::string const& _hexBytes)
+{
+	std::string tmp{_hexBytes};
+	if (!tmp.empty())
+	{
+		ranges::actions::remove_if(tmp, [=](char c) -> bool {
+			return !std::isxdigit(c);
+		});
+		tmp = tmp.substr(0, 64);
+	}
+	// We need this awkward if case because hex literals cannot be empty.
+	// Use a dictionary token.
+	if (tmp.empty())
+		tmp = dictionaryToken(HexPrefix::DontAdd);
+	// Hex literals must have even number of digits
+	if (tmp.size() % 2)
+		tmp.insert(0, "0");
+
+	yulAssert(tmp.size() <= 64, "Proto Fuzzer: Dictionary token too large");
+	return tmp;
+}
+
+std::string ProtoConverter::createAlphaNum(std::string const& _strBytes)
+{
+	std::string tmp{_strBytes};
+	if (!tmp.empty())
+	{
+		ranges::actions::remove_if(tmp, [=](char c) -> bool {
+			return !(std::isalpha(c) || std::isdigit(c));
+		});
+		tmp = tmp.substr(0, 32);
+	}
+	return tmp;
+}
+
+EVMVersion ProtoConverter::evmVersionMapping(Program_Version const& _ver)
+{
+	switch (_ver)
+	{
+	case Program::HOMESTEAD:
+		return EVMVersion::homestead();
+	case Program::TANGERINE:
+		return EVMVersion::tangerineWhistle();
+	case Program::SPURIOUS:
+		return EVMVersion::spuriousDragon();
+	case Program::BYZANTIUM:
+		return EVMVersion::byzantium();
+	case Program::CONSTANTINOPLE:
+		return EVMVersion::constantinople();
+	case Program::PETERSBURG:
+		return EVMVersion::petersburg();
+	case Program::ISTANBUL:
+		return EVMVersion::istanbul();
+	case Program::BERLIN:
+		return EVMVersion::berlin();
+	case Program::LONDON:
+		return EVMVersion::london();
+	case Program::PARIS:
+		return EVMVersion::paris();
+	case Program::SHANGHAI:
+		return EVMVersion::shanghai();
+	case Program::CANCUN:
+		return EVMVersion::cancun();
+	case Program::PRAGUE:
+		return EVMVersion::prague();
+	case Program::OSAKA:
+		return EVMVersion::osaka();
+	case Program::AMSTERDAM:
+		return EVMVersion::amsterdam();
+	}
+}
+
+std::string ProtoConverter::visit(Literal const& _x)
+{
+	switch (_x.literal_oneof_case())
+	{
+	case Literal::kIntval:
+		return std::to_string(_x.intval());
+	case Literal::kHexval:
+		return "0x" + createHex(_x.hexval());
+	case Literal::kStrval:
+		return "\"" + createAlphaNum(_x.strval()) + "\"";
+	case Literal::kBoolval:
+		return _x.boolval() ? "true" : "false";
+	case Literal::LITERAL_ONEOF_NOT_SET:
+		return dictionaryToken();
+	}
+}
+
+void ProtoConverter::consolidateVarDeclsInFunctionDef()
+{
+	m_currentFuncVars.clear();
+	yulAssert(!m_funcVars.empty(), "Proto fuzzer: Invalid operation");
+
+	auto const& scopes = m_funcVars.back();
+	for (auto const& s: scopes)
+		for (auto const& var: s)
+			m_currentFuncVars.push_back(&var);
+	yulAssert(!m_funcForLoopInitVars.empty(), "Proto fuzzer: Invalid operation");
+	auto const& forinitscopes = m_funcForLoopInitVars.back();
+	for (auto const& s: forinitscopes)
+		for (auto const& var: s)
+			m_currentFuncVars.push_back(&var);
+}
+
+void ProtoConverter::consolidateGlobalVarDecls()
+{
+	m_currentGlobalVars.clear();
+	// Place pointers to all global variables that are in scope
+	// into a single vector
+	for (auto const& scope: m_globalVars)
+		for (auto const& var: scope)
+			m_currentGlobalVars.push_back(&var);
+	// Place pointers to all variables declared in for-init blocks
+	// that are still live into the same vector
+	for (auto const& init: m_globalForLoopInitVars)
+		for (auto const& var: init)
+			m_currentGlobalVars.push_back(&var);
+}
+
+bool ProtoConverter::varDeclAvailable()
+{
+	if (m_inFunctionDef)
+	{
+		consolidateVarDeclsInFunctionDef();
+		return !m_currentFuncVars.empty();
+	}
+	else
+	{
+		consolidateGlobalVarDecls();
+		return !m_currentGlobalVars.empty();
+	}
+}
+
+void ProtoConverter::visit(VarRef const& _x)
+{
+	if (m_inFunctionDef)
+	{
+		// Ensure that there is at least one variable declaration to reference in function scope.
+		yulAssert(!m_currentFuncVars.empty(), "Proto fuzzer: No variables to reference.");
+		m_output << *m_currentFuncVars[static_cast<size_t>(_x.varnum()) % m_currentFuncVars.size()];
+	}
+	else
+	{
+		// Ensure that there is at least one variable declaration to reference in nested scopes.
+		yulAssert(!m_currentGlobalVars.empty(), "Proto fuzzer: No global variables to reference.");
+		m_output << *m_currentGlobalVars[static_cast<size_t>(_x.varnum()) % m_currentGlobalVars.size()];
+	}
+}
+
+void ProtoConverter::visit(Expression const& _x)
+{
+	switch (_x.expr_oneof_case())
+	{
+	case Expression::kVarref:
+		// If the expression requires a variable reference that we cannot provide
+		// (because there are no variables in scope), we silently output a literal
+		// expression from the optimizer dictionary.
+		if (!varDeclAvailable())
+			m_output << dictionaryToken();
+		else
+			visit(_x.varref());
+		break;
+	case Expression::kCons:
+		// If literal expression describes for-loop condition
+		// then force it to zero, so we don't generate infinite
+		// for loops
+		if (m_inForCond)
+			m_output << "0";
+		else
+			m_output << visit(_x.cons());
+		break;
+	case Expression::kBinop:
+		visit(_x.binop());
+		break;
+	case Expression::kUnop:
+		visit(_x.unop());
+		break;
+	case Expression::kTop:
+		visit(_x.top());
+		break;
+	case Expression::kNop:
+		visit(_x.nop());
+		break;
+	case Expression::kFuncExpr:
+		if (auto v = functionExists(NumFunctionReturns::Single); v.has_value())
+		{
+			std::string functionName = v.value();
+			visit(_x.func_expr(), functionName, true);
+		}
+		else
+			m_output << dictionaryToken();
+		break;
+	case Expression::kLowcall:
+		visit(_x.lowcall());
+		break;
+	case Expression::kCreate:
+		// Create and create2 return address of created contract which
+		// may lead to state change via sstore of the returned address.
+		if (!m_filterStatefulInstructions)
+			visit(_x.create());
+		else
+			m_output << dictionaryToken();
+		break;
+	case Expression::kUnopdata:
+		// Filter datasize and dataoffset because these instructions may return
+		// a value that is a function of optimisation. Therefore, when run on
+		// an EVM client, the execution traces for unoptimised vs optimised
+		// programs may differ. This ends up as a false-positive bug report.
+		if (m_isObject && !m_filterStatefulInstructions)
+			visit(_x.unopdata());
+		else
+			m_output << dictionaryToken();
+		break;
+	case Expression::EXPR_ONEOF_NOT_SET:
+		m_output << dictionaryToken();
+		break;
+	}
+}
+
+void ProtoConverter::visit(BinaryOp const& _x)
+{
+	BinaryOp_BOp op = _x.op();
+
+	if ((op == BinaryOp::SHL || op == BinaryOp::SHR || op == BinaryOp::SAR) &&
+		!m_evmVersion.hasBitwiseShifting())
+	{
+		m_output << dictionaryToken();
+		return;
+	}
+
+	switch (op)
+	{
+	case BinaryOp::ADD:
+		m_output << "add";
+		break;
+	case BinaryOp::SUB:
+		m_output << "sub";
+		break;
+	case BinaryOp::MUL:
+		m_output << "mul";
+		break;
+	case BinaryOp::DIV:
+		m_output << "div";
+		break;
+	case BinaryOp::MOD:
+		m_output << "mod";
+		break;
+	case BinaryOp::XOR:
+		m_output << "xor";
+		break;
+	case BinaryOp::AND:
+		m_output << "and";
+		break;
+	case BinaryOp::OR:
+		m_output << "or";
+		break;
+	case BinaryOp::EQ:
+		m_output << "eq";
+		break;
+	case BinaryOp::LT:
+		m_output << "lt";
+		break;
+	case BinaryOp::GT:
+		m_output << "gt";
+		break;
+	case BinaryOp::SHR:
+		yulAssert(m_evmVersion.hasBitwiseShifting(), "Proto fuzzer: Invalid evm version");
+		m_output << "shr";
+		break;
+	case BinaryOp::SHL:
+		yulAssert(m_evmVersion.hasBitwiseShifting(), "Proto fuzzer: Invalid evm version");
+		m_output << "shl";
+		break;
+	case BinaryOp::SAR:
+		yulAssert(m_evmVersion.hasBitwiseShifting(), "Proto fuzzer: Invalid evm version");
+		m_output << "sar";
+		break;
+	case BinaryOp::SDIV:
+		m_output << "sdiv";
+		break;
+	case BinaryOp::SMOD:
+		m_output << "smod";
+		break;
+	case BinaryOp::EXP:
+		m_output << "exp";
+		break;
+	case BinaryOp::SLT:
+		m_output << "slt";
+		break;
+	case BinaryOp::SGT:
+		m_output << "sgt";
+		break;
+	case BinaryOp::BYTE:
+		m_output << "byte";
+		break;
+	case BinaryOp::SI:
+		m_output << "signextend";
+		break;
+	case BinaryOp::KECCAK:
+		m_output << "keccak256";
+		break;
+	}
+	m_output << "(";
+	if (op == BinaryOp::KECCAK)
+	{
+		m_output << "mod(";
+		visit(_x.left());
+		m_output << ", " << std::to_string(s_maxMemory - s_maxSize) << ")";
+		m_output << ",";
+		m_output << "mod(";
+		visit(_x.right());
+		m_output << ", " << std::to_string(s_maxSize) << ")";
+	}
+	else
+	{
+		visit(_x.left());
+		m_output << ",";
+		visit(_x.right());
+	}
+	m_output << ")";
+}
+
+void ProtoConverter::scopeVariables(std::vector<std::string> const& _varNames)
+{
+	// If we are inside a for-init block, there are two places
+	// where the visited vardecl may have been defined:
+	// - directly inside the for-init block
+	// - inside a block within the for-init block
+	// In the latter case, we don't scope extend. The flag
+	// m_forInitScopeExtEnabled (= true) indicates whether we are directly
+	// inside a for-init block e.g., for { let x } or (= false) inside a
+	// nested for-init block e.g., for { { let x } }
+	bool forInitScopeExtendVariable = m_inForInitScope && m_forInitScopeExtEnabled;
+
+	// There are four cases that are tackled here
+	// Case 1. We are inside a function definition and the variable declaration's
+	// scope needs to be extended.
+	// Case 2. We are inside a function definition but scope extension is disabled
+	// Case 3. We are inside global scope and scope extension is required
+	// Case 4. We are inside global scope but scope extension is disabled
+	if (m_inFunctionDef)
+	{
+		// Variables declared directly in for-init block
+		// are tracked separately because their scope
+		// extends beyond the block they are defined in
+		// to the rest of the for-loop statement.
+		// Case 1
+		if (forInitScopeExtendVariable)
+		{
+			yulAssert(
+				!m_funcForLoopInitVars.empty() && !m_funcForLoopInitVars.back().empty(),
+				"Proto fuzzer: Invalid operation"
+			);
+			for (auto const& varName: _varNames)
+				m_funcForLoopInitVars.back().back().push_back(varName);
+		}
+		// Case 2
+		else
+		{
+			yulAssert(
+				!m_funcVars.empty() && !m_funcVars.back().empty(),
+				"Proto fuzzer: Invalid operation"
+			);
+			for (auto const& varName: _varNames)
+				m_funcVars.back().back().push_back(varName);
+		}
+	}
+	// If m_inFunctionDef is false, we are in global scope
+	else
+	{
+		// Case 3
+		if (forInitScopeExtendVariable)
+		{
+			yulAssert(!m_globalForLoopInitVars.empty(), "Proto fuzzer: Invalid operation");
+
+			for (auto const& varName: _varNames)
+				m_globalForLoopInitVars.back().push_back(varName);
+		}
+		// Case 4
+		else
+		{
+			yulAssert(!m_globalVars.empty(), "Proto fuzzer: Invalid operation");
+
+			for (auto const& varName: _varNames)
+				m_globalVars.back().push_back(varName);
+		}
+	}
+}
+
+void ProtoConverter::visit(VarDecl const& _x)
+{
+	std::string varName = newVarName();
+	m_output << "let " << varName << " := ";
+	visit(_x.expr());
+	m_output << "\n";
+	scopeVariables({varName});
+}
+
+void ProtoConverter::visit(MultiVarDecl const& _x)
+{
+	m_output << "let ";
+	std::vector<std::string> varNames;
+	// We support up to 4 variables in a single
+	// declaration statement.
+	unsigned numVars = _x.num_vars() % 3 + 2;
+	std::string delimiter;
+	for (unsigned i = 0; i < numVars; i++)
+	{
+		std::string varName = newVarName();
+		varNames.push_back(varName);
+		m_output << delimiter << varName;
+		if (i == 0)
+			delimiter = ", ";
+	}
+	m_output << "\n";
+	scopeVariables(varNames);
+}
+
+void ProtoConverter::visit(TypedVarDecl const& _x)
+{
+	std::string varName = newVarName();
+	m_output << "let " << varName;
+	switch (_x.type())
+	{
+	case TypedVarDecl::BOOL:
+		m_output << ": bool := ";
+		visit(_x.expr());
+		m_output << " : bool\n";
+		break;
+	case TypedVarDecl::S8:
+		m_output << ": s8 := ";
+		visit(_x.expr());
+		m_output << " : s8\n";
+		break;
+	case TypedVarDecl::S32:
+		m_output << ": s32 := ";
+		visit(_x.expr());
+		m_output << " : s32\n";
+		break;
+	case TypedVarDecl::S64:
+		m_output << ": s64 := ";
+		visit(_x.expr());
+		m_output << " : s64\n";
+		break;
+	case TypedVarDecl::S128:
+		m_output << ": s128 := ";
+		visit(_x.expr());
+		m_output << " : s128\n";
+		break;
+	case TypedVarDecl::S256:
+		m_output << ": s256 := ";
+		visit(_x.expr());
+		m_output << " : s256\n";
+		break;
+	case TypedVarDecl::U8:
+		m_output << ": u8 := ";
+		visit(_x.expr());
+		m_output << " : u8\n";
+		break;
+	case TypedVarDecl::U32:
+		m_output << ": u32 := ";
+		visit(_x.expr());
+		m_output << " : u32\n";
+		break;
+	case TypedVarDecl::U64:
+		m_output << ": u64 := ";
+		visit(_x.expr());
+		m_output << " : u64\n";
+		break;
+	case TypedVarDecl::U128:
+		m_output << ": u128 := ";
+		visit(_x.expr());
+		m_output << " : u128\n";
+		break;
+	case TypedVarDecl::U256:
+		m_output << ": u256 := ";
+		visit(_x.expr());
+		m_output << " : u256\n";
+		break;
+	}
+	// If we are inside a for-init block, there are two places
+	// where the visited vardecl may have been defined:
+	// - directly inside the for-init block
+	// - inside a block within the for-init block
+	// In the latter case, we don't scope extend.
+	if (m_inFunctionDef)
+	{
+		// Variables declared directly in for-init block
+		// are tracked separately because their scope
+		// extends beyond the block they are defined in
+		// to the rest of the for-loop statement.
+		if (m_inForInitScope && m_forInitScopeExtEnabled)
+		{
+			yulAssert(
+				!m_funcForLoopInitVars.empty() && !m_funcForLoopInitVars.back().empty(),
+				"Proto fuzzer: Invalid operation"
+			);
+			m_funcForLoopInitVars.back().back().push_back(varName);
+		}
+		else
+		{
+			yulAssert(
+				!m_funcVars.empty() && !m_funcVars.back().empty(),
+				"Proto fuzzer: Invalid operation"
+			);
+			m_funcVars.back().back().push_back(varName);
+		}
+	}
+	else
+	{
+		if (m_inForInitScope && m_forInitScopeExtEnabled)
+		{
+			yulAssert(
+				!m_globalForLoopInitVars.empty(),
+				"Proto fuzzer: Invalid operation"
+			);
+			m_globalForLoopInitVars.back().push_back(varName);
+		}
+		else
+		{
+			yulAssert(
+				!m_globalVars.empty(),
+				"Proto fuzzer: Invalid operation"
+			);
+			m_globalVars.back().push_back(varName);
+		}
+	}
+}
+
+void ProtoConverter::visit(UnaryOp const& _x)
+{
+	UnaryOp_UOp op = _x.op();
+
+	// Replace calls to extcodehash on unsupported EVMs with a dictionary
+	// token.
+	if (op == UnaryOp::EXTCODEHASH && !m_evmVersion.hasExtCodeHash())
+	{
+		m_output << dictionaryToken();
+		return;
+	}
+
+	if (op == UnaryOp::TLOAD && !m_evmVersion.supportsTransientStorage())
+	{
+		m_output << dictionaryToken();
+		return;
+	}
+
+	if (op == UnaryOp::BLOBHASH && !m_evmVersion.hasBlobHash())
+	{
+		m_output << dictionaryToken();
+		return;
+	}
+
+	// The following instructions may lead to change of EVM state and are hence
+	// excluded to avoid false positives.
+	if (
+		m_filterStatefulInstructions &&
+		(
+			op == UnaryOp::EXTCODEHASH ||
+			op == UnaryOp::EXTCODESIZE ||
+			op == UnaryOp::BALANCE ||
+			op == UnaryOp::BLOCKHASH
+		)
+	)
+	{
+		m_output << dictionaryToken();
+		return;
+	}
+
+	switch (op)
+	{
+	case UnaryOp::NOT:
+		m_output << "not";
+		break;
+	case UnaryOp::MLOAD:
+		m_output << "mload";
+		break;
+	case UnaryOp::SLOAD:
+		m_output << "sload";
+		break;
+	case UnaryOp::TLOAD:
+		m_output << "tload";
+		break;
+	case UnaryOp::ISZERO:
+		m_output << "iszero";
+		break;
+	case UnaryOp::CALLDATALOAD:
+		m_output << "calldataload";
+		break;
+	case UnaryOp::EXTCODESIZE:
+		m_output << "extcodesize";
+		break;
+	case UnaryOp::EXTCODEHASH:
+		m_output << "extcodehash";
+		break;
+	case UnaryOp::BALANCE:
+		m_output << "balance";
+		break;
+	case UnaryOp::BLOCKHASH:
+		m_output << "blockhash";
+		break;
+	case UnaryOp::BLOBHASH:
+		m_output << "blobhash";
+		break;
+	}
+	m_output << "(";
+	if (op == UnaryOp::MLOAD)
+	{
+		m_output << "mod(";
+		visit(_x.operand());
+		m_output << ", " << std::to_string(s_maxMemory - 32) << ")";
+	}
+	else
+		visit(_x.operand());
+	m_output << ")";
+}
+
+void ProtoConverter::visit(TernaryOp const& _x)
+{
+	switch (_x.op())
+	{
+	case TernaryOp::ADDM:
+		m_output << "addmod";
+		break;
+	case TernaryOp::MULM:
+		m_output << "mulmod";
+		break;
+	}
+	m_output << "(";
+	visit(_x.arg1());
+	m_output << ", ";
+	visit(_x.arg2());
+	m_output << ", ";
+	visit(_x.arg3());
+	m_output << ")";
+}
+
+void ProtoConverter::visit(NullaryOp const& _x)
+{
+	auto op = _x.op();
+	// The following instructions may lead to a change in EVM state and are
+	// excluded to avoid false positive reports.
+	if (
+		m_filterStatefulInstructions &&
+		(
+			op == NullaryOp::GAS ||
+			op == NullaryOp::CODESIZE ||
+			op == NullaryOp::ADDRESS ||
+			op == NullaryOp::TIMESTAMP ||
+			op == NullaryOp::NUMBER ||
+			op == NullaryOp::DIFFICULTY
+		)
+	)
+	{
+		m_output << dictionaryToken();
+		return;
+	}
+
+	switch (op)
+	{
+	case NullaryOp::MSIZE:
+		m_output << "msize()";
+		break;
+	case NullaryOp::GAS:
+		m_output << "gas()";
+		break;
+	case NullaryOp::CALLDATASIZE:
+		m_output << "calldatasize()";
+		break;
+	case NullaryOp::CODESIZE:
+		m_output << "codesize()";
+		break;
+	case NullaryOp::RETURNDATASIZE:
+		// If evm supports returndatasize, we generate it. Otherwise,
+		// we output a dictionary token.
+		if (m_evmVersion.supportsReturndata())
+			m_output << "returndatasize()";
+		else
+			m_output << dictionaryToken();
+		break;
+	case NullaryOp::ADDRESS:
+		m_output << "address()";
+		break;
+	case NullaryOp::ORIGIN:
+		m_output << "origin()";
+		break;
+	case NullaryOp::CALLER:
+		m_output << "caller()";
+		break;
+	case NullaryOp::CALLVALUE:
+		m_output << "callvalue()";
+		break;
+	case NullaryOp::GASPRICE:
+		m_output << "gasprice()";
+		break;
+	case NullaryOp::COINBASE:
+		m_output << "coinbase()";
+		break;
+	case NullaryOp::TIMESTAMP:
+		m_output << "timestamp()";
+		break;
+	case NullaryOp::NUMBER:
+		m_output << "number()";
+		break;
+	case NullaryOp::DIFFICULTY:
+		if (m_evmVersion >= EVMVersion::paris())
+			m_output << "prevrandao()";
+		else
+			m_output << "difficulty()";
+		break;
+	case NullaryOp::GASLIMIT:
+		m_output << "gaslimit()";
+		break;
+	case NullaryOp::SELFBALANCE:
+		// Replace calls to selfbalance() on unsupported EVMs with a dictionary
+		// token.
+		if (m_evmVersion.hasSelfBalance())
+			m_output << "selfbalance()";
+		else
+			m_output << dictionaryToken();
+		break;
+	case NullaryOp::CHAINID:
+		// Replace calls to chainid() on unsupported EVMs with a dictionary
+		// token.
+		if (m_evmVersion.hasChainID())
+			m_output << "chainid()";
+		else
+			m_output << dictionaryToken();
+		break;
+	case NullaryOp::BASEFEE:
+		// Replace calls to basefee() on unsupported EVMs with a dictionary
+		// token.
+		if (m_evmVersion.hasBaseFee())
+			m_output << "basefee()";
+		else
+			m_output << dictionaryToken();
+		break;
+	case NullaryOp::BLOBBASEFEE:
+		// Replace calls to blobbasefee() on unsupported EVMs with a dictionary
+		// token.
+		if (m_evmVersion.hasBlobBaseFee())
+			m_output << "blobbasefee()";
+		else
+			m_output << dictionaryToken();
+		break;
+	}
+}
+
+void ProtoConverter::visit(CopyFunc const& _x)
+{
+	CopyFunc_CopyType type = _x.ct();
+
+	// datacopy() is valid only if we are inside
+	// a Yul object.
+	if (type == CopyFunc::DATA && !m_isObject)
+		return;
+
+	// We don't generate code if the copy function is returndatacopy
+	// and the underlying evm does not support it.
+	if (type == CopyFunc::RETURNDATA && !m_evmVersion.supportsReturndata())
+		return;
+
+	// Bail out if MCOPY is not supported for fuzzed EVM version
+	if (type == CopyFunc::MEMORY && !m_evmVersion.hasMcopy())
+		return;
+
+	// Code copy may change state if e.g., some byte of code
+	// is stored to storage via a sequence of mload and sstore.
+	if (m_filterStatefulInstructions && type == CopyFunc::CODE)
+		return;
+
+	switch (type)
+	{
+	case CopyFunc::CALLDATA:
+		m_output << "calldatacopy";
+		break;
+	case CopyFunc::CODE:
+		m_output << "codecopy";
+		break;
+	case CopyFunc::RETURNDATA:
+		yulAssert(m_evmVersion.supportsReturndata(), "Proto fuzzer: Invalid evm version");
+		m_output << "returndatacopy";
+		break;
+	case CopyFunc::DATA:
+		m_output << "datacopy";
+		break;
+	case CopyFunc::MEMORY:
+		m_output << "mcopy";
+	}
+	m_output << "(";
+	m_output << "mod(";
+	visit(_x.target());
+	m_output << ", " << std::to_string(s_maxMemory - s_maxSize) << ")";
+	m_output << ", ";
+	if (type == CopyFunc::MEMORY)
+	{
+		m_output << "mod(";
+		visit(_x.source());
+		m_output << ", " << std::to_string(s_maxMemory - s_maxSize) << ")";
+	}
+	else
+		visit(_x.source());
+	m_output << ", ";
+	m_output << "mod(";
+	visit(_x.size());
+	m_output << ", " << std::to_string(s_maxSize) << ")";
+	m_output << ")\n";
+}
+
+void ProtoConverter::visit(ExtCodeCopy const& _x)
+{
+	m_output << "extcodecopy";
+	m_output << "(";
+	visit(_x.addr());
+	m_output << ", ";
+	m_output << "mod(";
+	visit(_x.target());
+	m_output << ", " << std::to_string(s_maxMemory - s_maxSize) << ")";
+	m_output << ", ";
+	visit(_x.source());
+	m_output << ", ";
+	m_output << "mod(";
+	visit(_x.size());
+	m_output << ", " << std::to_string(s_maxSize) << ")";
+	m_output << ")\n";
+}
+
+void ProtoConverter::visit(LogFunc const& _x)
+{
+	auto visitPosAndSize = [&](LogFunc const& _y) {
+		m_output << "mod(";
+		visit(_y.pos());
+		m_output << ", " << std::to_string(s_maxMemory - s_maxSize) << ")";
+		m_output << ", ";
+		m_output << "mod(";
+		visit(_y.size());
+		m_output << ", " << std::to_string(s_maxSize) << ")";
+	};
+
+	switch (_x.num_topics())
+	{
+	case LogFunc::ZERO:
+		m_output << "log0";
+		m_output << "(";
+		visitPosAndSize(_x);
+		m_output << ")\n";
+		break;
+	case LogFunc::ONE:
+		m_output << "log1";
+		m_output << "(";
+		visitPosAndSize(_x);
+		m_output << ", ";
+		visit(_x.t1());
+		m_output << ")\n";
+		break;
+	case LogFunc::TWO:
+		m_output << "log2";
+		m_output << "(";
+		visitPosAndSize(_x);
+		m_output << ", ";
+		visit(_x.t1());
+		m_output << ", ";
+		visit(_x.t2());
+		m_output << ")\n";
+		break;
+	case LogFunc::THREE:
+		m_output << "log3";
+		m_output << "(";
+		visitPosAndSize(_x);
+		m_output << ", ";
+		visit(_x.t1());
+		m_output << ", ";
+		visit(_x.t2());
+		m_output << ", ";
+		visit(_x.t3());
+		m_output << ")\n";
+		break;
+	case LogFunc::FOUR:
+		m_output << "log4";
+		m_output << "(";
+		visitPosAndSize(_x);
+		m_output << ", ";
+		visit(_x.t1());
+		m_output << ", ";
+		visit(_x.t2());
+		m_output << ", ";
+		visit(_x.t3());
+		m_output << ", ";
+		visit(_x.t4());
+		m_output << ")\n";
+		break;
+	}
+}
+
+void ProtoConverter::visit(AssignmentStatement const& _x)
+{
+	visit(_x.ref_id());
+	m_output << " := ";
+	visit(_x.expr());
+	m_output << "\n";
+}
+
+void ProtoConverter::visitFunctionInputParams(FunctionCall const& _x, unsigned _numInputParams)
+{
+	// We reverse the order of function input visits since it helps keep this switch case concise.
+	switch (_numInputParams)
+	{
+	case 4:
+		visit(_x.in_param4());
+		m_output << ", ";
+		[[fallthrough]];
+	case 3:
+		visit(_x.in_param3());
+		m_output << ", ";
+		[[fallthrough]];
+	case 2:
+		visit(_x.in_param2());
+		m_output << ", ";
+		[[fallthrough]];
+	case 1:
+		visit(_x.in_param1());
+		[[fallthrough]];
+	case 0:
+		break;
+	default:
+		yulAssert(false, "Proto fuzzer: Function call with too many input parameters.");
+		break;
+	}
+}
+
+void ProtoConverter::convertFunctionCall(
+	FunctionCall const& _x,
+	std::string const& _name,
+	unsigned _numInParams,
+	bool _newLine
+)
+{
+	m_output << _name << "(";
+	visitFunctionInputParams(_x, _numInParams);
+	m_output << ")";
+	if (_newLine)
+		m_output << "\n";
+}
+
+std::vector<std::string> ProtoConverter::createVarDecls(unsigned _start, unsigned _end, bool _isAssignment)
+{
+	m_output << "let ";
+	std::vector<std::string> varsVec = createVars(_start, _end);
+	if (_isAssignment)
+		m_output << " := ";
+	else
+		m_output << "\n";
+	return varsVec;
+}
+
+std::optional<std::string> ProtoConverter::functionExists(NumFunctionReturns _numReturns)
+{
+	for (auto const& item: m_functionSigMap)
+		if (_numReturns == NumFunctionReturns::None || _numReturns == NumFunctionReturns::Single)
+		{
+			if (item.second.second == static_cast<unsigned>(_numReturns))
+				return item.first;
+		}
+		else
+		{
+			if (item.second.second >= static_cast<unsigned>(_numReturns))
+				return item.first;
+		}
+	return std::nullopt;
+}
+
+void ProtoConverter::visit(FunctionCall const& _x, std::string const& _functionName, bool _expression)
+{
+	yulAssert(m_functionSigMap.count(_functionName), "Proto fuzzer: Invalid function.");
+	auto ret = m_functionSigMap.at(_functionName);
+	unsigned numInParams = ret.first;
+	unsigned numOutParams = ret.second;
+
+	if (numOutParams == 0)
+	{
+		convertFunctionCall(_x, _functionName, numInParams);
+		return;
+	}
+	else
+	{
+		yulAssert(numOutParams > 0, "");
+		std::vector<std::string> varsVec;
+		if (!_expression)
+		{
+			// Obtain variable name suffix
+			unsigned startIdx = counter();
+			varsVec = createVarDecls(
+				startIdx,
+				startIdx + numOutParams,
+				/*isAssignment=*/true
+			);
+		}
+		convertFunctionCall(_x, _functionName, numInParams);
+		// Add newly minted vars in the multidecl statement to current scope
+		if (!_expression)
+			addVarsToScope(varsVec);
+	}
+}
+
+void ProtoConverter::visit(LowLevelCall const& _x)
+{
+	LowLevelCall_Type type = _x.callty();
+
+	// Generate staticcall if it is supported by the underlying evm
+	if (type == LowLevelCall::STATICCALL && !m_evmVersion.hasStaticCall())
+	{
+		// Since staticcall is supposed to return 0 on success and 1 on
+		// failure, we can use counter value to emulate it
+		m_output << ((counter() % 2) ? "0" : "1");
+		return;
+	}
+
+	switch (type)
+	{
+	case LowLevelCall::CALL:
+		m_output << "call(";
+		break;
+	case LowLevelCall::CALLCODE:
+		m_output << "callcode(";
+		break;
+	case LowLevelCall::DELEGATECALL:
+		m_output << "delegatecall(";
+		break;
+	case LowLevelCall::STATICCALL:
+		yulAssert(m_evmVersion.hasStaticCall(), "Proto fuzzer: Invalid evm version");
+		m_output << "staticcall(";
+		break;
+	}
+	visit(_x.gas());
+	m_output << ", ";
+	visit(_x.addr());
+	m_output << ", ";
+	if (type == LowLevelCall::CALL || type == LowLevelCall::CALLCODE)
+	{
+		visit(_x.wei());
+		m_output << ", ";
+	}
+	m_output << "mod(";
+	visit(_x.in());
+	m_output << ", " << std::to_string(s_maxMemory - s_maxSize) << ")";
+	m_output << ", ";
+	m_output << "mod(";
+	visit(_x.insize());
+	m_output << ", " << std::to_string(s_maxSize) << ")";
+	m_output << ", ";
+	m_output << "mod(";
+	visit(_x.out());
+	m_output << ", " << std::to_string(s_maxMemory - s_maxSize) << ")";
+	m_output << ", ";
+	m_output << "mod(";
+	visit(_x.outsize());
+	m_output << ", " << std::to_string(s_maxSize) << ")";
+	m_output << ")";
+}
+
+void ProtoConverter::visit(Create const& _x)
+{
+	Create_Type type = _x.createty();
+
+	// Replace a call to create2 on unsupported EVMs with a dictionary
+	// token.
+	if (type == Create::CREATE2 && !m_evmVersion.hasCreate2())
+	{
+		m_output << dictionaryToken();
+		return;
+	}
+
+	switch (type)
+	{
+	case Create::CREATE:
+		m_output << "create(";
+		break;
+	case Create::CREATE2:
+		m_output << "create2(";
+		break;
+	}
+	visit(_x.wei());
+	m_output << ", ";
+	m_output << "mod(";
+	visit(_x.position());
+	m_output << ", " << std::to_string(s_maxMemory - s_maxSize) << ")";
+	m_output << ", ";
+	m_output << "mod(";
+	visit(_x.size());
+	m_output << ", " << std::to_string(s_maxSize) << ")";
+	if (type == Create::CREATE2)
+	{
+		m_output << ", ";
+		visit(_x.value());
+	}
+	m_output << ")";
+}
+
+void ProtoConverter::visit(IfStmt const& _x)
+{
+	m_output << "if ";
+	visit(_x.cond());
+	m_output << " ";
+	visit(_x.if_body());
+}
+
+void ProtoConverter::visit(StoreFunc const& _x)
+{
+	auto storeType = _x.st();
+	// Skip statement generation if tstore is not
+	// supported in EVM version
+	if (storeType == StoreFunc::TSTORE && !m_evmVersion.supportsTransientStorage())
+		return;
+
+	switch (storeType)
+	{
+	case StoreFunc::MSTORE:
+		m_output << "mstore(";
+		break;
+	case StoreFunc::SSTORE:
+		m_output << "sstore(";
+		break;
+	case StoreFunc::MSTORE8:
+		m_output << "mstore8(";
+		break;
+	case StoreFunc::TSTORE:
+		m_output << "tstore(";
+		break;
+	}
+	// Write to memory within bounds, storage is unbounded
+	if (storeType == StoreFunc::SSTORE || storeType == StoreFunc::TSTORE)
+		visit(_x.loc());
+	else if (storeType == StoreFunc::MSTORE8)
+	{
+		m_output << "mod(";
+		visit(_x.loc());
+		m_output << ", " << std::to_string(s_maxMemory) << ")";
+	}
+	else if (storeType == StoreFunc::MSTORE)
+	{
+		// Since we write 32 bytes, ensure it does not exceed
+		// upper bound on memory.
+		m_output << "mod(";
+		visit(_x.loc());
+		m_output << ", " << std::to_string(s_maxMemory - 32) << ")";
+
+	}
+	m_output << ", ";
+	visit(_x.val());
+	m_output << ")\n";
+}
+
+void ProtoConverter::visit(ForStmt const& _x)
+{
+	if (++m_numForLoops > s_maxForLoops)
+		return;
+	bool wasInForBody = m_inForBodyScope;
+	bool wasInForInit = m_inForInitScope;
+	bool wasForInitScopeExtEnabled = m_forInitScopeExtEnabled;
+	m_inForBodyScope = false;
+	m_inForInitScope = true;
+	m_forInitScopeExtEnabled = true;
+	m_inForCond = false;
+	m_output << "for ";
+	visit(_x.for_init());
+	m_inForInitScope = false;
+	m_forInitScopeExtEnabled = wasForInitScopeExtEnabled;
+	m_inForCond = true;
+	visit(_x.for_cond());
+	m_inForCond = false;
+	visit(_x.for_post());
+	m_inForBodyScope = true;
+	visit(_x.for_body());
+	m_inForBodyScope = wasInForBody;
+	m_inForInitScope = wasInForInit;
+	if (m_inFunctionDef)
+	{
+		yulAssert(
+			!m_funcForLoopInitVars.empty() && !m_funcForLoopInitVars.back().empty(),
+			"Proto fuzzer: Invalid data structure"
+		);
+		// Remove variables in for-init
+		m_funcForLoopInitVars.back().pop_back();
+	}
+	else
+	{
+		yulAssert(!m_globalForLoopInitVars.empty(), "Proto fuzzer: Invalid data structure");
+		m_globalForLoopInitVars.pop_back();
+	}
+}
+
+void ProtoConverter::visit(BoundedForStmt const& _x)
+{
+	if (++m_numForLoops > s_maxForLoops)
+		return;
+
+	// Boilerplate for loop that limits the number of iterations to a maximum of 4.
+	std::string loopVarName("i_" + std::to_string(m_numNestedForLoops++));
+	m_output << "for { let " << loopVarName << " := 0 } "
+	       << "lt(" << loopVarName << ", 0x60) "
+	       << "{ " << loopVarName << " := add(" << loopVarName << ", 0x20) } ";
+	// Store previous for body scope
+	bool wasInForBody = m_inForBodyScope;
+	bool wasInForInit = m_inForInitScope;
+	m_inForBodyScope = true;
+	m_inForInitScope = false;
+	visit(_x.for_body());
+	// Restore previous for body scope and init
+	m_inForBodyScope = wasInForBody;
+	m_inForInitScope = wasInForInit;
+}
+
+void ProtoConverter::visit(CaseStmt const& _x)
+{
+	std::string literal = visit(_x.case_lit());
+	// u256 value of literal
+	u256 literalVal;
+
+	// Convert string to u256 before looking for duplicate case literals
+	if (_x.case_lit().has_strval())
+	{
+		// Since string literals returned by the Literal visitor are enclosed within
+		// double quotes (like this "\"<string>\""), their size is at least two in the worst case
+		// that <string> is empty. Here we assert this invariant.
+		yulAssert(literal.size() >= 2, "Proto fuzzer: String literal too short");
+		// This variable stores the <string> part i.e., literal minus the first and last
+		// double quote characters. This is used to compute the keccak256 hash of the
+		// string literal. The hashing is done to check whether we are about to create
+		// a case statement containing a case literal that has already been used in a
+		// previous case statement. If the hash (u256 value) matches a previous hash,
+		// then we simply don't create a new case statement.
+		std::string noDoubleQuoteStr;
+		if (literal.size() > 2)
+		{
+			// Ensure that all characters in the string literal except the first
+			// and the last (double quote characters) are alphanumeric.
+			yulAssert(
+				ranges::all_of(
+					literal.begin() + 1,
+					literal.end() - 2,
+					[=](char c) { return isalpha(c) || isdigit(c); }),
+				"Proto fuzzer: Invalid string literal encountered"
+			);
+
+			// Make a copy because literal will need to be used later
+			noDoubleQuoteStr = literal.substr(1, literal.size() - 2);
+		}
+		// Hash the result to check for duplicate case literal strings
+		literalVal = u256(h256(noDoubleQuoteStr, h256::FromBinary, h256::AlignLeft));
+
+		// Make sure that an empty string literal evaluates to zero. This is to detect creation of
+		// duplicate case literals like so
+		// switch (x)
+		// {
+		//    case "": { x := 0 }
+		//    case 0: { x:= 1 } // Case statement with duplicate literal is invalid
+		// } // This snippet will not be parsed successfully.
+		if (noDoubleQuoteStr.empty())
+			yulAssert(literalVal == 0, "Proto fuzzer: Empty string does not evaluate to zero");
+	}
+	else if (_x.case_lit().has_boolval())
+		literalVal = _x.case_lit().boolval() ? u256(1) : u256(0);
+	else
+		literalVal = u256(literal);
+
+	// Check if set insertion fails (case literal present) or succeeds (case literal
+	// absent).
+	bool isUnique = m_switchLiteralSetPerScope.top().insert(literalVal).second;
+
+	// It is fine to bail out if we encounter a duplicate case literal because
+	// we can be assured that the switch statement is well-formed i.e., contains
+	// at least one case statement or a default block.
+	if (isUnique)
+	{
+		m_output << "case " << literal << " ";
+		visit(_x.case_block());
+	}
+}
+
+void ProtoConverter::visit(SwitchStmt const& _x)
+{
+	if (_x.case_stmt_size() > 0 || _x.has_default_block())
+	{
+		std::set<u256> s;
+		m_switchLiteralSetPerScope.push(s);
+		m_output << "switch ";
+		visit(_x.switch_expr());
+		m_output << "\n";
+
+		for (auto const& caseStmt: _x.case_stmt())
+			visit(caseStmt);
+
+		m_switchLiteralSetPerScope.pop();
+
+		if (_x.has_default_block())
+		{
+			m_output << "default ";
+			visit(_x.default_block());
+		}
+	}
+}
+
+void ProtoConverter::visit(StopInvalidStmt const& _x)
+{
+	switch (_x.stmt())
+	{
+	case StopInvalidStmt::STOP:
+		m_output << "stop()\n";
+		break;
+	case StopInvalidStmt::INVALID:
+		m_output << "invalid()\n";
+		break;
+	}
+}
+
+void ProtoConverter::visit(RetRevStmt const& _x)
+{
+	switch (_x.stmt())
+	{
+	case RetRevStmt::RETURN:
+		m_output << "return";
+		break;
+	case RetRevStmt::REVERT:
+		m_output << "revert";
+		break;
+	}
+	m_output << "(";
+	m_output << "mod(";
+	visit(_x.pos());
+	m_output << ", " << std::to_string(s_maxMemory - s_maxSize) << ")";
+	m_output << ", ";
+	m_output << "mod(";
+	visit(_x.size());
+	m_output << ", " << std::to_string(s_maxSize) << ")";
+	m_output << ")\n";
+}
+
+void ProtoConverter::visit(SelfDestructStmt const& _x)
+{
+	m_output << "selfdestruct";
+	m_output << "(";
+	visit(_x.addr());
+	m_output << ")\n";
+}
+
+void ProtoConverter::visit(TerminatingStmt const& _x)
+{
+	switch (_x.term_oneof_case())
+	{
+	case TerminatingStmt::kStopInvalid:
+		visit(_x.stop_invalid());
+		break;
+	case TerminatingStmt::kRetRev:
+		visit(_x.ret_rev());
+		break;
+	case TerminatingStmt::kSelfDes:
+		visit(_x.self_des());
+		break;
+	case TerminatingStmt::TERM_ONEOF_NOT_SET:
+		break;
+	}
+}
+
+void ProtoConverter::visit(UnaryOpData const& _x)
+{
+	switch (_x.op())
+	{
+	case UnaryOpData::SIZE:
+		m_output << Whiskers(R"(datasize("<id>"))")
+			("id", getObjectIdentifier(static_cast<unsigned>(_x.identifier())))
+			.render();
+		break;
+	case UnaryOpData::OFFSET:
+		m_output << Whiskers(R"(dataoffset("<id>"))")
+			("id", getObjectIdentifier(static_cast<unsigned>(_x.identifier())))
+			.render();
+		break;
+	}
+}
+
+void ProtoConverter::visit(Statement const& _x)
+{
+	switch (_x.stmt_oneof_case())
+	{
+	case Statement::kDecl:
+		visit(_x.decl());
+		break;
+	case Statement::kAssignment:
+		// Create an assignment statement only if there is at least one variable
+		// declaration that is in scope.
+		if (varDeclAvailable())
+			visit(_x.assignment());
+		break;
+	case Statement::kIfstmt:
+		if (_x.ifstmt().if_body().statements_size() > 0)
+			visit(_x.ifstmt());
+		break;
+	case Statement::kStorageFunc:
+		visit(_x.storage_func());
+		break;
+	case Statement::kBlockstmt:
+		if (_x.blockstmt().statements_size() > 0)
+			visit(_x.blockstmt());
+		break;
+	case Statement::kForstmt:
+		if (_x.forstmt().for_body().statements_size() > 0 && !m_filterUnboundedLoops)
+			visit(_x.forstmt());
+		break;
+	case Statement::kBoundedforstmt:
+		if (_x.boundedforstmt().for_body().statements_size() > 0)
+			visit(_x.boundedforstmt());
+		break;
+	case Statement::kSwitchstmt:
+		visit(_x.switchstmt());
+		break;
+	case Statement::kBreakstmt:
+		if (m_inForBodyScope)
+			m_output << "break\n";
+		break;
+	case Statement::kContstmt:
+		if (m_inForBodyScope)
+			m_output << "continue\n";
+		break;
+	case Statement::kLogFunc:
+		// Log is a stateful statement since it writes to storage.
+		if (!m_filterStatefulInstructions)
+			visit(_x.log_func());
+		break;
+	case Statement::kCopyFunc:
+		visit(_x.copy_func());
+		break;
+	case Statement::kExtcodeCopy:
+		// Extcodecopy may change state if external code is copied via a
+		// sequence of mload/sstore.
+		if (!m_filterStatefulInstructions)
+			visit(_x.extcode_copy());
+		break;
+	case Statement::kTerminatestmt:
+		visit(_x.terminatestmt());
+		break;
+	case Statement::kFunctioncall:
+		if (!m_functionSigMap.empty())
+		{
+			unsigned index = counter() % m_functionSigMap.size();
+			auto iter = m_functionSigMap.begin();
+			advance(iter, index);
+			visit(_x.functioncall(), iter->first);
+		}
+		break;
+	case Statement::kFuncdef:
+		if (_x.funcdef().block().statements_size() > 0)
+			if (!m_inForInitScope)
+				visit(_x.funcdef());
+		break;
+	case Statement::kPop:
+		visit(_x.pop());
+		break;
+	case Statement::kLeave:
+		if (m_inFunctionDef)
+			visit(_x.leave());
+		break;
+	case Statement::kMultidecl:
+		visit(_x.multidecl());
+		break;
+	case Statement::STMT_ONEOF_NOT_SET:
+		break;
+	}
+}
+
+void ProtoConverter::openBlockScope()
+{
+	m_scopeFuncs.emplace_back();
+
+	// Create new block scope inside current function scope
+	if (m_inFunctionDef)
+	{
+		yulAssert(
+			!m_funcVars.empty(),
+			"Proto fuzzer: Invalid data structure"
+		);
+		m_funcVars.back().push_back(std::vector<std::string>{});
+		if (m_inForInitScope && m_forInitScopeExtEnabled)
+		{
+			yulAssert(
+				!m_funcForLoopInitVars.empty(),
+				"Proto fuzzer: Invalid data structure"
+			);
+			m_funcForLoopInitVars.back().push_back(std::vector<std::string>{});
+		}
+	}
+	else
+	{
+		m_globalVars.emplace_back();
+		if (m_inForInitScope && m_forInitScopeExtEnabled)
+			m_globalForLoopInitVars.emplace_back();
+	}
+}
+
+void ProtoConverter::openFunctionScope(std::vector<std::string> const& _funcParams)
+{
+	m_funcVars.push_back(std::vector<std::vector<std::string>>({_funcParams}));
+	m_funcForLoopInitVars.push_back(std::vector<std::vector<std::string>>({}));
+}
+
+void ProtoConverter::updateFunctionMaps(std::string const& _var)
+{
+	size_t erased = m_functionSigMap.erase(_var);
+
+	for (auto const& i: m_functionDefMap)
+		if (i.second == _var)
+		{
+			erased += m_functionDefMap.erase(i.first);
+			break;
+		}
+
+	yulAssert(erased == 2, "Proto fuzzer: Function maps not updated");
+}
+
+void ProtoConverter::closeBlockScope()
+{
+	// Remove functions declared in the block that is going
+	// out of scope from the global function map.
+	for (auto const& f: m_scopeFuncs.back())
+	{
+		size_t numFuncsRemoved = m_functions.size();
+		m_functions.erase(remove(m_functions.begin(), m_functions.end(), f), m_functions.end());
+		numFuncsRemoved -= m_functions.size();
+		yulAssert(
+			numFuncsRemoved == 1,
+			"Proto fuzzer: Nothing or too much went out of scope"
+		);
+		updateFunctionMaps(f);
+	}
+	// Pop back the vector of scoped functions.
+	if (!m_scopeFuncs.empty())
+		m_scopeFuncs.pop_back();
+
+	// If block belongs to function body, then remove
+	// local variables in function body that are going out of scope.
+	if (m_inFunctionDef)
+	{
+		yulAssert(!m_funcVars.empty(), "Proto fuzzer: Invalid data structure");
+		if (!m_funcVars.back().empty())
+			m_funcVars.back().pop_back();
+	}
+	// Remove variables declared in vanilla block from current
+	// global scope.
+	else
+	{
+		yulAssert(!m_globalVars.empty(), "Proto fuzzer: Invalid data structure");
+		m_globalVars.pop_back();
+	}
+}
+
+void ProtoConverter::closeFunctionScope()
+{
+	yulAssert(!m_funcVars.empty(), "Proto fuzzer: Invalid data structure");
+	m_funcVars.pop_back();
+	yulAssert(!m_funcForLoopInitVars.empty(), "Proto fuzzer: Invalid data structure");
+	m_funcForLoopInitVars.pop_back();
+}
+
+void ProtoConverter::addVarsToScope(std::vector<std::string> const& _vars)
+{
+	// If we are in function definition, add the new vars to current function scope
+	if (m_inFunctionDef)
+	{
+		// If we are directly in for-init block, add the newly created vars to the
+		// stack of for-init variables.
+		if (m_inForInitScope && m_forInitScopeExtEnabled)
+		{
+			yulAssert(
+				!m_funcForLoopInitVars.empty() && !m_funcForLoopInitVars.back().empty(),
+				"Proto fuzzer: Invalid data structure"
+			);
+			m_funcForLoopInitVars.back().back().insert(
+				m_funcForLoopInitVars.back().back().end(),
+				_vars.begin(),
+				_vars.end()
+			);
+		}
+		else
+		{
+			yulAssert(
+				!m_funcVars.empty() && !m_funcVars.back().empty(),
+				"Proto fuzzer: Invalid data structure"
+			);
+			m_funcVars.back().back().insert(
+				m_funcVars.back().back().end(),
+				_vars.begin(),
+				_vars.end()
+			);
+		}
+	}
+	// If we are in a vanilla block, add the new vars to current global scope
+	else
+	{
+		if (m_inForInitScope && m_forInitScopeExtEnabled)
+		{
+			yulAssert(
+				!m_globalForLoopInitVars.empty(),
+				"Proto fuzzer: Invalid data structure"
+			);
+			m_globalForLoopInitVars.back().insert(
+				m_globalForLoopInitVars.back().end(),
+				_vars.begin(),
+				_vars.end()
+			);
+		}
+		else
+		{
+			yulAssert(
+				!m_globalVars.empty(),
+				"Proto fuzzer: Invalid data structure"
+			);
+			m_globalVars.back().insert(
+				m_globalVars.back().end(),
+				_vars.begin(),
+				_vars.end()
+			);
+		}
+	}
+}
+
+void ProtoConverter::visit(Block const& _x)
+{
+	openBlockScope();
+
+	// Register function declarations in this scope unless this
+	// scope belongs to for-init (in which function declarations
+	// are forbidden).
+	for (auto const& statement: _x.statements())
+		if (statement.has_funcdef() && statement.funcdef().block().statements_size() > 0 && !m_inForInitScope)
+			registerFunction(&statement.funcdef());
+
+	if (_x.statements_size() > 0)
+	{
+		m_output << "{\n";
+		bool wasForInitScopeExtEnabled = m_forInitScopeExtEnabled;
+		for (auto const& st: _x.statements())
+		{
+			// If statement is block or introduces one and we are in for-init block
+			// then temporarily disable scope extension if it is not already disabled.
+			if (
+				(st.has_blockstmt() || st.has_switchstmt() || st.has_ifstmt()) &&
+				m_inForInitScope &&
+				m_forInitScopeExtEnabled
+			)
+				m_forInitScopeExtEnabled = false;
+			visit(st);
+			m_forInitScopeExtEnabled = wasForInitScopeExtEnabled;
+		}
+		m_output << "}\n";
+	}
+	else
+		m_output << "{}\n";
+	closeBlockScope();
+}
+
+std::vector<std::string> ProtoConverter::createVars(unsigned _startIdx, unsigned _endIdx)
+{
+	yulAssert(_endIdx > _startIdx, "Proto fuzzer: Variable indices not in range");
+	std::string varsStr = suffixedVariableNameList("x_", _startIdx, _endIdx);
+	m_output << varsStr;
+	std::vector<std::string> varsVec;
+	boost::split(
+		varsVec,
+		varsStr,
+		boost::algorithm::is_any_of(", "),
+		boost::algorithm::token_compress_on
+	);
+
+	yulAssert(
+		varsVec.size() == (_endIdx - _startIdx),
+		"Proto fuzzer: Variable count mismatch during function definition"
+	);
+	m_counter += varsVec.size();
+	return varsVec;
+}
+
+void ProtoConverter::registerFunction(FunctionDef const* _x)
+{
+	unsigned numInParams = _x->num_input_params() % s_modInputParams;
+	unsigned numOutParams = _x->num_output_params() % s_modOutputParams;
+	NumFunctionReturns numReturns;
+	if (numOutParams == 0)
+		numReturns = NumFunctionReturns::None;
+	else if (numOutParams == 1)
+		numReturns = NumFunctionReturns::Single;
+	else
+		numReturns = NumFunctionReturns::Multiple;
+
+	// Generate function name
+	std::string funcName = functionName(numReturns);
+
+	// Register function
+	auto ret = m_functionSigMap.emplace(std::make_pair(funcName, std::make_pair(numInParams, numOutParams)));
+	yulAssert(ret.second, "Proto fuzzer: Function already exists.");
+	m_functions.push_back(funcName);
+	m_scopeFuncs.back().push_back(funcName);
+	m_functionDefMap.emplace(std::make_pair(_x, funcName));
+}
+
+void ProtoConverter::fillFunctionCallInput(unsigned _numInParams)
+{
+	for (unsigned i = 0; i < _numInParams; i++)
+	{
+		// Throw a 4-sided dice to choose whether to populate function input
+		// argument from a pseudo-randomly chosen slot in one of the following
+		// locations: calldata, memory, storage, or Yul optimizer dictionary.
+		unsigned diceValue = counter() % 4;
+		// Pseudo-randomly choose one of the first ten 32-byte
+		// aligned slots.
+		std::string slot = std::to_string((counter() % 10) * 32);
+		switch (diceValue)
+		{
+		case 0:
+			m_output << "calldataload(" << slot << ")";
+			break;
+		case 1:
+		{
+			// Access memory within stipulated bounds
+			slot = "mod(" + dictionaryToken() + ", " + std::to_string(s_maxMemory - 32) + ")";
+			m_output << "mload(" << slot << ")";
+			break;
+		}
+		case 2:
+			m_output << "sload(" << slot << ")";
+			break;
+		default:
+			// Call to dictionaryToken() automatically picks a token
+			// at a pseudo-random location.
+			m_output << dictionaryToken();
+			break;
+		}
+		if (i < _numInParams - 1)
+			m_output << ",";
+	}
+}
+
+void ProtoConverter::saveFunctionCallOutput(std::vector<std::string> const& _varsVec)
+{
+	constexpr auto numSlots = 10;
+	constexpr auto slotSize = 32;
+
+	for (std::string const& var: _varsVec)
+	{
+		// Flip a dice to choose whether to save output values
+		// in storage or memory.
+		unsigned diceThrow = counter() % (m_evmVersion.supportsTransientStorage() ? 3 : 2);
+		// Pseudo-randomly choose one of the first ten 32-byte
+		// aligned slots.
+		std::string slot = std::to_string((counter() % numSlots) * slotSize);
+		if (diceThrow == 0)
+			m_output << "sstore(" << slot << ", " << var << ")\n";
+		else if (diceThrow == 1)
+			m_output << "mstore(" << slot << ", " << var << ")\n";
+		else
+		{
+			yulAssert(
+				m_evmVersion.supportsTransientStorage(),
+				"Proto fuzzer: Invalid evm version"
+			);
+			m_output << "tstore(" << slot << ", " << var << ")\n";
+		}
+	}
+}
+
+void ProtoConverter::createFunctionCall(
+	std::string const& _funcName,
+	unsigned _numInParams,
+	unsigned _numOutParams
+)
+{
+	std::vector<std::string> varsVec{};
+	if (_numOutParams > 0)
+	{
+		unsigned startIdx = counter();
+		// Prints the following to output stream "let x_i,...,x_n := "
+		varsVec = createVarDecls(
+			startIdx,
+			startIdx + _numOutParams,
+			/*isAssignment=*/true
+		);
+	}
+
+	// Call the function with the correct number of input parameters
+	m_output << _funcName << "(";
+	if (_numInParams > 0)
+		fillFunctionCallInput(_numInParams);
+	m_output << ")\n";
+
+	if (!varsVec.empty())
+	{
+		// Save values returned by function so that they are reflected
+		// in the interpreter trace.
+		saveFunctionCallOutput(varsVec);
+		// Add newly minted vars to current scope
+		addVarsToScope(varsVec);
+	}
+	else
+		yulAssert(_numOutParams == 0, "Proto fuzzer: Function return value not saved");
+}
+
+void ProtoConverter::createFunctionDefAndCall(
+	FunctionDef const& _x,
+	unsigned _numInParams,
+	unsigned _numOutParams
+)
+{
+	yulAssert(
+		((_numInParams <= s_modInputParams - 1) && (_numOutParams <= s_modOutputParams - 1)),
+		"Proto fuzzer: Too many function I/O parameters requested."
+	);
+
+	// Obtain function name
+	yulAssert(m_functionDefMap.count(&_x), "Proto fuzzer: Unregistered function");
+	std::string funcName = m_functionDefMap.at(&_x);
+
+	std::vector<std::string> varsVec = {};
+	m_output << "function " << funcName << "(";
+	unsigned startIdx = counter();
+	if (_numInParams > 0)
+		varsVec = createVars(startIdx, startIdx + _numInParams);
+	m_output << ")";
+
+	std::vector<std::string> outVarsVec = {};
+	// This creates -> x_n+1,...,x_r
+	if (_numOutParams > 0)
+	{
+		m_output << " -> ";
+		if (varsVec.empty())
+		{
+			yulAssert(_numInParams == 0, "Proto fuzzer: Input parameters not processed correctly");
+			varsVec = createVars(startIdx, startIdx + _numOutParams);
+		}
+		else
+		{
+			outVarsVec = createVars(startIdx + _numInParams, startIdx + _numInParams + _numOutParams);
+			varsVec.insert(varsVec.end(), outVarsVec.begin(), outVarsVec.end());
+		}
+	}
+	yulAssert(varsVec.size() == _numInParams + _numOutParams, "Proto fuzzer: Function parameters not processed correctly");
+
+	m_output << "\n";
+
+	// If function definition is in for-loop body, update
+	bool wasInForBody = m_inForBodyScope;
+	m_inForBodyScope = false;
+
+	bool wasInFunctionDef = m_inFunctionDef;
+	m_inFunctionDef = true;
+
+	// Create new function scope and add function input and return
+	// parameters to it.
+	openFunctionScope(varsVec);
+	// Visit function body
+	visit(_x.block());
+	closeFunctionScope();
+
+	m_inForBodyScope = wasInForBody;
+	m_inFunctionDef = wasInFunctionDef;
+
+	yulAssert(
+		!m_inForInitScope,
+		"Proto fuzzer: Trying to create function call inside a for-init block"
+	);
+	if (_x.force_call())
+		createFunctionCall(funcName, _numInParams, _numOutParams);
+}
+
+void ProtoConverter::visit(FunctionDef const& _x)
+{
+	unsigned numInParams = _x.num_input_params() % s_modInputParams;
+	unsigned numOutParams = _x.num_output_params() % s_modOutputParams;
+	createFunctionDefAndCall(_x, numInParams, numOutParams);
+}
+
+void ProtoConverter::visit(PopStmt const& _x)
+{
+	m_output << "pop(";
+	visit(_x.expr());
+	m_output << ")\n";
+}
+
+void ProtoConverter::visit(LeaveStmt const&)
+{
+	m_output << "leave\n";
+}
+
+std::string ProtoConverter::getObjectIdentifier(unsigned _x)
+{
+	unsigned currentId = currentObjectId();
+	std::string currentObjName = "object" + std::to_string(currentId);
+	yulAssert(
+		m_objectScope.count(currentObjName) && !m_objectScope.at(currentObjName).empty(),
+		"Yul proto fuzzer: Error referencing object"
+	);
+	std::vector<std::string> objectIdsInScope = m_objectScope.at(currentObjName);
+	return objectIdsInScope[_x % objectIdsInScope.size()];
+}
+
+void ProtoConverter::visit(Code const& _x)
+{
+	m_output << "code {\n";
+	visit(_x.block());
+	m_output << "}\n";
+}
+
+void ProtoConverter::visit(Data const& _x)
+{
+	// TODO: Generate random data block identifier
+	m_output << "data \"" << s_dataIdentifier << "\" hex\"" << createHex(_x.hex()) << "\"\n";
+}
+
+void ProtoConverter::visit(Object const& _x)
+{
+	// object "object<n>" {
+	// ...
+	// }
+	m_output << "object " << newObjectId() << " {\n";
+	visit(_x.code());
+	if (_x.has_data())
+		visit(_x.data());
+	for (auto const& subObj: _x.sub_obj())
+		visit(subObj);
+	m_output << "}\n";
+}
+
+void ProtoConverter::buildObjectScopeTree(Object const& _x)
+{
+	// Identifies object being visited
+	std::string objectName = newObjectId(false);
+	std::vector<std::string> node{objectName};
+	if (_x.has_data())
+		node.emplace_back(s_dataIdentifier);
+	for (auto const& subObj: _x.sub_obj())
+	{
+		// Identifies sub object whose numeric suffix is
+		// m_objectId
+		unsigned subObjectId = m_objectId;
+		std::string subObjectName = "object" + std::to_string(subObjectId);
+		node.push_back(subObjectName);
+		buildObjectScopeTree(subObj);
+		// Add sub-object to object's ancestors
+		yulAssert(m_objectScope.count(subObjectName), "Yul proto fuzzer: Invalid object hierarchy");
+		for (std::string const& item: m_objectScope.at(subObjectName))
+			if (item != subObjectName)
+				node.emplace_back(subObjectName + "." + item);
+	}
+	m_objectScope.emplace(objectName, node);
+}
+
+void ProtoConverter::visit(Program const& _x)
+{
+	// Initialize input size
+	m_inputSize = static_cast<unsigned>(_x.ByteSizeLong());
+
+	// Record EVM Version
+	m_evmVersion = evmVersionMapping(_x.ver());
+
+	// Program is either a Yul object or a block of
+	// statements.
+	switch (_x.program_oneof_case())
+	{
+	case Program::kBlock:
+		m_output << "{\n";
+		m_output << "mstore(memoryguard(0x10000), 1)\n";
+		m_output << "sstore(mload(calldataload(0)), 1)\n";
+		visit(_x.block());
+		m_output << "}\n";
+		break;
+	case Program::kObj:
+		m_isObject = true;
+		buildObjectScopeTree(_x.obj());
+		// Reset object id counter
+		m_objectId = 0;
+		visit(_x.obj());
+		break;
+	case Program::PROGRAM_ONEOF_NOT_SET:
+		// {} is a trivial Yul program
+		m_output << "{}";
+		break;
+	}
+}
+
+std::string ProtoConverter::programToString(Program const& _input)
+{
+	visit(_input);
+	return m_output.str();
+}
+
+std::string ProtoConverter::functionTypeToString(NumFunctionReturns _type)
+{
+	switch (_type)
+	{
+	case NumFunctionReturns::None:
+		return "n";
+	case NumFunctionReturns::Single:
+		return "s";
+	case NumFunctionReturns::Multiple:
+		return "m";
+	}
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/libevmasm/Instruction.cpp b/libevmasm/Instruction.cpp
+index cc02286c8..f106f62b1 100644
+--- a/libevmasm/Instruction.cpp
++++ b/libevmasm/Instruction.cpp
+@@ -29,309 +29,311 @@ using namespace solidity::evmasm;
+ std::map<std::string, Instruction, std::less<>> const solidity::evmasm::c_instructions =
+ {
+ 	{ "STOP", Instruction::STOP },
+ 	{ "ADD", Instruction::ADD },
+ 	{ "SUB", Instruction::SUB },
+ 	{ "MUL", Instruction::MUL },
+ 	{ "DIV", Instruction::DIV },
+ 	{ "SDIV", Instruction::SDIV },
+ 	{ "MOD", Instruction::MOD },
+ 	{ "SMOD", Instruction::SMOD },
+ 	{ "EXP", Instruction::EXP },
+ 	{ "NOT", Instruction::NOT },
+ 	{ "LT", Instruction::LT },
+ 	{ "GT", Instruction::GT },
+ 	{ "SLT", Instruction::SLT },
+ 	{ "SGT", Instruction::SGT },
+ 	{ "EQ", Instruction::EQ },
+ 	{ "ISZERO", Instruction::ISZERO },
+ 	{ "AND", Instruction::AND },
+ 	{ "OR", Instruction::OR },
+ 	{ "XOR", Instruction::XOR },
+ 	{ "BYTE", Instruction::BYTE },
+ 	{ "SHL", Instruction::SHL },
+ 	{ "SHR", Instruction::SHR },
+ 	{ "SAR", Instruction::SAR },
+ 	{ "CLZ", Instruction::CLZ },
+ 	{ "ADDMOD", Instruction::ADDMOD },
+ 	{ "MULMOD", Instruction::MULMOD },
+ 	{ "SIGNEXTEND", Instruction::SIGNEXTEND },
+ 	{ "KECCAK256", Instruction::KECCAK256 },
+ 	{ "ADDRESS", Instruction::ADDRESS },
+ 	{ "BALANCE", Instruction::BALANCE },
+ 	{ "ORIGIN", Instruction::ORIGIN },
+ 	{ "CALLER", Instruction::CALLER },
+ 	{ "CALLVALUE", Instruction::CALLVALUE },
+ 	{ "CALLDATALOAD", Instruction::CALLDATALOAD },
+ 	{ "CALLDATASIZE", Instruction::CALLDATASIZE },
+ 	{ "CALLDATACOPY", Instruction::CALLDATACOPY },
+ 	{ "CODESIZE", Instruction::CODESIZE },
+ 	{ "CODECOPY", Instruction::CODECOPY },
+ 	{ "GASPRICE", Instruction::GASPRICE },
+ 	{ "EXTCODESIZE", Instruction::EXTCODESIZE },
+ 	{ "EXTCODECOPY", Instruction::EXTCODECOPY },
+ 	{ "RETURNDATASIZE", Instruction::RETURNDATASIZE },
+ 	{ "RETURNDATACOPY", Instruction::RETURNDATACOPY },
+ 	{ "MCOPY", Instruction::MCOPY },
+ 	{ "EXTCODEHASH", Instruction::EXTCODEHASH },
+ 	{ "BLOCKHASH", Instruction::BLOCKHASH },
+ 	{ "BLOBHASH", Instruction::BLOBHASH },
+ 	{ "COINBASE", Instruction::COINBASE },
+ 	{ "TIMESTAMP", Instruction::TIMESTAMP },
+ 	{ "NUMBER", Instruction::NUMBER },
+ 	{ "DIFFICULTY", Instruction::PREVRANDAO },
+ 	{ "PREVRANDAO", Instruction::PREVRANDAO },
+ 	{ "GASLIMIT", Instruction::GASLIMIT },
+ 	{ "CHAINID", Instruction::CHAINID },
+ 	{ "SELFBALANCE", Instruction::SELFBALANCE },
+ 	{ "BASEFEE", Instruction::BASEFEE },
+ 	{ "BLOBBASEFEE", Instruction::BLOBBASEFEE },
++	{ "SLOTNUM", Instruction::SLOTNUM },
+ 	{ "POP", Instruction::POP },
+ 	{ "MLOAD", Instruction::MLOAD },
+ 	{ "MSTORE", Instruction::MSTORE },
+ 	{ "MSTORE8", Instruction::MSTORE8 },
+ 	{ "SLOAD", Instruction::SLOAD },
+ 	{ "SSTORE", Instruction::SSTORE },
+ 	{ "TLOAD", Instruction::TLOAD },
+ 	{ "TSTORE", Instruction::TSTORE },
+ 	{ "JUMP", Instruction::JUMP },
+ 	{ "JUMPI", Instruction::JUMPI },
+ 	{ "PC", Instruction::PC },
+ 	{ "MSIZE", Instruction::MSIZE },
+ 	{ "GAS", Instruction::GAS },
+ 	{ "JUMPDEST", Instruction::JUMPDEST },
+ 	{ "PUSH0", Instruction::PUSH0 },
+ 	{ "PUSH1", Instruction::PUSH1 },
+ 	{ "PUSH2", Instruction::PUSH2 },
+ 	{ "PUSH3", Instruction::PUSH3 },
+ 	{ "PUSH4", Instruction::PUSH4 },
+ 	{ "PUSH5", Instruction::PUSH5 },
+ 	{ "PUSH6", Instruction::PUSH6 },
+ 	{ "PUSH7", Instruction::PUSH7 },
+ 	{ "PUSH8", Instruction::PUSH8 },
+ 	{ "PUSH9", Instruction::PUSH9 },
+ 	{ "PUSH10", Instruction::PUSH10 },
+ 	{ "PUSH11", Instruction::PUSH11 },
+ 	{ "PUSH12", Instruction::PUSH12 },
+ 	{ "PUSH13", Instruction::PUSH13 },
+ 	{ "PUSH14", Instruction::PUSH14 },
+ 	{ "PUSH15", Instruction::PUSH15 },
+ 	{ "PUSH16", Instruction::PUSH16 },
+ 	{ "PUSH17", Instruction::PUSH17 },
+ 	{ "PUSH18", Instruction::PUSH18 },
+ 	{ "PUSH19", Instruction::PUSH19 },
+ 	{ "PUSH20", Instruction::PUSH20 },
+ 	{ "PUSH21", Instruction::PUSH21 },
+ 	{ "PUSH22", Instruction::PUSH22 },
+ 	{ "PUSH23", Instruction::PUSH23 },
+ 	{ "PUSH24", Instruction::PUSH24 },
+ 	{ "PUSH25", Instruction::PUSH25 },
+ 	{ "PUSH26", Instruction::PUSH26 },
+ 	{ "PUSH27", Instruction::PUSH27 },
+ 	{ "PUSH28", Instruction::PUSH28 },
+ 	{ "PUSH29", Instruction::PUSH29 },
+ 	{ "PUSH30", Instruction::PUSH30 },
+ 	{ "PUSH31", Instruction::PUSH31 },
+ 	{ "PUSH32", Instruction::PUSH32 },
+ 	{ "DUP1", Instruction::DUP1 },
+ 	{ "DUP2", Instruction::DUP2 },
+ 	{ "DUP3", Instruction::DUP3 },
+ 	{ "DUP4", Instruction::DUP4 },
+ 	{ "DUP5", Instruction::DUP5 },
+ 	{ "DUP6", Instruction::DUP6 },
+ 	{ "DUP7", Instruction::DUP7 },
+ 	{ "DUP8", Instruction::DUP8 },
+ 	{ "DUP9", Instruction::DUP9 },
+ 	{ "DUP10", Instruction::DUP10 },
+ 	{ "DUP11", Instruction::DUP11 },
+ 	{ "DUP12", Instruction::DUP12 },
+ 	{ "DUP13", Instruction::DUP13 },
+ 	{ "DUP14", Instruction::DUP14 },
+ 	{ "DUP15", Instruction::DUP15 },
+ 	{ "DUP16", Instruction::DUP16 },
+ 	{ "SWAP1", Instruction::SWAP1 },
+ 	{ "SWAP2", Instruction::SWAP2 },
+ 	{ "SWAP3", Instruction::SWAP3 },
+ 	{ "SWAP4", Instruction::SWAP4 },
+ 	{ "SWAP5", Instruction::SWAP5 },
+ 	{ "SWAP6", Instruction::SWAP6 },
+ 	{ "SWAP7", Instruction::SWAP7 },
+ 	{ "SWAP8", Instruction::SWAP8 },
+ 	{ "SWAP9", Instruction::SWAP9 },
+ 	{ "SWAP10", Instruction::SWAP10 },
+ 	{ "SWAP11", Instruction::SWAP11 },
+ 	{ "SWAP12", Instruction::SWAP12 },
+ 	{ "SWAP13", Instruction::SWAP13 },
+ 	{ "SWAP14", Instruction::SWAP14 },
+ 	{ "SWAP15", Instruction::SWAP15 },
+ 	{ "SWAP16", Instruction::SWAP16 },
+ 	{ "LOG0", Instruction::LOG0 },
+ 	{ "LOG1", Instruction::LOG1 },
+ 	{ "LOG2", Instruction::LOG2 },
+ 	{ "LOG3", Instruction::LOG3 },
+ 	{ "LOG4", Instruction::LOG4 },
+ 	{ "CREATE", Instruction::CREATE },
+ 	{ "CALL", Instruction::CALL },
+ 	{ "CALLCODE", Instruction::CALLCODE },
+ 	{ "STATICCALL", Instruction::STATICCALL },
+ 	{ "RETURN", Instruction::RETURN },
+ 	{ "DELEGATECALL", Instruction::DELEGATECALL },
+ 	{ "CREATE2", Instruction::CREATE2 },
+ 	{ "REVERT", Instruction::REVERT },
+ 	{ "INVALID", Instruction::INVALID },
+ 	{ "SELFDESTRUCT", Instruction::SELFDESTRUCT }
+ };
+ 
+ /// @note InstructionInfo is assumed to be the same across all EVM versions except for the instruction name.
+ static std::map<Instruction, InstructionInfo> const c_instructionInfo =
+ {   //                                                Add Args Ret SideEffects GasPriceTier
+ 	{Instruction::STOP,           {"STOP",            0,  0,   0,  true,       Tier::Zero}},
+ 	{Instruction::ADD,            {"ADD",             0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::SUB,            {"SUB",             0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::MUL,            {"MUL",             0,  2,   1,  false,      Tier::Low}},
+ 	{Instruction::DIV,            {"DIV",             0,  2,   1,  false,      Tier::Low}},
+ 	{Instruction::SDIV,           {"SDIV",            0,  2,   1,  false,      Tier::Low}},
+ 	{Instruction::MOD,            {"MOD",             0,  2,   1,  false,      Tier::Low}},
+ 	{Instruction::SMOD,           {"SMOD",            0,  2,   1,  false,      Tier::Low}},
+ 	{Instruction::EXP,            {"EXP",             0,  2,   1,  false,      Tier::Special}},
+ 	{Instruction::NOT,            {"NOT",             0,  1,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::LT,             {"LT",              0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::GT,             {"GT",              0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::SLT,            {"SLT",             0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::SGT,            {"SGT",             0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::EQ,             {"EQ",              0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::ISZERO,         {"ISZERO",          0,  1,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::AND,            {"AND",             0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::OR,             {"OR",              0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::XOR,            {"XOR",             0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::BYTE,           {"BYTE",            0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::SHL,            {"SHL",             0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::SHR,            {"SHR",             0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::SAR,            {"SAR",             0,  2,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::CLZ,            {"CLZ",             0,  1,   1,  false,      Tier::Low}},
+ 	{Instruction::ADDMOD,         {"ADDMOD",          0,  3,   1,  false,      Tier::Mid}},
+ 	{Instruction::MULMOD,         {"MULMOD",          0,  3,   1,  false,      Tier::Mid}},
+ 	{Instruction::SIGNEXTEND,     {"SIGNEXTEND",      0,  2,   1,  false,      Tier::Low}},
+ 	{Instruction::KECCAK256,      {"KECCAK256",       0,  2,   1,  true,       Tier::Special}},
+ 	{Instruction::ADDRESS,        {"ADDRESS",         0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::BALANCE,        {"BALANCE",         0,  1,   1,  false,      Tier::Special}},
+ 	{Instruction::ORIGIN,         {"ORIGIN",          0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::CALLER,         {"CALLER",          0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::CALLVALUE,      {"CALLVALUE",       0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::CALLDATALOAD,   {"CALLDATALOAD",    0,  1,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::CALLDATASIZE,   {"CALLDATASIZE",    0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::CALLDATACOPY,   {"CALLDATACOPY",    0,  3,   0,  true,       Tier::VeryLow}},
+ 	{Instruction::CODESIZE,       {"CODESIZE",        0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::CODECOPY,       {"CODECOPY",        0,  3,   0,  true,       Tier::VeryLow}},
+ 	{Instruction::GASPRICE,       {"GASPRICE",        0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::EXTCODESIZE,    {"EXTCODESIZE",     0,  1,   1,  false,      Tier::Special}},
+ 	{Instruction::EXTCODECOPY,    {"EXTCODECOPY",     0,  4,   0,  true,       Tier::Special}},
+ 	{Instruction::RETURNDATASIZE, {"RETURNDATASIZE",  0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::RETURNDATACOPY, {"RETURNDATACOPY",  0,  3,   0,  true,       Tier::VeryLow}},
+ 	{Instruction::MCOPY,          {"MCOPY",           0,  3,   0,  true,       Tier::VeryLow}},
+ 	{Instruction::EXTCODEHASH,    {"EXTCODEHASH",     0,  1,   1,  false,      Tier::Special}},
+ 	{Instruction::BLOCKHASH,      {"BLOCKHASH",       0,  1,   1,  false,      Tier::BlockHash}},
+ 	{Instruction::BLOBHASH,       {"BLOBHASH",        0,  1,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::COINBASE,       {"COINBASE",        0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::TIMESTAMP,      {"TIMESTAMP",       0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::NUMBER,         {"NUMBER",          0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::PREVRANDAO,     {"PREVRANDAO",      0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::GASLIMIT,       {"GASLIMIT",        0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::CHAINID,        {"CHAINID",         0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::SELFBALANCE,    {"SELFBALANCE",     0,  0,   1,  false,      Tier::Low}},
+ 	{Instruction::BASEFEE,        {"BASEFEE",         0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::BLOBBASEFEE,    {"BLOBBASEFEE",     0,  0,   1,  false,      Tier::Base}},
++	{Instruction::SLOTNUM,        {"SLOTNUM",         0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::POP,            {"POP",             0,  1,   0,  false,      Tier::Base}},
+ 	{Instruction::MLOAD,          {"MLOAD",           0,  1,   1,  true,       Tier::VeryLow}},
+ 	{Instruction::MSTORE,         {"MSTORE",          0,  2,   0,  true,       Tier::VeryLow}},
+ 	{Instruction::MSTORE8,        {"MSTORE8",         0,  2,   0,  true,       Tier::VeryLow}},
+ 	{Instruction::SLOAD,          {"SLOAD",           0,  1,   1,  false,      Tier::Special}},
+ 	{Instruction::SSTORE,         {"SSTORE",          0,  2,   0,  true,       Tier::Special}},
+ 	{Instruction::TLOAD,          {"TLOAD",           0,  1,   1,  false,      Tier::WarmAccess}},
+ 	{Instruction::TSTORE,         {"TSTORE",          0,  2,   0,  true,       Tier::WarmAccess}},
+ 	{Instruction::JUMP,           {"JUMP",            0,  1,   0,  true,       Tier::Mid}},
+ 	{Instruction::JUMPI,          {"JUMPI",           0,  2,   0,  true,       Tier::High}},
+ 	{Instruction::PC,             {"PC",              0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::MSIZE,          {"MSIZE",           0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::GAS,            {"GAS",             0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::JUMPDEST,       {"JUMPDEST",        0,  0,   0,  true,       Tier::Special}},
+ 	{Instruction::PUSH0,          {"PUSH0",           0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::PUSH1,          {"PUSH1",           1,  0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH2,          {"PUSH2",           2,  0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH3,          {"PUSH3",           3,  0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH4,          {"PUSH4",           4,  0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH5,          {"PUSH5",           5,  0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH6,          {"PUSH6",           6,  0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH7,          {"PUSH7",           7,  0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH8,          {"PUSH8",           8,  0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH9,          {"PUSH9",           9,  0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH10,         {"PUSH10",          10, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH11,         {"PUSH11",          11, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH12,         {"PUSH12",          12, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH13,         {"PUSH13",          13, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH14,         {"PUSH14",          14, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH15,         {"PUSH15",          15, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH16,         {"PUSH16",          16, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH17,         {"PUSH17",          17, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH18,         {"PUSH18",          18, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH19,         {"PUSH19",          19, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH20,         {"PUSH20",          20, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH21,         {"PUSH21",          21, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH22,         {"PUSH22",          22, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH23,         {"PUSH23",          23, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH24,         {"PUSH24",          24, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH25,         {"PUSH25",          25, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH26,         {"PUSH26",          26, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH27,         {"PUSH27",          27, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH28,         {"PUSH28",          28, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH29,         {"PUSH29",          29, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH30,         {"PUSH30",          30, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH31,         {"PUSH31",          31, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::PUSH32,         {"PUSH32",          32, 0,   1,  false,      Tier::VeryLow}},
+ 	{Instruction::DUP1,           {"DUP1",            0,  1,   2,  false,      Tier::VeryLow}},
+ 	{Instruction::DUP2,           {"DUP2",            0,  2,   3,  false,      Tier::VeryLow}},
+ 	{Instruction::DUP3,           {"DUP3",            0,  3,   4,  false,      Tier::VeryLow}},
+ 	{Instruction::DUP4,           {"DUP4",            0,  4,   5,  false,      Tier::VeryLow}},
+ 	{Instruction::DUP5,           {"DUP5",            0,  5,   6,  false,      Tier::VeryLow}},
+ 	{Instruction::DUP6,           {"DUP6",            0,  6,   7,  false,      Tier::VeryLow}},
+ 	{Instruction::DUP7,           {"DUP7",            0,  7,   8,  false,      Tier::VeryLow}},
+ 	{Instruction::DUP8,           {"DUP8",            0,  8,   9,  false,      Tier::VeryLow}},
+ 	{Instruction::DUP9,           {"DUP9",            0,  9,   10, false,      Tier::VeryLow}},
+ 	{Instruction::DUP10,          {"DUP10",           0,  10,  11, false,      Tier::VeryLow}},
+ 	{Instruction::DUP11,          {"DUP11",           0,  11,  12, false,      Tier::VeryLow}},
+ 	{Instruction::DUP12,          {"DUP12",           0,  12,  13, false,      Tier::VeryLow}},
+ 	{Instruction::DUP13,          {"DUP13",           0,  13,  14, false,      Tier::VeryLow}},
+ 	{Instruction::DUP14,          {"DUP14",           0,  14,  15, false,      Tier::VeryLow}},
+ 	{Instruction::DUP15,          {"DUP15",           0,  15,  16, false,      Tier::VeryLow}},
+ 	{Instruction::DUP16,          {"DUP16",           0,  16,  17, false,      Tier::VeryLow}},
+ 	{Instruction::SWAP1,          {"SWAP1",           0,  2,   2,  false,      Tier::VeryLow}},
+ 	{Instruction::SWAP2,          {"SWAP2",           0,  3,   3,  false,      Tier::VeryLow}},
+ 	{Instruction::SWAP3,          {"SWAP3",           0,  4,   4,  false,      Tier::VeryLow}},
+ 	{Instruction::SWAP4,          {"SWAP4",           0,  5,   5,  false,      Tier::VeryLow}},
+ 	{Instruction::SWAP5,          {"SWAP5",           0,  6,   6,  false,      Tier::VeryLow}},
+ 	{Instruction::SWAP6,          {"SWAP6",           0,  7,   7,  false,      Tier::VeryLow}},
+ 	{Instruction::SWAP7,          {"SWAP7",           0,  8,   8,  false,      Tier::VeryLow}},
+ 	{Instruction::SWAP8,          {"SWAP8",           0,  9,   9,  false,      Tier::VeryLow}},
+ 	{Instruction::SWAP9,          {"SWAP9",           0,  10,  10, false,      Tier::VeryLow}},
+ 	{Instruction::SWAP10,         {"SWAP10",          0,  11,  11, false,      Tier::VeryLow}},
+ 	{Instruction::SWAP11,         {"SWAP11",          0,  12,  12, false,      Tier::VeryLow}},
+ 	{Instruction::SWAP12,         {"SWAP12",          0,  13,  13, false,      Tier::VeryLow}},
+ 	{Instruction::SWAP13,         {"SWAP13",          0,  14,  14, false,      Tier::VeryLow}},
+ 	{Instruction::SWAP14,         {"SWAP14",          0,  15,  15, false,      Tier::VeryLow}},
+ 	{Instruction::SWAP15,         {"SWAP15",          0,  16,  16, false,      Tier::VeryLow}},
+ 	{Instruction::SWAP16,         {"SWAP16",          0,  17,  17, false,      Tier::VeryLow}},
+ 	{Instruction::LOG0,           {"LOG0",            0,  2,   0,  true,       Tier::Special}},
+ 	{Instruction::LOG1,           {"LOG1",            0,  3,   0,  true,       Tier::Special}},
+ 	{Instruction::LOG2,           {"LOG2",            0,  4,   0,  true,       Tier::Special}},
+ 	{Instruction::LOG3,           {"LOG3",            0,  5,   0,  true,       Tier::Special}},
+ 	{Instruction::LOG4,           {"LOG4",            0,  6,   0,  true,       Tier::Special}},
+ 	{Instruction::CREATE,         {"CREATE",          0,  3,   1,  true,       Tier::Special}},
+ 	{Instruction::CALL,           {"CALL",            0,  7,   1,  true,       Tier::Special}},
+ 	{Instruction::CALLCODE,       {"CALLCODE",        0,  7,   1,  true,       Tier::Special}},
+ 	{Instruction::RETURN,         {"RETURN",          0,  2,   0,  true,       Tier::Zero}},
+ 	{Instruction::DELEGATECALL,   {"DELEGATECALL",    0,  6,   1,  true,       Tier::Special}},
+ 	{Instruction::STATICCALL,     {"STATICCALL",      0,  6,   1,  true,       Tier::Special}},
+ 	{Instruction::CREATE2,        {"CREATE2",         0,  4,   1,  true,       Tier::Special}},
+ 	{Instruction::REVERT,         {"REVERT",          0,  2,   0,  true,       Tier::Zero}},
+ 	{Instruction::INVALID,        {"INVALID",         0,  0,   0,  true,       Tier::Zero}},
+ 	{Instruction::SELFDESTRUCT,   {"SELFDESTRUCT",    0,  1,   0,  true,       Tier::Special}}
+ };
+diff --git a/libevmasm/Instruction.h b/libevmasm/Instruction.h
+index d5ebfa31d..755fce5c9 100644
+--- a/libevmasm/Instruction.h
++++ b/libevmasm/Instruction.h
+@@ -34,167 +34,168 @@ namespace solidity::evmasm
+ /// Virtual machine bytecode instruction.
+ enum class Instruction: uint8_t
+ {
+ 	STOP = 0x00,              ///< halts execution
+ 	ADD,                      ///< addition operation
+ 	MUL,                      ///< multiplication operation
+ 	SUB,                      ///< subtraction operation
+ 	DIV,                      ///< integer division operation
+ 	SDIV,                     ///< signed integer division operation
+ 	MOD,                      ///< modulo remainder operation
+ 	SMOD,                     ///< signed modulo remainder operation
+ 	ADDMOD,                   ///< unsigned modular addition
+ 	MULMOD,                   ///< unsigned modular multiplication
+ 	EXP,                      ///< exponential operation
+ 	SIGNEXTEND,               ///< extend length of signed integer
+ 
+ 	LT = 0x10,                ///< less-than comparison
+ 	GT,                       ///< greater-than comparison
+ 	SLT,                      ///< signed less-than comparison
+ 	SGT,                      ///< signed greater-than comparison
+ 	EQ,                       ///< equality comparison
+ 	ISZERO,                   ///< simple not operator
+ 	AND,                      ///< bitwise AND operation
+ 	OR,                       ///< bitwise OR operation
+ 	XOR,                      ///< bitwise XOR operation
+ 	NOT,                      ///< bitwise NOT operation
+ 	BYTE,                     ///< retrieve single byte from word
+ 	SHL,                      ///< bitwise SHL operation
+ 	SHR,                      ///< bitwise SHR operation
+ 	SAR,                      ///< bitwise SAR operation
+ 	CLZ,                      ///< count of leading zeros in binary representation
+ 
+ 	KECCAK256 = 0x20,         ///< compute KECCAK-256 hash
+ 
+ 	ADDRESS = 0x30,           ///< get address of currently executing account
+ 	BALANCE,                  ///< get balance of the given account
+ 	ORIGIN,                   ///< get execution origination address
+ 	CALLER,                   ///< get caller address
+ 	CALLVALUE,                ///< get deposited value by the instruction/transaction responsible for this execution
+ 	CALLDATALOAD,             ///< get input data of current environment
+ 	CALLDATASIZE,             ///< get size of input data in current environment
+ 	CALLDATACOPY,             ///< copy input data in current environment to memory
+ 	CODESIZE,                 ///< get size of code running in current environment
+ 	CODECOPY,                 ///< copy code running in current environment to memory
+ 	GASPRICE,                 ///< get price of gas in current environment
+ 	EXTCODESIZE,              ///< get external code size (from another contract)
+ 	EXTCODECOPY,              ///< copy external code (from another contract)
+ 	RETURNDATASIZE = 0x3d,    ///< get size of return data buffer
+ 	RETURNDATACOPY = 0x3e,    ///< copy return data in current environment to memory
+ 	EXTCODEHASH = 0x3f,       ///< get external code hash (from another contract)
+ 
+ 	BLOCKHASH = 0x40,         ///< get hash of most recent complete block
+ 	COINBASE,                 ///< get the block's coinbase address
+ 	TIMESTAMP,                ///< get the block's timestamp
+ 	NUMBER,                   ///< get the block's number
+ 	PREVRANDAO,               ///< get randomness provided by the beacon chain
+ 	GASLIMIT,                 ///< get the block's gas limit
+ 	CHAINID,                  ///< get the config's chainid param
+ 	SELFBALANCE,              ///< get balance of the current account
+ 	BASEFEE,                  ///< get the block's basefee
+ 	BLOBHASH = 0x49,          ///< get a versioned hash of one of the blobs associated with the transaction
+ 	BLOBBASEFEE = 0x4a,       ///< get the block's blob basefee
++	SLOTNUM = 0x4b,           ///< get the current beacon chain slot number
+ 
+ 	POP = 0x50,               ///< remove item from stack
+ 	MLOAD,                    ///< load word from memory
+ 	MSTORE,                   ///< save word to memory
+ 	MSTORE8,                  ///< save byte to memory
+ 	SLOAD,                    ///< load word from storage
+ 	SSTORE,                   ///< save word to storage
+ 	JUMP,                     ///< alter the program counter
+ 	JUMPI,                    ///< conditionally alter the program counter
+ 	PC,                       ///< get the program counter
+ 	MSIZE,                    ///< get the size of active memory
+ 	GAS,                      ///< get the amount of available gas
+ 	JUMPDEST,                 ///< set a potential jump destination
+ 	TLOAD = 0x5c,             ///< load word from transient storage
+ 	TSTORE = 0x5d,            ///< save word to transient storage
+ 	MCOPY = 0x5e,             ///< copy between memory areas
+ 
+ 	PUSH0 = 0x5f,             ///< place the value 0 on stack
+ 	PUSH1 = 0x60,             ///< place 1 byte item on stack
+ 	PUSH2,                    ///< place 2 byte item on stack
+ 	PUSH3,                    ///< place 3 byte item on stack
+ 	PUSH4,                    ///< place 4 byte item on stack
+ 	PUSH5,                    ///< place 5 byte item on stack
+ 	PUSH6,                    ///< place 6 byte item on stack
+ 	PUSH7,                    ///< place 7 byte item on stack
+ 	PUSH8,                    ///< place 8 byte item on stack
+ 	PUSH9,                    ///< place 9 byte item on stack
+ 	PUSH10,                   ///< place 10 byte item on stack
+ 	PUSH11,                   ///< place 11 byte item on stack
+ 	PUSH12,                   ///< place 12 byte item on stack
+ 	PUSH13,                   ///< place 13 byte item on stack
+ 	PUSH14,                   ///< place 14 byte item on stack
+ 	PUSH15,                   ///< place 15 byte item on stack
+ 	PUSH16,                   ///< place 16 byte item on stack
+ 	PUSH17,                   ///< place 17 byte item on stack
+ 	PUSH18,                   ///< place 18 byte item on stack
+ 	PUSH19,                   ///< place 19 byte item on stack
+ 	PUSH20,                   ///< place 20 byte item on stack
+ 	PUSH21,                   ///< place 21 byte item on stack
+ 	PUSH22,                   ///< place 22 byte item on stack
+ 	PUSH23,                   ///< place 23 byte item on stack
+ 	PUSH24,                   ///< place 24 byte item on stack
+ 	PUSH25,                   ///< place 25 byte item on stack
+ 	PUSH26,                   ///< place 26 byte item on stack
+ 	PUSH27,                   ///< place 27 byte item on stack
+ 	PUSH28,                   ///< place 28 byte item on stack
+ 	PUSH29,                   ///< place 29 byte item on stack
+ 	PUSH30,                   ///< place 30 byte item on stack
+ 	PUSH31,                   ///< place 31 byte item on stack
+ 	PUSH32,                   ///< place 32 byte item on stack
+ 
+ 	DUP1 = 0x80,              ///< copies the highest item in the stack to the top of the stack
+ 	DUP2,                     ///< copies the second highest item in the stack to the top of the stack
+ 	DUP3,                     ///< copies the third highest item in the stack to the top of the stack
+ 	DUP4,                     ///< copies the 4th highest item in the stack to the top of the stack
+ 	DUP5,                     ///< copies the 5th highest item in the stack to the top of the stack
+ 	DUP6,                     ///< copies the 6th highest item in the stack to the top of the stack
+ 	DUP7,                     ///< copies the 7th highest item in the stack to the top of the stack
+ 	DUP8,                     ///< copies the 8th highest item in the stack to the top of the stack
+ 	DUP9,                     ///< copies the 9th highest item in the stack to the top of the stack
+ 	DUP10,                    ///< copies the 10th highest item in the stack to the top of the stack
+ 	DUP11,                    ///< copies the 11th highest item in the stack to the top of the stack
+ 	DUP12,                    ///< copies the 12th highest item in the stack to the top of the stack
+ 	DUP13,                    ///< copies the 13th highest item in the stack to the top of the stack
+ 	DUP14,                    ///< copies the 14th highest item in the stack to the top of the stack
+ 	DUP15,                    ///< copies the 15th highest item in the stack to the top of the stack
+ 	DUP16,                    ///< copies the 16th highest item in the stack to the top of the stack
+ 
+ 	SWAP1 = 0x90,             ///< swaps the highest and second highest value on the stack
+ 	SWAP2,                    ///< swaps the highest and third highest value on the stack
+ 	SWAP3,                    ///< swaps the highest and 4th highest value on the stack
+ 	SWAP4,                    ///< swaps the highest and 5th highest value on the stack
+ 	SWAP5,                    ///< swaps the highest and 6th highest value on the stack
+ 	SWAP6,                    ///< swaps the highest and 7th highest value on the stack
+ 	SWAP7,                    ///< swaps the highest and 8th highest value on the stack
+ 	SWAP8,                    ///< swaps the highest and 9th highest value on the stack
+ 	SWAP9,                    ///< swaps the highest and 10th highest value on the stack
+ 	SWAP10,                   ///< swaps the highest and 11th highest value on the stack
+ 	SWAP11,                   ///< swaps the highest and 12th highest value on the stack
+ 	SWAP12,                   ///< swaps the highest and 13th highest value on the stack
+ 	SWAP13,                   ///< swaps the highest and 14th highest value on the stack
+ 	SWAP14,                   ///< swaps the highest and 15th highest value on the stack
+ 	SWAP15,                   ///< swaps the highest and 16th highest value on the stack
+ 	SWAP16,                   ///< swaps the highest and 17th highest value on the stack
+ 
+ 	LOG0 = 0xa0,              ///< Makes a log entry; no topics.
+ 	LOG1,                     ///< Makes a log entry; 1 topic.
+ 	LOG2,                     ///< Makes a log entry; 2 topics.
+ 	LOG3,                     ///< Makes a log entry; 3 topics.
+ 	LOG4,                     ///< Makes a log entry; 4 topics.
+ 
+ 	CREATE = 0xf0,            ///< create a new account with associated code
+ 	CALL,                     ///< message-call into an account
+ 	CALLCODE,                 ///< message-call with another account's code only
+ 	RETURN,                   ///< halt execution returning output data
+ 	DELEGATECALL,             ///< like CALLCODE but keeps caller's value and sender
+ 	CREATE2 = 0xf5,           ///< create new account with associated code at address `sha3(0xff + sender + salt + init code) % 2**160`
+ 	STATICCALL = 0xfa,        ///< like CALL but disallow state modifications
+ 
+ 	REVERT = 0xfd,            ///< halt execution, revert state and return output data
+ 	INVALID = 0xfe,           ///< invalid instruction for expressing runtime errors (e.g., division-by-zero)
+ 	SELFDESTRUCT = 0xff       ///< halt execution and register account for later deletion
+ };
+ 
+ /// @returns true if the instruction is of the CALL opcode family
+diff --git a/libevmasm/SemanticInformation.cpp b/libevmasm/SemanticInformation.cpp
+index 5f5a2279b..c8653b443 100644
+--- a/libevmasm/SemanticInformation.cpp
++++ b/libevmasm/SemanticInformation.cpp
+@@ -551,34 +551,35 @@ SemanticInformation::Effect SemanticInformation::otherState(Instruction _instruc
+ bool SemanticInformation::invalidInPureFunctions(Instruction _instruction)
+ {
+ 	switch (_instruction)
+ 	{
+ 	case Instruction::ADDRESS:
+ 	case Instruction::SELFBALANCE:
+ 	case Instruction::BALANCE:
+ 	case Instruction::ORIGIN:
+ 	case Instruction::CALLER:
+ 	case Instruction::CALLVALUE:
+ 	case Instruction::CHAINID:
+ 	case Instruction::BASEFEE:
+ 	case Instruction::BLOBBASEFEE:
++	case Instruction::SLOTNUM:
+ 	case Instruction::GAS:
+ 	case Instruction::GASPRICE:
+ 	case Instruction::EXTCODESIZE:
+ 	case Instruction::EXTCODECOPY:
+ 	case Instruction::EXTCODEHASH:
+ 	case Instruction::BLOCKHASH:
+ 	case Instruction::BLOBHASH:
+ 	case Instruction::COINBASE:
+ 	case Instruction::TIMESTAMP:
+ 	case Instruction::NUMBER:
+ 	case Instruction::PREVRANDAO:
+ 	case Instruction::GASLIMIT:
+ 	case Instruction::STATICCALL:
+ 	case Instruction::SLOAD:
+ 	case Instruction::TLOAD:
+ 		return true;
+ 	default:
+ 		break;
+ 	}
+ 	return invalidInViewFunctions(_instruction);
+ }
+diff --git a/libevmasm/SimplificationRule.h b/libevmasm/SimplificationRule.h
+index ea1baa9e5..552ab3290 100644
+--- a/libevmasm/SimplificationRule.h
++++ b/libevmasm/SimplificationRule.h
+@@ -55,108 +55,109 @@ template <typename Pattern>
+ struct EVMBuiltins
+ {
+ 	using InstrType = Instruction;
+ 
+ 	template<Instruction inst>
+ 	struct PatternGenerator
+ 	{
+ 		template<typename... Args> constexpr Pattern operator()(Args&&... _args) const
+ 		{
+ 			return {inst, {std::forward<Args>(_args)...}};
+ 		}
+ 	};
+ 
+ 	struct PatternGeneratorInstance
+ 	{
+ 		Instruction instruction;
+ 		template<typename... Args> constexpr Pattern operator()(Args&&... _args) const
+ 		{
+ 			return {instruction, {std::forward<Args>(_args)...}};
+ 		}
+ 	};
+ 
+ 
+ 	static auto constexpr STOP = PatternGenerator<Instruction::STOP>{};
+ 	static auto constexpr ADD = PatternGenerator<Instruction::ADD>{};
+ 	static auto constexpr SUB = PatternGenerator<Instruction::SUB>{};
+ 	static auto constexpr MUL = PatternGenerator<Instruction::MUL>{};
+ 	static auto constexpr DIV = PatternGenerator<Instruction::DIV>{};
+ 	static auto constexpr SDIV = PatternGenerator<Instruction::SDIV>{};
+ 	static auto constexpr MOD = PatternGenerator<Instruction::MOD>{};
+ 	static auto constexpr SMOD = PatternGenerator<Instruction::SMOD>{};
+ 	static auto constexpr EXP = PatternGenerator<Instruction::EXP>{};
+ 	static auto constexpr NOT = PatternGenerator<Instruction::NOT>{};
+ 	static auto constexpr LT = PatternGenerator<Instruction::LT>{};
+ 	static auto constexpr GT = PatternGenerator<Instruction::GT>{};
+ 	static auto constexpr SLT = PatternGenerator<Instruction::SLT>{};
+ 	static auto constexpr SGT = PatternGenerator<Instruction::SGT>{};
+ 	static auto constexpr EQ = PatternGenerator<Instruction::EQ>{};
+ 	static auto constexpr ISZERO = PatternGenerator<Instruction::ISZERO>{};
+ 	static auto constexpr AND = PatternGenerator<Instruction::AND>{};
+ 	static auto constexpr OR = PatternGenerator<Instruction::OR>{};
+ 	static auto constexpr XOR = PatternGenerator<Instruction::XOR>{};
+ 	static auto constexpr BYTE = PatternGenerator<Instruction::BYTE>{};
+ 	static auto constexpr SHL = PatternGenerator<Instruction::SHL>{};
+ 	static auto constexpr SHR = PatternGenerator<Instruction::SHR>{};
+ 	static auto constexpr SAR = PatternGenerator<Instruction::SAR>{};
+ 	static auto constexpr CLZ = PatternGenerator<Instruction::CLZ>{};
+ 	static auto constexpr ADDMOD = PatternGenerator<Instruction::ADDMOD>{};
+ 	static auto constexpr MULMOD = PatternGenerator<Instruction::MULMOD>{};
+ 	static auto constexpr SIGNEXTEND = PatternGenerator<Instruction::SIGNEXTEND>{};
+ 	static auto constexpr KECCAK256 = PatternGenerator<Instruction::KECCAK256>{};
+ 	static auto constexpr ADDRESS = PatternGenerator<Instruction::ADDRESS>{};
+ 	static auto constexpr BALANCE = PatternGenerator<Instruction::BALANCE>{};
+ 	static auto constexpr ORIGIN = PatternGenerator<Instruction::ORIGIN>{};
+ 	static auto constexpr CALLER = PatternGenerator<Instruction::CALLER>{};
+ 	static auto constexpr CALLVALUE = PatternGenerator<Instruction::CALLVALUE>{};
+ 	static auto constexpr CALLDATALOAD = PatternGenerator<Instruction::CALLDATALOAD>{};
+ 	static auto constexpr CALLDATASIZE = PatternGenerator<Instruction::CALLDATASIZE>{};
+ 	static auto constexpr CALLDATACOPY = PatternGenerator<Instruction::CALLDATACOPY>{};
+ 	static auto constexpr CODESIZE = PatternGenerator<Instruction::CODESIZE>{};
+ 	static auto constexpr CODECOPY = PatternGenerator<Instruction::CODECOPY>{};
+ 	static auto constexpr GASPRICE = PatternGenerator<Instruction::GASPRICE>{};
+ 	static auto constexpr EXTCODESIZE = PatternGenerator<Instruction::EXTCODESIZE>{};
+ 	static auto constexpr EXTCODECOPY = PatternGenerator<Instruction::EXTCODECOPY>{};
+ 	static auto constexpr RETURNDATASIZE = PatternGenerator<Instruction::RETURNDATASIZE>{};
+ 	static auto constexpr RETURNDATACOPY = PatternGenerator<Instruction::RETURNDATACOPY>{};
+ 	static auto constexpr MCOPY = PatternGenerator<Instruction::MCOPY>{};
+ 	static auto constexpr EXTCODEHASH = PatternGenerator<Instruction::EXTCODEHASH>{};
+ 	static auto constexpr BLOCKHASH = PatternGenerator<Instruction::BLOCKHASH>{};
+ 	static auto constexpr BLOBHASH = PatternGenerator<Instruction::BLOBHASH>{};
+ 	static auto constexpr COINBASE = PatternGenerator<Instruction::COINBASE>{};
+ 	static auto constexpr TIMESTAMP = PatternGenerator<Instruction::TIMESTAMP>{};
+ 	static auto constexpr NUMBER = PatternGenerator<Instruction::NUMBER>{};
+ 	static auto constexpr PREVRANDAO = PatternGenerator<Instruction::PREVRANDAO>{};
+ 	static auto constexpr GASLIMIT = PatternGenerator<Instruction::GASLIMIT>{};
+ 	static auto constexpr CHAINID = PatternGenerator<Instruction::CHAINID>{};
+ 	static auto constexpr SELFBALANCE = PatternGenerator<Instruction::SELFBALANCE>{};
+ 	static auto constexpr BASEFEE = PatternGenerator<Instruction::BASEFEE>{};
+ 	static auto constexpr BLOBBASEFEE = PatternGenerator<Instruction::BLOBBASEFEE>{};
++	static auto constexpr SLOTNUM = PatternGenerator<Instruction::SLOTNUM>{};
+ 	static auto constexpr POP = PatternGenerator<Instruction::POP>{};
+ 	static auto constexpr MLOAD = PatternGenerator<Instruction::MLOAD>{};
+ 	static auto constexpr MSTORE = PatternGenerator<Instruction::MSTORE>{};
+ 	static auto constexpr MSTORE8 = PatternGenerator<Instruction::MSTORE8>{};
+ 	static auto constexpr SLOAD = PatternGenerator<Instruction::SLOAD>{};
+ 	static auto constexpr SSTORE = PatternGenerator<Instruction::SSTORE>{};
+ 	static auto constexpr TLOAD = PatternGenerator<Instruction::TLOAD>{};
+ 	static auto constexpr TSTORE = PatternGenerator<Instruction::TSTORE>{};
+ 	static auto constexpr PC = PatternGenerator<Instruction::PC>{};
+ 	static auto constexpr MSIZE = PatternGenerator<Instruction::MSIZE>{};
+ 	static auto constexpr GAS = PatternGenerator<Instruction::GAS>{};
+ 	static auto constexpr LOG0 = PatternGenerator<Instruction::LOG0>{};
+ 	static auto constexpr LOG1 = PatternGenerator<Instruction::LOG1>{};
+ 	static auto constexpr LOG2 = PatternGenerator<Instruction::LOG2>{};
+ 	static auto constexpr LOG3 = PatternGenerator<Instruction::LOG3>{};
+ 	static auto constexpr LOG4 = PatternGenerator<Instruction::LOG4>{};
+ 	static auto constexpr CREATE = PatternGenerator<Instruction::CREATE>{};
+ 	static auto constexpr CALL = PatternGenerator<Instruction::CALL>{};
+ 	static auto constexpr CALLCODE = PatternGenerator<Instruction::CALLCODE>{};
+ 	static auto constexpr STATICCALL = PatternGenerator<Instruction::STATICCALL>{};
+ 	static auto constexpr RETURN = PatternGenerator<Instruction::RETURN>{};
+ 	static auto constexpr DELEGATECALL = PatternGenerator<Instruction::DELEGATECALL>{};
+ 	static auto constexpr CREATE2 = PatternGenerator<Instruction::CREATE2>{};
+ 	static auto constexpr REVERT = PatternGenerator<Instruction::REVERT>{};
+ 	static auto constexpr INVALID = PatternGenerator<Instruction::INVALID>{};
+ 	static auto constexpr SELFDESTRUCT = PatternGenerator<Instruction::SELFDESTRUCT>{};
+ };
+ 
+ }
+diff --git a/liblangutil/EVMVersion.cpp b/liblangutil/EVMVersion.cpp
+index 84a3d479c..23f769cea 100644
+--- a/liblangutil/EVMVersion.cpp
++++ b/liblangutil/EVMVersion.cpp
+@@ -29,38 +29,40 @@ using namespace solidity::langutil;
+ bool EVMVersion::hasOpcode(Instruction _opcode) const
+ {
+ 	switch (_opcode)
+ 	{
+ 	case Instruction::RETURNDATACOPY:
+ 	case Instruction::RETURNDATASIZE:
+ 		return supportsReturndata();
+ 	case Instruction::STATICCALL:
+ 		return hasStaticCall();
+ 	case Instruction::SHL:
+ 	case Instruction::SHR:
+ 	case Instruction::SAR:
+ 		return hasBitwiseShifting();
+ 	case Instruction::CLZ:
+ 		return hasCLZ();
+ 	case Instruction::CREATE2:
+ 		return hasCreate2();
+ 	case Instruction::EXTCODEHASH:
+ 		return hasExtCodeHash();
+ 	case Instruction::CHAINID:
+ 		return hasChainID();
+ 	case Instruction::SELFBALANCE:
+ 		return hasSelfBalance();
+ 	case Instruction::BASEFEE:
+ 		return hasBaseFee();
+ 	case Instruction::BLOBHASH:
+ 		return hasBlobHash();
+ 	case Instruction::BLOBBASEFEE:
+ 		return hasBlobBaseFee();
++	case Instruction::SLOTNUM:
++		return hasSlotNum();
+ 	case Instruction::MCOPY:
+ 		return hasMcopy();
+ 	case Instruction::TSTORE:
+ 	case Instruction::TLOAD:
+ 		return supportsTransientStorage();
+ 	default:
+ 		return true;
+ 	}
+ }
+diff --git a/liblangutil/EVMVersion.h b/liblangutil/EVMVersion.h
+index 1b8a3dc46..66895f23f 100644
+--- a/liblangutil/EVMVersion.h
++++ b/liblangutil/EVMVersion.h
+@@ -47,106 +47,107 @@ class EVMVersion
+ {
+ public:
+ 	EVMVersion() = default;
+ 
+ 	static EVMVersion current() { return {currentVersion}; }
+ 
+ 	static EVMVersion constexpr homestead() { return {Version::Homestead}; }
+ 	static EVMVersion constexpr tangerineWhistle() { return {Version::TangerineWhistle}; }
+ 	static EVMVersion constexpr spuriousDragon() { return {Version::SpuriousDragon}; }
+ 	static EVMVersion constexpr byzantium() { return {Version::Byzantium}; }
+ 	static EVMVersion constexpr constantinople() { return {Version::Constantinople}; }
+ 	static EVMVersion constexpr petersburg() { return {Version::Petersburg}; }
+ 	static EVMVersion constexpr istanbul() { return {Version::Istanbul}; }
+ 	static EVMVersion constexpr berlin() { return {Version::Berlin}; }
+ 	static EVMVersion constexpr london() { return {Version::London}; }
+ 	static EVMVersion constexpr paris() { return {Version::Paris}; }
+ 	static EVMVersion constexpr shanghai() { return {Version::Shanghai}; }
+ 	static EVMVersion constexpr cancun() { return {Version::Cancun}; }
+ 	static EVMVersion constexpr prague() { return {Version::Prague}; }
+ 	static EVMVersion constexpr osaka() { return {Version::Osaka}; }
+ 	static EVMVersion constexpr amsterdam() { return {Version::Amsterdam}; }
+ 	static EVMVersion constexpr future() { return {Version::Future}; }
+ 
+ 	static auto constexpr allVersions() {
+ 		return std::array{
+ 			homestead(),
+ 			tangerineWhistle(),
+ 			spuriousDragon(),
+ 			byzantium(),
+ 			constantinople(),
+ 			petersburg(),
+ 			istanbul(),
+ 			berlin(),
+ 			london(),
+ 			paris(),
+ 			shanghai(),
+ 			cancun(),
+ 			prague(),
+ 			osaka(),
+ 			amsterdam(),
+ 			future(),
+ 		};
+ 	}
+ 
+ 	static std::optional<EVMVersion> fromString(std::string const& _version)
+ 	{
+ 		for (auto const& v: allVersions())
+ 			if (_version == v.name())
+ 				return v;
+ 		return std::nullopt;
+ 	}
+ 
+ 	bool isExperimental() const {
+ 		solAssert(Version::Future > currentVersion);
+ 		return m_version > currentVersion;
+ 	}
+ 
+ 	auto operator<=>(EVMVersion const&) const = default;
+ 
+ 	std::string name() const
+ 	{
+ 		switch (m_version)
+ 		{
+ 		case Version::Homestead: return "homestead";
+ 		case Version::TangerineWhistle: return "tangerineWhistle";
+ 		case Version::SpuriousDragon: return "spuriousDragon";
+ 		case Version::Byzantium: return "byzantium";
+ 		case Version::Constantinople: return "constantinople";
+ 		case Version::Petersburg: return "petersburg";
+ 		case Version::Istanbul: return "istanbul";
+ 		case Version::Berlin: return "berlin";
+ 		case Version::London: return "london";
+ 		case Version::Paris: return "paris";
+ 		case Version::Shanghai: return "shanghai";
+ 		case Version::Cancun: return "cancun";
+ 		case Version::Prague: return "prague";
+ 		case Version::Osaka: return "osaka";
+ 		case Version::Amsterdam: return "amsterdam";
+ 		case Version::Future: return "@future";
+ 		}
+ 		util::unreachable();
+ 	}
+ 
+ 	/// Has the RETURNDATACOPY and RETURNDATASIZE opcodes.
+ 	bool supportsReturndata() const { return *this >= byzantium(); }
+ 	bool hasStaticCall() const { return *this >= byzantium(); }
+ 	bool hasBitwiseShifting() const { return *this >= constantinople(); }
+ 	bool hasCLZ() const { return *this >= osaka(); }
+ 	bool hasCreate2() const { return *this >= constantinople(); }
+ 	bool hasExtCodeHash() const { return *this >= constantinople(); }
+ 	bool hasChainID() const { return *this >= istanbul(); }
+ 	bool hasSelfBalance() const { return *this >= istanbul(); }
+ 	bool hasBaseFee() const { return *this >= london(); }
+ 	bool hasBlobBaseFee() const { return *this >= cancun(); }
+ 	bool hasPrevRandao() const { return *this >= paris(); }
+ 	bool hasPush0() const { return *this >= shanghai(); }
+ 	bool hasBlobHash() const { return *this >= cancun(); }
+ 	bool hasMcopy() const { return *this >= cancun(); }
+ 	bool supportsTransientStorage() const { return *this >= cancun(); }
++	bool hasSlotNum() const { return *this >= amsterdam(); }
+ 	constexpr size_t reachableStackDepth() const { return 16; }
+ 
+ 	bool hasOpcode(evmasm::Instruction _opcode) const;
+ 
+ 	/// Whether we have to retain the costs for the call opcode itself (false),
+ 	/// or whether we can just forward easily all remaining gas (true).
+ 	bool canOverchargeGasForCall() const { return *this >= tangerineWhistle(); }
+diff --git a/liblangutil/Token.cpp b/liblangutil/Token.cpp
+index 0a75e06d3..1ca5339aa 100644
+--- a/liblangutil/Token.cpp
++++ b/liblangutil/Token.cpp
+@@ -172,13 +172,14 @@ bool isFutureYulKeyword(std::string_view const _literal)
+ bool isFutureYulReservedIdentifier(std::string_view const _literal)
+ {
+ 	return
+ 		_literal == "basefee" ||
+ 		_literal == "blobbasefee" ||
+ 		_literal == "blobhash" ||
+ 		_literal == "clz" ||
+ 		_literal == "mcopy" ||
+ 		_literal == "memoryguard" ||
+ 		_literal == "prevrandao" ||
++		_literal == "slotnum" ||
+ 		_literal == "tload" ||
+ 		_literal == "tstore";
+ }
+diff --git a/libsolidity/analysis/TypeChecker.cpp b/libsolidity/analysis/TypeChecker.cpp
+index d211c38b9..c2c219ec2 100644
+--- a/libsolidity/analysis/TypeChecker.cpp
++++ b/libsolidity/analysis/TypeChecker.cpp
+@@ -3294,267 +3294,273 @@ void TypeChecker::checkAccessedMemberFunction(MemberAccess const& _memberAccess)
+ bool TypeChecker::visit(MemberAccess const& _memberAccess)
+ {
+ 	_memberAccess.expression().accept(*this);
+ 	Type const* owningObjectType = type(_memberAccess.expression());
+ 	ASTString const& memberName = _memberAccess.memberName();
+ 
+ 	// TODO: This should be probably deprecated.
+ 	_memberAccess.annotation().isConstant = false;
+ 	MemberList::Member const possibleMember = resolveOverloads(_memberAccess);
+ 
+ 	_memberAccess.annotation().referencedDeclaration = possibleMember.declaration;
+ 	_memberAccess.annotation().type = possibleMember.type;
+ 
+ 	// Lookup type required to find the function declaration.
+ 	VirtualLookup requiredLookup = VirtualLookup::Static;
+ 
+ 	if (auto const* accessedMemberFunctionType = dynamic_cast<FunctionType const*>(type(_memberAccess)))
+ 	{
+ 		// Update required lookup
+ 		if (!accessedMemberFunctionType->hasBoundFirstArgument())
+ 			if (auto const* owningObjectTypeType = dynamic_cast<TypeType const*>(owningObjectType))
+ 			{
+ 				auto const* owningObjectContractType = dynamic_cast<ContractType const*>(owningObjectTypeType->actualType());
+ 				if (owningObjectContractType && owningObjectContractType->isSuper())
+ 					requiredLookup = VirtualLookup::Super;
+ 			}
+ 
+ 		checkAccessedMemberFunction(_memberAccess);
+ 	}
+ 
+ 	_memberAccess.annotation().requiredLookup = requiredLookup;
+ 
+ 	switch (owningObjectType->category())
+ 	{
+ 	case Type::Category::Struct:
+ 	{
+ 		auto const* owningObjectStructType = dynamic_cast<StructType const*>(owningObjectType);
+ 		solAssert(owningObjectStructType);
+ 		_memberAccess.annotation().isLValue = !owningObjectStructType->dataStoredIn(DataLocation::CallData);
+ 		break;
+ 	}
+ 	case Type::Category::Function:
+ 	{
+ 		auto const* owningObjectFunctionType = dynamic_cast<FunctionType const*>(owningObjectType);
+ 		solAssert(owningObjectFunctionType);
+ 
+ 		if (owningObjectFunctionType->hasDeclaration() && memberName == "selector")
+ 		{
+ 			if (dynamic_cast<FunctionDefinition const*>(&owningObjectFunctionType->declaration()))
+ 			{
+ 				if (auto const* parentMemberAccess = dynamic_cast<MemberAccess const*>(&_memberAccess.expression()))
+ 				{
+ 					bool isPure = *parentMemberAccess->expression().annotation().isPure;
+ 					// Accessing a function selector using `super|this.f.selector`.
+ 					if (auto const* exprInt = dynamic_cast<Identifier const*>(&parentMemberAccess->expression()))
+ 						if (exprInt->name() == "this" || exprInt->name() == "super")
+ 							isPure = true;
+ 
+ 					_memberAccess.annotation().isPure = isPure;
+ 				}
+ 			}
+ 			// In case of event or error definition, the selector is always compile-time constant, as it can be
+ 			// a keccak256 hash of the event signature or a function selector in case of an error.
+ 			else if (
+ 				dynamic_cast<EventDefinition const*>(&owningObjectFunctionType->declaration()) ||
+ 				dynamic_cast<ErrorDefinition const*>(&owningObjectFunctionType->declaration())
+ 			)
+ 				_memberAccess.annotation().isPure = true;
+ 		}
+ 
+ 		_memberAccess.annotation().isLValue = false;
+ 		break;
+ 	}
+ 	case Type::Category::TypeType:
+ 	{
+ 		// TODO some members might be pure, but for example `address(0x123).balance` is not pure
+ 		// although every subexpression is, so leaving this limited for now.
+ 		auto const* owningObjectTypeType = dynamic_cast<TypeType const*>(owningObjectType);
+ 		solAssert(owningObjectTypeType);
+ 
+ 		switch (owningObjectTypeType->actualType()->category())
+ 		{
+ 		case Type::Category::Array:
+ 		{
+ 			// `concat` purity depends also on its arguments, but this is checked later, in visit(FunctionCall...)
+ 			// This covers `bytes.concat` and `string.concat`.
+ 			auto const* accessedMemberFunctionType = dynamic_cast<FunctionType const*>(type(_memberAccess));
+ 			solAssert(accessedMemberFunctionType && (
+ 				accessedMemberFunctionType->kind() == FunctionType::Kind::StringConcat ||
+ 				accessedMemberFunctionType->kind() == FunctionType::Kind::BytesConcat
+ 			));
+ 
+ 			_memberAccess.annotation().isPure = true;
+ 			_memberAccess.annotation().isLValue = false;
+ 			break;
+ 		}
+ 		case Type::Category::Contract:
+ 		{
+ 			_memberAccess.annotation().isLValue = _memberAccess.annotation().referencedDeclaration->isLValue();
+ 			if (
+ 				auto const* accessedMemberFunctionType = dynamic_cast<FunctionType const*>(type(_memberAccess));
+ 				accessedMemberFunctionType &&
+ 				accessedMemberFunctionType->kind() == FunctionType::Kind::Declaration
+ 			)
+ 				_memberAccess.annotation().isPure = *_memberAccess.expression().annotation().isPure;
+ 			break;
+ 		}
+ 		case Type::Category::Enum:
+ 		case Type::Category::UserDefinedValueType:
+ 			_memberAccess.annotation().isPure = true;
+ 			_memberAccess.annotation().isLValue = false;
+ 			break;
+ 		case Type::Category::Address:
+ 		case Type::Category::Integer:
+ 		case Type::Category::RationalNumber:
+ 		case Type::Category::StringLiteral:
+ 		case Type::Category::Bool:
+ 		case Type::Category::FixedPoint:
+ 		case Type::Category::ArraySlice:
+ 		case Type::Category::FixedBytes:
+ 		case Type::Category::Struct:
+ 		case Type::Category::Function:
+ 		case Type::Category::Tuple:
+ 		case Type::Category::Mapping:
+ 		case Type::Category::TypeType:
+ 		case Type::Category::Modifier:
+ 		case Type::Category::Magic:
+ 		case Type::Category::Module:
+ 		case Type::Category::InaccessibleDynamic:
+ 			_memberAccess.annotation().isLValue = false;
+ 			break;
+ 		}
+ 		break;
+ 	}
+ 	case Type::Category::Magic:
+ 	{
+ 		auto const* owningObjectMagicType = dynamic_cast<MagicType const*>(owningObjectType);
+ 		solAssert(owningObjectMagicType);
+ 
+ 		switch (owningObjectMagicType->kind())
+ 		{
+ 		case MagicType::Kind::Block:
+ 		{
+ 			if (memberName == "chainid" && !m_evmVersion.hasChainID())
+ 				m_errorReporter.typeError(
+ 					3081_error,
+ 					_memberAccess.location(),
+ 					R"("chainid" is not supported by the VM version.)"
+ 				);
+ 			else if (memberName == "basefee" && !m_evmVersion.hasBaseFee())
+ 				m_errorReporter.typeError(
+ 					5921_error,
+ 					_memberAccess.location(),
+ 					R"("basefee" is not supported by the VM version.)"
+ 				);
+ 			else if (memberName == "blobbasefee" && !m_evmVersion.hasBlobBaseFee())
+ 				m_errorReporter.typeError(
+ 					1006_error,
+ 					_memberAccess.location(),
+ 					R"("blobbasefee" is not supported by the VM version.)"
+ 				);
++			else if (memberName == "slotnum" && !m_evmVersion.hasSlotNum())
++				m_errorReporter.typeError(
++					1048_error,
++					_memberAccess.location(),
++					R"("slotnum" is not supported by the VM version.)"
++				);
+ 			else if (memberName == "prevrandao" && !m_evmVersion.hasPrevRandao())
+ 				m_errorReporter.warning(
+ 					9432_error,
+ 					_memberAccess.location(),
+ 					R"("prevrandao" is not supported by the VM version and will be treated as "difficulty".)"
+ 				);
+ 			else if (memberName == "difficulty" && m_evmVersion.hasPrevRandao())
+ 				m_errorReporter.warning(
+ 					8417_error,
+ 					_memberAccess.location(),
+ 					R"(Since the VM version paris, "difficulty" was replaced by "prevrandao", which now returns a random number based on the beacon chain.)"
+ 				);
+ 			break;
+ 		}
+ 		case MagicType::Kind::ABI:
+ 			_memberAccess.annotation().isPure = true;
+ 			break;
+ 		case MagicType::Kind::MetaType:
+ 		{
+ 			if (memberName == "creationCode" || memberName == "runtimeCode")
+ 			{
+ 				_memberAccess.annotation().isPure = true;
+ 				ContractType const& accessedContractType = dynamic_cast<ContractType const&>(*owningObjectMagicType->typeArgument());
+ 				solAssert(!accessedContractType.isSuper(), "");
+ 				if (
+ 					memberName == "runtimeCode" &&
+ 					!accessedContractType.immutableVariables().empty()
+ 				)
+ 					m_errorReporter.typeError(
+ 						9274_error,
+ 						_memberAccess.location(),
+ 						R"("runtimeCode" is not available for contracts containing immutable variables.)"
+ 					);
+ 			}
+ 			else if (
+ 				memberName == "name" ||
+ 				memberName == "interfaceId" ||
+ 				memberName == "min" ||
+ 				memberName == "max"
+ 			)
+ 				_memberAccess.annotation().isPure = true;
+ 			break;
+ 		}
+ 		// Empty cases.
+ 		case MagicType::Kind::Message:
+ 		case MagicType::Kind::Transaction:
+ 		case MagicType::Kind::Error:
+ 			break;
+ 		}
+ 
+ 		_memberAccess.annotation().isLValue = false;
+ 		break;
+ 	}
+ 	case Type::Category::Module:
+ 		_memberAccess.annotation().isPure = *_memberAccess.expression().annotation().isPure;
+ 		_memberAccess.annotation().isLValue = false;
+ 		break;
+ 	case Type::Category::Address:
+ 		if (memberName == "codehash" && !m_evmVersion.hasExtCodeHash())
+ 			m_errorReporter.typeError(
+ 				7598_error,
+ 				_memberAccess.location(),
+ 				R"("codehash" is not supported by the VM version.)"
+ 			);
+ 		_memberAccess.annotation().isLValue = false;
+ 		break;
+ 	case Type::Category::Integer:
+ 	case Type::Category::RationalNumber:
+ 	case Type::Category::StringLiteral:
+ 	case Type::Category::Bool:
+ 	case Type::Category::FixedPoint:
+ 	case Type::Category::FixedBytes:
+ 	case Type::Category::Array:
+ 	case Type::Category::ArraySlice:
+ 	case Type::Category::Contract:
+ 	case Type::Category::Enum:
+ 	case Type::Category::UserDefinedValueType:
+ 	case Type::Category::Tuple:
+ 	case Type::Category::Mapping:
+ 	case Type::Category::Modifier:
+ 	case Type::Category::InaccessibleDynamic:
+ 		_memberAccess.annotation().isLValue = false;
+ 		break;
+ 	}
+ 
+ 	solAssert(_memberAccess.annotation().isLValue.set());
+ 
+ 	// TODO: Leave it for now, but it should be moved to TypeType -> Contract case.
+ 	// We do not want to change the logic in refactor PR.
+ 	if (
+ 		auto const* varDecl = dynamic_cast<VariableDeclaration const*>(_memberAccess.annotation().referencedDeclaration);
+ 		!_memberAccess.annotation().isPure.set() &&
+ 		varDecl &&
+ 		varDecl->isConstant()
+ 	)
+ 	{
+ 		solAssert(owningObjectType->category() != Type::Category::Magic);
+ 		_memberAccess.annotation().isPure = true;
+ 	}
+ 
+ 
+ 	if (!_memberAccess.annotation().isPure.set())
+ 		_memberAccess.annotation().isPure = false;
+ 
+ 	return false;
+ }
+diff --git a/libsolidity/ast/Types.cpp b/libsolidity/ast/Types.cpp
+index d8f754a95..50fa0508b 100644
+--- a/libsolidity/ast/Types.cpp
++++ b/libsolidity/ast/Types.cpp
+@@ -4179,142 +4179,143 @@ bool MagicType::operator==(Type const& _other) const
+ MemberList::MemberMap MagicType::nativeMembers(ASTNode const*) const
+ {
+ 	switch (m_kind)
+ 	{
+ 	case Kind::Block:
+ 		return MemberList::MemberMap({
+ 			{"coinbase", TypeProvider::payableAddress()},
+ 			{"timestamp", TypeProvider::uint256()},
+ 			{"blockhash", TypeProvider::function(strings{"uint"}, strings{"bytes32"}, FunctionType::Kind::BlockHash, StateMutability::View)},
+ 			{"difficulty", TypeProvider::uint256()},
+ 			{"prevrandao", TypeProvider::uint256()},
+ 			{"number", TypeProvider::uint256()},
+ 			{"gaslimit", TypeProvider::uint256()},
+ 			{"chainid", TypeProvider::uint256()},
+ 			{"basefee", TypeProvider::uint256()},
+-			{"blobbasefee", TypeProvider::uint256()}
++			{"blobbasefee", TypeProvider::uint256()},
++			{"slotnum", TypeProvider::uint(64)},
+ 		});
+ 	case Kind::Message:
+ 		return MemberList::MemberMap({
+ 			{"sender", TypeProvider::address()},
+ 			{"gas", TypeProvider::uint256()},
+ 			{"value", TypeProvider::uint256()},
+ 			{"data", TypeProvider::array(DataLocation::CallData)},
+ 			{"sig", TypeProvider::fixedBytes(4)}
+ 		});
+ 	case Kind::Transaction:
+ 		return MemberList::MemberMap({
+ 			{"origin", TypeProvider::address()},
+ 			{"gasprice", TypeProvider::uint256()}
+ 		});
+ 	case Kind::ABI:
+ 		return MemberList::MemberMap({
+ 			{"encode", TypeProvider::function(
+ 				TypePointers{},
+ 				TypePointers{TypeProvider::array(DataLocation::Memory)},
+ 				strings{},
+ 				strings{1, ""},
+ 				FunctionType::Kind::ABIEncode,
+ 				StateMutability::Pure,
+ 				nullptr,
+ 				FunctionType::Options::withArbitraryParameters()
+ 			)},
+ 			{"encodePacked", TypeProvider::function(
+ 				TypePointers{},
+ 				TypePointers{TypeProvider::array(DataLocation::Memory)},
+ 				strings{},
+ 				strings{1, ""},
+ 				FunctionType::Kind::ABIEncodePacked,
+ 				StateMutability::Pure,
+ 				nullptr,
+ 				FunctionType::Options::withArbitraryParameters()
+ 			)},
+ 			{"encodeWithSelector", TypeProvider::function(
+ 				TypePointers{TypeProvider::fixedBytes(4)},
+ 				TypePointers{TypeProvider::array(DataLocation::Memory)},
+ 				strings{1, ""},
+ 				strings{1, ""},
+ 				FunctionType::Kind::ABIEncodeWithSelector,
+ 				StateMutability::Pure,
+ 				nullptr,
+ 				FunctionType::Options::withArbitraryParameters()
+ 			)},
+ 			{"encodeCall", TypeProvider::function(
+ 				TypePointers{},
+ 				TypePointers{TypeProvider::array(DataLocation::Memory)},
+ 				strings{},
+ 				strings{1, ""},
+ 				FunctionType::Kind::ABIEncodeCall,
+ 				StateMutability::Pure,
+ 				nullptr,
+ 				FunctionType::Options::withArbitraryParameters()
+ 			)},
+ 			{"encodeWithSignature", TypeProvider::function(
+ 				TypePointers{TypeProvider::array(DataLocation::Memory, true)},
+ 				TypePointers{TypeProvider::array(DataLocation::Memory)},
+ 				strings{1, ""},
+ 				strings{1, ""},
+ 				FunctionType::Kind::ABIEncodeWithSignature,
+ 				StateMutability::Pure,
+ 				nullptr,
+ 				FunctionType::Options::withArbitraryParameters()
+ 			)},
+ 			{"decode", TypeProvider::function(
+ 				TypePointers(),
+ 				TypePointers(),
+ 				strings{},
+ 				strings{},
+ 				FunctionType::Kind::ABIDecode,
+ 				StateMutability::Pure,
+ 				nullptr,
+ 				FunctionType::Options::withArbitraryParameters()
+ 			)}
+ 		});
+ 	case Kind::Error:
+ 		return {};
+ 	case Kind::MetaType:
+ 	{
+ 		solAssert(
+ 			m_typeArgument && (
+ 					m_typeArgument->category() == Type::Category::Contract ||
+ 					m_typeArgument->category() == Type::Category::Integer ||
+ 					m_typeArgument->category() == Type::Category::Enum
+ 			),
+ 			"Only enums, contracts or integer types supported for now"
+ 		);
+ 
+ 		if (m_typeArgument->category() == Type::Category::Contract)
+ 		{
+ 			ContractDefinition const& contract = dynamic_cast<ContractType const&>(*m_typeArgument).contractDefinition();
+ 			if (contract.canBeDeployed())
+ 				return MemberList::MemberMap({
+ 					{"creationCode", TypeProvider::array(DataLocation::Memory)},
+ 					{"runtimeCode", TypeProvider::array(DataLocation::Memory)},
+ 					{"name", TypeProvider::stringMemory()},
+ 				});
+ 			else
+ 				return MemberList::MemberMap({
+ 					{"interfaceId", TypeProvider::fixedBytes(4)},
+ 					{"name", TypeProvider::stringMemory()},
+ 				});
+ 		}
+ 		else if (m_typeArgument->category() == Type::Category::Integer)
+ 		{
+ 			IntegerType const* integerTypePointer = dynamic_cast<IntegerType const*>(m_typeArgument);
+ 			return MemberList::MemberMap({
+ 				{"min", integerTypePointer},
+ 				{"max", integerTypePointer},
+ 			});
+ 		}
+ 		else if (m_typeArgument->category() == Type::Category::Enum)
+ 		{
+ 			EnumType const* enumTypePointer = dynamic_cast<EnumType const*>(m_typeArgument);
+ 			return MemberList::MemberMap({
+ 				{"min", enumTypePointer},
+ 				{"max", enumTypePointer},
+ 			});
+ 		}
+ 	}
+ 	}
+ 	solAssert(false, "Unknown kind of magic.");
+ 	return {};
+ }
+diff --git a/libsolidity/codegen/ExpressionCompiler.cpp b/libsolidity/codegen/ExpressionCompiler.cpp
+index 579f421f3..e8dd0a907 100644
+--- a/libsolidity/codegen/ExpressionCompiler.cpp
++++ b/libsolidity/codegen/ExpressionCompiler.cpp
+@@ -1624,592 +1624,594 @@ bool ExpressionCompiler::visit(NewExpression const&)
+ bool ExpressionCompiler::visit(MemberAccess const& _memberAccess)
+ {
+ 	CompilerContext::LocationSetter locationSetter(m_context, _memberAccess);
+ 	// Check whether the member is an attached function.
+ 	ASTString const& member = _memberAccess.memberName();
+ 	if (auto funType = dynamic_cast<FunctionType const*>(_memberAccess.annotation().type))
+ 		if (funType->hasBoundFirstArgument())
+ 		{
+ 			acceptAndConvert(_memberAccess.expression(), *funType->selfType(), true);
+ 			if (funType->kind() == FunctionType::Kind::Internal)
+ 			{
+ 				FunctionDefinition const& funDef = dynamic_cast<decltype(funDef)>(funType->declaration());
+ 				solAssert(*_memberAccess.annotation().requiredLookup == VirtualLookup::Static, "");
+ 				utils().pushCombinedFunctionEntryLabel(
+ 					funDef,
+ 					// If we call directly, do not include the second label.
+ 					!_memberAccess.annotation().calledDirectly
+ 				);
+ 				utils().moveIntoStack(funType->selfType()->sizeOnStack(), 1);
+ 			}
+ 			else if (
+ 				funType->kind() == FunctionType::Kind::ArrayPop ||
+ 				funType->kind() == FunctionType::Kind::ArrayPush
+ 			)
+ 			{
+ 			}
+ 			else
+ 			{
+ 				solAssert(funType->kind() == FunctionType::Kind::DelegateCall, "");
+ 				auto contract = dynamic_cast<ContractDefinition const*>(funType->declaration().scope());
+ 				solAssert(contract && contract->isLibrary(), "");
+ 				m_context.appendLibraryAddress(contract->fullyQualifiedName());
+ 				m_context << funType->externalIdentifier();
+ 				utils().moveIntoStack(funType->selfType()->sizeOnStack(), 2);
+ 			}
+ 			return false;
+ 		}
+ 
+ 	// Special processing for TypeType because we do not want to visit the library itself
+ 	// for internal functions, or enum/struct definitions.
+ 	if (TypeType const* type = dynamic_cast<TypeType const*>(_memberAccess.expression().annotation().type))
+ 	{
+ 		if (auto contractType = dynamic_cast<ContractType const*>(type->actualType()))
+ 		{
+ 			solAssert(_memberAccess.annotation().type, "_memberAccess has no type");
+ 			if (contractType->isSuper())
+ 			{
+ 				_memberAccess.expression().accept(*this);
+ 				solAssert(_memberAccess.annotation().referencedDeclaration, "Referenced declaration not resolved.");
+ 				solAssert(*_memberAccess.annotation().requiredLookup == VirtualLookup::Super, "");
+ 				utils().pushCombinedFunctionEntryLabel(
+ 					m_context.superFunction(
+ 						dynamic_cast<FunctionDefinition const&>(*_memberAccess.annotation().referencedDeclaration),
+ 						contractType->contractDefinition()
+ 					),
+ 					// If we call directly, do not include the second label.
+ 					!_memberAccess.annotation().calledDirectly
+ 				);
+ 			}
+ 			else
+ 			{
+ 				if (auto variable = dynamic_cast<VariableDeclaration const*>(_memberAccess.annotation().referencedDeclaration))
+ 					appendVariable(*variable, static_cast<Expression const&>(_memberAccess));
+ 				else if (auto funType = dynamic_cast<FunctionType const*>(_memberAccess.annotation().type))
+ 				{
+ 					switch (funType->kind())
+ 					{
+ 					case FunctionType::Kind::Declaration:
+ 						break;
+ 					case FunctionType::Kind::Internal:
+ 						// We do not visit the expression here on purpose, because in the case of an
+ 						// internal library function call, this would push the library address forcing
+ 						// us to link against it although we actually do not need it.
+ 						if (auto const* function = dynamic_cast<FunctionDefinition const*>(_memberAccess.annotation().referencedDeclaration))
+ 						{
+ 							solAssert(*_memberAccess.annotation().requiredLookup == VirtualLookup::Static, "");
+ 							utils().pushCombinedFunctionEntryLabel(
+ 								*function,
+ 								// If we call directly, do not include the second label.
+ 								!_memberAccess.annotation().calledDirectly
+ 							);
+ 						}
+ 						else
+ 							solAssert(false, "Function not found in member access");
+ 						break;
+ 					case FunctionType::Kind::Event:
+ 						if (!dynamic_cast<EventDefinition const*>(_memberAccess.annotation().referencedDeclaration))
+ 							solAssert(false, "event not found");
+ 						// no-op, because the parent node will do the job
+ 						break;
+ 					case FunctionType::Kind::Error:
+ 						if (!dynamic_cast<ErrorDefinition const*>(_memberAccess.annotation().referencedDeclaration))
+ 							solAssert(false, "error not found");
+ 						// no-op, because the parent node will do the job
+ 						break;
+ 					case FunctionType::Kind::DelegateCall:
+ 						_memberAccess.expression().accept(*this);
+ 						m_context << funType->externalIdentifier();
+ 					break;
+ 					case FunctionType::Kind::External:
+ 					case FunctionType::Kind::Creation:
+ 					case FunctionType::Kind::Send:
+ 					case FunctionType::Kind::BareCall:
+ 					case FunctionType::Kind::BareCallCode:
+ 					case FunctionType::Kind::BareDelegateCall:
+ 					case FunctionType::Kind::BareStaticCall:
+ 					case FunctionType::Kind::Transfer:
+ 					case FunctionType::Kind::ECRecover:
+ 					case FunctionType::Kind::SHA256:
+ 					case FunctionType::Kind::RIPEMD160:
+ 					default:
+ 						solAssert(false, "unsupported member function");
+ 					}
+ 				}
+ 				else if (dynamic_cast<TypeType const*>(_memberAccess.annotation().type))
+ 				{
+ 					// no-op
+ 				}
+ 				else
+ 					_memberAccess.expression().accept(*this);
+ 			}
+ 		}
+ 		else if (auto enumType = dynamic_cast<EnumType const*>(type->actualType()))
+ 		{
+ 			_memberAccess.expression().accept(*this);
+ 			m_context << enumType->memberValue(_memberAccess.memberName());
+ 		}
+ 		else
+ 			_memberAccess.expression().accept(*this);
+ 		return false;
+ 	}
+ 	// Another special case for `this.f.selector` and for ``C.f.selector`` which do not need the address.
+ 	// There are other uses of `.selector` which do need the address, but we want these
+ 	// specific uses to be pure expressions.
+ 	if (
+ 		auto const* functionType = dynamic_cast<FunctionType const*>(_memberAccess.expression().annotation().type);
+ 		functionType && member == "selector"
+ 	)
+ 	{
+ 		if (functionType->hasDeclaration())
+ 		{
+ 			// Still visit the expression in case it has side effects.
+ 			_memberAccess.expression().accept(*this);
+ 			utils().popStackElement(*functionType);
+ 
+ 			if (functionType->kind() == FunctionType::Kind::Event)
+ 				m_context << u256(h256::Arith(util::keccak256(functionType->externalSignature())));
+ 			else
+ 			{
+ 				m_context << functionType->externalIdentifier();
+ 				/// need to store it as bytes4
+ 				utils().leftShiftNumberOnStack(224);
+ 			}
+ 			return false;
+ 		}
+ 		else if (auto const* expr = dynamic_cast<MemberAccess const*>(&_memberAccess.expression()))
+ 			if (auto const* exprInt = dynamic_cast<Identifier const*>(&expr->expression()))
+ 				if (exprInt->name() == "this")
+ 					if (Declaration const* declaration = expr->annotation().referencedDeclaration)
+ 					{
+ 						u256 identifier;
+ 						if (auto const* variable = dynamic_cast<VariableDeclaration const*>(declaration))
+ 							identifier = FunctionType(*variable).externalIdentifier();
+ 						else if (auto const* function = dynamic_cast<FunctionDefinition const*>(declaration))
+ 							identifier = FunctionType(*function).externalIdentifier();
+ 						else
+ 							solAssert(false, "Contract member is neither variable nor function.");
+ 						m_context << identifier;
+ 						/// need to store it as bytes4
+ 						utils().leftShiftNumberOnStack(224);
+ 						return false;
+ 					}
+ 	}
+ 	// Another special case for `address(this).balance`. Post-Istanbul, we can use the selfbalance
+ 	// opcode.
+ 	if (
+ 		m_context.evmVersion().hasSelfBalance() &&
+ 		member == "balance" &&
+ 		_memberAccess.expression().annotation().type->category() == Type::Category::Address
+ 	)
+ 		if (FunctionCall const* funCall = dynamic_cast<FunctionCall const*>(&_memberAccess.expression()))
+ 			if (auto const* addr = dynamic_cast<ElementaryTypeNameExpression const*>(&funCall->expression()))
+ 				if (
+ 					addr->type().typeName().token() == Token::Address &&
+ 					funCall->arguments().size() == 1
+ 				)
+ 					if (auto arg = dynamic_cast<Identifier const*>( funCall->arguments().front().get()))
+ 						if (
+ 							arg->name() == "this" &&
+ 							dynamic_cast<MagicVariableDeclaration const*>(arg->annotation().referencedDeclaration)
+ 						)
+ 						{
+ 							m_context << Instruction::SELFBALANCE;
+ 							return false;
+ 						}
+ 
+ 	// Another special case for `address.code.length`, which should simply call extcodesize
+ 	if (
+ 		auto innerExpression = dynamic_cast<MemberAccess const*>(&_memberAccess.expression());
+ 		member == "length" &&
+ 		innerExpression &&
+ 		innerExpression->memberName() == "code" &&
+ 		innerExpression->expression().annotation().type->category() == Type::Category::Address
+ 	)
+ 	{
+ 		solAssert(innerExpression->annotation().type->category() == Type::Category::Array, "");
+ 
+ 		innerExpression->expression().accept(*this);
+ 
+ 		utils().convertType(
+ 			*innerExpression->expression().annotation().type,
+ 			*TypeProvider::address(),
+ 			true
+ 		);
+ 		m_context << Instruction::EXTCODESIZE;
+ 
+ 		return false;
+ 	}
+ 
+ 	_memberAccess.expression().accept(*this);
+ 	switch (_memberAccess.expression().annotation().type->category())
+ 	{
+ 	case Type::Category::Contract:
+ 	{
+ 		ContractType const& type = dynamic_cast<ContractType const&>(*_memberAccess.expression().annotation().type);
+ 		// ordinary contract type
+ 		if (Declaration const* declaration = _memberAccess.annotation().referencedDeclaration)
+ 		{
+ 			u256 identifier;
+ 			if (auto const* variable = dynamic_cast<VariableDeclaration const*>(declaration))
+ 				identifier = FunctionType(*variable).externalIdentifier();
+ 			else if (auto const* function = dynamic_cast<FunctionDefinition const*>(declaration))
+ 				identifier = FunctionType(*function).externalIdentifier();
+ 			else
+ 				solAssert(false, "Contract member is neither variable nor function.");
+ 			utils().convertType(type, type.isPayable() ? *TypeProvider::payableAddress() : *TypeProvider::address(), true);
+ 			m_context << identifier;
+ 		}
+ 		else
+ 			solAssert(false, "Invalid member access in contract");
+ 		break;
+ 	}
+ 	case Type::Category::Integer:
+ 	{
+ 		solAssert(false, "Invalid member access to integer");
+ 		break;
+ 	}
+ 	case Type::Category::Address:
+ 	{
+ 		if (member == "balance")
+ 		{
+ 			utils().convertType(
+ 				*_memberAccess.expression().annotation().type,
+ 				*TypeProvider::address(),
+ 				true
+ 			);
+ 			m_context << Instruction::BALANCE;
+ 		}
+ 		else if (member == "code")
+ 		{
+ 			// Stack: <address>
+ 			utils().convertType(
+ 				*_memberAccess.expression().annotation().type,
+ 				*TypeProvider::address(),
+ 				true
+ 			);
+ 
+ 			m_context << Instruction::DUP1 << Instruction::EXTCODESIZE;
+ 			// Stack post: <address> <size>
+ 
+ 			m_context << Instruction::DUP1;
+ 			// Account for the size field of `bytes memory`
+ 			m_context << u256(32) << Instruction::ADD;
+ 			utils().allocateMemory();
+ 			// Stack post: <address> <size> <mem_offset>
+ 
+ 			// Store size at mem_offset
+ 			m_context << Instruction::DUP2 << Instruction::DUP2 << Instruction::MSTORE;
+ 
+ 			m_context << u256(0) << Instruction::SWAP1 << Instruction::DUP1;
+ 			// Stack post: <address> <size> 0 <mem_offset> <mem_offset>
+ 
+ 			m_context << u256(32) << Instruction::ADD << Instruction::SWAP1;
+ 			// Stack post: <address> <size> 0 <mem_offset_adjusted> <mem_offset>
+ 
+ 			m_context << Instruction::SWAP4;
+ 			// Stack post: <mem_offset> <size> 0 <mem_offset_adjusted> <address>
+ 
+ 			m_context << Instruction::EXTCODECOPY;
+ 			// Stack post: <mem_offset>
+ 		}
+ 		else if (member == "codehash")
+ 		{
+ 			utils().convertType(
+ 				*_memberAccess.expression().annotation().type,
+ 				*TypeProvider::address(),
+ 				true
+ 			);
+ 			m_context << Instruction::EXTCODEHASH;
+ 		}
+ 		else if ((std::set<std::string>{"send", "transfer"}).count(member))
+ 		{
+ 			solAssert(dynamic_cast<AddressType const&>(*_memberAccess.expression().annotation().type).stateMutability() == StateMutability::Payable, "");
+ 			utils().convertType(
+ 				*_memberAccess.expression().annotation().type,
+ 				AddressType(StateMutability::Payable),
+ 				true
+ 			);
+ 		}
+ 		else if ((std::set<std::string>{"call", "callcode", "delegatecall", "staticcall"}).count(member))
+ 			utils().convertType(
+ 				*_memberAccess.expression().annotation().type,
+ 				*TypeProvider::address(),
+ 				true
+ 			);
+ 		else
+ 			solAssert(false, "Invalid member access to address");
+ 		break;
+ 	}
+ 	case Type::Category::Function:
+ 		if (member == "selector")
+ 		{
+ 			auto const& functionType = dynamic_cast<FunctionType const&>(*_memberAccess.expression().annotation().type);
+ 			// all events should have already been caught by this stage
+ 			solAssert(!(functionType.kind() == FunctionType::Kind::Event));
+ 
+ 			if (functionType.kind() == FunctionType::Kind::External)
+ 				CompilerUtils(m_context).popStackSlots(functionType.sizeOnStack() - 2);
+ 			m_context << Instruction::SWAP1 << Instruction::POP;
+ 
+ 			/// need to store it as bytes4
+ 			utils().leftShiftNumberOnStack(224);
+ 		}
+ 		else if (member == "address")
+ 		{
+ 			auto const& functionType = dynamic_cast<FunctionType const&>(*_memberAccess.expression().annotation().type);
+ 			solAssert(functionType.kind() == FunctionType::Kind::External, "");
+ 			CompilerUtils(m_context).popStackSlots(functionType.sizeOnStack() - 1);
+ 		}
+ 		else
+ 			solAssert(
+ 				!!_memberAccess.expression().annotation().type->memberType(member),
+ 				"Invalid member access to function."
+ 			);
+ 		break;
+ 	case Type::Category::Magic:
+ 		// we can ignore the kind of magic and only look at the name of the member
+ 		if (member == "coinbase")
+ 			m_context << Instruction::COINBASE;
+ 		else if (member == "timestamp")
+ 			m_context << Instruction::TIMESTAMP;
+ 		else if (member == "difficulty" || member == "prevrandao")
+ 			m_context << Instruction::PREVRANDAO;
+ 		else if (member == "number")
+ 			m_context << Instruction::NUMBER;
+ 		else if (member == "gaslimit")
+ 			m_context << Instruction::GASLIMIT;
+ 		else if (member == "sender")
+ 			m_context << Instruction::CALLER;
+ 		else if (member == "value")
+ 			m_context << Instruction::CALLVALUE;
+ 		else if (member == "origin")
+ 			m_context << Instruction::ORIGIN;
+ 		else if (member == "gasprice")
+ 			m_context << Instruction::GASPRICE;
+ 		else if (member == "chainid")
+ 			m_context << Instruction::CHAINID;
+ 		else if (member == "basefee")
+ 			m_context << Instruction::BASEFEE;
+ 		else if (member == "blobbasefee")
+ 			m_context << Instruction::BLOBBASEFEE;
++		else if (member == "slotnum")
++			m_context << Instruction::SLOTNUM;
+ 		else if (member == "data")
+ 			m_context << u256(0) << Instruction::CALLDATASIZE;
+ 		else if (member == "sig")
+ 			m_context << u256(0) << Instruction::CALLDATALOAD
+ 				<< (u256(0xffffffff) << (256 - 32)) << Instruction::AND;
+ 		else if (member == "gas")
+ 			solAssert(false, "Gas has been removed.");
+ 		else if (member == "blockhash")
+ 			solAssert(false, "Blockhash has been removed.");
+ 		else if (member == "creationCode" || member == "runtimeCode")
+ 		{
+ 			Type const* arg = dynamic_cast<MagicType const&>(*_memberAccess.expression().annotation().type).typeArgument();
+ 			auto const& contractType = dynamic_cast<ContractType const&>(*arg);
+ 			solAssert(!contractType.isSuper(), "");
+ 			ContractDefinition const& contract = contractType.contractDefinition();
+ 			utils().fetchFreeMemoryPointer();
+ 			m_context << Instruction::DUP1 << u256(32) << Instruction::ADD;
+ 			utils().copyContractCodeToMemory(contract, member == "creationCode");
+ 			// Stack: start end
+ 			m_context.appendInlineAssembly(
+ 				Whiskers(R"({
+ 					mstore(start, sub(end, add(start, 0x20)))
+ 					mstore(<free>, and(add(end, 31), not(31)))
+ 				})")("free", std::to_string(CompilerUtils::freeMemoryPointer)).render(),
+ 				{"start", "end"}
+ 			);
+ 			m_context << Instruction::POP;
+ 		}
+ 		else if (member == "name")
+ 		{
+ 			Type const* arg = dynamic_cast<MagicType const&>(*_memberAccess.expression().annotation().type).typeArgument();
+ 			auto const& contractType = dynamic_cast<ContractType const&>(*arg);
+ 			ContractDefinition const& contract = contractType.isSuper() ?
+ 				*contractType.contractDefinition().superContract(m_context.mostDerivedContract()) :
+ 				dynamic_cast<ContractType const&>(*arg).contractDefinition();
+ 			utils().allocateMemory(((contract.name().length() + 31) / 32) * 32 + 32);
+ 			// store string length
+ 			m_context << u256(contract.name().length()) << Instruction::DUP2 << Instruction::MSTORE;
+ 			// adjust pointer
+ 			m_context << Instruction::DUP1 << u256(32) << Instruction::ADD;
+ 			utils().storeStringData(contract.name());
+ 		}
+ 		else if (member == "interfaceId")
+ 		{
+ 			Type const* arg = dynamic_cast<MagicType const&>(*_memberAccess.expression().annotation().type).typeArgument();
+ 			ContractDefinition const& contract = dynamic_cast<ContractType const&>(*arg).contractDefinition();
+ 			m_context << (u256{contract.interfaceId()} << (256 - 32));
+ 		}
+ 		else if (member == "min" || member == "max")
+ 		{
+ 			MagicType const* arg = dynamic_cast<MagicType const*>(_memberAccess.expression().annotation().type);
+ 			if (IntegerType const* integerType = dynamic_cast<IntegerType const*>(arg->typeArgument()))
+ 				m_context << (member == "min" ? integerType->min() : integerType->max());
+ 			else if (EnumType const* enumType = dynamic_cast<EnumType const*>(arg->typeArgument()))
+ 				m_context << (member == "min" ? enumType->minValue() : enumType->maxValue());
+ 			else
+ 				solAssert(false, "min/max not available for the given type.");
+ 
+ 		}
+ 		else if ((std::set<std::string>{"encode", "encodePacked", "encodeWithSelector", "encodeWithSignature", "decode"}).count(member))
+ 		{
+ 			// no-op
+ 		}
+ 		else
+ 			solAssert(false, "Unknown magic member.");
+ 		break;
+ 	case Type::Category::Struct:
+ 	{
+ 		StructType const& type = dynamic_cast<StructType const&>(*_memberAccess.expression().annotation().type);
+ 		Type const* memberType = _memberAccess.annotation().type;
+ 		switch (type.location())
+ 		{
+ 		case DataLocation::Storage:
+ 		{
+ 			std::pair<u256, unsigned> const& offsets = type.storageOffsetsOfMember(member);
+ 			m_context << offsets.first << Instruction::ADD << u256(offsets.second);
+ 			setLValueToStorageItem(_memberAccess);
+ 			break;
+ 		}
+ 		case DataLocation::Memory:
+ 		{
+ 			m_context << type.memoryOffsetOfMember(member) << Instruction::ADD;
+ 			setLValue<MemoryItem>(_memberAccess, *memberType);
+ 			break;
+ 		}
+ 		case DataLocation::CallData:
+ 		{
+ 			if (_memberAccess.annotation().type->isDynamicallyEncoded())
+ 			{
+ 				m_context << Instruction::DUP1;
+ 				m_context << type.calldataOffsetOfMember(member) << Instruction::ADD;
+ 				CompilerUtils(m_context).accessCalldataTail(*memberType);
+ 			}
+ 			else
+ 			{
+ 				m_context << type.calldataOffsetOfMember(member) << Instruction::ADD;
+ 				// For non-value types the calldata offset is returned directly.
+ 				if (memberType->isValueType())
+ 				{
+ 					solAssert(memberType->calldataEncodedSize() > 0, "");
+ 					solAssert(memberType->storageBytes() <= 32, "");
+ 					if (memberType->storageBytes() < 32 && m_context.useABICoderV2())
+ 					{
+ 						m_context << u256(32);
+ 						CompilerUtils(m_context).abiDecodeV2({memberType}, false);
+ 					}
+ 					else
+ 						CompilerUtils(m_context).loadFromMemoryDynamic(*memberType, true, true, false);
+ 				}
+ 				else
+ 					solAssert(
+ 						memberType->category() == Type::Category::Array ||
+ 						memberType->category() == Type::Category::Struct,
+ 						""
+ 					);
+ 			}
+ 			break;
+ 		}
+ 		default:
+ 			solAssert(false, "Illegal data location for struct.");
+ 		}
+ 		break;
+ 	}
+ 	case Type::Category::Enum:
+ 	{
+ 		EnumType const& type = dynamic_cast<EnumType const&>(*_memberAccess.expression().annotation().type);
+ 		m_context << type.memberValue(_memberAccess.memberName());
+ 		break;
+ 	}
+ 	case Type::Category::Array:
+ 	{
+ 		auto const& type = dynamic_cast<ArrayType const&>(*_memberAccess.expression().annotation().type);
+ 		if (member == "length")
+ 		{
+ 			if (!type.isDynamicallySized())
+ 			{
+ 				utils().popStackElement(type);
+ 				m_context << type.length();
+ 			}
+ 			else
+ 				switch (type.location())
+ 				{
+ 				case DataLocation::CallData:
+ 					m_context << Instruction::SWAP1 << Instruction::POP;
+ 					break;
+ 				case DataLocation::Storage:
+ 					ArrayUtils(m_context).retrieveLength(type);
+ 					m_context << Instruction::SWAP1 << Instruction::POP;
+ 					break;
+ 				case DataLocation::Transient:
+ 					solUnimplemented("Transient data location is only supported for value types.");
+ 					break;
+ 				case DataLocation::Memory:
+ 					m_context << Instruction::MLOAD;
+ 					break;
+ 				}
+ 		}
+ 		else if (member == "push" || member == "pop")
+ 		{
+ 			solAssert(
+ 				type.isDynamicallySized() &&
+ 				type.location() == DataLocation::Storage &&
+ 				type.category() == Type::Category::Array,
+ 				"Tried to use ." + member + "() on a non-dynamically sized array"
+ 			);
+ 		}
+ 		else
+ 			solAssert(false, "Illegal array member.");
+ 		break;
+ 	}
+ 	case Type::Category::FixedBytes:
+ 	{
+ 		auto const& type = dynamic_cast<FixedBytesType const&>(*_memberAccess.expression().annotation().type);
+ 		utils().popStackElement(type);
+ 		if (member == "length")
+ 			m_context << u256(type.numBytes());
+ 		else
+ 			solAssert(false, "Illegal fixed bytes member.");
+ 		break;
+ 	}
+ 	case Type::Category::Module:
+ 	{
+ 		Type::Category category = _memberAccess.annotation().type->category();
+ 		solAssert(
+ 			dynamic_cast<VariableDeclaration const*>(_memberAccess.annotation().referencedDeclaration) ||
+ 			dynamic_cast<FunctionDefinition const*>(_memberAccess.annotation().referencedDeclaration) ||
+ 			dynamic_cast<ErrorDefinition const*>(_memberAccess.annotation().referencedDeclaration) ||
+ 			dynamic_cast<EventDefinition const*>(_memberAccess.annotation().referencedDeclaration) ||
+ 			category == Type::Category::TypeType ||
+ 			category == Type::Category::Module,
+ 			""
+ 		);
+ 		if (auto variable = dynamic_cast<VariableDeclaration const*>(_memberAccess.annotation().referencedDeclaration))
+ 		{
+ 			solAssert(variable->isConstant(), "");
+ 			appendVariable(*variable, static_cast<Expression const&>(_memberAccess));
+ 		}
+ 		else if (auto const* function = dynamic_cast<FunctionDefinition const*>(_memberAccess.annotation().referencedDeclaration))
+ 		{
+ 			auto funType = dynamic_cast<FunctionType const*>(_memberAccess.annotation().type);
+ 			solAssert(function && function->isFree(), "");
+ 			solAssert(funType->kind() == FunctionType::Kind::Internal, "");
+ 			solAssert(*_memberAccess.annotation().requiredLookup == VirtualLookup::Static, "");
+ 			utils().pushCombinedFunctionEntryLabel(
+ 				*function,
+ 				// If we call directly, do not include the second label.
+ 				!_memberAccess.annotation().calledDirectly
+ 			);
+ 		}
+ 		else if (auto const* contract = dynamic_cast<ContractDefinition const*>(_memberAccess.annotation().referencedDeclaration))
+ 		{
+ 			if (contract->isLibrary())
+ 				m_context.appendLibraryAddress(contract->fullyQualifiedName());
+ 		}
+ 		break;
+ 	}
+ 	default:
+ 		solAssert(false, "Member access to unknown type.");
+ 	}
+ 	return false;
+ }
+diff --git a/libsolidity/codegen/ir/IRGeneratorForStatements.cpp b/libsolidity/codegen/ir/IRGeneratorForStatements.cpp
+index 61c2b96b9..426963fe2 100644
+--- a/libsolidity/codegen/ir/IRGeneratorForStatements.cpp
++++ b/libsolidity/codegen/ir/IRGeneratorForStatements.cpp
+@@ -1772,508 +1772,510 @@ bool IRGeneratorForStatements::visit(MemberAccess const& _memberAccess)
+ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
+ {
+ 	setLocation(_memberAccess);
+ 
+ 	ASTString const& member = _memberAccess.memberName();
+ 	auto memberFunctionType = dynamic_cast<FunctionType const*>(_memberAccess.annotation().type);
+ 	Type::Category objectCategory = _memberAccess.expression().annotation().type->category();
+ 
+ 	if (memberFunctionType && memberFunctionType->hasBoundFirstArgument())
+ 	{
+ 		define(IRVariable(_memberAccess).part("self"), _memberAccess.expression());
+ 		solAssert(*_memberAccess.annotation().requiredLookup == VirtualLookup::Static);
+ 		if (memberFunctionType->kind() == FunctionType::Kind::Internal)
+ 			assignInternalFunctionIDIfNotCalledDirectly(
+ 				_memberAccess,
+ 				dynamic_cast<FunctionDefinition const&>(memberFunctionType->declaration())
+ 			);
+ 		else if (
+ 			memberFunctionType->kind() == FunctionType::Kind::ArrayPush ||
+ 			memberFunctionType->kind() == FunctionType::Kind::ArrayPop
+ 		)
+ 		{
+ 			// Nothing to do.
+ 		}
+ 		else
+ 		{
+ 			auto const& functionDefinition = dynamic_cast<FunctionDefinition const&>(memberFunctionType->declaration());
+ 			solAssert(memberFunctionType->kind() == FunctionType::Kind::DelegateCall);
+ 			auto contract = dynamic_cast<ContractDefinition const*>(functionDefinition.scope());
+ 			solAssert(contract && contract->isLibrary());
+ 			define(IRVariable(_memberAccess).part("address")) << linkerSymbol(*contract) << "\n";
+ 			define(IRVariable(_memberAccess).part("functionSelector")) << memberFunctionType->externalIdentifier() << "\n";
+ 		}
+ 		return;
+ 	}
+ 
+ 	switch (objectCategory)
+ 	{
+ 	case Type::Category::Contract:
+ 	{
+ 		ContractType const& type = dynamic_cast<ContractType const&>(*_memberAccess.expression().annotation().type);
+ 		if (type.isSuper())
+ 			solAssert(false);
+ 
+ 		// ordinary contract type
+ 		else if (Declaration const* declaration = _memberAccess.annotation().referencedDeclaration)
+ 		{
+ 			u256 identifier;
+ 			if (auto const* variable = dynamic_cast<VariableDeclaration const*>(declaration))
+ 				identifier = FunctionType(*variable).externalIdentifier();
+ 			else if (auto const* function = dynamic_cast<FunctionDefinition const*>(declaration))
+ 				identifier = FunctionType(*function).externalIdentifier();
+ 			else
+ 				solAssert(false, "Contract member is neither variable nor function.");
+ 
+ 			define(IRVariable(_memberAccess).part("address"), _memberAccess.expression());
+ 			define(IRVariable(_memberAccess).part("functionSelector")) << formatNumber(identifier) << "\n";
+ 		}
+ 		else
+ 			solAssert(false, "Invalid member access in contract");
+ 		break;
+ 	}
+ 	case Type::Category::Integer:
+ 	{
+ 		solAssert(false, "Invalid member access to integer");
+ 		break;
+ 	}
+ 	case Type::Category::Address:
+ 	{
+ 		if (member == "balance")
+ 			define(_memberAccess) <<
+ 				"balance(" <<
+ 				expressionAsType(_memberAccess.expression(), *TypeProvider::address()) <<
+ 				")\n";
+ 		else if (member == "code")
+ 		{
+ 			std::string externalCodeFunction = m_utils.externalCodeFunction();
+ 			define(_memberAccess) <<
+ 				externalCodeFunction <<
+ 				"(" <<
+ 				expressionAsType(_memberAccess.expression(), *TypeProvider::address()) <<
+ 				")\n";
+ 		}
+ 		else if (member == "codehash")
+ 		{
+ 			define(_memberAccess) <<
+ 				"extcodehash(" <<
+ 				expressionAsType(_memberAccess.expression(), *TypeProvider::address()) <<
+ 				")\n";
+ 		}
+ 		else if (std::set<std::string>{"send", "transfer"}.count(member))
+ 		{
+ 			solAssert(dynamic_cast<AddressType const&>(*_memberAccess.expression().annotation().type).stateMutability() == StateMutability::Payable);
+ 			define(IRVariable{_memberAccess}.part("address"), _memberAccess.expression());
+ 		}
+ 		else if (std::set<std::string>{"call", "callcode", "delegatecall", "staticcall"}.count(member))
+ 			define(IRVariable{_memberAccess}.part("address"), _memberAccess.expression());
+ 		else
+ 			solAssert(false, "Invalid member access to address");
+ 		break;
+ 	}
+ 	case Type::Category::Function:
+ 		if (member == "selector")
+ 		{
+ 			FunctionType const& functionType = dynamic_cast<FunctionType const&>(
+ 				*_memberAccess.expression().annotation().type
+ 			);
+ 			if (
+ 				functionType.kind() == FunctionType::Kind::External ||
+ 				functionType.kind() == FunctionType::Kind::DelegateCall
+ 			)
+ 				define(IRVariable{_memberAccess}, IRVariable(_memberAccess.expression()).part("functionSelector"));
+ 			else if (
+ 				functionType.kind() == FunctionType::Kind::Declaration ||
+ 				functionType.kind() == FunctionType::Kind::Error ||
+ 				// In some situations, internal function types also provide the "selector" member.
+ 				// See Types.cpp for details.
+ 				functionType.kind() == FunctionType::Kind::Internal
+ 			)
+ 			{
+ 				solAssert(functionType.hasDeclaration());
+ 				solAssert(
+ 					functionType.kind() == FunctionType::Kind::Error ||
+ 					functionType.declaration().isPartOfExternalInterface(),
+ 					""
+ 				);
+ 				define(IRVariable{_memberAccess}) << formatNumber(
+ 					util::selectorFromSignatureU256(functionType.externalSignature())
+ 				) << "\n";
+ 			}
+ 			else if (functionType.kind() == FunctionType::Kind::Event)
+ 			{
+ 				solAssert(functionType.hasDeclaration());
+ 				solAssert(functionType.kind() == FunctionType::Kind::Event);
+ 				solAssert(
+ 					!(dynamic_cast<EventDefinition const&>(functionType.declaration()).isAnonymous())
+ 				);
+ 				define(IRVariable{_memberAccess}) << formatNumber(
+ 					u256(h256::Arith(util::keccak256(functionType.externalSignature())))
+ 				) << "\n";
+ 			}
+ 			else
+ 				solAssert(false, "Invalid use of .selector: " + functionType.toString(false));
+ 		}
+ 		else if (member == "address")
+ 		{
+ 			solUnimplementedAssert(
+ 				dynamic_cast<FunctionType const&>(*_memberAccess.expression().annotation().type).kind() ==
+ 				FunctionType::Kind::External
+ 			);
+ 			define(IRVariable{_memberAccess}, IRVariable(_memberAccess.expression()).part("address"));
+ 		}
+ 		else
+ 			solAssert(
+ 				!!_memberAccess.expression().annotation().type->memberType(member),
+ 				"Invalid member access to function."
+ 			);
+ 		break;
+ 	case Type::Category::Magic:
+ 		// we can ignore the kind of magic and only look at the name of the member
+ 		if (member == "coinbase")
+ 			define(_memberAccess) << "coinbase()\n";
+ 		else if (member == "timestamp")
+ 			define(_memberAccess) << "timestamp()\n";
+ 		else if (member == "difficulty" || member == "prevrandao")
+ 		{
+ 			if (m_context.evmVersion().hasPrevRandao())
+ 				define(_memberAccess) << "prevrandao()\n";
+ 			else
+ 				define(_memberAccess) << "difficulty()\n";
+ 		}
+ 		else if (member == "number")
+ 			define(_memberAccess) << "number()\n";
+ 		else if (member == "gaslimit")
+ 			define(_memberAccess) << "gaslimit()\n";
+ 		else if (member == "sender")
+ 			define(_memberAccess) << "caller()\n";
+ 		else if (member == "value")
+ 			define(_memberAccess) << "callvalue()\n";
+ 		else if (member == "origin")
+ 			define(_memberAccess) << "origin()\n";
+ 		else if (member == "gasprice")
+ 			define(_memberAccess) << "gasprice()\n";
+ 		else if (member == "chainid")
+ 			define(_memberAccess) << "chainid()\n";
+ 		else if (member == "basefee")
+ 			define(_memberAccess) << "basefee()\n";
+ 		else if (member == "blobbasefee")
+ 			define(_memberAccess) << "blobbasefee()\n";
++		else if (member == "slotnum")
++			define(_memberAccess) << "slotnum()\n";
+ 		else if (member == "data")
+ 		{
+ 			IRVariable var(_memberAccess);
+ 			define(var.part("offset")) << "0\n";
+ 			define(var.part("length")) << "calldatasize()\n";
+ 		}
+ 		else if (member == "sig")
+ 			define(_memberAccess) <<
+ 				"and(calldataload(0), " <<
+ 				formatNumber(u256(0xffffffff) << (256 - 32)) <<
+ 				")\n";
+ 		else if (member == "gas")
+ 			solAssert(false, "Gas has been removed.");
+ 		else if (member == "blockhash")
+ 			solAssert(false, "Blockhash has been removed.");
+ 		else if (member == "creationCode" || member == "runtimeCode")
+ 		{
+ 			Type const* arg = dynamic_cast<MagicType const&>(*_memberAccess.expression().annotation().type).typeArgument();
+ 			auto const& contractType = dynamic_cast<ContractType const&>(*arg);
+ 			solAssert(!contractType.isSuper());
+ 			ContractDefinition const& contract = contractType.contractDefinition();
+ 			m_context.addSubObject(&contract);
+ 			appendCode() << Whiskers(R"(
+ 				let <size> := datasize("<objectName>")
+ 				let <result> := <allocationFunction>(add(<size>, 32))
+ 				mstore(<result>, <size>)
+ 				datacopy(add(<result>, 32), dataoffset("<objectName>"), <size>)
+ 			)")
+ 			("allocationFunction", m_utils.allocationFunction())
+ 			("size", m_context.newYulVariable())
+ 			("objectName", IRNames::creationObject(contract) + (member == "runtimeCode" ? "." + IRNames::deployedObject(contract) : ""))
+ 			("result", IRVariable(_memberAccess).commaSeparatedList()).render();
+ 		}
+ 		else if (member == "name")
+ 		{
+ 			Type const* arg = dynamic_cast<MagicType const&>(*_memberAccess.expression().annotation().type).typeArgument();
+ 			ContractDefinition const& contract = dynamic_cast<ContractType const&>(*arg).contractDefinition();
+ 			define(IRVariable(_memberAccess)) << m_utils.copyLiteralToMemoryFunction(contract.name()) << "()\n";
+ 		}
+ 		else if (member == "interfaceId")
+ 		{
+ 			Type const* arg = dynamic_cast<MagicType const&>(*_memberAccess.expression().annotation().type).typeArgument();
+ 			auto const& contractType = dynamic_cast<ContractType const&>(*arg);
+ 			solAssert(!contractType.isSuper());
+ 			ContractDefinition const& contract = contractType.contractDefinition();
+ 			define(_memberAccess) << formatNumber(u256{contract.interfaceId()} << (256 - 32)) << "\n";
+ 		}
+ 		else if (member == "min" || member == "max")
+ 		{
+ 			MagicType const* arg = dynamic_cast<MagicType const*>(_memberAccess.expression().annotation().type);
+ 
+ 			std::string requestedValue;
+ 			if (IntegerType const* integerType = dynamic_cast<IntegerType const*>(arg->typeArgument()))
+ 			{
+ 				if (member == "min")
+ 					requestedValue = formatNumber(integerType->min());
+ 				else
+ 					requestedValue = formatNumber(integerType->max());
+ 			}
+ 			else if (EnumType const* enumType = dynamic_cast<EnumType const*>(arg->typeArgument()))
+ 			{
+ 				if (member == "min")
+ 					requestedValue = std::to_string(enumType->minValue());
+ 				else
+ 					requestedValue = std::to_string(enumType->maxValue());
+ 			}
+ 			else
+ 				solAssert(false, "min/max requested on unexpected type.");
+ 
+ 			define(_memberAccess) << requestedValue << "\n";
+ 		}
+ 		else if (std::set<std::string>{"encode", "encodePacked", "encodeWithSelector", "encodeCall", "encodeWithSignature", "decode"}.count(member))
+ 		{
+ 			// no-op
+ 		}
+ 		else
+ 			solAssert(false, "Unknown magic member.");
+ 		break;
+ 	case Type::Category::Struct:
+ 	{
+ 		auto const& structType = dynamic_cast<StructType const&>(*_memberAccess.expression().annotation().type);
+ 
+ 		IRVariable expression(_memberAccess.expression());
+ 		switch (structType.location())
+ 		{
+ 		case DataLocation::Storage:
+ 		{
+ 			std::pair<u256, unsigned> const& offsets = structType.storageOffsetsOfMember(member);
+ 			std::string slot = m_context.newYulVariable();
+ 			appendCode() << "let " << slot << " := " <<
+ 				("add(" + expression.part("slot").name() + ", " + offsets.first.str() + ")\n");
+ 			setLValue(_memberAccess, IRLValue{
+ 				type(_memberAccess),
+ 				IRLValue::Storage{slot, offsets.second}
+ 			});
+ 			break;
+ 		}
+ 		case DataLocation::Memory:
+ 		{
+ 			std::string pos = m_context.newYulVariable();
+ 			appendCode() << "let " << pos << " := " <<
+ 				("add(" + expression.part("mpos").name() + ", " + structType.memoryOffsetOfMember(member).str() + ")\n");
+ 			setLValue(_memberAccess, IRLValue{
+ 				type(_memberAccess),
+ 				IRLValue::Memory{pos}
+ 			});
+ 			break;
+ 		}
+ 		case DataLocation::CallData:
+ 		{
+ 			std::string baseRef = expression.part("offset").name();
+ 			std::string offset = m_context.newYulVariable();
+ 			appendCode() << "let " << offset << " := " << "add(" << baseRef << ", " << std::to_string(structType.calldataOffsetOfMember(member)) << ")\n";
+ 			if (_memberAccess.annotation().type->isDynamicallyEncoded())
+ 				define(_memberAccess) <<
+ 					m_utils.accessCalldataTailFunction(*_memberAccess.annotation().type) <<
+ 					"(" <<
+ 					baseRef <<
+ 					", " <<
+ 					offset <<
+ 					")\n";
+ 			else if (
+ 				dynamic_cast<ArrayType const*>(_memberAccess.annotation().type) ||
+ 				dynamic_cast<StructType const*>(_memberAccess.annotation().type)
+ 			)
+ 				define(_memberAccess) << offset << "\n";
+ 			else
+ 				define(_memberAccess) <<
+ 					m_utils.readFromCalldata(*_memberAccess.annotation().type) <<
+ 					"(" <<
+ 					offset <<
+ 					")\n";
+ 			break;
+ 		}
+ 		default:
+ 			solAssert(false, "Illegal data location for struct.");
+ 		}
+ 		break;
+ 	}
+ 	case Type::Category::Enum:
+ 	{
+ 		EnumType const& type = dynamic_cast<EnumType const&>(*_memberAccess.expression().annotation().type);
+ 		define(_memberAccess) << std::to_string(type.memberValue(_memberAccess.memberName())) << "\n";
+ 		break;
+ 	}
+ 	case Type::Category::Array:
+ 	{
+ 		auto const& type = dynamic_cast<ArrayType const&>(*_memberAccess.expression().annotation().type);
+ 		if (member == "length")
+ 		{
+ 			// shortcut for <address>.code.length
+ 			if (
+ 				auto innerExpression = dynamic_cast<MemberAccess const*>(&_memberAccess.expression());
+ 				innerExpression &&
+ 				innerExpression->memberName() == "code" &&
+ 				innerExpression->expression().annotation().type->category() == Type::Category::Address
+ 			)
+ 				define(_memberAccess) <<
+ 					"extcodesize(" <<
+ 					expressionAsType(innerExpression->expression(), *TypeProvider::address()) <<
+ 					")\n";
+ 			else
+ 				define(_memberAccess) <<
+ 					m_utils.arrayLengthFunction(type) <<
+ 					"(" <<
+ 					IRVariable(_memberAccess.expression()).commaSeparatedList() <<
+ 					")\n";
+ 		}
+ 		else if (member == "pop" || member == "push")
+ 		{
+ 			solAssert(type.location() == DataLocation::Storage);
+ 			define(IRVariable{_memberAccess}.part("slot"), IRVariable{_memberAccess.expression()}.part("slot"));
+ 		}
+ 		else
+ 			solAssert(false, "Invalid array member access.");
+ 
+ 		break;
+ 	}
+ 	case Type::Category::FixedBytes:
+ 	{
+ 		auto const& type = dynamic_cast<FixedBytesType const&>(*_memberAccess.expression().annotation().type);
+ 		if (member == "length")
+ 			define(_memberAccess) << std::to_string(type.numBytes()) << "\n";
+ 		else
+ 			solAssert(false, "Illegal fixed bytes member.");
+ 		break;
+ 	}
+ 	case Type::Category::TypeType:
+ 	{
+ 		Type const& actualType = *dynamic_cast<TypeType const&>(
+ 			*_memberAccess.expression().annotation().type
+ 		).actualType();
+ 
+ 		if (actualType.category() == Type::Category::Contract)
+ 		{
+ 			ContractType const& contractType = dynamic_cast<ContractType const&>(actualType);
+ 			if (contractType.isSuper())
+ 			{
+ 				solAssert(!!_memberAccess.annotation().referencedDeclaration, "Referenced declaration not resolved.");
+ 				ContractDefinition const* super = contractType.contractDefinition().superContract(m_context.mostDerivedContract());
+ 				solAssert(super, "Super contract not available.");
+ 				FunctionDefinition const& resolvedFunctionDef =
+ 					dynamic_cast<FunctionDefinition const&>(
+ 						*_memberAccess.annotation().referencedDeclaration
+ 					).resolveVirtual(m_context.mostDerivedContract(), super);
+ 
+ 				solAssert(resolvedFunctionDef.functionType(true));
+ 				solAssert(resolvedFunctionDef.functionType(true)->kind() == FunctionType::Kind::Internal);
+ 				assignInternalFunctionIDIfNotCalledDirectly(_memberAccess, resolvedFunctionDef);
+ 			}
+ 			else if (auto const* variable = dynamic_cast<VariableDeclaration const*>(_memberAccess.annotation().referencedDeclaration))
+ 				handleVariableReference(*variable, _memberAccess);
+ 			else if (memberFunctionType)
+ 			{
+ 				switch (memberFunctionType->kind())
+ 				{
+ 				case FunctionType::Kind::Declaration:
+ 					break;
+ 				case FunctionType::Kind::Internal:
+ 					if (auto const* function = dynamic_cast<FunctionDefinition const*>(_memberAccess.annotation().referencedDeclaration))
+ 						assignInternalFunctionIDIfNotCalledDirectly(_memberAccess, *function);
+ 					else
+ 						solAssert(false, "Function not found in member access");
+ 					break;
+ 				case FunctionType::Kind::Event:
+ 					solAssert(
+ 						dynamic_cast<EventDefinition const*>(_memberAccess.annotation().referencedDeclaration),
+ 						"Event not found"
+ 					);
+ 						// the call will do the resolving
+ 					break;
+ 				case FunctionType::Kind::Error:
+ 					solAssert(
+ 						dynamic_cast<ErrorDefinition const*>(_memberAccess.annotation().referencedDeclaration),
+ 						"Error not found"
+ 					);
+ 					// The function call will resolve the selector.
+ 					break;
+ 				case FunctionType::Kind::DelegateCall:
+ 					define(IRVariable(_memberAccess).part("address"), _memberAccess.expression());
+ 					define(IRVariable(_memberAccess).part("functionSelector")) << formatNumber(memberFunctionType->externalIdentifier()) << "\n";
+ 					break;
+ 				case FunctionType::Kind::External:
+ 				case FunctionType::Kind::Creation:
+ 				case FunctionType::Kind::Send:
+ 				case FunctionType::Kind::BareCall:
+ 				case FunctionType::Kind::BareCallCode:
+ 				case FunctionType::Kind::BareDelegateCall:
+ 				case FunctionType::Kind::BareStaticCall:
+ 				case FunctionType::Kind::Transfer:
+ 				case FunctionType::Kind::ECRecover:
+ 				case FunctionType::Kind::SHA256:
+ 				case FunctionType::Kind::RIPEMD160:
+ 				default:
+ 					solAssert(false, "unsupported member function");
+ 				}
+ 			}
+ 			else if (dynamic_cast<TypeType const*>(_memberAccess.annotation().type))
+ 			{
+ 			// no-op
+ 			}
+ 			else
+ 				// The old code generator had a generic "else" case here
+ 				// without any specific code being generated,
+ 				// but it would still be better to have an exhaustive list.
+ 				solAssert(false);
+ 		}
+ 		else if (EnumType const* enumType = dynamic_cast<EnumType const*>(&actualType))
+ 			define(_memberAccess) << std::to_string(enumType->memberValue(_memberAccess.memberName())) << "\n";
+ 		else if (dynamic_cast<UserDefinedValueType const*>(&actualType))
+ 			solAssert(member == "wrap" || member == "unwrap");
+ 		else if (auto const* arrayType = dynamic_cast<ArrayType const*>(&actualType))
+ 			solAssert(arrayType->isByteArrayOrString() && member == "concat");
+ 		else
+ 			// The old code generator had a generic "else" case here
+ 			// without any specific code being generated,
+ 			// but it would still be better to have an exhaustive list.
+ 			solAssert(false);
+ 		break;
+ 	}
+ 	case Type::Category::Module:
+ 	{
+ 		Type::Category category = _memberAccess.annotation().type->category();
+ 		solAssert(
+ 			dynamic_cast<VariableDeclaration const*>(_memberAccess.annotation().referencedDeclaration) ||
+ 			dynamic_cast<FunctionDefinition const*>(_memberAccess.annotation().referencedDeclaration) ||
+ 			dynamic_cast<ErrorDefinition const*>(_memberAccess.annotation().referencedDeclaration) ||
+ 			dynamic_cast<EventDefinition const*>(_memberAccess.annotation().referencedDeclaration) ||
+ 			category == Type::Category::TypeType ||
+ 			category == Type::Category::Module,
+ 			""
+ 		);
+ 		if (auto variable = dynamic_cast<VariableDeclaration const*>(_memberAccess.annotation().referencedDeclaration))
+ 		{
+ 			solAssert(variable->isConstant());
+ 			handleVariableReference(*variable, static_cast<Expression const&>(_memberAccess));
+ 		}
+ 		else if (auto const* function = dynamic_cast<FunctionDefinition const*>(_memberAccess.annotation().referencedDeclaration))
+ 		{
+ 			auto funType = dynamic_cast<FunctionType const*>(_memberAccess.annotation().type);
+ 			solAssert(function && function->isFree());
+ 			solAssert(function->functionType(true));
+ 			solAssert(function->functionType(true)->kind() == FunctionType::Kind::Internal);
+ 			solAssert(funType->kind() == FunctionType::Kind::Internal);
+ 			solAssert(*_memberAccess.annotation().requiredLookup == VirtualLookup::Static);
+ 
+ 			assignInternalFunctionIDIfNotCalledDirectly(_memberAccess, *function);
+ 		}
+ 		else if (auto const* contract = dynamic_cast<ContractDefinition const*>(_memberAccess.annotation().referencedDeclaration))
+ 		{
+ 			if (contract->isLibrary())
+ 				define(IRVariable(_memberAccess).part("address")) << linkerSymbol(*contract) << "\n";
+ 		}
+ 		break;
+ 	}
+ 	default:
+ 		solAssert(false, "Member access to unknown type.");
+ 	}
+ }
+diff --git a/libyul/AsmAnalysis.cpp b/libyul/AsmAnalysis.cpp
+index 3c563e44e..b8cc4f45e 100644
+--- a/libyul/AsmAnalysis.cpp
++++ b/libyul/AsmAnalysis.cpp
+@@ -699,83 +699,85 @@ bool AsmAnalyzer::validateInstructions(std::string_view _instructionIdentifier,
+ bool AsmAnalyzer::validateInstructions(evmasm::Instruction _instr, SourceLocation const& _location)
+ {
+ 	// We assume that returndatacopy, returndatasize and staticcall are either all available
+ 	// or all not available.
+ 	yulAssert(m_evmVersion.supportsReturndata() == m_evmVersion.hasStaticCall(), "");
+ 	// Similarly we assume bitwise shifting and create2 go together.
+ 	yulAssert(m_evmVersion.hasBitwiseShifting() == m_evmVersion.hasCreate2(), "");
+ 
+ 	// These instructions are disabled in the dialect.
+ 	yulAssert(
+ 		_instr != evmasm::Instruction::JUMP &&
+ 		_instr != evmasm::Instruction::JUMPI &&
+ 		_instr != evmasm::Instruction::JUMPDEST
+ 	);
+ 
+ 	auto errorForVM = [&](ErrorId _errorId, std::string const& vmKindMessage) {
+ 		m_errorReporter.typeError(
+ 			_errorId,
+ 			_location,
+ 			fmt::format(
+ 				"The \"{instruction}\" instruction is {kind} VMs (you are currently compiling for \"{version}\").",
+ 				fmt::arg("instruction", boost::to_lower_copy(instructionInfo(_instr, m_evmVersion).name)),
+ 				fmt::arg("kind", vmKindMessage),
+ 				fmt::arg("version", m_evmVersion.name())
+ 			)
+ 		);
+ 	};
+ 
+ 	// The errors below are meant to be issued when processing an undeclared identifier matching a builtin name
+ 	// present on the default EVM version but not on the currently selected one,
+ 	// since the other `validateInstructions()` overload uses the default EVM version.
+ 	if (_instr == evmasm::Instruction::RETURNDATACOPY && !m_evmVersion.supportsReturndata())
+ 		errorForVM(7756_error, "only available for Byzantium-compatible");
+ 	else if (_instr == evmasm::Instruction::RETURNDATASIZE && !m_evmVersion.supportsReturndata())
+ 		errorForVM(4778_error, "only available for Byzantium-compatible");
+ 	else if (_instr == evmasm::Instruction::STATICCALL && !m_evmVersion.hasStaticCall())
+ 		errorForVM(1503_error, "only available for Byzantium-compatible");
+ 	else if (_instr == evmasm::Instruction::SHL && !m_evmVersion.hasBitwiseShifting())
+ 		errorForVM(6612_error, "only available for Constantinople-compatible");
+ 	else if (_instr == evmasm::Instruction::SHR && !m_evmVersion.hasBitwiseShifting())
+ 		errorForVM(7458_error, "only available for Constantinople-compatible");
+ 	else if (_instr == evmasm::Instruction::SAR && !m_evmVersion.hasBitwiseShifting())
+ 		errorForVM(2054_error, "only available for Constantinople-compatible");
+ 	else if (_instr == evmasm::Instruction::CLZ && !m_evmVersion.hasCLZ())
+ 		errorForVM(4948_error, "only available for Osaka-compatible");
+ 	else if (_instr == evmasm::Instruction::CREATE2 && !m_evmVersion.hasCreate2())
+ 		errorForVM(6166_error, "only available for Constantinople-compatible");
+ 	else if (_instr == evmasm::Instruction::EXTCODEHASH && !m_evmVersion.hasExtCodeHash())
+ 		errorForVM(7110_error, "only available for Constantinople-compatible");
+ 	else if (_instr == evmasm::Instruction::CHAINID && !m_evmVersion.hasChainID())
+ 		errorForVM(1561_error, "only available for Istanbul-compatible");
+ 	else if (_instr == evmasm::Instruction::SELFBALANCE && !m_evmVersion.hasSelfBalance())
+ 		errorForVM(7721_error, "only available for Istanbul-compatible");
+ 	else if (_instr == evmasm::Instruction::BASEFEE && !m_evmVersion.hasBaseFee())
+ 		errorForVM(5430_error, "only available for London-compatible");
+ 	else if (_instr == evmasm::Instruction::BLOBBASEFEE && !m_evmVersion.hasBlobBaseFee())
+ 		errorForVM(6679_error, "only available for Cancun-compatible");
++	else if (_instr == evmasm::Instruction::SLOTNUM && !m_evmVersion.hasSlotNum())
++		errorForVM(1049_error, "only available for Amsterdam-compatible");
+ 	else if (_instr == evmasm::Instruction::BLOBHASH && !m_evmVersion.hasBlobHash())
+ 		errorForVM(8314_error, "only available for Cancun-compatible");
+ 	else if (_instr == evmasm::Instruction::MCOPY && !m_evmVersion.hasMcopy())
+ 		errorForVM(7755_error, "only available for Cancun-compatible");
+ 	else if ((_instr == evmasm::Instruction::TSTORE || _instr == evmasm::Instruction::TLOAD) && !m_evmVersion.supportsTransientStorage())
+ 		errorForVM(6243_error, "only available for Cancun-compatible");
+ 	else if (_instr == evmasm::Instruction::PC)
+ 		m_errorReporter.error(
+ 			2450_error,
+ 			Error::Type::SyntaxError,
+ 			_location,
+ 			"PC instruction is a low-level EVM feature. "
+ 			"Because of that PC is disallowed in strict assembly."
+ 		);
+ 	else
+ 	{
+ 		// Sanity check
+ 		solAssert(m_evmVersion.hasOpcode(_instr));
+ 		return false;
+ 	}
+ 
+ 	// Sanity check
+ 	// PC is not available in strict assembly but it is always valid opcode in legacy evm.
+ 	solAssert(_instr == evmasm::Instruction::PC || !m_evmVersion.hasOpcode(_instr));
+ 	return true;
+ }
+diff --git a/libyul/backends/evm/EVMDialect.cpp b/libyul/backends/evm/EVMDialect.cpp
+index 61ee04335..25e129bb9 100644
+--- a/libyul/backends/evm/EVMDialect.cpp
++++ b/libyul/backends/evm/EVMDialect.cpp
+@@ -83,78 +83,86 @@ bool isLowLevelControlFlowInstruction(evmasm::Instruction const& _instruction)
+ std::set<std::string, std::less<>> createReservedIdentifiers(langutil::EVMVersion _evmVersion)
+ {
+ 	// TODO remove this in 0.9.0. We allow creating functions or identifiers in Yul with the name
+ 	// basefee for VMs before london.
+ 	auto baseFeeException = [&](evmasm::Instruction _instr) -> bool
+ 	{
+ 		return _instr == evmasm::Instruction::BASEFEE && _evmVersion < langutil::EVMVersion::london();
+ 	};
+ 
+ 	// TODO remove this in 0.9.0. We allow creating functions or identifiers in Yul with the name
+ 	// blobbasefee for VMs before cancun.
+ 	auto blobBaseFeeException = [&](evmasm::Instruction _instr) -> bool
+ 	{
+ 		return _instr == evmasm::Instruction::BLOBBASEFEE && _evmVersion < langutil::EVMVersion::cancun();
+ 	};
+ 
+ 	// TODO remove this in 0.9.0. We allow creating functions or identifiers in Yul with the name
+ 	// mcopy for VMs before london.
+ 	auto mcopyException = [&](evmasm::Instruction _instr) -> bool
+ 	{
+ 		return _instr == evmasm::Instruction::MCOPY && _evmVersion < langutil::EVMVersion::cancun();
+ 	};
+ 
+ 	// TODO remove this in 0.9.0. We allow creating functions or identifiers in Yul with the name
+ 	// prevrandao for VMs before paris.
+ 	auto prevRandaoException = [&](std::string const& _instrName) -> bool
+ 	{
+ 		// Using string comparison as the opcode is the same as for "difficulty"
+ 		return _instrName == "prevrandao" && _evmVersion < langutil::EVMVersion::paris();
+ 	};
+ 
+ 	// TODO remove this in 0.9.0. We allow creating functions or identifiers in Yul with the name
+ 	// blobhash for VMs before cancun.
+ 	auto blobHashException = [&](evmasm::Instruction _instr) -> bool
+ 	{
+ 		return _instr == evmasm::Instruction::BLOBHASH && _evmVersion < langutil::EVMVersion::cancun();
+ 	};
+ 	// TODO remove this in 0.9.0. We allow creating functions or identifiers in Yul with the names
+ 	// tstore or tload for VMs before cancun.
+ 	auto transientStorageException = [&](evmasm::Instruction _instr) -> bool
+ 	{
+ 		return
+ 			_evmVersion < langutil::EVMVersion::cancun() &&
+ 			(_instr == evmasm::Instruction::TSTORE || _instr == evmasm::Instruction::TLOAD);
+ 	};
+ 	// TODO remove this in 0.9.0. We allow creating functions or identifiers in Yul with the name
+ 	// clz for VMs before osaka.
+ 	auto clzException = [&](evmasm::Instruction _instr) -> bool
+ 	{
+ 		return _instr == evmasm::Instruction::CLZ && !_evmVersion.hasCLZ();
+ 	};
+ 
++	// TODO remove this in 0.9.0. We allow creating functions or identifiers in Yul with the name
++	// slotnum for VMs before amsterdam.
++	auto slotNumException = [&](evmasm::Instruction _instr) -> bool
++	{
++		return _instr == evmasm::Instruction::SLOTNUM && !_evmVersion.hasSlotNum();
++	};
++
+ 	std::set<std::string, std::less<>> reserved;
+ 	for (auto const& instr: evmasm::c_instructions)
+ 	{
+ 		std::string name = toLower(instr.first);
+ 		if (
+ 			!baseFeeException(instr.second) &&
+ 			!prevRandaoException(name) &&
+ 			!blobHashException(instr.second) &&
+ 			!blobBaseFeeException(instr.second) &&
+ 			!mcopyException(instr.second) &&
+ 			!transientStorageException(instr.second) &&
+-			!clzException(instr.second)
++			!clzException(instr.second) &&
++			!slotNumException(instr.second)
+ 		)
+ 			reserved.emplace(name);
+ 	}
+ 	reserved += std::vector<std::string>{
+ 		"linkersymbol",
+ 		"datasize",
+ 		"dataoffset",
+ 		"datacopy",
+ 		"setimmutable",
+ 		"loadimmutable",
+ 	};
+ 
+ 	return reserved;
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8038","gap_exists":true,"gap_type":["input semantics","attack surface","configuration"],"commit_induced":"YES","maintenance_needed":true,"confidence":99,"affected_functions":["ProtoConverter::visit(NullaryOp const&)","ProtoConverter::evmVersionMapping(Program_Version const&)","EVMVersion::hasOpcode(Instruction) const","TypeChecker::visit(MemberAccess const&)","ExpressionCompiler::visit(MemberAccess const&)","IRGeneratorForStatements::endVisit(MemberAccess const&)","AsmAnalyzer::validateInstructions(evmasm::Instruction, SourceLocation const&)"],"reason":"S1 introduces the Amsterdam-gated SLOTNUM opcode, the Yul builtin slotnum(), and Solidity block.slotnum, but H0 cannot generate that new operation. H0 can select Program::AMSTERDAM through ProtoConverter::evmVersionMapping(), yet ProtoConverter::visit(NullaryOp const&) has no SLOTNUM case, so fuzz input cannot directly exercise the newly added opcode parsing, version validation, code generation, or block-member handling. This gap did not exist in S0 because SLOTNUM and block.slotnum were introduced by S1.","evidence":["Instruction::SLOTNUM = 0x4b is newly declared in Instruction.h and registered as \"SLOTNUM\" in c_instructions and c_instructionInfo.","EVMVersion::hasSlotNum() is newly defined as available from amsterdam(), and EVMVersion::hasOpcode() newly dispatches SLOTNUM to it.","AsmAnalyzer::validateInstructions() newly validates SLOTNUM and rejects it before Amsterdam.","MagicType::nativeMembers() newly exposes \"slotnum\", while ExpressionCompiler::visit() emits Instruction::SLOTNUM and IRGeneratorForStatements::endVisit() emits \"slotnum()\".","H0's ProtoConverter::evmVersionMapping() includes Program::AMSTERDAM, providing the required configuration selection.","H0's ProtoConverter::visit(NullaryOp const&) enumerates existing zero-argument operations through BLOBBASEFEE but contains no SLOTNUM branch and therefore cannot emit \"slotnum()\"."],"recommended_action":"Extend H0's structured input model with a SLOTNUM nullary operation and add a ProtoConverter::visit(NullaryOp const&) branch that emits slotnum() only when m_evmVersion.hasSlotNum(), otherwise substituting a dictionary token, consistent with the existing BASEFEE and BLOBBASEFEE handling."}
+tokens used
+50,417

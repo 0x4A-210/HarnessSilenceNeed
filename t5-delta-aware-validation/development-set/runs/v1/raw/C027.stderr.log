@@ -1,0 +1,844 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/delta-dev-C027-a0ceo5fp
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08ab9-6702-7423-b7db-7eb778a1578f
+--------
+user
+You are evaluating whether one production-source commit creates a fuzz-harness
+maintenance need. Use only the anonymous case below. Do not use tools, files,
+the network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+Follow this order exactly and keep one stable comparison scope throughout:
+
+1. Identify the commit's fuzz-relevant impact scope from the S0-to-S1 source
+   diff. Anchor it in concrete files, functions, states, configurations, input
+   semantics, or entry points. Do not search the rest of the project for an
+   unrelated harness omission.
+2. For that same scope, decide whether S0 + H0 has a material harness gap.
+3. For that identical scope, decide whether S1 + H0 has a material harness gap.
+4. Identify whether the commit creates a concrete new harness obligation: a
+   new entry/call, caller-supplied argument or buffer, call-order transition,
+   configuration action, compile-time enablement, or input construction that
+   H0 did not need in S0.
+5. Derive exactly one delta: NEW, AGGRAVATED, UNCHANGED, REMOVED, or NONE.
+6. Apply the fixed final rule.
+
+A harness gap concerns exposure or controllability, not the mere existence of
+changed lines. More internal code, a replacement algorithm, validation, error
+handling, a CPU fast path, or implementation state is not by itself an
+aggravation. If an existing public entry/API is omitted by the unchanged H0 on
+both sides and its caller-facing exposure requirement is unchanged, then the
+gap existed before and after: classify UNCHANGED even when the commit changes
+behavior inside that entry. Conversely, a genuinely new public entry, format,
+configuration, state protocol, or caller obligation that H0 cannot exercise is
+NEW (or AGGRAVATED when a demonstrably weaker same-scope gap already existed).
+
+AGGRAVATED requires concrete comparative evidence that S1 adds a harness action
+or reachability/control requirement absent in S0. Do not infer AGGRAVATED only
+from added LOC, a changed file, additional internal branches, or the fact that
+H0 omits the whole subsystem on both sides.
+
+Use this truth table unless concrete aggravation/removal evidence is present:
+
+- before=false, after=true  -> NEW
+- before=true,  after=true  -> UNCHANGED
+- before=true,  after=false -> REMOVED
+- before=false, after=false -> NONE
+
+Set maintenance_needed=true only if explicit_failure=true or delta_attribution
+is NEW or AGGRAVATED. Otherwise set it false. Return exactly one JSON object
+matching the schema. Give separate S0 and S1 evidence and do not collapse the
+two judgments into one narrative.
+
+--- BEGIN DEVELOPMENT CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+C027
+
+## Existing harness H0
+
+The complete project-owned harness translation unit is shown below. Framework
+main/CLI scaffolding is not expanded; directly included semantic helper files
+are shown separately under the fixed context rule.
+
+Path: `fuzz/c/std/json_fuzzer.cc`
+
+```cpp
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN json_fuzzer.c
+./a.out ../../../test/data/*.json
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__AUX__BASE
+#define WUFFS_CONFIG__MODULE__AUX__JSON
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__JSON
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+
+#define TOK_BUFFER_ARRAY_SIZE 4096
+#define STACK_SIZE (WUFFS_JSON__DECODER_DEPTH_MAX_INCL + 1)
+
+// Wuffs allows either statically or dynamically allocated work buffers. This
+// program exercises static allocation.
+#define WORK_BUFFER_ARRAY_SIZE \
+  WUFFS_JSON__DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE
+#if WORK_BUFFER_ARRAY_SIZE > 0
+uint8_t g_work_buffer_array[WORK_BUFFER_ARRAY_SIZE];
+#else
+// Not all C/C++ compilers support 0-length arrays.
+uint8_t g_work_buffer_array[1];
+#endif
+
+// Each stack element is 1 byte. The low 7 bits denote the container:
+//  - 0x01 means no container: we are at the top level.
+//  - 0x02 means a [] list.
+//  - 0x04 means a {} dictionary.
+//
+// The high 0x80 bit holds the even/odd-ness of the number of elements in that
+// container. A valid dictionary contains key-value pairs and should therefore
+// contain an even number of elements.
+typedef uint8_t stack_element;
+
+const char*  //
+fuzz_one_token(wuffs_base__token t,
+               wuffs_base__token prev_token,
+               wuffs_base__io_buffer* src,
+               size_t* ti,
+               stack_element* stack,
+               size_t* depth) {
+  uint64_t len = wuffs_base__token__length(&t);
+  if (len > 0xFFFF) {
+    return "fuzz: internal error: length too long (vs 0xFFFF)";
+  } else if (len > (src->meta.wi - *ti)) {
+    return "fuzz: internal error: length too long (vs wi - ti)";
+  }
+  *ti += len;
+
+  if ((wuffs_base__token__value_extension(&t) >= 0) &&
+      !wuffs_base__token__continued(&prev_token)) {
+    return "fuzz: internal error: extended token not after continued token";
+  }
+
+  int64_t vbc = wuffs_base__token__value_base_category(&t);
+  uint64_t vbd = wuffs_base__token__value_base_detail(&t);
+
+  switch (vbc) {
+    case WUFFS_BASE__TOKEN__VBC__STRUCTURE: {
+      bool from_consistent = false;
+      if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_NONE) {
+        from_consistent = stack[*depth] & 0x01;
+      } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_LIST) {
+        from_consistent = stack[*depth] & 0x02;
+      } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_DICT) {
+        from_consistent = stack[*depth] & 0x04;
+      }
+      if (!from_consistent) {
+        return "fuzz: internal error: inconsistent VBD__STRUCTURE__FROM_ETC";
+      }
+
+      if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__PUSH) {
+        (*depth)++;
+        if ((*depth >= STACK_SIZE) || (*depth == 0)) {
+          return "fuzz: internal error: depth too large";
+        }
+
+        if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_NONE) {
+          return "fuzz: internal error: push to the 'none' container";
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_LIST) {
+          stack[*depth] = 0x02;
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_DICT) {
+          stack[*depth] = 0x04;
+        } else {
+          return "fuzz: internal error: unrecognized VBD__STRUCTURE__TO_ETC";
+        }
+
+      } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__POP) {
+        if ((vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_DICT) &&
+            (0 != (0x80 & stack[*depth]))) {
+          return "fuzz: internal error: dictionary had an incomplete key/value "
+                 "pair";
+        }
+
+        if (*depth <= 0) {
+          return "fuzz: internal error: depth too small";
+        }
+        (*depth)--;
+
+        bool to_consistent = false;
+        if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_NONE) {
+          to_consistent = stack[*depth] & 0x01;
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_LIST) {
+          to_consistent = stack[*depth] & 0x02;
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_DICT) {
+          to_consistent = stack[*depth] & 0x04;
+        }
+        if (!to_consistent) {
+          return "fuzz: internal error: inconsistent VBD__STRUCTURE__TO_ETC";
+        }
+
+      } else {
+        return "fuzz: internal error: unrecognized VBC__STRUCTURE";
+      }
+      break;
+    }
+
+    case WUFFS_BASE__TOKEN__VBC__STRING: {
+      if (vbd & WUFFS_BASE__TOKEN__VBD__STRING__CONVERT_1_DST_1_SRC_COPY) {
+        wuffs_base__slice_u8 s =
+            wuffs_base__make_slice_u8(src->data.ptr + *ti - len, len);
+        if ((vbd & WUFFS_BASE__TOKEN__VBD__STRING__DEFINITELY_UTF_8) &&
+            (s.len != wuffs_base__utf_8__longest_valid_prefix(s.ptr, s.len))) {
+          return "fuzz: internal error: invalid UTF-8";
+        }
+        if ((vbd & WUFFS_BASE__TOKEN__VBD__STRING__DEFINITELY_ASCII) &&
+            (s.len != wuffs_base__ascii__longest_valid_prefix(s.ptr, s.len))) {
+          return "fuzz: internal error: invalid ASCII";
+        }
+      }
+      break;
+    }
+
+    case WUFFS_BASE__TOKEN__VBC__UNICODE_CODE_POINT: {
+      if ((WUFFS_BASE__UNICODE_SURROGATE__MIN_INCL <= vbd) &&
+          (vbd <= WUFFS_BASE__UNICODE_SURROGATE__MAX_INCL)) {
+        return "fuzz: internal error: invalid Unicode surrogate";
+      } else if (WUFFS_BASE__UNICODE_CODE_POINT__MAX_INCL < vbd) {
+        return "fuzz: internal error: invalid Unicode code point";
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+
+  // After a complete JSON value, update the parity (even/odd count) of the
+  // container.
+  if (!wuffs_base__token__continued(&t) &&
+      (vbc != WUFFS_BASE__TOKEN__VBC__FILLER) &&
+      ((vbc != WUFFS_BASE__TOKEN__VBC__STRUCTURE) ||
+       (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__POP))) {
+    stack[*depth] ^= 0x80;
+  }
+
+  return NULL;
+}
+
+uint64_t  //
+buffer_limit(uint64_t hash, uint64_t min, uint64_t max) {
+  hash &= 0x3F;
+  uint64_t n;
+  if (hash < 0x20) {
+    n = min + hash;
+  } else {
+    n = max - (0x3F - hash);
+  }
+  if (n < min) {
+    return min;
+  } else if (n > max) {
+    return max;
+  }
+  return n;
+}
+
+uint32_t g_quirks[] = {
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_A,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_CAPITAL_U,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_E,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_QUESTION_MARK,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_SINGLE_QUOTE,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_V,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_X_AS_CODE_POINTS,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_ZERO,
+    WUFFS_JSON__QUIRK_ALLOW_COMMENT_BLOCK,
+    WUFFS_JSON__QUIRK_ALLOW_COMMENT_LINE,
+    WUFFS_JSON__QUIRK_ALLOW_EXTRA_COMMA,
+    WUFFS_JSON__QUIRK_ALLOW_INF_NAN_NUMBERS,
+    WUFFS_JSON__QUIRK_ALLOW_LEADING_ASCII_RECORD_SEPARATOR,
+    WUFFS_JSON__QUIRK_ALLOW_LEADING_UNICODE_BYTE_ORDER_MARK,
+    WUFFS_JSON__QUIRK_ALLOW_TRAILING_FILLER,
+    WUFFS_JSON__QUIRK_JSON_POINTER_ALLOW_TILDE_N_TILDE_R_TILDE_T,
+    WUFFS_JSON__QUIRK_REPLACE_INVALID_UNICODE,
+    0,
+};
+
+void set_quirks(wuffs_json__decoder* dec, uint64_t hash) {
+  for (uint32_t i = 0; g_quirks[i]; i++) {
+    uint64_t bit = 1 << (i & 63);
+    if (hash & bit) {
+      wuffs_json__decoder__set_quirk(dec, g_quirks[i], 1);
+    }
+  }
+}
+
+const char*  //
+fuzz_complex(wuffs_base__io_buffer* full_src, uint64_t hash) {
+  uint64_t tok_limit = buffer_limit(
+      hash & 0x3F, WUFFS_JSON__DECODER_DST_TOKEN_BUFFER_LENGTH_MIN_INCL,
+      TOK_BUFFER_ARRAY_SIZE);
+  hash = wuffs_base__u64__rotate_right(hash, 6);
+
+  uint64_t src_limit = buffer_limit(
+      hash & 0x3F, WUFFS_JSON__DECODER_SRC_IO_BUFFER_LENGTH_MIN_INCL, 4096);
+  hash = wuffs_base__u64__rotate_right(hash, 6);
+
+  // ----
+
+  wuffs_json__decoder dec;
+  wuffs_base__status status = wuffs_json__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  set_quirks(&dec, hash);
+
+  wuffs_base__token tok_array[TOK_BUFFER_ARRAY_SIZE];
+  wuffs_base__token_buffer tok = ((wuffs_base__token_buffer){
+      .data = ((wuffs_base__slice_token){
+          .ptr = tok_array,
+          .len = (size_t)((tok_limit < TOK_BUFFER_ARRAY_SIZE)
+                              ? tok_limit
+                              : TOK_BUFFER_ARRAY_SIZE),
+      }),
+  });
+
+  wuffs_base__token prev_token = wuffs_base__make_token(0);
+  uint32_t no_progress_count = 0;
+
+  stack_element stack[STACK_SIZE];
+  stack[0] = 0x01;  // We start in the 'none' container.
+  size_t depth = 0;
+
+  // ----
+
+  while (true) {  // Outer loop.
+    wuffs_base__io_buffer src = make_limited_reader(*full_src, src_limit);
+
+    size_t old_tok_wi = tok.meta.wi;
+    size_t old_tok_ri = tok.meta.ri;
+    size_t old_src_wi = src.meta.wi;
+    size_t old_src_ri = src.meta.ri;
+    size_t ti = old_src_ri;
+
+    status = wuffs_json__decoder__decode_tokens(
+        &dec, &tok, &src,
+        wuffs_base__make_slice_u8(g_work_buffer_array, WORK_BUFFER_ARRAY_SIZE));
+    if ((tok.data.len < tok.meta.wi) ||  //
+        (tok.meta.wi < tok.meta.ri) ||   //
+        (tok.meta.ri != old_tok_ri)) {
+      return "fuzz: internal error: inconsistent tok indexes";
+    } else if ((src.data.len < src.meta.wi) ||  //
+               (src.meta.wi < src.meta.ri) ||   //
+               (src.meta.wi != old_src_wi)) {
+      return "fuzz: internal error: inconsistent src indexes";
+    }
+    full_src->meta.ri += src.meta.ri - old_src_ri;
+
+    if ((tok.meta.wi > old_tok_wi) || (src.meta.ri > old_src_ri) ||
+        !wuffs_base__status__is_suspension(&status)) {
+      no_progress_count = 0;
+    } else if (no_progress_count < 999) {
+      no_progress_count++;
+    } else if (!full_src->meta.closed &&
+               (status.repr == wuffs_base__suspension__short_read)) {
+      return wuffs_base__status__message(&status);
+    } else {
+      return "fuzz: internal error: no progress";
+    }
+
+    // ----
+
+    while (tok.meta.ri < tok.meta.wi) {  // Inner loop.
+      wuffs_base__token t = tok.data.ptr[tok.meta.ri++];
+      const char* z =
+          fuzz_one_token(t, prev_token, &src, &ti, &stack[0], &depth);
+      if (z != NULL) {
+        return z;
+      }
+      prev_token = t;
+    }  // Inner loop.
+
+    // ----
+
+    // Check that, starting from old_src_ri, summing the token lengths brings
+    // us to the new src.meta.ri.
+    if (ti != src.meta.ri) {
+      return "fuzz: internal error: ti != ri";
+    }
+
+    if (status.repr == NULL) {
+      break;
+
+    } else if (status.repr == wuffs_base__suspension__short_read) {
+      if (src.meta.closed) {
+        return "fuzz: internal error: short read on a closed io_reader";
+      }
+      // We don't compact full_src as it may be mmap'ed read-only.
+      continue;
+
+    } else if (status.repr == wuffs_base__suspension__short_write) {
+      wuffs_base__token_buffer__compact(&tok);
+      continue;
+    }
+
+    return wuffs_base__status__message(&status);
+  }  // Outer loop.
+
+  // ----
+
+  if (depth != 0) {
+    return "fuzz: internal error: decoded OK but final depth was not zero";
+  } else if (wuffs_base__token__continued(&prev_token)) {
+    return "fuzz: internal error: decoded OK but final token was continued";
+  }
+  return NULL;
+}
+
+const char*  //
+fuzz_simple(wuffs_base__io_buffer* full_src) {
+  wuffs_json__decoder dec;
+  wuffs_base__status status =
+      wuffs_json__decoder__initialize(&dec, sizeof dec, WUFFS_VERSION, 0);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+
+  wuffs_base__token tok_array[TOK_BUFFER_ARRAY_SIZE];
+  wuffs_base__token_buffer tok = ((wuffs_base__token_buffer){
+      .data = ((wuffs_base__slice_token){
+          .ptr = tok_array,
+          .len = TOK_BUFFER_ARRAY_SIZE,
+      }),
+  });
+
+  while (true) {
+    status = wuffs_json__decoder__decode_tokens(
+        &dec, &tok, full_src,
+        wuffs_base__make_slice_u8(g_work_buffer_array, WORK_BUFFER_ARRAY_SIZE));
+    if (status.repr == NULL) {
+      break;
+
+    } else if (status.repr == wuffs_base__suspension__short_write) {
+      tok.meta.ri = tok.meta.wi;
+      wuffs_base__token_buffer__compact(&tok);
+      continue;
+    }
+
+    return wuffs_base__status__message(&status);
+  }
+
+  return NULL;
+}
+
+#if defined(__cplusplus)
+#include <vector>
+
+class Callbacks : public wuffs_aux::DecodeJsonCallbacks {
+ public:
+  Callbacks() : m_depth(0) {}
+
+  std::string AppendNull() override { return ""; }
+
+  std::string AppendBool(bool val) override { return ""; }
+
+  std::string AppendI64(int64_t val) override { return ""; }
+
+  std::string AppendF64(double val) override { return ""; }
+
+  std::string AppendTextString(std::string&& val) override { return ""; }
+
+  std::string Push(uint32_t flags) override {
+    m_depth++;
+    return "";
+  }
+
+  std::string Pop(uint32_t flags) override {
+    m_depth--;
+    if (m_depth < 0) {
+      fprintf(stderr, "negative depth\n");
+      intentional_segfault();
+    }
+    return "";
+  }
+
+  void Done(wuffs_aux::DecodeJsonResult& result,
+            wuffs_aux::sync_io::Input& input,
+            wuffs_aux::IOBuffer& buffer) override {
+    if (result.error_message.empty()) {
+      if (m_depth != 0) {
+        fprintf(stderr, "no error message but final depth is non-zero\n");
+        intentional_segfault();
+      }
+    } else if (result.error_message.find("internal error:") !=
+               std::string::npos) {
+      fprintf(stderr, "internal errors shouldn't occur: \"%s\"\n",
+              result.error_message.c_str());
+      intentional_segfault();
+    }
+  }
+
+ private:
+  int64_t m_depth;
+};
+
+void  //
+fuzz_cpp(const uint8_t* in_ptr, size_t in_len, uint64_t hash) {
+  static const char* json_pointers[16] = {
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "/",          //
+      "/2/3/4/5",   //
+      "/k0",        //
+      "/k0/1",      //
+      "/x/y",       //
+      "/~0/~1/~n",  //
+  };
+  const char* json_pointer = json_pointers[hash & 15];
+  hash = wuffs_base__u64__rotate_right(hash, 4);
+
+  std::vector<wuffs_aux::QuirkKeyValuePair> quirks;
+  for (uint32_t i = 0; g_quirks[i]; i++) {
+    uint64_t bit = 1 << (i & 63);
+    if (hash & bit) {
+      quirks.push_back({g_quirks[i], 1});
+    }
+  }
+
+  Callbacks callbacks;
+  wuffs_aux::sync_io::MemoryInput input(in_ptr, in_len);
+  wuffs_aux::DecodeJson(
+      callbacks, input,
+      wuffs_aux::DecodeJsonArgQuirks(quirks.data(), quirks.size()),
+      wuffs_aux::DecodeJsonArgJsonPointer(json_pointer));
+}
+#endif  // defined(__cplusplus)
+
+const char*  //
+fuzz(wuffs_base__io_buffer* full_src, uint64_t hash) {
+#if defined(__cplusplus)
+  fuzz_cpp(full_src->reader_pointer(), full_src->reader_length(),
+           wuffs_base__u64__rotate_right(hash, 32));
+#endif  // defined(__cplusplus)
+
+  // Send 99.6% of inputs to fuzz_complex and the remainder to fuzz_simple. The
+  // 0xA5 constant is arbitrary but non-zero. If the hash function maps the
+  // empty input to 0, this still sends the empty input to fuzz_complex.
+  //
+  // The fuzz_simple implementation shows how easy decoding with Wuffs is when
+  // all you want is to run LLVMFuzzerTestOneInput's built-in (Wuffs API
+  // independent) checks (e.g. the ASan address sanitizer) and you don't really
+  // care what the output is, just that it doesn't crash.
+  //
+  // The fuzz_complex implementation adds many more Wuffs API specific checks
+  // (e.g. that the sum of the tokens' lengths do not exceed the input length).
+  if ((hash & 0xFF) != 0xA5) {
+    return fuzz_complex(full_src, wuffs_base__u64__rotate_right(hash, 8));
+  }
+  return fuzz_simple(full_src);
+}
+```
+
+No semantic helper beyond the generic runner is directly included.
+
+## Complete S0 -> S1 hand-written production-source diff
+
+The fixed rule includes every changed `std/**/*.wuffs` production file. It
+excludes generated release snapshots, tests, docs, examples, and commit text.
+
+```diff
+diff --git a/std/thumbhash/decode_quirks.wuffs b/std/thumbhash/decode_quirks.wuffs
+new file mode 100644
+index 00000000..f5f42875
+--- /dev/null
++++ b/std/thumbhash/decode_quirks.wuffs
+@@ -0,0 +1,26 @@
++// Copyright 2024 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
++// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
++// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
++// option. This file may not be copied, modified, or distributed
++// except according to those terms.
++//
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++// --------
++
++// Quirks are discussed in (/doc/note/quirks.md).
++//
++// The base38 encoding of "th.." is 0x19_83D8. Left shifting by 10 gives
++// 0x660F_6000.
++pri const QUIRKS_BASE : base.u32 = 0x660F_6000
++
++// --------
++
++// When this quirk is enabled, the decoder speaks just raw thumbhash, without
++// the "\xC3\xBE\xFE" magic identifier to start the file.
++//
++// Enabling this quirk matches the behavior of the original JavaScript
++// reference implementation at https://evanw.github.io/thumbhash/
++pub const QUIRK_JUST_RAW_THUMBHASH : base.u32 = 0x660F_6000 | 0x00
+diff --git a/std/thumbhash/decode_thumbhash.wuffs b/std/thumbhash/decode_thumbhash.wuffs
+index 7556ef61..487ea1cb 100644
+--- a/std/thumbhash/decode_thumbhash.wuffs
++++ b/std/thumbhash/decode_thumbhash.wuffs
+@@ -62,24 +62,26 @@ pub struct decoder? implements base.image_decoder(
+         //
+         // The A channel is not combined with L, P or Q and a_scale is out of
+         // 15, so we can keep the a_dc denominator at (15 << 42).
+         //
+         // Let LDENOM = ((63 * 31) << 14) = 0x01E8_4000.
+         //
+         // Let ADENOM = ( 15       << 14) = 0x0003_C000.
+         l_dc : base.u64,  // Fixed-point denominator is (LDENOM << 28).
+         p_dc : base.u64,  // Fixed-point denominator is (LDENOM << 28).
+         q_dc : base.u64,  // Fixed-point denominator is (LDENOM << 28).
+         a_dc : base.u64,  // Fixed-point denominator is (ADENOM << 28).
+ 
++        quirk_just_raw_thumbhash : base.bool,
++
+         l_scale : base.u8[..= 31],
+         p_scale : base.u8[..= 63],
+         q_scale : base.u8[..= 63],
+         a_scale : base.u8[..= 15],
+ 
+         // The first three fields determine lx and ly: the exclusive max of the
+         // (cx, cy) pairs indexing two-dimensional AC coefficients. The (0, 0)
+         // pair is the DC coefficient. (lx / ly) is also the image's aspect
+         // ratio, after rounding width and height to a whole number of pixels
+         // such that the longest dimension is 32.
+         //
+         // Let lminor and lmajor alias lx and ly if is_landscape is 0 (false).
+@@ -176,55 +178,63 @@ pub struct decoder? implements base.image_decoder(
+         // qac) or 14 (aac). But we round up the array sizes up to a power of 2
+         // (and bitwise-and the array indexes) to simplify bounds checking.
+         lac : array[32] base.u32,  // Fixed-point denominator is LDENOM.
+         pac : array[8] base.u32,  //  Fixed-point denominator is LDENOM.
+         qac : array[8] base.u32,  //  Fixed-point denominator is LDENOM.
+         aac : array[16] base.u32,  // Fixed-point denominator is ADENOM.
+ 
+         // 32 rows, 32 BGRA pixels per row.
+         pixels : array[32] array[128] base.u8,
+ )
+ 
+ pub func decoder.get_quirk(key: base.u32) base.u64 {
++    if (args.key == QUIRK_JUST_RAW_THUMBHASH) and this.quirk_just_raw_thumbhash {
++        return 1
++    }
+     return 0
+ }
+ 
+ pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
++    if args.key == QUIRK_JUST_RAW_THUMBHASH {
++        this.quirk_just_raw_thumbhash = args.value > 0
++        return ok
++    }
+     return base."#unsupported option"
+ }
+ 
+ pub func decoder.decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+     var status : base.status
+ 
+     while true {
+         status =? this.do_decode_image_config?(dst: args.dst, src: args.src)
+         if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+         yield? status
+     }
+ }
+ 
+ pri func decoder.do_decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+     var c32  : base.u32
+     var swap : base.u8[..= 7]
+ 
+     if this.call_sequence <> 0x00 {
+         return base."#bad call sequence"
+     }
+ 
+-    // TODO: implement QUIRK_JUST_RAW_THUMBHASH.
+-    c32 = args.src.read_u24le_as_u32?()
+-    if c32 <> '\xC3\xBE\xFE'le {
+-        return "#bad header"
++    if not this.quirk_just_raw_thumbhash {
++        c32 = args.src.read_u24le_as_u32?()
++        if c32 <> '\xC3\xBE\xFE'le {
++            return "#bad header"
++        }
+     }
+ 
+     c32 = args.src.read_u24le_as_u32?()
+     this.l_dc = (((c32 >> 0x00) & 63) as base.u64) * (31 << 42)
+     this.p_dc = ((((c32 >> 0x06) & 63) as base.u64) * (31 << 43)) ~mod- ((63 * 31) << 42)
+     this.q_dc = ((((c32 >> 0x0C) & 63) as base.u64) * (31 << 43)) ~mod- ((63 * 31) << 42)
+     this.l_scale = ((c32 >> 0x12) & 31) as base.u8
+     this.has_alpha = ((c32 >> 0x17) & 1) as base.u8
+ 
+     c32 = args.src.read_u16le_as_u32?()
+     this.l_count = ((c32 >> 0x00) & 7) as base.u8
+     this.p_scale = ((c32 >> 0x03) & 63) as base.u8
+@@ -238,29 +248,35 @@ pri func decoder.do_decode_image_config?(dst: nptr base.image_config, src: base.
+         this.h_dimension_code = swap
+     }
+ 
+     if this.is_landscape <> 0 {
+         this.lx = (7 - (2 * this.has_alpha)) as base.u32
+         this.ly = (this.l_count.max(no_less_than: 3)) as base.u32
+     } else {
+         this.lx = (this.l_count.max(no_less_than: 3)) as base.u32
+         this.ly = (7 - (2 * this.has_alpha)) as base.u32
+     }
+ 
+     this.frame_config_io_position = 8
++    assert this.frame_config_io_position >= 8
+     if this.has_alpha <> 0 {
+-        this.frame_config_io_position = 9
+         c32 = args.src.read_u8_as_u32?()
+         this.a_dc = (((c32 >> 0x00) & 15) as base.u64) << 42
+         this.a_scale = ((c32 >> 0x04) & 15) as base.u8
++        this.frame_config_io_position = 9
++        assert this.frame_config_io_position >= 8
++    }
++
++    if this.quirk_just_raw_thumbhash {
++        this.frame_config_io_position -= 3
+     }
+ 
+     this.pixfmt = base.PIXEL_FORMAT__BGRX
+     if this.has_alpha <> 0 {
+         this.pixfmt = base.PIXEL_FORMAT__BGRA_NONPREMUL
+     }
+ 
+     if args.dst <> nullptr {
+         args.dst.set!(
+                 pixfmt: this.pixfmt,
+                 pixsub: 0,
+                 width: DIMENSIONS_FROM_DIMENSION_CODES[this.w_dimension_code] as base.u32,
+```
+
+## Uniform selected declaration context
+
+This same mechanically selected S0/S1 context is supplied for every case.
+
+### S0
+
+```text
+<no matching declaration in the selected S0 source file>
+```
+
+### S1
+
+```text
+lines 2-26
+000002: //
+000003: // Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+000004: // https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+000005: // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+000006: // option. This file may not be copied, modified, or distributed
+000007: // except according to those terms.
+000008: //
+000009: // SPDX-License-Identifier: Apache-2.0 OR MIT
+000010: 
+000011: // --------
+000012: 
+000013: // Quirks are discussed in (/doc/note/quirks.md).
+000014: //
+000015: // The base38 encoding of "th.." is 0x19_83D8. Left shifting by 10 gives
+000016: // 0x660F_6000.
+000017: pri const QUIRKS_BASE : base.u32 = 0x660F_6000
+000018: 
+000019: // --------
+000020: 
+000021: // When this quirk is enabled, the decoder speaks just raw thumbhash, without
+000022: // the "\xC3\xBE\xFE" magic identifier to start the file.
+000023: //
+000024: // Enabling this quirk matches the behavior of the original JavaScript
+000025: // reference implementation at https://evanw.github.io/thumbhash/
+000026: pub const QUIRK_JUST_RAW_THUMBHASH : base.u32 = 0x660F_6000 | 0x00
+```
+
+--- END DEVELOPMENT CASE ---
+
+codex
+{"case_id":"C027","impact_scope":[{"type":"configuration_change","files":["std/thumbhash/decode_quirks.wuffs","std/thumbhash/decode_thumbhash.wuffs"],"functions":["decoder.get_quirk","decoder.set_quirk!","decoder.do_decode_image_config?"],"description":"The ThumbHash decoder gains the public QUIRK_JUST_RAW_THUMBHASH configuration, with stored per-decoder state exposed through the existing quirk API."},{"type":"input_semantic_change","files":["std/thumbhash/decode_thumbhash.wuffs"],"functions":["decoder.do_decode_image_config?"],"description":"When the new quirk is enabled, decoding accepts raw ThumbHash input without the three-byte magic identifier and adjusts frame_config_io_position accordingly."}],"gap_before":{"exists":true,"type":"same-subsystem exposure gap","evidence":["H0 exclusively initializes and drives the JSON decoder and never initializes or calls the existing ThumbHash decoder.","In S0, decoder.decode_image_config? and decoder.do_decode_image_config? already exposed ordinary magic-prefixed ThumbHash decoding, which H0 could not exercise."]},"gap_after":{"exists":true,"type":"aggravated configuration and input-semantic exposure gap","evidence":["H0 remains JSON-only and therefore still cannot exercise the ThumbHash decoder.","S1 additionally requires calling decoder.set_quirk! with QUIRK_JUST_RAW_THUMBHASH and supplying raw ThumbHash bytes without the magic prefix to reach the new behavior."]},"new_harness_obligation":{"exists":true,"description":"A harness covering this scope must newly enable QUIRK_JUST_RAW_THUMBHASH through the existing set_quirk! API and construct raw ThumbHash input lacking the three-byte magic identifier; this action and input form were not meaningful in S0.","evidence":["S0 set_quirk! returned unsupported option for all keys and do_decode_image_config? always consumed and validated the magic identifier.","S1 set_quirk! stores the new quirk state, and do_decode_image_config? conditionally skips the magic-header read and subtracts three from frame_config_io_position."]},"explicit_failure":false,"delta_attribution":"AGGRAVATED","maintenance_needed":true,"confidence":98,"reason":"The unchanged H0 already had a material same-subsystem gap because it omitted existing ThumbHash decoding. S1 concretely enlarges that gap with a new caller-controlled quirk and a newly accepted raw input form requiring an additional configuration call and different input construction, so the delta is AGGRAVATED rather than merely UNCHANGED."}
+tokens used
+23,343

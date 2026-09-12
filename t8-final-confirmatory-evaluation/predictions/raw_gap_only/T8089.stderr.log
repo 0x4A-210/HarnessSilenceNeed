@@ -1,0 +1,532 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8089-e701s3cz
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fe-3c02-7e23-ae2e-03bc144ffb5c
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8089
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `tools/codecfuzz.cpp`
+
+~~~~cpp
+#include "../src/meshoptimizer.h"
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+void fuzzDecoder(const uint8_t* data, size_t size, size_t stride, int (*decode)(void*, size_t, size_t, const unsigned char*, size_t))
+{
+	size_t count = 66; // must be divisible by 3 for decodeIndexBuffer; should be >=64 to cover large vertex blocks
+
+	void* destination = malloc(count * stride);
+	assert(destination);
+
+	int rc = decode(destination, count, stride, reinterpret_cast<const unsigned char*>(data), size);
+	(void)rc;
+
+	free(destination);
+}
+
+void fuzzRoundtrip(const uint8_t* data, size_t size, size_t stride)
+{
+	size_t count = size / stride;
+
+	size_t bound = meshopt_encodeVertexBufferBound(count, stride);
+	void* encoded = malloc(bound);
+	void* decoded = malloc(count * stride);
+	assert(encoded && decoded);
+
+	size_t res = meshopt_encodeVertexBuffer(static_cast<unsigned char*>(encoded), bound, data, count, stride);
+	assert(res <= bound);
+
+	int rc = meshopt_decodeVertexBuffer(decoded, count, stride, static_cast<unsigned char*>(encoded), res);
+	assert(rc == 0);
+
+	assert(memcmp(data, decoded, count * stride) == 0);
+
+	free(decoded);
+	free(encoded);
+}
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+	// decodeIndexBuffer supports 2 and 4-byte indices
+	fuzzDecoder(data, size, 2, meshopt_decodeIndexBuffer);
+	fuzzDecoder(data, size, 4, meshopt_decodeIndexBuffer);
+
+	// decodeIndexSequence supports 2 and 4-byte indices
+	fuzzDecoder(data, size, 2, meshopt_decodeIndexSequence);
+	fuzzDecoder(data, size, 4, meshopt_decodeIndexSequence);
+
+	// decodeVertexBuffer supports any strides divisible by 4 in 4-256 interval
+	// It's a waste of time to check all of them, so we'll just check a few with different alignment mod 16
+	fuzzDecoder(data, size, 4, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 16, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 24, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 32, meshopt_decodeVertexBuffer);
+
+	// encodeVertexBuffer/decodeVertexBuffer should roundtrip for any stride, check a few with different alignment mod 16
+	fuzzRoundtrip(data, size, 4);
+	fuzzRoundtrip(data, size, 16);
+	fuzzRoundtrip(data, size, 24);
+	fuzzRoundtrip(data, size, 32);
+
+	return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/src/vertexcodec.cpp b/src/vertexcodec.cpp
+index f06ed804..b8a67219 100644
+--- a/src/vertexcodec.cpp
++++ b/src/vertexcodec.cpp
+@@ -667,57 +667,59 @@ static void decodeDeltas1(const unsigned char* buffer, unsigned char* transposed
+ 	}
+ }
+ 
+-static const unsigned char* decodeVertexBlock(const unsigned char* data, const unsigned char* data_end, unsigned char* vertex_data, size_t vertex_count, size_t vertex_size, unsigned char last_vertex[256], int version)
++static const unsigned char* decodeVertexBlock(const unsigned char* data, const unsigned char* data_end, unsigned char* vertex_data, size_t vertex_count, size_t vertex_size, unsigned char last_vertex[256], const unsigned char* channels, int version)
+ {
+ 	assert(vertex_count > 0 && vertex_count <= kVertexBlockMaxSize);
+ 
++	(void)channels;
++
+ 	unsigned char buffer[kVertexBlockMaxSize];
+ 	unsigned char transposed[kVertexBlockSizeBytes];
+ 
+ 	size_t vertex_count_aligned = (vertex_count + kByteGroupSize - 1) & ~(kByteGroupSize - 1);
+ 	assert(vertex_count <= vertex_count_aligned);
+ 
+ 	size_t control_size = version == 0 ? 0 : vertex_size / 4;
+ 	if (size_t(data_end - data) < control_size)
+ 		return NULL;
+ 
+ 	const unsigned char* control = data;
+ 	data += control_size;
+ 
+ 	for (size_t k = 0; k < vertex_size; ++k)
+ 	{
+ 		int ctrl = version == 0 ? 0 : (control[k / 4] >> ((k % 4) * 2)) & 3;
+ 
+ 		if (ctrl == 3)
+ 		{
+ 			// literal encoding
+ 			if (size_t(data_end - data) < vertex_count)
+ 				return NULL;
+ 
+ 			memcpy(buffer, data, vertex_count);
+ 			data += vertex_count;
+ 		}
+ 		else if (ctrl == 2)
+ 		{
+ 			// zero encoding
+ 			memset(buffer, 0, vertex_count);
+ 		}
+ 		else
+ 		{
+ 			data = decodeBytes(data, data_end, buffer, vertex_count_aligned, version == 0 ? kBitsV0 : kBitsV1 + ctrl);
+ 			if (!data)
+ 				return NULL;
+ 		}
+ 
+ 		decodeDeltas1(buffer, transposed + k, vertex_count, vertex_size, last_vertex[k]);
+ 	}
+ 
+ 	memcpy(vertex_data, transposed, vertex_count * vertex_size);
+ 
+ 	memcpy(last_vertex, &transposed[vertex_size * (vertex_count - 1)], vertex_size);
+ 
+ 	return data;
+ }
+ #endif
+ 
+ #if defined(SIMD_SSE) || defined(SIMD_NEON) || defined(SIMD_WASM)
+@@ -1255,13 +1257,71 @@ inline void transpose8(__m128i& x0, __m128i& x1, __m128i& x2, __m128i& x3)
+ }
+ 
+ SIMD_TARGET
+-inline __m128i unzigzag8(__m128i v)
++inline void unzigzag8(__m128i& v)
+ {
+ 	__m128i xl = _mm_sub_epi8(_mm_setzero_si128(), _mm_and_si128(v, _mm_set1_epi8(1)));
+ 	__m128i xr = _mm_and_si128(_mm_srli_epi16(v, 1), _mm_set1_epi8(127));
+ 
+-	return _mm_xor_si128(xl, xr);
++	v = _mm_xor_si128(xl, xr);
++}
++
++SIMD_TARGET
++inline void unzigzag16(__m128i& v0, __m128i& v1)
++{
++	// 16 insn
++	__m128i i0 = _mm_unpacklo_epi8(v0, v1);
++	__m128i i1 = _mm_unpackhi_epi8(v0, v1);
++
++	__m128i l0 = _mm_sub_epi16(_mm_setzero_si128(), _mm_and_si128(i0, _mm_set1_epi16(1)));
++	__m128i r0 = _mm_xor_si128(l0, _mm_srli_epi16(i0, 1));
++
++	__m128i l1 = _mm_sub_epi16(_mm_setzero_si128(), _mm_and_si128(i1, _mm_set1_epi16(1)));
++	__m128i r1 = _mm_xor_si128(l1, _mm_srli_epi16(i1, 1));
++
++	v0 = _mm_packus_epi16(_mm_and_si128(r0, _mm_set1_epi16(0xff)), _mm_and_si128(r1, _mm_set1_epi16(0xff)));
++	v1 = _mm_packus_epi16(_mm_srli_epi16(r0, 8), _mm_srli_epi16(r1, 8));
++}
++
++SIMD_TARGET
++inline void unzigzag32(__m128i& v0, __m128i& v1, __m128i& v2, __m128i& v3)
++{
++	// v >> 1 (per byte)
++	__m128i r0 = _mm_and_si128(_mm_srli_epi16(v0, 1), _mm_set1_epi8(0x7f));
++	__m128i r1 = _mm_and_si128(_mm_srli_epi16(v1, 1), _mm_set1_epi8(0x7f));
++	__m128i r2 = _mm_and_si128(_mm_srli_epi16(v2, 1), _mm_set1_epi8(0x7f));
++	__m128i r3 = _mm_and_si128(_mm_srli_epi16(v3, 1), _mm_set1_epi8(0x7f));
++
++	// v >> 1 (carry)
++	r0 = _mm_or_si128(r0, _mm_and_si128(_mm_slli_epi16(v1, 7), _mm_set1_epi8(-0x80)));
++	r1 = _mm_or_si128(r1, _mm_and_si128(_mm_slli_epi16(v2, 7), _mm_set1_epi8(-0x80)));
++	r2 = _mm_or_si128(r2, _mm_and_si128(_mm_slli_epi16(v3, 7), _mm_set1_epi8(-0x80)));
++
++	// -(v & 1)
++	__m128i mk = _mm_sub_epi8(_mm_setzero_si128(), _mm_and_si128(v0, _mm_set1_epi8(1)));
++
++	v0 = _mm_xor_si128(r0, mk);
++	v1 = _mm_xor_si128(r1, mk);
++	v2 = _mm_xor_si128(r2, mk);
++	v3 = _mm_xor_si128(r3, mk);
++}
++
++SIMD_TARGET
++inline __m128i undelta(__m128i v, __m128i p, int channel)
++{
++	switch (channel)
++	{
++	case 0:
++		return _mm_add_epi8(v, p);
++	case 1:
++		return _mm_add_epi16(v, p);
++	case 2:
++		return _mm_add_epi32(v, p);
++	case 3:
++		return _mm_xor_si128(v, p);
++	default:
++		return v;
++	}
+ }
+ #endif
+ 
+ #ifdef SIMD_NEON
+@@ -1359,140 +1419,180 @@ static const unsigned char* decodeBytesSimd(const unsigned char* data, const uns
+ 	return data;
+ }
+ 
+-SIMD_TARGET
+-static void decodeDeltas4Simd(const unsigned char* buffer, unsigned char* transposed, size_t vertex_count_aligned, size_t vertex_size, unsigned char last_vertex[4])
++template <int Channel>
++SIMD_TARGET static void
++decodeDeltas4Simd(const unsigned char* buffer, unsigned char* transposed, size_t vertex_count_aligned, size_t vertex_size, unsigned char last_vertex[4])
+ {
+ #if defined(SIMD_SSE) || defined(SIMD_AVX)
+ #define TEMP __m128i
+ #define PREP() __m128i pi = _mm_cvtsi32_si128(*reinterpret_cast<const int*>(last_vertex))
+ #define LOAD(i) __m128i r##i = _mm_loadu_si128(reinterpret_cast<const __m128i*>(buffer + j + i * vertex_count_aligned))
+ #define GRP4(i) t0 = _mm_shuffle_epi32(r##i, 0), t1 = _mm_shuffle_epi32(r##i, 1), t2 = _mm_shuffle_epi32(r##i, 2), t3 = _mm_shuffle_epi32(r##i, 3)
+-#define FIXD(i) t##i = pi = _mm_add_epi8(pi, t##i)
++#define FIXD(i) t##i = pi = undelta(pi, t##i, Channel)
+ #define SAVE(i) *reinterpret_cast<int*>(savep) = _mm_cvtsi128_si32(t##i), savep += vertex_size
+ #endif
+ 
+ #ifdef SIMD_NEON
+ #define TEMP uint8x8_t
+ #define PREP() uint8x8_t pi = vreinterpret_u8_u32(vld1_lane_u32(reinterpret_cast<uint32_t*>(last_vertex), vdup_n_u32(0), 0))
+ #define LOAD(i) uint8x16_t r##i = vld1q_u8(buffer + j + i * vertex_count_aligned)
+ #define GRP4(i) t0 = vget_low_u8(r##i), t1 = vreinterpret_u8_u32(vdup_lane_u32(vreinterpret_u32_u8(t0), 1)), t2 = vget_high_u8(r##i), t3 = vreinterpret_u8_u32(vdup_lane_u32(vreinterpret_u32_u8(t2), 1))
+ #define FIXD(i) t##i = pi = vadd_u8(pi, t##i)
+ #define SAVE(i) vst1_lane_u32(reinterpret_cast<uint32_t*>(savep), vreinterpret_u32_u8(t##i), 0), savep += vertex_size
+ #endif
+ 
+ #ifdef SIMD_WASM
+ #define TEMP v128_t
+ #define PREP() v128_t pi = wasm_v128_load(last_vertex)
+ #define LOAD(i) v128_t r##i = wasm_v128_load(buffer + j + i * vertex_count_aligned)
+ #define GRP4(i) t0 = wasmx_splat_v32x4(r##i, 0), t1 = wasmx_splat_v32x4(r##i, 1), t2 = wasmx_splat_v32x4(r##i, 2), t3 = wasmx_splat_v32x4(r##i, 3)
+ #define FIXD(i) t##i = pi = wasm_i8x16_add(pi, t##i)
+ #define SAVE(i) *reinterpret_cast<int*>(savep) = wasm_i32x4_extract_lane(t##i, 0), savep += vertex_size
+ #endif
+ 
+ 	PREP();
+ 
+ 	unsigned char* savep = transposed;
+ 
+ 	for (size_t j = 0; j < vertex_count_aligned; j += 16)
+ 	{
+ 		LOAD(0);
+ 		LOAD(1);
+ 		LOAD(2);
+ 		LOAD(3);
+ 
++#ifdef SIMD_SSE
++		switch (Channel)
++		{
++		case 0:
++			unzigzag8(r0);
++			unzigzag8(r1);
++			unzigzag8(r2);
++			unzigzag8(r3);
++			break;
++		case 1:
++			unzigzag16(r0, r1);
++			unzigzag16(r2, r3);
++			break;
++		case 2:
++			unzigzag32(r0, r1, r2, r3);
++			break;
++		default:;
++		}
++#else
++		// no channel support atm
+ 		r0 = unzigzag8(r0);
+ 		r1 = unzigzag8(r1);
+ 		r2 = unzigzag8(r2);
+ 		r3 = unzigzag8(r3);
++#endif
+ 
+ 		transpose8(r0, r1, r2, r3);
+ 
+ 		TEMP t0, t1, t2, t3;
+ 
+ 		GRP4(0);
+ 		FIXD(0), FIXD(1), FIXD(2), FIXD(3);
+ 		SAVE(0), SAVE(1), SAVE(2), SAVE(3);
+ 
+ 		GRP4(1);
+ 		FIXD(0), FIXD(1), FIXD(2), FIXD(3);
+ 		SAVE(0), SAVE(1), SAVE(2), SAVE(3);
+ 
+ 		GRP4(2);
+ 		FIXD(0), FIXD(1), FIXD(2), FIXD(3);
+ 		SAVE(0), SAVE(1), SAVE(2), SAVE(3);
+ 
+ 		GRP4(3);
+ 		FIXD(0), FIXD(1), FIXD(2), FIXD(3);
+ 		SAVE(0), SAVE(1), SAVE(2), SAVE(3);
+ 
+ #undef TEMP
+ #undef PREP
+ #undef LOAD
+ #undef GRP4
+ #undef FIXD
+ #undef SAVE
+ 	}
+ }
+ 
+ SIMD_TARGET
+-static const unsigned char* decodeVertexBlockSimd(const unsigned char* data, const unsigned char* data_end, unsigned char* vertex_data, size_t vertex_count, size_t vertex_size, unsigned char last_vertex[256], int version)
++static const unsigned char* decodeVertexBlockSimd(const unsigned char* data, const unsigned char* data_end, unsigned char* vertex_data, size_t vertex_count, size_t vertex_size, unsigned char last_vertex[256], const unsigned char* channels, int version)
+ {
+ 	assert(vertex_count > 0 && vertex_count <= kVertexBlockMaxSize);
+ 
+ 	unsigned char buffer[kVertexBlockMaxSize * 4];
+ 	unsigned char transposed[kVertexBlockSizeBytes];
+ 
+ 	size_t vertex_count_aligned = (vertex_count + kByteGroupSize - 1) & ~(kByteGroupSize - 1);
+ 
+ 	size_t control_size = version == 0 ? 0 : vertex_size / 4;
+ 	if (size_t(data_end - data) < control_size)
+ 		return NULL;
+ 
+ 	const unsigned char* control = data;
+ 	data += control_size;
+ 
+ 	for (size_t k = 0; k < vertex_size; k += 4)
+ 	{
+ 		unsigned char ctrl_byte = version == 0 ? 0 : control[k / 4];
+ 
+ 		for (size_t j = 0; j < 4; ++j)
+ 		{
+ 			int ctrl = (ctrl_byte >> (j * 2)) & 3;
+ 
+ 			if (ctrl == 3)
+ 			{
+ 				// literal encoding; safe to over-copy due to tail
+ 				if (size_t(data_end - data) < vertex_count_aligned)
+ 					return NULL;
+ 
+ 				memcpy(buffer + j * vertex_count_aligned, data, vertex_count_aligned);
+ 				data += vertex_count;
+ 			}
+ 			else if (ctrl == 2)
+ 			{
+ 				// zero encoding
+ 				memset(buffer + j * vertex_count_aligned, 0, vertex_count_aligned);
+ 			}
+ 			else
+ 			{
+ 				// for v0, headers are mapped to 0..3; for v1, headers are mapped to 4..8
+ 				int hshift = version == 0 ? 0 : 4 + ctrl;
+ 
+ 				data = decodeBytesSimd(data, data_end, buffer + j * vertex_count_aligned, vertex_count_aligned, hshift);
+ 				if (!data)
+ 					return NULL;
+ 			}
+ 		}
+ 
+-		decodeDeltas4Simd(buffer, transposed + k, vertex_count_aligned, vertex_size, last_vertex + k);
++		int channel = version == 0 ? 0 : channels[k / 4];
++
++		switch (channel)
++		{
++		case 0:
++			decodeDeltas4Simd<0>(buffer, transposed + k, vertex_count_aligned, vertex_size, last_vertex + k);
++			break;
++		case 1:
++			decodeDeltas4Simd<1>(buffer, transposed + k, vertex_count_aligned, vertex_size, last_vertex + k);
++			break;
++		case 2:
++			decodeDeltas4Simd<2>(buffer, transposed + k, vertex_count_aligned, vertex_size, last_vertex + k);
++			break;
++		case 3:
++			decodeDeltas4Simd<3>(buffer, transposed + k, vertex_count_aligned, vertex_size, last_vertex + k);
++			break;
++		default:
++			return NULL;
++		}
+ 	}
+ 
+ 	memcpy(vertex_data, transposed, vertex_count * vertex_size);
+ 
+ 	memcpy(last_vertex, &transposed[vertex_size * (vertex_count - 1)], vertex_size);
+ 
+ 	return data;
+ }
+ #endif
+ 
+ #if defined(SIMD_SSE) && defined(SIMD_FALLBACK)
+@@ -1655,78 +1755,80 @@ void meshopt_encodeVertexVersion(int version)
+ int meshopt_decodeVertexBuffer(void* destination, size_t vertex_count, size_t vertex_size, const unsigned char* buffer, size_t buffer_size)
+ {
+ 	using namespace meshopt;
+ 
+ 	assert(vertex_size > 0 && vertex_size <= 256);
+ 	assert(vertex_size % 4 == 0);
+ 
+-	const unsigned char* (*decode)(const unsigned char*, const unsigned char*, unsigned char*, size_t, size_t, unsigned char[256], int) = NULL;
++	const unsigned char* (*decode)(const unsigned char*, const unsigned char*, unsigned char*, size_t, size_t, unsigned char[256], const unsigned char*, int) = NULL;
+ 
+ #if defined(SIMD_SSE) && defined(SIMD_FALLBACK)
+ 	decode = (cpuid & (1 << 9)) ? decodeVertexBlockSimd : decodeVertexBlock;
+ #elif defined(SIMD_SSE) || defined(SIMD_AVX) || defined(SIMD_NEON) || defined(SIMD_WASM)
+ 	decode = decodeVertexBlockSimd;
+ #else
+ 	decode = decodeVertexBlock;
+ #endif
+ 
+ #if defined(SIMD_SSE) || defined(SIMD_NEON) || defined(SIMD_WASM)
+ 	assert(gDecodeBytesGroupInitialized);
+ 	(void)gDecodeBytesGroupInitialized;
+ #endif
+ 
+ 	unsigned char* vertex_data = static_cast<unsigned char*>(destination);
+ 
+ 	const unsigned char* data = buffer;
+ 	const unsigned char* data_end = buffer + buffer_size;
+ 
+ 	if (size_t(data_end - data) < 1)
+ 		return -2;
+ 
+ 	unsigned char data_header = *data++;
+ 
+ 	if ((data_header & 0xf0) != kVertexHeader)
+ 		return -1;
+ 
+ 	int version = data_header & 0x0f;
+ 	if (version > 0 && version != 0xe)
+ 		return -1;
+ 
+ 	size_t tail_size = vertex_size + (version == 0 ? 0 : vertex_size / 4);
+ 	size_t tail_size_pad = tail_size < kTailMinSize ? kTailMinSize : tail_size;
+ 
+ 	if (size_t(data_end - data) < tail_size_pad)
+ 		return -2;
+ 
+ 	const unsigned char* tail = data_end - tail_size;
+ 
+ 	unsigned char last_vertex[256];
+ 	memcpy(last_vertex, tail, vertex_size);
+ 
++	const unsigned char* channels = version == 0 ? NULL : tail + vertex_size;
++
+ 	size_t vertex_block_size = getVertexBlockSize(vertex_size);
+ 
+ 	size_t vertex_offset = 0;
+ 
+ 	while (vertex_offset < vertex_count)
+ 	{
+ 		size_t block_size = (vertex_offset + vertex_block_size < vertex_count) ? vertex_block_size : vertex_count - vertex_offset;
+ 
+-		data = decode(data, data_end, vertex_data + vertex_offset * vertex_size, block_size, vertex_size, last_vertex, version);
++		data = decode(data, data_end, vertex_data + vertex_offset * vertex_size, block_size, vertex_size, last_vertex, channels, version);
+ 		if (!data)
+ 			return -2;
+ 
+ 		vertex_offset += block_size;
+ 	}
+ 
+ 	if (size_t(data_end - data) != tail_size_pad)
+ 		return -3;
+ 
+ 	return 0;
+ }
+ 
+ #undef SIMD_NEON
+ #undef SIMD_SSE
+ #undef SIMD_AVX
+ #undef SIMD_WASM
+ #undef SIMD_FALLBACK
+ #undef SIMD_TARGET
+ #undef SIMD_LATENCYOPT
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8089","gap_exists":true,"gap_type":["API protocol","input semantics","configuration-dependent behavior","semantic oracle"],"confidence":96,"affected_functions":["meshopt_decodeVertexBuffer","decodeVertexBlock","decodeVertexBlockSimd","decodeDeltas4Simd","unzigzag16","unzigzag32","undelta"],"reason":"H0 sends arbitrary bytes to meshopt_decodeVertexBuffer, so it can reach version 0xe parsing, but fuzzDecoder discards rc and never checks decoded values. The changed version-0xe channel semantics can therefore produce silent decoding corruption without failing the harness. H0's roundtrip path does not call the visible meshopt_encodeVertexVersion configuration API, so it does not intentionally generate and verify version-0xe streams. It also provides no differential coverage for the configuration-dependent implementations: decodeVertexBlock explicitly ignores channels, while decodeVertexBlockSimd selects channel-specific decodeDeltas4Simd<0..3> behavior.","evidence":["meshopt_decodeVertexBuffer derives version from data_header and accepts version 0xe, then reads channels from tail + vertex_size.","decodeVertexBlock contains (void)channels, whereas decodeVertexBlockSimd reads channels[k / 4] and dispatches cases 0, 1, 2, and 3.","The new unzigzag16, unzigzag32, and undelta paths alter decoded output semantics and need a correctness oracle, not merely crash detection.","H0's fuzzDecoder invokes decode and then only executes (void)rc; it never validates destination.","H0's fuzzRoundtrip calls meshopt_encodeVertexBuffer directly and contains no call to meshopt_encodeVertexVersion.","H0 tests only count 66, so it also does not deliberately exercise channel prediction across multiple vertex blocks."],"recommended_action":"Add a version-0xe roundtrip target that configures meshopt_encodeVertexVersion, generates valid streams covering channel values 0 through 3 across several stride/channel layouts and multiple vertex blocks, and asserts exact decoded equality. Also run or differentially compare scalar and supported SIMD configurations so channel-dependent output mismatches are detected."}
+tokens used
+10,001

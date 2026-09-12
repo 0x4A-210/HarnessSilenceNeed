@@ -1,0 +1,965 @@
+PROJECT libarchive
+COMMIT 7b543b13d813e529364c7b70ae204ce7c0eddfc3
+PARENT f079aadc03aae8647db50536ca43e1ca75fc4775
+SUBJECT Implement support for reading from multiple data objects as one large stream. This enables support for reading archives split using the split utility.
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/libarchive/archive.h b/libarchive/archive.h
+index e28037b6..48b5d546 100644
+--- a/libarchive/archive.h
++++ b/libarchive/archive.h
+@@ -194,6 +194,13 @@ typedef int	archive_open_callback(struct archive *, void *_client_data);
+ 
+ typedef int	archive_close_callback(struct archive *, void *_client_data);
+ 
++/* Switches from one client data object to the next/prev client data object.
++ * This is useful for reading from different data blocks such as a set of files
++ * that make up one large file.
++ */
++typedef int archive_switch_callback(struct archive *, void *_client_data1,
++			    void *_client_data2);
++
+ /*
+  * Codes to identify various stream filters.
+  */
+@@ -354,8 +361,23 @@ __LA_DECL int archive_read_set_skip_callback(struct archive *,
+     archive_skip_callback *);
+ __LA_DECL int archive_read_set_close_callback(struct archive *,
+     archive_close_callback *);
+-/* The callback data is provided to all of the callbacks above. */
++/* Callback used to switch between one data object to the next */
++__LA_DECL int archive_read_set_switch_callback(struct archive *,
++    archive_switch_callback *);
++
++/* This sets the first data object. */
+ __LA_DECL int archive_read_set_callback_data(struct archive *, void *);
++/* This sets data object at specified index */
++__LA_DECL int archive_read_set_callback_data2(struct archive *, void *,
++    unsigned int);
++/* This adds a data object at the specified index. */
++__LA_DECL int archive_read_add_callback_data(struct archive *, void *,
++    unsigned int);
++/* This appends a data object to the end of list */
++__LA_DECL int archive_read_append_callback_data(struct archive *, void *);
++/* This prepends a data object to the beginning of list */
++__LA_DECL int archive_read_prepend_callback_data(struct archive *, void *);
++
+ /* Opening freezes the callbacks. */
+ __LA_DECL int archive_read_open1(struct archive *);
+ 
+@@ -375,6 +397,10 @@ __LA_DECL int archive_read_open2(struct archive *, void *_client_data,
+ /* Use this if you know the filename.  Note: NULL indicates stdin. */
+ __LA_DECL int archive_read_open_filename(struct archive *,
+ 		     const char *_filename, size_t _block_size);
++/* Use this for reading multivolume files by filenames.
++ * NOTE: Must be NULL terminated. Sorting is NOT done. */
++__LA_DECL int archive_read_open_filenames(struct archive *,
++		     const char **_filenames, size_t _block_size);
+ __LA_DECL int archive_read_open_filename_w(struct archive *,
+ 		     const wchar_t *_filename, size_t _block_size);
+ /* archive_read_open_file() is a deprecated synonym for ..._open_filename(). */
+diff --git a/libarchive/archive_read.c b/libarchive/archive_read.c
+index e99906f8..502d7f45 100644
+--- a/libarchive/archive_read.c
++++ b/libarchive/archive_read.c
+@@ -241,14 +241,64 @@ client_seek_proxy(struct archive_read_filter *self, int64_t offset, int whence)
+ static int
+ client_close_proxy(struct archive_read_filter *self)
+ {
+-	int r = ARCHIVE_OK;
++	int r = ARCHIVE_OK, r2;
++	unsigned int i;
++
++	if (self->archive->client.closer == NULL)
++		return (r);
++	for (i = 0; i < self->archive->client.nodes; i++)
++	{
++		r2 = (self->archive->client.closer)
++			((struct archive *)self->archive,
++				self->archive->client.dataset[i].data);
++		if (r > r2)
++			r = r2;
++	}
++	return (r);
++}
+ 
+-	if (self->archive->client.closer != NULL)
+-		r = (self->archive->client.closer)((struct archive *)self->archive,
++static int
++client_open_proxy(struct archive_read_filter *self)
++{
++  int r = ARCHIVE_OK;
++	if (self->archive->client.opener != NULL)
++		r = (self->archive->client.opener)((struct archive *)self->archive,
+ 		    self->data);
+ 	return (r);
+ }
+ 
++static int
++client_switch_proxy(struct archive_read_filter *self, unsigned int iindex)
++{
++  int r1 = ARCHIVE_OK, r2 = ARCHIVE_OK;
++	void *data2 = NULL;
++
++	/* Don't do anything if already in the specified data node */
++	if (self->archive->client.cursor == iindex)
++		return (ARCHIVE_OK);
++
++	self->archive->client.cursor = iindex;
++	data2 = self->archive->client.dataset[self->archive->client.cursor].data;
++	if (self->archive->client.switcher != NULL)
++	{
++		r1 = r2 = (self->archive->client.switcher)
++			((struct archive *)self->archive, self->data, data2);
++		self->data = data2;
++	}
++	else
++	{
++		/* Attempt to call close and open instead */
++		if (self->archive->client.closer != NULL)
++			r1 = (self->archive->client.closer)
++				((struct archive *)self->archive, self->data);
++		self->data = data2;
++		if (self->archive->client.opener != NULL)
++			r2 = (self->archive->client.opener)
++				((struct archive *)self->archive, self->data);
++	}
++	return (r1 < r2) ? r1 : r2;
++}
++
+ int
+ archive_read_set_open_callback(struct archive *_a,
+     archive_open_callback *client_opener)
+@@ -304,22 +354,102 @@ archive_read_set_close_callback(struct archive *_a,
+ 	return ARCHIVE_OK;
+ }
+ 
++int
++archive_read_set_switch_callback(struct archive *_a,
++    archive_switch_callback *client_switcher)
++{
++	struct archive_read *a = (struct archive_read *)_a;
++	archive_check_magic(_a, ARCHIVE_READ_MAGIC, ARCHIVE_STATE_NEW,
++	    "archive_read_set_switch_callback");
++	a->client.switcher = client_switcher;
++	return ARCHIVE_OK;
++}
++
+ int
+ archive_read_set_callback_data(struct archive *_a, void *client_data)
++{
++	return archive_read_set_callback_data2(_a, client_data, 0);
++}
++
++int
++archive_read_set_callback_data2(struct archive *_a, void *client_data,
++    unsigned int iindex)
+ {
+ 	struct archive_read *a = (struct archive_read *)_a;
+ 	archive_check_magic(_a, ARCHIVE_READ_MAGIC, ARCHIVE_STATE_NEW,
+-	    "archive_read_set_callback_data");
+-	a->client.data = client_data;
++	    "archive_read_set_callback_data2");
++
++	if (a->client.nodes == 0)
++	{
++		a->client.dataset =
++			(struct archive_read_data_node *)calloc(1, sizeof(*a->client.dataset));
++		if (a->client.dataset == NULL)
++		{
++			archive_set_error(&a->archive, ENOMEM,
++				"No memory.");
++			return ARCHIVE_FATAL;
++		}
++		a->client.nodes = 1;
++	}
++
++	if (iindex > a->client.nodes - 1)
++	{
++		archive_set_error(&a->archive, EINVAL,
++			"Invalid index specified.");
++		return ARCHIVE_FATAL;
++	}
++	a->client.dataset[iindex].data = client_data;
++	return ARCHIVE_OK;
++}
++
++int
++archive_read_add_callback_data(struct archive *_a, void *client_data,
++    unsigned int iindex)
++{
++	struct archive_read *a = (struct archive_read *)_a;
++	unsigned int i;
++	archive_check_magic(_a, ARCHIVE_READ_MAGIC, ARCHIVE_STATE_NEW,
++	    "archive_read_add_callback_data");
++	if (iindex > a->client.nodes)
++	{
++		archive_set_error(&a->archive, EINVAL,
++			"Invalid index specified.");
++		return ARCHIVE_FATAL;
++	}
++	if ((a->client.dataset =
++		(struct archive_read_data_node *)realloc(a->client.dataset,
++			sizeof(*a->client.dataset) * (++(a->client.nodes)))) == NULL)
++	{
++		archive_set_error(&a->archive, ENOMEM,
++			"No memory.");
++		return ARCHIVE_FATAL;
++	}
++	for (i = a->client.nodes - 1; i > iindex && i > 0; i--)
++		a->client.dataset[i].data = a->client.dataset[i-1].data;
++	a->client.dataset[iindex].data = client_data;
+ 	return ARCHIVE_OK;
+ }
+ 
++int
++archive_read_append_callback_data(struct archive *_a, void *client_data)
++{
++	struct archive_read *a = (struct archive_read *)_a;
++	return archive_read_add_callback_data(_a, client_data, a->client.nodes);
++}
++
++int
++archive_read_prepend_callback_data(struct archive *_a, void *client_data)
++{
++	return archive_read_add_callback_data(_a, client_data, 0);
++}
++
+ int
+ archive_read_open1(struct archive *_a)
+ {
+ 	struct archive_read *a = (struct archive_read *)_a;
+ 	struct archive_read_filter *filter;
+ 	int slot, e;
++	unsigned int i;
+ 
+ 	archive_check_magic(_a, ARCHIVE_READ_MAGIC, ARCHIVE_STATE_NEW,
+ 	    "archive_read_open");
+@@ -334,11 +464,14 @@ archive_read_open1(struct archive *_a)
+ 
+ 	/* Open data source. */
+ 	if (a->client.opener != NULL) {
+-		e =(a->client.opener)(&a->archive, a->client.data);
++		e =(a->client.opener)(&a->archive, a->client.dataset[0].data);
+ 		if (e != 0) {
+ 			/* If the open failed, call the closer to clean up. */
+ 			if (a->client.closer)
+-				(a->client.closer)(&a->archive, a->client.data);
++			{
++				for (i = 0; i < a->client.nodes; i++)
++					(a->client.closer)(&a->archive, a->client.dataset[i].data);
++			}
+ 			return (e);
+ 		}
+ 	}
+@@ -349,11 +482,13 @@ archive_read_open1(struct archive *_a)
+ 	filter->bidder = NULL;
+ 	filter->upstream = NULL;
+ 	filter->archive = a;
+-	filter->data = a->client.data;
++	filter->data = a->client.dataset[0].data;
++	filter->open = client_open_proxy;
+ 	filter->read = client_read_proxy;
+ 	filter->skip = client_skip_proxy;
+ 	filter->seek = client_seek_proxy;
+ 	filter->close = client_close_proxy;
++	filter->sswitch = client_switch_proxy;
+ 	filter->name = "none";
+ 	filter->code = ARCHIVE_COMPRESSION_NONE;
+ 	a->filter = filter;
+@@ -374,6 +509,9 @@ archive_read_open1(struct archive *_a)
+ 	a->format = &(a->formats[slot]);
+ 
+ 	a->archive.state = ARCHIVE_STATE_HEADER;
++
++	/* Ensure libarchive starts from the first node in a multivolume set */
++	client_switch_proxy(a->filter, 0);
+ 	return (e);
+ }
+ 
+@@ -846,6 +984,7 @@ _archive_read_free(struct archive *_a)
+ 		archive_entry_free(a->entry);
+ 	a->archive.magic = 0;
+ 	__archive_clean(&a->archive);
++	free(a->client.dataset);
+ 	free(a);
+ 	return (r);
+ }
+@@ -1094,7 +1233,15 @@ __archive_read_filter_ahead(struct archive_read_filter *filter,
+ 					*avail = ARCHIVE_FATAL;
+ 				return (NULL);
+ 			}
+-			if (bytes_read == 0) {	/* Premature end-of-file. */
++			if (bytes_read == 0) {
++				/* Check for another client object first */
++				if (filter->archive->client.cursor != filter->archive->client.nodes - 1)
++				{
++					if (client_switch_proxy(filter,
++						filter->archive->client.cursor + 1) == (ARCHIVE_OK))
++						continue;
++				}
++				/* Premature end-of-file. */
+ 				filter->client_total = filter->client_avail = 0;
+ 				filter->client_next = filter->client_buff = NULL;
+ 				filter->end_of_file = 1;
+@@ -1274,6 +1421,12 @@ advance_file_pointer(struct archive_read_filter *filter, int64_t request)
+ 		}
+ 
+ 		if (bytes_read == 0) {
++			if (filter->archive->client.cursor != filter->archive->client.nodes - 1)
++			{
++				if (client_switch_proxy(filter,
++					filter->archive->client.cursor + 1) == (ARCHIVE_OK))
++					continue;
++			}
+ 			filter->client_buff = NULL;
+ 			filter->end_of_file = 1;
+ 			return (total_bytes_skipped);
+diff --git a/libarchive/archive_read_open_filename.c b/libarchive/archive_read_open_filename.c
+index 69c44ea7..9b65fec4 100644
+--- a/libarchive/archive_read_open_filename.c
++++ b/libarchive/archive_read_open_filename.c
+@@ -79,9 +79,10 @@ struct read_file_data {
+ 	} filename; /* Must be last! */
+ };
+ 
++static int	file_open(struct archive *, void *);
+ static int	file_close(struct archive *, void *);
+-static int	file_open_filename(struct archive *, enum fnt_e, const void *,
+-		    size_t);
++static int file_close2(struct archive *, void *);
++static int file_switch(struct archive *, void *, void *);
+ static ssize_t	file_read(struct archive *, void *, const void **buff);
+ static int64_t	file_seek(struct archive *, void *, int64_t request, int);
+ static int64_t	file_skip(struct archive *, void *, int64_t request);
+@@ -98,26 +99,73 @@ int
+ archive_read_open_filename(struct archive *a, const char *filename,
+     size_t block_size)
+ {
+-	enum fnt_e filename_type;
++	const char *filenames[2] = { filename, NULL };
++	return archive_read_open_filenames(a, filenames, block_size);
++}
++
++int
++archive_read_open_filenames(struct archive *a, const char **filenames,
++    size_t block_size)
++{
++	struct read_file_data *mine;
++	const char *filename = NULL;
++	if (filenames)
++		filename = *(filenames++);
+ 
+-	if (filename == NULL || filename[0] == '\0') {
+-		filename_type = FNT_STDIN;
+-	} else
+-		filename_type = FNT_MBS;
+-	return (file_open_filename(a, filename_type, filename, block_size));
++	archive_clear_error(a);
++	do
++	{
++		if (filename == NULL)
++			filename = "";
++		mine = (struct read_file_data *)calloc(1,
++			sizeof(*mine) + strlen(filename));
++		if (mine == NULL)
++			goto no_memory;
++		strcpy(mine->filename.m, filename);
++		mine->block_size = block_size;
++		mine->fd = -1;
++		mine->buffer = NULL;
++		mine->st_mode = mine->use_lseek = 0;
++		if (filename == NULL || filename[0] == '\0') {
++			mine->filename_type = FNT_STDIN;
++		} else
++			mine->filename_type = FNT_MBS;
++		if (archive_read_append_callback_data(a, mine) != (ARCHIVE_OK))
++			return (ARCHIVE_FATAL);
++		filename = *(filenames++);
++	} while (filename != NULL && filename[0] != '\0');
++	archive_read_set_open_callback(a, file_open);
++	archive_read_set_read_callback(a, file_read);
++	archive_read_set_skip_callback(a, file_skip);
++	archive_read_set_close_callback(a, file_close);
++	archive_read_set_switch_callback(a, file_switch);
++	archive_read_set_seek_callback(a, file_seek);
++
++	return (archive_read_open1(a));
++no_memory:
++	archive_set_error(a, ENOMEM, "No memory");
++	return (ARCHIVE_FATAL);
+ }
+ 
+ int
+ archive_read_open_filename_w(struct archive *a, const wchar_t *wfilename,
+     size_t block_size)
+ {
+-	enum fnt_e filename_type;
++	struct read_file_data *mine = (struct read_file_data *)calloc(1,
++		sizeof(*mine) + wcslen(wfilename) * sizeof(wchar_t));
++	if (!mine)
++	{
++		archive_set_error(a, ENOMEM, "No memory");
++		return (ARCHIVE_FATAL);
++	}
++	mine->fd = -1;
++	mine->block_size = block_size;
+ 
+ 	if (wfilename == NULL || wfilename[0] == L'\0') {
+-		filename_type = FNT_STDIN;
++		mine->filename_type = FNT_STDIN;
+ 	} else {
+ #if defined(_WIN32) && !defined(__CYGWIN__)
+-		filename_type = FNT_WCS;
++		mine->filename_type = FNT_WCS;
+ #else
+ 		/*
+ 		 * POSIX system does not support a wchar_t interface for
+@@ -125,7 +173,6 @@ archive_read_open_filename_w(struct archive *a, const wchar_t *wfilename,
+ 		 * filename to multi-byte one and use it.
+ 		 */
+ 		struct archive_string fn;
+-		int r;
+ 
+ 		archive_string_init(&fn);
+ 		if (archive_string_append_from_wcs(&fn, wfilename,
+@@ -140,20 +187,28 @@ archive_read_open_filename_w(struct archive *a, const wchar_t *wfilename,
+ 			archive_string_free(&fn);
+ 			return (ARCHIVE_FATAL);
+ 		}
+-		r = file_open_filename(a, FNT_MBS, fn.s, block_size);
++		mine->filename_type = FNT_MBS;
++		strcpy(mine->filename.m, fn.s);
+ 		archive_string_free(&fn);
+-		return (r);
+ #endif
+ 	}
+-	return (file_open_filename(a, filename_type, wfilename, block_size));
++	if (archive_read_append_callback_data(a, mine) != (ARCHIVE_OK))
++		return (ARCHIVE_FATAL);
++	archive_read_set_open_callback(a, file_open);
++	archive_read_set_read_callback(a, file_read);
++	archive_read_set_skip_callback(a, file_skip);
++	archive_read_set_close_callback(a, file_close);
++	archive_read_set_switch_callback(a, file_switch);
++	archive_read_set_seek_callback(a, file_seek);
++
++	return (archive_read_open1(a));
+ }
+ 
+ static int
+-file_open_filename(struct archive *a, enum fnt_e filename_type,
+-    const void *_filename, size_t block_size)
++file_open(struct archive *a, void *client_data)
+ {
+ 	struct stat st;
+-	struct read_file_data *mine;
++	struct read_file_data *mine = (struct read_file_data *)client_data;
+ 	void *buffer;
+ 	const char *filename = NULL;
+ 	const wchar_t *wfilename = NULL;
+@@ -168,7 +223,7 @@ file_open_filename(struct archive *a, enum fnt_e filename_type,
+ #endif
+ 
+ 	archive_clear_error(a);
+-	if (filename_type == FNT_STDIN) {
++	if (mine->filename_type == FNT_STDIN) {
+ 		/* We used to delegate stdin support by
+ 		 * directly calling archive_read_open_fd(a,0,block_size)
+ 		 * here, but that doesn't (and shouldn't) handle the
+@@ -183,8 +238,8 @@ file_open_filename(struct archive *a, enum fnt_e filename_type,
+ 		setmode(0, O_BINARY);
+ #endif
+ 		filename = "";
+-	} else if (filename_type == FNT_MBS) {
+-		filename = (const char *)_filename;
++	} else if (mine->filename_type == FNT_MBS) {
++		filename = mine->filename.m;
+ 		fd = open(filename, O_RDONLY | O_BINARY);
+ 		if (fd < 0) {
+ 			archive_set_error(a, errno,
+@@ -193,7 +248,7 @@ file_open_filename(struct archive *a, enum fnt_e filename_type,
+ 		}
+ 	} else {
+ #if defined(_WIN32) && !defined(__CYGWIN__)
+-		wfilename = (const wchar_t *)_filename;
++		wfilename = mine->filename.w;
+ 		fd = _wopen(wfilename, O_RDONLY | O_BINARY);
+ 		if (fd < 0 && errno == ENOENT) {
+ 			wchar_t *fullpath;
+@@ -215,7 +270,7 @@ file_open_filename(struct archive *a, enum fnt_e filename_type,
+ #endif
+ 	}
+ 	if (fstat(fd, &st) != 0) {
+-		if (filename_type == FNT_WCS)
++		if (mine->filename_type == FNT_WCS)
+ 			archive_set_error(a, errno, "Can't stat '%S'",
+ 			    wfilename);
+ 		else
+@@ -280,50 +335,32 @@ file_open_filename(struct archive *a, enum fnt_e filename_type,
+ #endif
+ 	/* TODO: Add an "is_tape_like" variable and appropriate tests. */
+ 
+-	if (filename_type == FNT_WCS)
+-		mine = (struct read_file_data *)calloc(1,
+-		    sizeof(*mine) + wcslen(wfilename) * sizeof(wchar_t));
+-	else
+-		mine = (struct read_file_data *)calloc(1,
+-		    sizeof(*mine) + strlen(filename));
+ 	/* Disk-like devices prefer power-of-two block sizes.  */
+ 	/* Use provided block_size as a guide so users have some control. */
+ 	if (is_disk_like) {
+ 		size_t new_block_size = 64 * 1024;
+-		while (new_block_size < block_size
++		while (new_block_size < mine->block_size
+ 		    && new_block_size < 64 * 1024 * 1024)
+ 			new_block_size *= 2;
+-		block_size = new_block_size;
++		mine->block_size = new_block_size;
+ 	}
+-	buffer = malloc(block_size);
++	buffer = malloc(mine->block_size);
+ 	if (mine == NULL || buffer == NULL) {
+ 		archive_set_error(a, ENOMEM, "No memory");
+ 		free(mine);
+ 		free(buffer);
+ 		return (ARCHIVE_FATAL);
+ 	}
+-	if (filename_type == FNT_WCS)
+-		wcscpy(mine->filename.w, wfilename);
+-	else
+-		strcpy(mine->filename.m, filename);
+-	mine->filename_type = filename_type;
+-	mine->block_size = block_size;
+ 	mine->buffer = buffer;
+ 	mine->fd = fd;
+ 	/* Remember mode so close can decide whether to flush. */
+ 	mine->st_mode = st.st_mode;
+ 
+ 	/* Disk-like inputs can use lseek(). */
+-	if (is_disk_like) {
+-		archive_read_set_seek_callback(a, file_seek);
++	if (is_disk_like)
+ 		mine->use_lseek = 1;
+-	}
+ 
+-	archive_read_set_read_callback(a, file_read);
+-	archive_read_set_skip_callback(a, file_skip);
+-	archive_read_set_close_callback(a, file_close);
+-	archive_read_set_callback_data(a, mine);
+-	return (archive_read_open1(a));
++	return (ARCHIVE_OK);
+ }
+ 
+ static ssize_t
+@@ -475,7 +512,7 @@ file_seek(struct archive *a, void *client_data, int64_t request, int whence)
+ }
+ 
+ static int
+-file_close(struct archive *a, void *client_data)
++file_close2(struct archive *a, void *client_data)
+ {
+ 	struct read_file_data *mine = (struct read_file_data *)client_data;
+ 
+@@ -508,6 +545,23 @@ file_close(struct archive *a, void *client_data)
+ 			close(mine->fd);
+ 	}
+ 	free(mine->buffer);
++	mine->buffer = NULL;
++	mine->fd = -1;
++	return (ARCHIVE_OK);
++}
++
++static int
++file_close(struct archive *a, void *client_data)
++{
++	struct read_file_data *mine = (struct read_file_data *)client_data;
++	file_close2(a, client_data);
+ 	free(mine);
+ 	return (ARCHIVE_OK);
+ }
++
++static int
++file_switch(struct archive *a, void *client_data1, void *client_data2)
++{
++	file_close2(a, client_data1);
++	return file_open(a, client_data2);
++}
+diff --git a/libarchive/archive_read_private.h b/libarchive/archive_read_private.h
+index 445c557f..f1153bfc 100644
+--- a/libarchive/archive_read_private.h
++++ b/libarchive/archive_read_private.h
+@@ -82,6 +82,8 @@ struct archive_read_filter {
+ 	struct archive_read_filter_bidder *bidder; /* My bidder. */
+ 	struct archive_read_filter *upstream; /* Who I read from. */
+ 	struct archive_read *archive; /* Associated archive. */
++	/* Open a block for reading */
++	int (*open)(struct archive_read_filter *self);
+ 	/* Return next block. */
+ 	ssize_t (*read)(struct archive_read_filter *, const void **);
+ 	/* Skip forward this many bytes. */
+@@ -90,6 +92,8 @@ struct archive_read_filter {
+ 	int64_t (*seek)(struct archive_read_filter *self, int64_t offset, int whence);
+ 	/* Close (just this filter) and free(self). */
+ 	int (*close)(struct archive_read_filter *self);
++	/* Function that handles switching from reading one block to the next/prev */
++	int (*sswitch)(struct archive_read_filter *self, unsigned int iindex);
+ 	/* My private data. */
+ 	void *data;
+ 
+@@ -118,13 +122,19 @@ struct archive_read_filter {
+  * transformation filters.  This will probably break the API/ABI and
+  * so should be deferred at least until libarchive 3.0.
+  */
++struct archive_read_data_node {
++	void *data;
++};
+ struct archive_read_client {
+ 	archive_open_callback	*opener;
+ 	archive_read_callback	*reader;
+ 	archive_skip_callback	*skipper;
+ 	archive_seek_callback	*seeker;
+ 	archive_close_callback	*closer;
+-	void *data;
++	archive_switch_callback *switcher;
++	unsigned int nodes;
++	unsigned int cursor;
++	struct archive_read_data_node *dataset;
+ };
+ 
+ struct archive_read {
+@@ -146,7 +156,7 @@ struct archive_read {
+ 	int64_t		  read_data_output_offset;
+ 	size_t		  read_data_remaining;
+ 
+-	/* Callbacks to open/read/write/close client archive stream. */
++	/* Callbacks to open/read/write/close client archive streams. */
+ 	struct archive_read_client client;
+ 
+ 	/* Registered filter bidders. */
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/libarchive/test/test_fuzz.c b/libarchive/test/test_fuzz.c
+index 78d941d1..d0beb94f 100644
+--- a/libarchive/test/test_fuzz.c
++++ b/libarchive/test/test_fuzz.c
+@@ -46,56 +46,195 @@ __FBSDID("$FreeBSD: head/lib/libarchive/test/test_fuzz.c 201247 2009-12-30 05:59
+ 
+ /* Because this works for any archive, we can just re-use the archives
+  * developed for other tests. */
+-static struct {
++struct files {
+ 	int uncompress; /* If 1, decompress the file before fuzzing. */
+-	const char *name;
+-} files[] = {
+-	{0, "test_fuzz_1.iso.Z"}, /* Exercise compress decompressor. */
+-	{1, "test_fuzz_1.iso.Z"},
+-	{0, "test_fuzz.cab"},
+-	{0, "test_fuzz.lzh"},
+-	{0, "test_compat_bzip2_1.tbz"}, /* Exercise bzip2 decompressor. */
+-	{1, "test_compat_bzip2_1.tbz"},
+-	{0, "test_compat_gtar_1.tar"},
+-	{0, "test_compat_gzip_1.tgz"}, /* Exercise gzip decompressor. */
+-	{0, "test_compat_gzip_2.tgz"}, /* Exercise gzip decompressor. */
+-	{0, "test_compat_tar_hardlink_1.tar"},
+-	{0, "test_compat_xz_1.txz"}, /* Exercise xz decompressor. */
+-	{0, "test_compat_zip_1.zip"},
+-	{0, "test_read_format_7zip_bzip2.7z"},
+-	{0, "test_read_format_7zip_bcj_lzma1.7z"},
+-	{0, "test_read_format_7zip_bcj_lzma2.7z"},
+-	{0, "test_read_format_7zip_bcj2_lzma1_1.7z"},
+-	{0, "test_read_format_7zip_bcj2_lzma1_2.7z"},
+-	{0, "test_read_format_7zip_bcj2_lzma2_1.7z"},
+-	{0, "test_read_format_7zip_bcj2_lzma2_2.7z"},
+-	{0, "test_read_format_7zip_copy.7z"},
+-	{0, "test_read_format_7zip_deflate.7z"},
+-	{0, "test_read_format_7zip_lzma1.7z"},
+-	{0, "test_read_format_7zip_lzma1_lzma2.7z"},
+-	{0, "test_read_format_7zip_ppmd.7z"},
+-	{0, "test_read_format_ar.ar"},
+-	{0, "test_read_format_cpio_bin_be.cpio"},
+-	{0, "test_read_format_cpio_svr4_gzip_rpm.rpm"}, /* Test RPM unwrapper */
+-	{0, "test_read_format_rar.rar"}, /* Uncompressed RAR test */
+-	{0, "test_read_format_rar_binary_data.rar"}, /* RAR file with binary data */
+-	{0, "test_read_format_rar_compress_best.rar"}, /* Best Compressed RAR test */
+-	{0, "test_read_format_rar_compress_normal.rar"}, /* Normal Compressed RAR
++	const char **names;
++};
++
++static const char *fileset1[] =
++{
++	"test_fuzz_1.iso.Z", /* Exercise compress decompressor. */
++	NULL
++};
++static const char *fileset2[] =
++{
++	"test_fuzz_1.iso.Z",
++	NULL
++};
++static const char *fileset3[] =
++{
++	"test_fuzz.cab",
++	NULL
++};
++static const char *fileset4[] =
++{
++	"test_fuzz.lzh",
++	NULL
++};
++static const char *fileset5[] =
++{
++	"test_compat_bzip2_1.tbz", /* Exercise bzip2 decompressor. */
++	NULL
++};
++static const char *fileset6[] =
++{
++	"test_compat_bzip2_1.tbz",
++	NULL
++};
++static const char *fileset7[] =
++{
++	"test_compat_gtar_1.tar",
++	NULL
++};
++static const char *fileset8[] =
++{
++	"test_compat_gzip_1.tgz", /* Exercise gzip decompressor. */
++	NULL
++};
++static const char *fileset9[] =
++{
++	"test_compat_gzip_2.tgz", /* Exercise gzip decompressor. */
++	NULL
++};
++static const char *fileset10[] =
++{
++	"test_compat_tar_hardlink_1.tar",
++	NULL
++};
++static const char *fileset11[] =
++{
++	"test_compat_xz_1.txz", /* Exercise xz decompressor. */
++	NULL
++};
++static const char *fileset12[] =
++{
++	"test_compat_zip_1.zip",
++	NULL
++};
++static const char *fileset13[] =
++{
++	"test_read_format_ar.ar",
++	NULL
++};
++static const char *fileset14[] =
++{
++	"test_read_format_cpio_bin_be.cpio",
++	NULL
++};
++static const char *fileset15[] =
++{
++	"test_read_format_cpio_svr4_gzip_rpm.rpm", /* Test RPM unwrapper */
++	NULL
++};
++static const char *fileset16[] =
++{
++	"test_read_format_rar.rar", /* Uncompressed RAR test */
++	NULL
++};
++static const char *fileset17[] =
++{
++	"test_read_format_rar_binary_data.rar", /* RAR file with binary data */
++	NULL
++};
++static const char *fileset18[] =
++{
++	"test_read_format_rar_compress_best.rar", /* Best Compressed RAR test */
++	NULL
++};
++static const char *fileset19[] =
++{
++	"test_read_format_rar_compress_normal.rar", /* Normal Compressed RAR
+ 	                                                  * test */
+-	{0, "test_read_format_rar_multi_lzss_blocks.rar"}, /* Normal Compressed Multi
+-	                                                    * LZSS blocks RAR test */
+-	{0, "test_read_format_rar_noeof.rar"}, /* RAR with no EOF header */
+-	{0, "test_read_format_rar_ppmd_lzss_conversion.rar"}, /* Best Compressed
+-	                                                       * RAR file with both
+-	                                                       * PPMd and LZSS
+-	                                                       * blocks */
+-	{0, "test_read_format_rar_sfx.exe"}, /* RAR SFX archive */
+-	{0, "test_read_format_rar_subblock.rar"}, /* RAR with subblocks */
+-	{0, "test_read_format_rar_unicode.rar"}, /* RAR with Unicode filenames */
+-	{0, "test_read_format_gtar_sparse_1_17_posix10_modified.tar"},
+-	{0, "test_read_format_mtree.mtree"},
+-	{0, "test_read_format_tar_empty_filename.tar"},
+-	{0, "test_read_format_zip.zip"},
++	NULL
++};
++static const char *fileset20[] =
++{
++	"test_read_format_rar_multi_lzss_blocks.rar", /* Normal Compressed Multi
++	                                               * LZSS blocks RAR test */
++	NULL
++};
++static const char *fileset21[] =
++{
++	"test_read_format_rar_noeof.rar", /* RAR with no EOF header */
++	NULL
++};
++static const char *fileset22[] =
++{
++	"test_read_format_rar_ppmd_lzss_conversion.rar", /* Best Compressed
++	                                                  * RAR file with both
++	                                                  * PPMd and LZSS
++	                                                  * blocks */
++	NULL
++};
++static const char *fileset23[] =
++{
++	"test_read_format_rar_subblock.rar", /* RAR with subblocks */
++	NULL
++};
++static const char *fileset24[] =
++{
++	"test_read_format_rar_unicode.rar", /* RAR with Unicode filenames */
++	NULL
++};
++static const char *fileset25[] =
++{
++	"test_read_format_gtar_sparse_1_17_posix10_modified.tar",
++	NULL
++};
++static const char *fileset26[] =
++{
++	"test_read_format_mtree.mtree",
++	NULL
++};
++static const char *fileset27[] =
++{
++	"test_read_format_tar_empty_filename.tar",
++	NULL
++};
++static const char *fileset28[] =
++{
++	"test_read_format_zip.zip",
++	NULL
++};
++static const char *fileset29[] =
++{
++	"test_read_splitted_rar_aa",
++	"test_read_splitted_rar_ab",
++	"test_read_splitted_rar_ac",
++	"test_read_splitted_rar_ad",
++	NULL
++};
++
++static const struct files filesets[] = {
++	{0, fileset1},
++	{1, fileset2},
++	{0, fileset3},
++	{0, fileset4},
++	{0, fileset5},
++	{1, fileset6},
++	{0, fileset7},
++	{0, fileset8},
++	{0, fileset9},
++	{0, fileset10},
++	{0, fileset11},
++	{0, fileset12},
++	{0, fileset13},
++	{0, fileset14},
++	{0, fileset15},
++	{0, fileset16},
++	{0, fileset17},
++	{0, fileset18},
++	{0, fileset19},
++	{0, fileset20},
++	{0, fileset21},
++	{0, fileset22},
++	{0, fileset23},
++	{0, fileset24},
++	{0, fileset25},
++	{0, fileset26},
++	{0, fileset27},
++	{0, fileset28},
++	{0, fileset29},
+ 	{1, NULL}
+ };
+ 
+@@ -106,17 +245,16 @@ DEFINE_TEST(test_fuzz)
+ 	int64_t blk_offset;
+ 	int n;
+ 
+-	for (n = 0; files[n].name != NULL; ++n) {
++	for (n = 0; filesets[n].names != NULL; ++n) {
+ 		const size_t buffsize = 30000000;
+-		const char *filename = files[n].name;
+ 		struct archive_entry *ae;
+ 		struct archive *a;
+-		char *rawimage, *image;
+-		size_t size;
++		char *rawimage = NULL, *image = NULL, *tmp = NULL;
++		size_t size, oldsize = 0;
+ 		int i, q;
+ 
+-		extract_reference_file(filename);
+-		if (files[n].uncompress) {
++		extract_reference_files(filesets[n].names);
++		if (filesets[n].uncompress) {
+ 			int r;
+ 			/* Use format_raw to decompress the data. */
+ 			assert((a = archive_read_new()) != NULL);
+@@ -124,10 +262,14 @@ DEFINE_TEST(test_fuzz)
+ 			    archive_read_support_filter_all(a));
+ 			assertEqualIntA(a, ARCHIVE_OK,
+ 			    archive_read_support_format_raw(a));
+-			r = archive_read_open_filename(a, filename, 16384);
++			r = archive_read_open_filenames(a, filesets[n].names, 16384);
+ 			if (r != ARCHIVE_OK) {
+ 				archive_read_free(a);
+-				skipping("Cannot uncompress %s", filename);
++				if (filesets[n].names[0] == NULL || filesets[n].names[1] == NULL) {
++					skipping("Cannot uncompress fileset");
++				} else {
++					skipping("Cannot uncompress %s", filesets[n].names[0]);
++				}
+ 				continue;
+ 			}
+ 			assertEqualIntA(a, ARCHIVE_OK,
+@@ -139,16 +281,29 @@ DEFINE_TEST(test_fuzz)
+ 			assertEqualInt(ARCHIVE_OK,
+ 			    archive_read_free(a));
+ 			assert(size > 0);
+-			failure("Internal buffer is not big enough for "
+-			    "uncompressed test file: %s", filename);
++			if (filesets[n].names[0] == NULL || filesets[n].names[1] == NULL) {
++				failure("Internal buffer is not big enough for "
++					"uncompressed test files");
++			} else {
++				failure("Internal buffer is not big enough for "
++					"uncompressed test file: %s", filesets[n].names[0]);
++			}
+ 			if (!assert(size < buffsize)) {
+ 				free(rawimage);
+ 				continue;
+ 			}
+ 		} else {
+-			rawimage = slurpfile(&size, filename);
+-			if (!assert(rawimage != NULL))
+-				continue;
++			for (i = 0; filesets[n].names[i] != NULL; ++i)
++			{
++				tmp = slurpfile(&size, filesets[n].names[i]);
++				rawimage = (char *)realloc(rawimage, oldsize + size);
++				memcpy(rawimage + oldsize, tmp, size);
++				oldsize += size;
++				size = oldsize;
++				free(tmp);
++				if (!assert(rawimage != NULL))
++					continue;
++			}
+ 		}
+ 		image = malloc(size);
+ 		assert(image != NULL);

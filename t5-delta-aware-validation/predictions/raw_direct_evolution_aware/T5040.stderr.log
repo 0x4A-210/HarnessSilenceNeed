@@ -1,0 +1,652 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t5-direct_evolution_aware-T5040-58fyf766
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08af2-20ae-7ae1-a4f3-87df586bf2b7
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T5040
+
+## Existing harness H0
+
+Every project-owned C/C++ path containing `fuzz` at the pre-change snapshot is shown below. Framework and build-script scaffolding are not expanded.
+
+### H0 path: `tools/clusterfuzz.cpp`
+
+~~~~cpp
+#include "../src/meshoptimizer.h"
+
+#include <float.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* buffer, size_t size)
+{
+	if (size == 0)
+		return 0;
+
+	srand(buffer[0]);
+
+	float vb[100][4];
+
+	for (int i = 0; i < 100; ++i)
+	{
+		vb[i][0] = rand() % 10;
+		vb[i][1] = rand() % 10;
+		vb[i][2] = rand() % 10;
+		vb[i][3] = rand() % 10;
+	}
+
+	unsigned int ib[999];
+	int indices = (size - 1) < 999 ? (size - 1) / 3 * 3 : 999;
+
+	for (int i = 0; i < indices; ++i)
+		ib[i] = buffer[1 + i] % 100;
+
+	meshopt_Meshlet ml[333];
+	unsigned int mv[333 * 3];
+	unsigned char mt[333 * 4];
+
+	meshopt_buildMeshlets(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 4, /* max_triangles= */ 4, 0.f);
+
+	meshopt_buildMeshletsScan(ml, mv, mt, ib, indices, 100, /* max_vertices= */ 4, /* max_triangles= */ 4);
+	meshopt_buildMeshletsScan(ml, mv, mt, ib, indices, 100, /* max_vertices= */ 4, /* max_triangles= */ 8);
+
+	meshopt_buildMeshletsFlex(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 4, /* min_triangles= */ 4, /* max_triangles= */ 8, 0.f, 2.f);
+	meshopt_buildMeshletsFlex(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 8, /* min_triangles= */ 8, /* max_triangles= */ 16, 0.f, 2.f);
+	meshopt_buildMeshletsFlex(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 16, /* min_triangles= */ 8, /* max_triangles= */ 32, 0.f, 2.f);
+	meshopt_buildMeshletsFlex(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 16, /* min_triangles= */ 16, /* max_triangles= */ 32, 0.f, 2.f);
+
+	meshopt_buildMeshletsSpatial(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 4, /* min_triangles= */ 4, /* max_triangles= */ 8, 0.f);
+	meshopt_buildMeshletsSpatial(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 8, /* min_triangles= */ 4, /* max_triangles= */ 32, 0.f);
+	meshopt_buildMeshletsSpatial(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 8, /* min_triangles= */ 8, /* max_triangles= */ 32, 0.f);
+	meshopt_buildMeshletsSpatial(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 8, /* min_triangles= */ 12, /* max_triangles= */ 32, 0.f);
+	meshopt_buildMeshletsSpatial(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 16, /* min_triangles= */ 16, /* max_triangles= */ 32, 0.f);
+	meshopt_buildMeshletsSpatial(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 16, /* min_triangles= */ 32, /* max_triangles= */ 32, 0.f);
+
+	unsigned int part[333];
+	unsigned int clsize[333];
+
+	// treat each triangle as a cluster
+	for (int i = 0; i < indices; ++i)
+		clsize[i / 3] = 3;
+
+	meshopt_partitionClusters(part, ib, indices, clsize, indices / 3, vb[0], 100, sizeof(float) * 4, /* target_group_size= */ 12);
+
+	return 0;
+}
+~~~~
+
+### H0 path: `tools/codecfuzz.cpp`
+
+~~~~cpp
+#include "../src/meshoptimizer.h"
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+void fuzzDecoder(const uint8_t* data, size_t size, size_t stride, int (*decode)(void*, size_t, size_t, const unsigned char*, size_t))
+{
+	size_t count = 66; // must be divisible by 3 for decodeIndexBuffer; should be >=64 to cover large vertex blocks
+
+	void* destination = malloc(count * stride);
+	assert(destination);
+
+	int rc = decode(destination, count, stride, reinterpret_cast<const unsigned char*>(data), size);
+	(void)rc;
+
+	free(destination);
+}
+
+void fuzzRoundtrip(const uint8_t* data, size_t size, size_t stride, int level)
+{
+	size_t count = size / stride;
+
+	size_t bound = meshopt_encodeVertexBufferBound(count, stride);
+	void* encoded = malloc(bound);
+	void* decoded = malloc(count * stride);
+	assert(encoded && decoded);
+
+	size_t res = meshopt_encodeVertexBufferLevel(static_cast<unsigned char*>(encoded), bound, data, count, stride, level, -1);
+	assert(res > 0 && res <= bound);
+
+	// encode again at the boundary to check for memory safety
+	// this should produce the same output because encoder is deterministic
+	size_t rese = meshopt_encodeVertexBufferLevel(static_cast<unsigned char*>(encoded) + bound - res, res, data, count, stride, level, -1);
+	assert(rese == res);
+
+	int rc = meshopt_decodeVertexBuffer(decoded, count, stride, static_cast<unsigned char*>(encoded) + bound - res, res);
+	assert(rc == 0);
+
+	assert(memcmp(data, decoded, count * stride) == 0);
+
+	free(decoded);
+	free(encoded);
+}
+
+size_t align(size_t value, size_t alignment)
+{
+	return (value + alignment - 1) & ~(alignment - 1);
+}
+
+void fuzzDecodeMeshlet(size_t vertex_count, size_t triangle_count, const unsigned char* data, size_t size)
+{
+	// raw decoding: allowed to write align(count, 4) elements
+	unsigned int rt[256];
+	unsigned int rv[256];
+	meshopt_decodeMeshletRaw(rv + 256 - align(vertex_count, 4), vertex_count, rt + 256 - align(triangle_count, 4), triangle_count, data, size);
+
+	// regular decoding: allowed to write align(count * size, 4) bytes
+	// with variations for 3-byte triangles and 2-byte vertex references
+	unsigned short rsv[256];
+	unsigned char rbt[256 * 3];
+
+	meshopt_decodeMeshlet(rv + 256 - vertex_count, vertex_count, 4, rt + 256 - triangle_count, triangle_count, 4, data, size);
+	meshopt_decodeMeshlet(rsv + 256 - align(vertex_count, 2), vertex_count, 2, rt + 256 - triangle_count, triangle_count, 4, data, size);
+	meshopt_decodeMeshlet(rv + 256 - vertex_count, vertex_count, 4, rbt + 256 * 3 - align(triangle_count * 3, 4), triangle_count, 3, data, size);
+	meshopt_decodeMeshlet(rsv + 256 - align(vertex_count, 2), vertex_count, 2, rbt + 256 * 3 - align(triangle_count * 3, 4), triangle_count, 3, data, size);
+}
+
+void fuzzRoundtripMeshlet(const uint8_t* data, size_t size)
+{
+	size_t triangle_count = size / 3;
+	if (triangle_count > 256)
+		triangle_count = 256;
+
+	unsigned char buf[4096];
+	size_t enc = meshopt_encodeMeshlet(buf, sizeof(buf), NULL, 0, reinterpret_cast<const unsigned char*>(data), triangle_count);
+	assert(enc > 0);
+	assert(enc <= meshopt_encodeMeshletBound(0, triangle_count));
+
+	unsigned int rt4[256];
+	int rc4 = meshopt_decodeMeshlet(static_cast<unsigned int*>(NULL), 0, rt4, triangle_count, buf, enc);
+	assert(rc4 == 0);
+
+	for (size_t i = 0; i < triangle_count; ++i)
+	{
+		unsigned char a = data[i * 3 + 0], b = data[i * 3 + 1], c = data[i * 3 + 2];
+
+		unsigned int abc = (a << 0) | (b << 8) | (c << 16);
+		unsigned int bca = (b << 0) | (c << 8) | (a << 16);
+		unsigned int cba = (c << 0) | (a << 8) | (b << 16);
+
+		unsigned int tri = rt4[i];
+
+		assert(tri == abc || tri == bca || tri == cba);
+	}
+
+	unsigned char rt3[256 * 3];
+	int rc3 = meshopt_decodeMeshlet(static_cast<unsigned int*>(NULL), 0, rt3, triangle_count, buf, enc);
+	assert(rc3 == 0);
+
+	for (size_t i = 0; i < triangle_count; ++i)
+	{
+		unsigned char a = data[i * 3 + 0], b = data[i * 3 + 1], c = data[i * 3 + 2];
+
+		unsigned int abc = (a << 0) | (b << 8) | (c << 16);
+		unsigned int bca = (b << 0) | (c << 8) | (a << 16);
+		unsigned int cba = (c << 0) | (a << 8) | (b << 16);
+
+		unsigned int tri = rt3[i * 3 + 0] | (rt3[i * 3 + 1] << 8) | (rt3[i * 3 + 2] << 16);
+
+		assert(tri == abc || tri == bca || tri == cba);
+	}
+}
+
+void fuzzRoundtripMeshletV(const uint8_t* data, size_t size)
+{
+	size_t vertex_count = size / 4;
+	if (vertex_count > 256)
+		vertex_count = 256;
+
+	unsigned char tri[4] = {0, 1, 2};
+
+	unsigned char buf[4096];
+	size_t enc = meshopt_encodeMeshlet(buf, sizeof(buf), reinterpret_cast<const uint32_t*>(data), vertex_count, tri, 1);
+	assert(enc > 0);
+	assert(enc <= meshopt_encodeMeshletBound(vertex_count, 1));
+
+	unsigned int rv4[256];
+	int rc4 = meshopt_decodeMeshlet(rv4, vertex_count, tri, 1, buf, enc);
+	assert(rc4 == 0);
+
+	for (size_t i = 0; i < vertex_count; ++i)
+		assert(rv4[i] == reinterpret_cast<const uint32_t*>(data)[i]);
+
+	unsigned short rv2[256];
+	int rc2 = meshopt_decodeMeshlet(rv2, vertex_count, tri, 1, buf, enc);
+	assert(rc2 == 0);
+
+	for (size_t i = 0; i < vertex_count; ++i)
+		assert(rv2[i] == uint16_t(reinterpret_cast<const uint32_t*>(data)[i]));
+}
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+	// decodeIndexBuffer supports 2 and 4-byte indices
+	fuzzDecoder(data, size, 2, meshopt_decodeIndexBuffer);
+	fuzzDecoder(data, size, 4, meshopt_decodeIndexBuffer);
+
+	// decodeIndexSequence supports 2 and 4-byte indices
+	fuzzDecoder(data, size, 2, meshopt_decodeIndexSequence);
+	fuzzDecoder(data, size, 4, meshopt_decodeIndexSequence);
+
+	// decodeVertexBuffer supports any strides divisible by 4 in 4-256 interval
+	// it's a waste of time to check all of them, so we'll just check a few with different alignment mod 16
+	fuzzDecoder(data, size, 4, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 16, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 24, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 32, meshopt_decodeVertexBuffer);
+
+	// encodeVertexBuffer/decodeVertexBuffer should roundtrip for any stride, check a few with different alignment mod 16
+	// this also checks memory safety properties of the encoder
+	// to conserve time, we only check one version/level combination, biased towards version 1
+	uint8_t data0 = size > 0 ? data[0] : 0;
+	int level = data0 % 5;
+
+	meshopt_encodeVertexVersion(level < 4 ? 1 : 0);
+
+	fuzzRoundtrip(data, size, 4, level);
+	fuzzRoundtrip(data, size, 16, level);
+	fuzzRoundtrip(data, size, 24, level);
+	fuzzRoundtrip(data, size, 32, level);
+
+	// validate that decodeMeshlet works on untrusted data and is memory safe within documented limits
+	if (size > 2)
+		fuzzDecodeMeshlet(data[0] + 1, data[1] + 1, reinterpret_cast<const unsigned char*>(data + 2), size - 2);
+
+	// validate that index data roundtrips in meshlet encoding modulo rotation
+	fuzzRoundtripMeshlet(data, size);
+
+	// validate that vertex data roundtrips in meshlet encoding
+	fuzzRoundtripMeshletV(data, size);
+
+	return 0;
+}
+~~~~
+
+### H0 path: `tools/simplifyfuzz.cpp`
+
+~~~~cpp
+#include "../src/meshoptimizer.h"
+
+#include <float.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* buffer, size_t size)
+{
+	if (size == 0)
+		return 0;
+
+	srand(buffer[0]);
+
+	float vb[100][4];
+
+	for (int i = 0; i < 100; ++i)
+	{
+		vb[i][0] = rand() % 10;
+		vb[i][1] = rand() % 10;
+		vb[i][2] = rand() % 10;
+		vb[i][3] = rand() % 10;
+	}
+
+	unsigned int ib[999];
+	int indices = (size - 1) < 999 ? (size - 1) / 3 * 3 : 999;
+
+	for (int i = 0; i < indices; ++i)
+		ib[i] = buffer[1 + i] % 100;
+
+	unsigned int res[999];
+
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, 1e-1f, 0, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, 0, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifyLockBorder, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifySparse, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifyPrune, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifyPermissive, NULL);
+
+	float aw = 1;
+	meshopt_simplifyWithAttributes(res, ib, indices, vb[0], 100, sizeof(float) * 4, vb[0] + 3, sizeof(float) * 4, &aw, 1, NULL, 0, FLT_MAX, 0, NULL);
+
+	// must be last, as it modifies all inputs in place
+	meshopt_simplifyWithUpdate(ib, indices, vb[0], 100, sizeof(float) * 4, vb[0] + 3, sizeof(float) * 4, &aw, 1, NULL, 0, FLT_MAX, 0, NULL);
+
+	return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed C/C++ production paths and all hunks are included. Function-context mode expands changed C/C++ function bodies; tests, examples, documentation, build files, and Harness files are excluded by the frozen rule.
+
+~~~~diff
+diff --git a/src/meshletutils.cpp b/src/meshletutils.cpp
+index 1bfe2ea..a8c38ca 100644
+--- a/src/meshletutils.cpp
++++ b/src/meshletutils.cpp
+@@ -363,147 +363,192 @@ meshopt_Bounds meshopt_computeSphereBounds(const float* positions, size_t count,
+ 	return bounds;
+ }
+ 
+-void meshopt_optimizeMeshlet(unsigned int* meshlet_vertices, unsigned char* meshlet_triangles, size_t triangle_count, size_t vertex_count)
++void meshopt_optimizeMeshletLevel(unsigned int* meshlet_vertices, size_t vertex_count, unsigned char* meshlet_triangles, size_t triangle_count, int level)
+ {
+ 	using namespace meshopt;
+ 
+ 	assert(triangle_count <= kMeshletMaxTriangles);
+ 	assert(vertex_count <= kMeshletMaxVertices);
++	assert(level >= 0 && level <= 9);
+ 
+ 	unsigned char* indices = meshlet_triangles;
+ 	unsigned int* vertices = meshlet_vertices;
+ 
+ 	// cache tracks vertex timestamps (corresponding to triangle index! all 3 vertices are added at the same time and never removed)
+ 	unsigned char cache[kMeshletMaxVertices];
+ 	memset(cache, 0, vertex_count);
+ 
+ 	// note that we start from a value that means all vertices aren't in cache
+ 	unsigned char cache_last = 128;
+ 	const unsigned char cache_cutoff = 3; // 3 triangles = ~5..9 vertices depending on reuse
+ 
++	// vertex valence is used to prioritize triangles for level>0
++	// note: we use 8-bit counters for performance; for outlier vertices the valence is incorrect but that just affects the heuristic
++	unsigned char valence[kMeshletMaxVertices];
++	memset(valence, 0, vertex_count);
++
++	for (size_t i = 0; i < triangle_count; ++i)
++	{
++		unsigned char a = indices[i * 3 + 0], b = indices[i * 3 + 1], c = indices[i * 3 + 2];
++		assert(a < vertex_count && b < vertex_count && c < vertex_count);
++
++		valence[a]++;
++		valence[b]++;
++		valence[c]++;
++	}
++
+ 	for (size_t i = 0; i < triangle_count; ++i)
+ 	{
+ 		int next = -1;
+ 		int next_score = -1;
++		int edges = 0;
+ 
+ 		for (size_t j = i; j < triangle_count; ++j)
+ 		{
+ 			unsigned char a = indices[j * 3 + 0], b = indices[j * 3 + 1], c = indices[j * 3 + 2];
+ 			assert(a < vertex_count && b < vertex_count && c < vertex_count);
+ 
+ 			// compute cache distance using unsigned 8-bit subtraction, so cache timestamp overflow is handled gracefully
+ 			unsigned char ad = (unsigned char)(cache_last - cache[a]);
+ 			unsigned char bd = (unsigned char)(cache_last - cache[b]);
+ 			unsigned char cd = (unsigned char)(cache_last - cache[c]);
+ 
+-			// we currently score purely by how many vertices are in the cache window
+-			// future heuristics for compressibility could include minimizing distance (ad+bd+cd)
+-			// however, that requires scanning the entire candidate set, making the early out below impossible
+ 			int match = (ad < cache_cutoff) + (bd < cache_cutoff) + (cd < cache_cutoff);
+-			int score = match;
+ 
+-			next = (score > next_score) ? int(j) : next;
+-			next_score = (score > next_score) ? score : next_score;
++			if (level)
++			{
++				// prefer low minimum valence
++				int vmin = valence[a] < valence[b] ? valence[a] : valence[b];
++				vmin = valence[c] < vmin ? valence[c] : vmin;
+ 
+-			// for now we settle for a first edge match, which makes the function ~linear in practice
+-			if (match >= 2)
+-				break;
++				// prefer vertices with smaller cache distance and valence to improve traversal locality
++				int score = match * 1024 + (1023 - ad - bd - cd);
++				score = score * 256 + (255 - vmin);
++
++				next = (score > next_score) ? int(j) : next;
++				next_score = (score > next_score) ? score : next_score;
++
++				// terminate after finding enough edge matches
++				if (match >= 2 && ++edges >= level)
++					break;
++			}
++			else
++			{
++				int score = match;
++
++				next = (score > next_score) ? int(j) : next;
++				next_score = (score > next_score) ? score : next_score;
++
++				// settle for a first edge match, which makes the function ~linear in practice
++				if (match >= 2)
++					break;
++			}
+ 		}
+ 
+ 		assert(next >= 0);
+ 
+ 		unsigned char a = indices[next * 3 + 0], b = indices[next * 3 + 1], c = indices[next * 3 + 2];
+ 
+ 		// shift triangles before the next one forward so that we always keep an ordered partition
+ 		// note: this could have swapped triangles [i] and [next] but that distorts the order and may skew the output sequence
+ 		memmove(indices + (i + 1) * 3, indices + i * 3, (next - i) * 3 * sizeof(unsigned char));
+ 
+ 		indices[i * 3 + 0] = a;
+ 		indices[i * 3 + 1] = b;
+ 		indices[i * 3 + 2] = c;
+ 
+ 		// cache timestamp is the same between all vertices of each triangle to reduce overflow
+ 		cache_last++;
+ 		cache[a] = cache_last;
+ 		cache[b] = cache_last;
+ 		cache[c] = cache_last;
++
++		// update vertex valences for scoring heuristic
++		valence[a]--;
++		valence[b]--;
++		valence[c]--;
+ 	}
+ 
+ 	// rotate triangles to maximize compressibility
+ 	memset(cache, 0, vertex_count);
+ 
+ 	for (size_t i = 0; i < triangle_count; ++i)
+ 	{
+ 		unsigned char a = indices[i * 3 + 0], b = indices[i * 3 + 1], c = indices[i * 3 + 2];
+ 
+ 		// if only the middle vertex has been used, rotate triangle to ensure new vertices are always sequential
+ 		if (!cache[a] && cache[b] && !cache[c])
+ 		{
+ 			// abc -> bca
+ 			unsigned char t = a;
+ 			a = b, b = c, c = t;
+ 		}
+ 		else if (!cache[a] && !cache[b] && !cache[c])
+ 		{
+ 			// out of three edges, the edge ab can not be reused by subsequent triangles in some encodings
+ 			// if subsequent triangles don't share edges ca or bc, we can rotate the triangle to fix this
+ 			bool needab = false, needbc = false, needca = false;
+ 
+ 			for (size_t j = i + 1; j < triangle_count && j <= i + 3; ++j)
+ 			{
+ 				unsigned char oa = indices[j * 3 + 0], ob = indices[j * 3 + 1], oc = indices[j * 3 + 2];
+ 
+ 				// note: edge comparisons are reversed as reused edges are flipped
+ 				needab |= (oa == b && ob == a) || (ob == b && oc == a) || (oc == b && oa == a);
+ 				needbc |= (oa == c && ob == b) || (ob == c && oc == b) || (oc == c && oa == b);
+ 				needca |= (oa == a && ob == c) || (ob == a && oc == c) || (oc == a && oa == c);
+ 			}
+ 
+ 			if (needab && !needbc)
+ 			{
+ 				// abc -> bca
+ 				unsigned char t = a;
+ 				a = b, b = c, c = t;
+ 			}
+ 			else if (needab && !needca)
+ 			{
+ 				// abc -> cab
+ 				unsigned char t = c;
+ 				c = b, b = a, a = t;
+ 			}
+ 		}
+ 
+ 		indices[i * 3 + 0] = a, indices[i * 3 + 1] = b, indices[i * 3 + 2] = c;
+ 
+ 		cache[a] = cache[b] = cache[c] = 1;
+ 	}
+ 
+ 	// reorder meshlet vertices for access locality assuming index buffer is scanned sequentially
+ 	unsigned int order[kMeshletMaxVertices];
+ 
+ 	short remap[kMeshletMaxVertices];
+ 	memset(remap, -1, vertex_count * sizeof(short));
+ 
+ 	size_t vertex_offset = 0;
+ 
+ 	for (size_t i = 0; i < triangle_count * 3; ++i)
+ 	{
+ 		short& r = remap[indices[i]];
+ 
+ 		if (r < 0)
+ 		{
+ 			r = short(vertex_offset);
+ 			order[vertex_offset] = vertices[indices[i]];
+ 			vertex_offset++;
+ 		}
+ 
+ 		indices[i] = (unsigned char)r;
+ 	}
+ 
+ 	assert(vertex_offset <= vertex_count);
+ 	memcpy(vertices, order, vertex_offset * sizeof(unsigned int));
+ }
+ 
++void meshopt_optimizeMeshlet(unsigned int* meshlet_vertices, unsigned char* meshlet_triangles, size_t triangle_count, size_t vertex_count)
++{
++	meshopt_optimizeMeshletLevel(meshlet_vertices, vertex_count, meshlet_triangles, triangle_count, 0);
++}
++
+ size_t meshopt_extractMeshletIndices(unsigned int* vertices, unsigned char* triangles, const unsigned int* indices, size_t index_count)
+ {
+ 	using namespace meshopt;
+diff --git a/src/meshoptimizer.h b/src/meshoptimizer.h
+index b5a3331..ba7930a 100644
+--- a/src/meshoptimizer.h
++++ b/src/meshoptimizer.h
+@@ -738,6 +738,14 @@ MESHOPTIMIZER_API size_t meshopt_buildMeshletsSpatial(struct meshopt_Meshlet* me
+  */
+ MESHOPTIMIZER_API void meshopt_optimizeMeshlet(unsigned int* meshlet_vertices, unsigned char* meshlet_triangles, size_t triangle_count, size_t vertex_count);
+ 
++/**
++ * Experimental: Meshlet optimizer
++ * Reorders meshlet vertices and triangles to maximize locality, with higher levels resulting in smaller compressed size at the cost of optimization time.
++ *
++ * level should be in the range [0, 9] with 0 equivalent to meshopt_optimizeMeshlet and 9 being the slowest; the sweet spot for compression ratio is around 3
++ */
++MESHOPTIMIZER_EXPERIMENTAL void meshopt_optimizeMeshletLevel(unsigned int* meshlet_vertices, size_t vertex_count, unsigned char* meshlet_triangles, size_t triangle_count, int level);
++
+ struct meshopt_Bounds
+ {
+ 	/* bounding sphere, useful for frustum and occlusion culling */
+~~~~
+
+## Uniform selected declaration context
+
+The same mechanical rule is used for every case: in lexicographic changed-production-path order, show +/-24 lines around the first literal identity match in each snapshot.
+
+### S0
+
+~~~~text
+<no matching declaration in the selected production files>
+~~~~
+
+### S1
+
+Path: `src/meshletutils.cpp`; lines 342-390
+
+~~~~text
+000342: 
+000343: 	assert(positions_stride >= 12 && positions_stride <= 256);
+000344: 	assert(positions_stride % sizeof(float) == 0);
+000345: 	assert((radii_stride >= 4 && radii_stride <= 256) || radii == NULL);
+000346: 	assert(radii_stride % sizeof(float) == 0);
+000347: 
+000348: 	meshopt_Bounds bounds = {};
+000349: 
+000350: 	if (count == 0)
+000351: 		return bounds;
+000352: 
+000353: 	const float rzero = 0.f;
+000354: 
+000355: 	float psphere[4] = {};
+000356: 	computeBoundingSphere(psphere, positions, count, positions_stride, radii ? radii : &rzero, radii ? radii_stride : 0, 7);
+000357: 
+000358: 	bounds.center[0] = psphere[0];
+000359: 	bounds.center[1] = psphere[1];
+000360: 	bounds.center[2] = psphere[2];
+000361: 	bounds.radius = psphere[3];
+000362: 
+000363: 	return bounds;
+000364: }
+000365: 
+000366: void meshopt_optimizeMeshletLevel(unsigned int* meshlet_vertices, size_t vertex_count, unsigned char* meshlet_triangles, size_t triangle_count, int level)
+000367: {
+000368: 	using namespace meshopt;
+000369: 
+000370: 	assert(triangle_count <= kMeshletMaxTriangles);
+000371: 	assert(vertex_count <= kMeshletMaxVertices);
+000372: 	assert(level >= 0 && level <= 9);
+000373: 
+000374: 	unsigned char* indices = meshlet_triangles;
+000375: 	unsigned int* vertices = meshlet_vertices;
+000376: 
+000377: 	// cache tracks vertex timestamps (corresponding to triangle index! all 3 vertices are added at the same time and never removed)
+000378: 	unsigned char cache[kMeshletMaxVertices];
+000379: 	memset(cache, 0, vertex_count);
+000380: 
+000381: 	// note that we start from a value that means all vertices aren't in cache
+000382: 	unsigned char cache_last = 128;
+000383: 	const unsigned char cache_cutoff = 3; // 3 triangles = ~5..9 vertices depending on reuse
+000384: 
+000385: 	// vertex valence is used to prioritize triangles for level>0
+000386: 	// note: we use 8-bit counters for performance; for outlier vertices the valence is incorrect but that just affects the heuristic
+000387: 	unsigned char valence[kMeshletMaxVertices];
+000388: 	memset(valence, 0, vertex_count);
+000389: 
+000390: 	for (size_t i = 0; i < triangle_count; ++i)
+~~~~
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T5040","gap_exists":true,"gap_type":["entry point","configuration","input semantics"],"commit_induced":"YES","maintenance_needed":true,"confidence":98,"affected_functions":["meshopt_optimizeMeshletLevel"],"reason":"S1 adds the experimental entry point meshopt_optimizeMeshletLevel and a new level parameter whose values 1 through 9 select newly introduced valence- and cache-distance-based behavior. H0 never calls this entry point and cannot control level; the existing meshopt_optimizeMeshlet wrapper always supplies 0. This commit therefore creates a material, commit-induced coverage gap for the new API and its nonzero-level behavior.","evidence":["src/meshoptimizer.h newly declares meshopt_optimizeMeshletLevel(..., int level) and documents level in [0, 9].","meshopt_optimizeMeshletLevel asserts level >= 0 && level <= 9 and enters a distinct `if (level)` scoring path using `valence`, cache distances, and an `edges >= level` stopping condition.","meshopt_optimizeMeshlet delegates to meshopt_optimizeMeshletLevel(..., 0), so exercising the legacy entry point cannot reach the level>0 branch.","H0 calls meshopt_buildMeshlets, meshopt_buildMeshletsScan, meshopt_buildMeshletsFlex, meshopt_buildMeshletsSpatial, meshopt_partitionClusters, codec functions, and simplification functions, but never meshopt_optimizeMeshletLevel or meshopt_optimizeMeshlet."],"recommended_action":"Extend a meshlet fuzz harness to construct valid meshlet vertex and triangle arrays, call meshopt_optimizeMeshletLevel, and derive level across the documented 0–9 range from fuzz input, with particular coverage of levels 1–9."}
+tokens used
+10,893

@@ -1,0 +1,358 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/maintenance-evolution_aware-C053-wd_knnjx
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08646-d00b-7ce3-9c7f-d4bcd40b2979
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C053
+
+## Existing Fuzz Harness H0
+
+### `fuzz/c/std/gif_fuzzer.c`
+
+~~~~c
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a sanity check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN gif_fuzzer.c
+./a.out ../../../test/data/*.gif
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+
+const char* fuzz(wuffs_base__io_reader src_reader, uint32_t hash) {
+  const char* ret = NULL;
+  wuffs_base__slice_u8 pixbuf = ((wuffs_base__slice_u8){});
+  wuffs_base__slice_u8 workbuf = ((wuffs_base__slice_u8){});
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_gif__decoder dec = ((wuffs_gif__decoder){});
+    const char* status = wuffs_gif__decoder__check_wuffs_version(
+        &dec, sizeof dec, WUFFS_VERSION);
+    if (status) {
+      ret = status;
+      goto exit;
+    }
+
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    status = wuffs_gif__decoder__decode_image_config(&dec, &ic, src_reader);
+    if (status) {
+      ret = status;
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    // Wuffs allows either statically or dynamically allocated work buffers.
+    // This program exercises dynamic allocation.
+    uint64_t n = wuffs_gif__decoder__workbuf_len(&dec).max_incl;
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      workbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!workbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    n = wuffs_base__pixel_config__pixbuf_len(&ic.pixcfg);
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      pixbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!pixbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    status = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, pixbuf);
+    if (status) {
+      ret = status;
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      wuffs_base__frame_config fc = ((wuffs_base__frame_config){});
+      status = wuffs_gif__decoder__decode_frame_config(&dec, &fc, src_reader);
+      if (status) {
+        if ((status != wuffs_base__warning__end_of_data) || !seen_ok) {
+          ret = status;
+        }
+        goto exit;
+      }
+
+      status = wuffs_gif__decoder__decode_frame(&dec, &pb, src_reader, workbuf,
+                                                NULL);
+      if (status) {
+        if ((status != wuffs_base__warning__end_of_data) || !seen_ok) {
+          ret = status;
+        }
+        goto exit;
+      }
+      seen_ok = true;
+
+      wuffs_base__rect_ie_u32 frame_rect =
+          wuffs_base__frame_config__bounds(&fc);
+      wuffs_base__rect_ie_u32 dirty_rect =
+          wuffs_gif__decoder__frame_dirty_rect(&dec);
+      if (!wuffs_base__rect_ie_u32__contains_rect(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not contain dirty_rect";
+        goto exit;
+      }
+    }
+  }
+
+exit:
+  free(workbuf.ptr);
+  free(pixbuf.ptr);
+  return ret;
+}
+~~~~
+### `fuzz/c/std/zlib_fuzzer.c`
+
+~~~~c
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a sanity check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN zlib_fuzzer.c
+./a.out ../../../test/data/*.zlib
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+
+#define DST_BUFFER_SIZE 65536
+
+// Wuffs allows either statically or dynamically allocated work buffers. This
+// program exercises static allocation.
+#define WORK_BUFFER_SIZE WUFFS_ZLIB__DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE
+#if WORK_BUFFER_SIZE > 0
+uint8_t work_buffer[WORK_BUFFER_SIZE];
+#else
+// Not all C/C++ compilers support 0-length arrays.
+uint8_t work_buffer[1];
+#endif
+
+const char* fuzz(wuffs_base__io_reader src_reader, uint32_t hash) {
+  wuffs_zlib__decoder dec = ((wuffs_zlib__decoder){});
+  const char* status =
+      wuffs_zlib__decoder__check_wuffs_version(&dec, sizeof dec, WUFFS_VERSION);
+  if (status) {
+    return status;
+  }
+
+  // Ignore the checksum for 99.99%-ish of all input. When fuzzers generate
+  // random input, the checkum is very unlikely to match. Still, it's useful to
+  // verify that checksumming does not lead to e.g. buffer overflows.
+  wuffs_zlib__decoder__set_ignore_checksum(&dec, hash & 0xFFFF);
+
+  uint8_t dst_buffer[DST_BUFFER_SIZE];
+  wuffs_base__io_buffer dst = ((wuffs_base__io_buffer){
+      .data = ((wuffs_base__slice_u8){
+          .ptr = dst_buffer,
+          .len = DST_BUFFER_SIZE,
+      }),
+  });
+  wuffs_base__io_writer dst_writer = wuffs_base__io_buffer__writer(&dst);
+
+  while (true) {
+    dst.meta.wi = 0;
+    status = wuffs_zlib__decoder__decode_io_writer(&dec, dst_writer, src_reader,
+                                                   ((wuffs_base__slice_u8){
+                                                       .ptr = work_buffer,
+                                                       .len = WORK_BUFFER_SIZE,
+                                                   }));
+    if (status != wuffs_base__suspension__short_write) {
+      break;
+    }
+    if (dst.meta.wi == 0) {
+      fprintf(stderr,
+              "wuffs_zlib__decoder__decode_io_writer made no progress\n");
+      intentional_segfault();
+    }
+  }
+  return status;
+}
+~~~~
+
+## Production Source Change (S0 -> S1)
+
+Harness changes, commit messages, tests, outcomes, and future evidence are excluded. The source diff is complete.
+
+~~~~diff
+diff --git a/script/bench-c-deflate-fragmentation.c b/script/bench-c-deflate-fragmentation.c
+index 94b400e2..c49aa9a6 100644
+--- a/script/bench-c-deflate-fragmentation.c
++++ b/script/bench-c-deflate-fragmentation.c
+@@ -112,6 +112,14 @@ uint8_t idat_buffer[SRC_BUFFER_SIZE] = {0};
+ size_t idat_splits[MAX_IDAT_CHUNKS + 1] = {0};
+ uint32_t num_idat_chunks = 0;
+ 
++#define WORK_BUFFER_SIZE WUFFS_ZLIB__DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE
++#if WORK_BUFFER_SIZE > 0
++uint8_t work_buffer[WORK_BUFFER_SIZE];
++#else
++// Not all C/C++ compilers support 0-length arrays.
++uint8_t work_buffer[1];
++#endif
++
+ uint32_t width = 0;
+ uint32_t height = 0;
+ uint64_t bytes_per_pixel = 0;
+@@ -218,9 +226,9 @@ const char* process_png_chunks(uint8_t* p, size_t n) {
+ }
+ 
+ const char* decode_once(bool frag_dst, bool frag_idat) {
+-  wuffs_zlib__decoder dec = ((wuffs_zlib__decoder){});
++  wuffs_zlib__decoder dec;
+   const char* status =
+-      wuffs_zlib__decoder__check_wuffs_version(&dec, sizeof dec, WUFFS_VERSION);
++      wuffs_zlib__decoder__initialize(&dec, sizeof dec, WUFFS_VERSION, 0);
+   if (status) {
+     return status;
+   }
+@@ -259,7 +267,11 @@ const char* decode_once(bool frag_dst, bool frag_idat) {
+ 
+   while (true) {
+     status =
+-        wuffs_zlib__decoder__decode_io_writer(&dec, dst_writer, idat_reader);
++        wuffs_zlib__decoder__decode_io_writer(&dec, dst_writer, idat_reader,
++                                              ((wuffs_base__slice_u8){
++                                                  .ptr = work_buffer,
++                                                  .len = WORK_BUFFER_SIZE,
++                                              }));
+ 
+     if (!status) {
+       break;
+~~~~
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C053","gap_exists":false,"gap_type":[],"commit_induced":"NO","maintenance_needed":false,"confidence":99,"affected_functions":["decode_once","fuzz"],"reason":"The S1 change only updates the benchmark function decode_once to initialize wuffs_zlib__decoder with wuffs_zlib__decoder__initialize and pass a work buffer to wuffs_zlib__decoder__decode_io_writer. H0's zlib fuzz function already directly exercises wuffs_zlib__decoder__decode_io_writer with a WORK_BUFFER_SIZE slice and controls checksum behavior through hash. The commit adds no new decoder entry point, protocol state, configuration mode, input semantics, or attack surface that H0 fails to reach.","evidence":["S1 changes decode_once from wuffs_zlib__decoder__check_wuffs_version to wuffs_zlib__decoder__initialize without changing the decoded idat_reader input or the frag_dst and frag_idat controls.","S1 adds work_buffer sized by WUFFS_ZLIB__DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE and supplies it to wuffs_zlib__decoder__decode_io_writer.","H0's zlib fuzz already defines WORK_BUFFER_SIZE using WUFFS_ZLIB__DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE and passes the corresponding slice to wuffs_zlib__decoder__decode_io_writer.","The production diff is confined to script/bench-c-deflate-fragmentation.c and does not introduce a new library decoding path absent from fuzz/c/std/zlib_fuzzer.c."],"recommended_action":"No fuzz-harness maintenance is needed for this commit."}
+tokens used
+17,405

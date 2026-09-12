@@ -1,0 +1,784 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/n4-gap_only-C010-2hve50ky
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08a73-3e48-75c2-9d0f-a93f68d861dc
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+C010
+
+## Existing harness H0
+
+The complete project-owned harness translation unit is shown below. Framework
+main/CLI scaffolding is not expanded; directly included semantic helper files
+are shown separately under the fixed context rule.
+
+Path: `fuzz/c/std/json_fuzzer.cc`
+
+```cpp
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN bmp_fuzzer.c
+./a.out ../../../test/data/*.bmp
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__BMP
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+#include "../fuzzlib/fuzzlib_image_decoder.c"
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_bmp__decoder dec;
+  wuffs_base__status status = wuffs_bmp__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  hash = wuffs_base__u64__rotate_right(hash, 1);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  return fuzz_image_decoder(
+      src, hash,
+      wuffs_bmp__decoder__upcast_as__wuffs_base__image_decoder(&dec));
+}
+```
+
+### Direct H0 helper: `fuzz/c/fuzzlib/fuzzlib_image_decoder.c`
+
+```c
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef WUFFS_INCLUDE_GUARD
+#error "Wuffs' .h files need to be included before this file"
+#endif
+
+static const char*  //
+fuzz_image_decoder(wuffs_base__io_buffer* src,
+                   uint64_t hash,
+                   wuffs_base__image_decoder* dec) {
+  const char* ret = NULL;
+  wuffs_base__slice_u8 pixbuf = ((wuffs_base__slice_u8){});
+  wuffs_base__slice_u8 workbuf = ((wuffs_base__slice_u8){});
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    wuffs_base__status status =
+        wuffs_base__image_decoder__decode_image_config(dec, &ic, src);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    // 50% of the time, choose BGRA_PREMUL instead of the native pixel config.
+    if (hash & 1) {
+      wuffs_base__pixel_config__set(
+          &ic.pixcfg, WUFFS_BASE__PIXEL_FORMAT__BGRA_PREMUL,
+          WUFFS_BASE__PIXEL_SUBSAMPLING__NONE,
+          wuffs_base__pixel_config__width(&ic.pixcfg),
+          wuffs_base__pixel_config__height(&ic.pixcfg));
+    }
+    hash >>= 1;
+
+    // Wuffs allows either statically or dynamically allocated work buffers.
+    // This program exercises dynamic allocation.
+    uint64_t n = wuffs_base__image_decoder__workbuf_len(dec).max_incl;
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      workbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!workbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    n = wuffs_base__pixel_config__pixbuf_len(&ic.pixcfg);
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      pixbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!pixbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    status = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, pixbuf);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      wuffs_base__frame_config fc = ((wuffs_base__frame_config){});
+      status = wuffs_base__image_decoder__decode_frame_config(dec, &fc, src);
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+
+      status = wuffs_base__image_decoder__decode_frame(
+          dec, &pb, src, WUFFS_BASE__PIXEL_BLEND__SRC, workbuf, NULL);
+
+      wuffs_base__rect_ie_u32 frame_rect =
+          wuffs_base__frame_config__bounds(&fc);
+      wuffs_base__rect_ie_u32 dirty_rect =
+          wuffs_base__image_decoder__frame_dirty_rect(dec);
+      if (!wuffs_base__rect_ie_u32__contains_rect(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not contain dirty_rect";
+        goto exit;
+      }
+
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+      seen_ok = true;
+
+      if (!wuffs_base__rect_ie_u32__equals(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not equal dirty_rect";
+        goto exit;
+      }
+    }
+  }
+
+exit:
+  free(workbuf.ptr);
+  free(pixbuf.ptr);
+  return ret;
+}
+```
+
+## Complete S0 -> S1 hand-written production-source diff
+
+The fixed rule includes every changed `std/**/*.wuffs` production file. It
+excludes generated release snapshots, tests, docs, examples, and commit text.
+
+```diff
+diff --git a/std/netpbm/decode_netpbm.wuffs b/std/netpbm/decode_netpbm.wuffs
+new file mode 100644
+index 00000000..6af56a2d
+--- /dev/null
++++ b/std/netpbm/decode_netpbm.wuffs
+@@ -0,0 +1,433 @@
++// Copyright 2023 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++pub status "#bad header"
++pub status "#truncated input"
++pub status "#unsupported Netpbm file"
++
++pri status "@internal note: short read"
++
++pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0
++
++pub struct decoder? implements base.image_decoder(
++        pixfmt : base.u32,
++        width  : base.u32[..= 0xFF_FFFF],
++        height : base.u32[..= 0xFF_FFFF],
++
++        max_value : base.u32[..= 0xFF_FFFF],
++
++        // The call sequence state machine is discussed in
++        // (/doc/std/image-decoders-call-sequence.md).
++        call_sequence : base.u8,
++
++        frame_config_io_position : base.u64,
++
++        dst_x : base.u32,
++        dst_y : base.u32,
++
++        swizzler : base.pixel_swizzler,
++        util     : base.utility,
++)
++
++pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
++    return base."#unsupported option"
++}
++
++pub func decoder.decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
++    var status : base.status
++
++    while true {
++        status =? this.do_decode_image_config?(dst: args.dst, src: args.src)
++        if (status == base."$short read") and args.src.is_closed() {
++            return "#truncated input"
++        }
++        yield? status
++    } endwhile
++}
++
++pri func decoder.do_decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
++    var c : base.u8
++    var n : base.u32
++
++    if this.call_sequence <> 0x00 {
++        return base."#bad call sequence"
++    }
++
++    c = args.src.read_u8?()
++    if c <> 'P' {
++        return "#bad header"
++    }
++
++    c = args.src.read_u8?()
++    if (c < '1') or ('7' < c) {
++        return "#bad header"
++    } else if c == '5' {
++        this.pixfmt = base.PIXEL_FORMAT__Y
++    } else if c == '6' {
++        this.pixfmt = base.PIXEL_FORMAT__RGB
++    } else {
++        return "#unsupported Netpbm file"
++    }
++
++    c = args.src.read_u8?()
++    if c <> 0x0A {
++        return "#bad header"
++    }
++
++    // Decode width.
++    while true {
++        c = args.src.read_u8?()
++        if (c == ' ') or (c == 0x09) {
++            continue
++        } else if c == '#' {
++            // Consume a "#...\n" comment.
++            while true {
++                c = args.src.read_u8?()
++                if c == 0x0A {
++                    break
++                }
++            } endwhile
++            continue
++        } else if (c < '0') or ('9' < c) {
++            return "#bad header"
++        }
++        this.width = ((c - '0') as base.u32)
++        break
++    } endwhile
++    while true {
++        c = args.src.read_u8?()
++        if (c == ' ') or (c == 0x09) {
++            break
++        } else if (c < '0') or ('9' < c) {
++            return "#bad header"
++        }
++        n = (10 * this.width) + ((c - '0') as base.u32)
++        if n > 0xFF_FFFF {
++            return "#unsupported Netpbm file"
++        }
++        this.width = n
++    } endwhile
++
++    // Decode height.
++    while true {
++        c = args.src.read_u8?()
++        if (c == ' ') or (c == 0x09) {
++            continue
++        } else if c == '#' {
++            // Consume a "#...\n" comment.
++            while true {
++                c = args.src.read_u8?()
++                if c == 0x0A {
++                    break
++                }
++            } endwhile
++            continue
++        } else if (c < '0') or ('9' < c) {
++            return "#bad header"
++        }
++        this.height = ((c - '0') as base.u32)
++        break
++    } endwhile
++    while true {
++        c = args.src.read_u8?()
++        if (c == ' ') or (c == 0x09) or (c == 0x0D) {
++            continue
++        } else if c == 0x0A {
++            break
++        } else if (c < '0') or ('9' < c) {
++            return "#bad header"
++        }
++        n = (10 * this.height) + ((c - '0') as base.u32)
++        if n > 0xFF_FFFF {
++            return "#unsupported Netpbm file"
++        }
++        this.height = n
++    } endwhile
++
++    // Decode max_value.
++    while true {
++        c = args.src.read_u8?()
++        if (c == ' ') or (c == 0x09) {
++            continue
++        } else if c == '#' {
++            // Consume a "#...\n" comment.
++            while true {
++                c = args.src.read_u8?()
++                if c == 0x0A {
++                    break
++                }
++            } endwhile
++            continue
++        } else if (c < '0') or ('9' < c) {
++            return "#bad header"
++        }
++        this.max_value = ((c - '0') as base.u32)
++        break
++    } endwhile
++    while true {
++        c = args.src.read_u8?()
++        if (c == ' ') or (c == 0x09) or (c == 0x0D) {
++            continue
++        } else if c == 0x0A {
++            break
++        } else if (c < '0') or ('9' < c) {
++            return "#bad header"
++        }
++        n = (10 * this.max_value) + ((c - '0') as base.u32)
++        if n > 0xFF_FFFF {
++            return "#unsupported Netpbm file"
++        }
++        this.max_value = n
++    } endwhile
++
++    if this.max_value <> 255 {
++        return "#unsupported Netpbm file"
++    }
++
++    this.frame_config_io_position = args.src.position()
++
++    if args.dst <> nullptr {
++        args.dst.set!(
++                pixfmt: this.pixfmt,
++                pixsub: 0,
++                width: this.width,
++                height: this.height,
++                first_frame_io_position: this.frame_config_io_position,
++                first_frame_is_opaque: false)
++    }
++
++    this.call_sequence = 0x20
++}
++
++pub func decoder.decode_frame_config?(dst: nptr base.frame_config, src: base.io_reader) {
++    var status : base.status
++
++    while true {
++        status =? this.do_decode_frame_config?(dst: args.dst, src: args.src)
++        if (status == base."$short read") and args.src.is_closed() {
++            return "#truncated input"
++        }
++        yield? status
++    } endwhile
++}
++
++pri func decoder.do_decode_frame_config?(dst: nptr base.frame_config, src: base.io_reader) {
++    if this.call_sequence == 0x20 {
++        // No-op.
++    } else if this.call_sequence < 0x20 {
++        this.do_decode_image_config?(dst: nullptr, src: args.src)
++    } else if this.call_sequence == 0x28 {
++        if this.frame_config_io_position <> args.src.position() {
++            return base."#bad restart"
++        }
++    } else if this.call_sequence == 0x40 {
++        this.call_sequence = 0x60
++        return base."@end of data"
++    } else {
++        return base."@end of data"
++    }
++
++    if args.dst <> nullptr {
++        args.dst.set!(bounds: this.util.make_rect_ie_u32(
++                min_incl_x: 0,
++                min_incl_y: 0,
++                max_excl_x: this.width,
++                max_excl_y: this.height),
++                duration: 0,
++                index: 0,
++                io_position: this.frame_config_io_position,
++                disposal: 0,
++                opaque_within_bounds: false,
++                overwrite_instead_of_blend: false,
++                background_color: 0x0000_0000)
++    }
++
++    this.call_sequence = 0x40
++}
++
++pub func decoder.decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
++    var status : base.status
++
++    while true {
++        status =? this.do_decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
++        if (status == base."$short read") and args.src.is_closed() {
++            return "#truncated input"
++        }
++        yield? status
++    } endwhile
++}
++
++pri func decoder.do_decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
++    var status : base.status
++
++    if this.call_sequence == 0x40 {
++        // No-op.
++    } else if this.call_sequence < 0x40 {
++        this.do_decode_frame_config?(dst: nullptr, src: args.src)
++    } else {
++        return base."@end of data"
++    }
++
++    this.dst_x = 0
++    this.dst_y = 0
++
++    status = this.swizzler.prepare!(
++            dst_pixfmt: args.dst.pixel_format(),
++            dst_palette: args.dst.palette(),
++            src_pixfmt: this.util.make_pixel_format(repr: this.pixfmt),
++            src_palette: this.util.empty_slice_u8(),
++            blend: args.blend)
++    if not status.is_ok() {
++        return status
++    }
++
++    while true {
++        status = this.swizzle!(dst: args.dst, src: args.src)
++        if status.is_ok() {
++            break
++        } else if status <> "@internal note: short read" {
++            return status
++        }
++        yield? base."$short read"
++    } endwhile
++
++    this.call_sequence = 0x60
++}
++
++pri func decoder.swizzle!(dst: ptr base.pixel_buffer, src: base.io_reader) base.status {
++    var dst_pixfmt          : base.pixel_format
++    var dst_bits_per_pixel  : base.u32[..= 256]
++    var dst_bytes_per_pixel : base.u32[..= 32]
++    var dst_bytes_per_row   : base.u64
++    var src_bytes_per_pixel : base.u32[..= 8]
++    var tab                 : table base.u8
++    var dst                 : slice base.u8
++    var i                   : base.u64
++    var j                   : base.u64
++    var n                   : base.u64
++
++    // TODO: the dst_pixfmt variable shouldn't be necessary. We should be able
++    // to chain the two calls: "args.dst.pixel_format().bits_per_pixel()".
++    dst_pixfmt = args.dst.pixel_format()
++    dst_bits_per_pixel = dst_pixfmt.bits_per_pixel()
++    if (dst_bits_per_pixel & 7) <> 0 {
++        return base."#unsupported option"
++    }
++    dst_bytes_per_pixel = dst_bits_per_pixel / 8
++    dst_bytes_per_row = (this.width * dst_bytes_per_pixel) as base.u64
++    tab = args.dst.plane(p: 0)
++
++    while true {
++        if this.dst_x == this.width {
++            this.dst_x = 0
++            this.dst_y ~mod+= 1
++            if this.dst_y >= this.height {
++                break
++            }
++        }
++
++        dst = tab.row_u32(y: this.dst_y)
++        if dst_bytes_per_row < dst.length() {
++            dst = dst[.. dst_bytes_per_row]
++        }
++        i = (this.dst_x as base.u64) * (dst_bytes_per_pixel as base.u64)
++        if i >= dst.length() {
++            src_bytes_per_pixel = 1
++            assert src_bytes_per_pixel > 0
++            if this.pixfmt == base.PIXEL_FORMAT__RGB {
++                src_bytes_per_pixel = 3
++                assert src_bytes_per_pixel > 0
++            }
++            n = args.src.length() / (src_bytes_per_pixel as base.u64)
++            n = n.min(no_more_than: (this.width ~mod- this.dst_x) as base.u64)
++            j = n
++            while j >= 8 {
++                if args.src.length() >= ((src_bytes_per_pixel * 8) as base.u64) {
++                    args.src.skip_u32_fast!(
++                            actual: src_bytes_per_pixel * 8,
++                            worst_case: src_bytes_per_pixel * 8)
++                }
++                j -= 8
++            } endwhile
++            while j > 0 {
++                if args.src.length() >= ((src_bytes_per_pixel * 1) as base.u64) {
++                    args.src.skip_u32_fast!(
++                            actual: src_bytes_per_pixel * 1,
++                            worst_case: src_bytes_per_pixel * 1)
++                }
++                j -= 1
++            } endwhile
++        } else {
++            n = this.swizzler.swizzle_interleaved_from_reader!(
++                    dst: dst[i ..],
++                    dst_palette: args.dst.palette(),
++                    src: args.src)
++        }
++        if n == 0 {
++            return "@internal note: short read"
++        }
++        this.dst_x ~sat+= (n & 0xFFFF_FFFF) as base.u32
++    } endwhile
++
++    return ok
++}
++
++pub func decoder.frame_dirty_rect() base.rect_ie_u32 {
++    return this.util.make_rect_ie_u32(
++            min_incl_x: 0,
++            min_incl_y: 0,
++            max_excl_x: this.width,
++            max_excl_y: this.height)
++}
++
++pub func decoder.num_animation_loops() base.u32 {
++    return 0
++}
++
++pub func decoder.num_decoded_frame_configs() base.u64 {
++    if this.call_sequence > 0x20 {
++        return 1
++    }
++    return 0
++}
++
++pub func decoder.num_decoded_frames() base.u64 {
++    if this.call_sequence > 0x40 {
++        return 1
++    }
++    return 0
++}
++
++pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
++    if this.call_sequence < 0x20 {
++        return base."#bad call sequence"
++    }
++    if (args.index <> 0) or (args.io_position <> this.frame_config_io_position) {
++        return base."#bad argument"
++    }
++    this.call_sequence = 0x28
++    return ok
++}
++
++pub func decoder.set_report_metadata!(fourcc: base.u32, report: base.bool) {
++    // No-op. Netpbm doesn't support metadata.
++}
++
++pub func decoder.tell_me_more?(dst: base.io_writer, minfo: nptr base.more_information, src: base.io_reader) {
++    return base."#no more information"
++}
++
++pub func decoder.workbuf_len() base.range_ii_u64 {
++    return this.util.make_range_ii_u64(min_incl: 0, max_incl: 0)
++}
+```
+
+## Uniform selected declaration context
+
+This same mechanically selected S0/S1 context is supplied for every case.
+
+### S0
+
+```text
+<no matching declaration in the selected S0 source file>
+```
+
+### S1
+
+```text
+lines 369-417
+000369:                 j -= 1
+000370:             } endwhile
+000371:         } else {
+000372:             n = this.swizzler.swizzle_interleaved_from_reader!(
+000373:                     dst: dst[i ..],
+000374:                     dst_palette: args.dst.palette(),
+000375:                     src: args.src)
+000376:         }
+000377:         if n == 0 {
+000378:             return "@internal note: short read"
+000379:         }
+000380:         this.dst_x ~sat+= (n & 0xFFFF_FFFF) as base.u32
+000381:     } endwhile
+000382: 
+000383:     return ok
+000384: }
+000385: 
+000386: pub func decoder.frame_dirty_rect() base.rect_ie_u32 {
+000387:     return this.util.make_rect_ie_u32(
+000388:             min_incl_x: 0,
+000389:             min_incl_y: 0,
+000390:             max_excl_x: this.width,
+000391:             max_excl_y: this.height)
+000392: }
+000393: 
+000394: pub func decoder.num_animation_loops() base.u32 {
+000395:     return 0
+000396: }
+000397: 
+000398: pub func decoder.num_decoded_frame_configs() base.u64 {
+000399:     if this.call_sequence > 0x20 {
+000400:         return 1
+000401:     }
+000402:     return 0
+000403: }
+000404: 
+000405: pub func decoder.num_decoded_frames() base.u64 {
+000406:     if this.call_sequence > 0x40 {
+000407:         return 1
+000408:     }
+000409:     return 0
+000410: }
+000411: 
+000412: pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+000413:     if this.call_sequence < 0x20 {
+000414:         return base."#bad call sequence"
+000415:     }
+000416:     if (args.index <> 0) or (args.io_position <> this.frame_config_io_position) {
+000417:         return base."#bad argument"
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C010","gap_exists":true,"gap_type":["fuzz-worthy entry point","input semantics","API protocol/state"],"confidence":99,"affected_functions":["decoder.decode_image_config?","decoder.do_decode_image_config?","decoder.decode_frame_config?","decoder.do_decode_frame_config?","decoder.decode_frame?","decoder.do_decode_frame?","decoder.swizzle!","decoder.restart_frame!"],"reason":"H0 exclusively instantiates wuffs_bmp__decoder and compiles WUFFS_CONFIG__MODULE__BMP, so it cannot reach the new Netpbm decoder. Consequently, S1's P5/P6 header and raster parsing, incremental short-read behavior, pixel swizzling, call_sequence transitions, and restart protocol receive no coverage. Even if the generic fuzz_image_decoder helper were reused later, its fixed decode sequence never calls restart_frame!, leaving the 0x28 restart state and #bad restart/#bad argument paths uncovered.","evidence":["H0 defines WUFFS_CONFIG__MODULE__BMP and constructs wuffs_bmp__decoder; it contains no NETPBM module definition or netpbm decoder instance.","S1 adds pub struct decoder implementing base.image_decoder in std/netpbm/decode_netpbm.wuffs.","decoder.do_decode_image_config? recognizes P5 and P6 inputs and parses comments, width, height, and max_value, including limits up to 0xFF_FFFF and the required max_value of 255.","decoder.do_decode_frame? and decoder.swizzle! process attacker-controlled raster bytes incrementally and preserve dst_x/dst_y across $short read yields.","decoder.restart_frame! introduces a distinct call_sequence state 0x28, validated later by decoder.do_decode_frame_config? against frame_config_io_position.","fuzz_image_decoder only calls decode_image_config, decode_frame_config, decode_frame, workbuf_len, and frame_dirty_rect; it never calls restart_frame!."],"recommended_action":"Add a Netpbm-specific harness that enables the Netpbm module, initializes its decoder, and drives P5/P6 inputs through incremental and closed-input decoding. Extend protocol coverage to fuzz restart_frame! arguments and source-position handling, then resume decode_frame_config/decode_frame from the 0x28 restart state."}
+tokens used
+10,536

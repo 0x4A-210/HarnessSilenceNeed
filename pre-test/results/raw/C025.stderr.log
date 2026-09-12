@@ -1,0 +1,377 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-blind-run-40ko0e9q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0854f-451a-77c2-8eca-6e62aa4e28fd
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C025
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `test/ossfuzz/json_load_dump_fuzzer.cc`
+
+~~~~cpp
+#include <stdint.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <inttypes.h>
+
+#include "jansson.h"
+
+static int enable_diags;
+
+#define FUZZ_DEBUG(FMT, ...)                                                  \
+        if (enable_diags)                                                     \
+        {                                                                     \
+          fprintf(stderr, FMT, ##__VA_ARGS__);                                \
+          fprintf(stderr, "\n");                                              \
+        }
+
+
+static int json_dump_counter(const char *buffer, size_t size, void *data)
+{
+  uint64_t *counter = reinterpret_cast<uint64_t *>(data);
+  *counter += size;
+  return 0;
+}
+
+
+#define NUM_COMMAND_BYTES  (sizeof(size_t) + sizeof(size_t) + 1)
+
+#define FUZZ_DUMP_CALLBACK 0x00
+#define FUZZ_DUMP_STRING   0x01
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+  json_error_t error;
+  unsigned char dump_mode;
+
+  // Enable or disable diagnostics based on the FUZZ_VERBOSE environment flag.
+  enable_diags = (getenv("FUZZ_VERBOSE") != NULL);
+
+  FUZZ_DEBUG("Input data length: %zd", size);
+
+  if (size < NUM_COMMAND_BYTES)
+  {
+    return 0;
+  }
+
+  // Use the first sizeof(size_t) bytes as load flags.
+  size_t load_flags = *(const size_t*)data;
+  data += sizeof(size_t);
+
+  FUZZ_DEBUG("load_flags: 0x%zx\n"
+             "& JSON_REJECT_DUPLICATES =  0x%zx\n"
+             "& JSON_DECODE_ANY =         0x%zx\n"
+             "& JSON_DISABLE_EOF_CHECK =  0x%zx\n"
+             "& JSON_DECODE_INT_AS_REAL = 0x%zx\n"
+             "& JSON_ALLOW_NUL =          0x%zx\n",
+             load_flags,
+             load_flags & JSON_REJECT_DUPLICATES,
+             load_flags & JSON_DECODE_ANY,
+             load_flags & JSON_DISABLE_EOF_CHECK,
+             load_flags & JSON_DECODE_INT_AS_REAL,
+             load_flags & JSON_ALLOW_NUL);
+
+  // Use the next sizeof(size_t) bytes as dump flags.
+  size_t dump_flags = *(const size_t*)data;
+  data += sizeof(size_t);
+
+  FUZZ_DEBUG("dump_flags: 0x%zx\n"
+             "& JSON_MAX_INDENT =     0x%zx\n"
+             "& JSON_COMPACT =        0x%zx\n"
+             "& JSON_ENSURE_ASCII =   0x%zx\n"
+             "& JSON_SORT_KEYS =      0x%zx\n"
+             "& JSON_PRESERVE_ORDER = 0x%zx\n"
+             "& JSON_ENCODE_ANY =     0x%zx\n"
+             "& JSON_ESCAPE_SLASH =   0x%zx\n"
+             "& JSON_REAL_PRECISION = 0x%zx\n"
+             "& JSON_EMBED =          0x%zx\n",
+             dump_flags,
+             dump_flags & JSON_MAX_INDENT,
+             dump_flags & JSON_COMPACT,
+             dump_flags & JSON_ENSURE_ASCII,
+             dump_flags & JSON_SORT_KEYS,
+             dump_flags & JSON_PRESERVE_ORDER,
+             dump_flags & JSON_ENCODE_ANY,
+             dump_flags & JSON_ESCAPE_SLASH,
+             ((dump_flags >> 11) & 0x1F) << 11,
+             dump_flags & JSON_EMBED);
+
+  // Use the next byte as the dump mode.
+  dump_mode = data[0];
+  data++;
+
+  FUZZ_DEBUG("dump_mode: 0x%x", (unsigned int)dump_mode);
+
+  // Remove the command bytes from the size total.
+  size -= NUM_COMMAND_BYTES;
+
+  // Attempt to load the remainder of the data with the given load flags.
+  const char* text = reinterpret_cast<const char *>(data);
+  json_t* jobj = json_loadb(text, size, load_flags, &error);
+
+  if (jobj == NULL)
+  {
+    return 0;
+  }
+
+  if (dump_mode & FUZZ_DUMP_STRING)
+  {
+    // Dump as a string. Remove indents so that we don't run out of memory.
+    char *out = json_dumps(jobj, dump_flags & ~JSON_MAX_INDENT);
+    if (out != NULL)
+    {
+      free(out);
+    }
+  }
+  else
+  {
+    // Default is callback mode.
+    //
+    // Attempt to dump the loaded json object with the given dump flags.
+    uint64_t counter = 0;
+
+    json_dump_callback(jobj, json_dump_counter, &counter, dump_flags);
+    FUZZ_DEBUG("Counter function counted %" PRIu64 " bytes.", counter);
+  }
+
+  if (jobj)
+  {
+    json_decref(jobj);
+  }
+
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/jansson/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2019 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+# Run the OSS-Fuzz script in the project.
+./test/ossfuzz/ossfuzz.sh
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `src/value.c`
+
+~~~~diff
+diff --git a/src/value.c b/src/value.c
+--- a/src/value.c
++++ b/src/value.c
+@@ -34,13 +34,13 @@ static JSON_INLINE int isnan(double x) { return x != x; }
+ #endif
+ #endif
+ #ifndef isinf
+ static JSON_INLINE int isinf(double x) { return !isnan(x) && isnan(x - x); }
+ #endif
+ 
+-json_t *do_deep_copy(const json_t *, hashtable_t *);
++json_t *do_deep_copy(const json_t *json, hashtable_t *parents);
+ 
+ static JSON_INLINE void json_init(json_t *json, json_type type)
+ {
+     json->type = type;
+     json->refcount = 1;
+ }
+@@ -211,30 +211,62 @@ int json_object_update_missing(json_t *object, json_t *other)
+             json_object_set_nocheck(object, key, value);
+     }
+ 
+     return 0;
+ }
+ 
+-int json_object_update_recursive(json_t *object, json_t *other)
++int do_object_update_recursive(json_t *object, json_t *other, hashtable_t *parents)
+ {
+     const char *key;
+     json_t *value;
++    char loop_key[LOOP_KEY_LEN];
++    int res = 0;
+ 
+     if(!json_is_object(object) || !json_is_object(other))
+         return -1;
+ 
++    if(jsonp_loop_check(parents, other, loop_key, sizeof(loop_key)))
++        return -1;
++
+     json_object_foreach(other, key, value) {
+         json_t *v = json_object_get(object, key);
+ 
+         if(json_is_object(v) && json_is_object(value))
+-            json_object_update_recursive(v, value);
++        {
++            if(do_object_update_recursive(v, value, parents))
++            {
++                res = -1;
++                break;
++            }
++        }
+         else
+-            json_object_set_nocheck(object, key, value);
++        {
++            if(json_object_set_nocheck(object, key, value))
++            {
++                res = -1;
++                break;
++            }
++        }
+     }
+ 
+-    return 0;
++    hashtable_del(parents, loop_key);
++
++    return res;
++}
++
++int json_object_update_recursive(json_t *object, json_t *other)
++{
++    int res;
++    hashtable_t parents_set;
++
++    if (hashtable_init(&parents_set))
++        return -1;
++    res = do_object_update_recursive(object, other, &parents_set);
++    hashtable_close(&parents_set);
++
++    return res;
+ }
+ 
+ void *json_object_iter(json_t *json)
+ {
+     json_object_t *object;
+ 
+@@ -346,13 +378,13 @@ static json_t *json_object_deep_copy(const json_t *object, hashtable_t *parents)
+ 
+     if (jsonp_loop_check(parents, object, loop_key, sizeof(loop_key)))
+         return NULL;
+ 
+     result = json_object();
+     if(!result)
+-        return NULL;
++        goto out;
+ 
+     /* Cannot use json_object_foreach because object has to be cast
+        non-const */
+     iter = json_object_iter((json_t *)object);
+     while(iter) {
+         const char *key;
+@@ -365,12 +397,14 @@ static json_t *json_object_deep_copy(const json_t *object, hashtable_t *parents)
+             json_decref(result);
+             result = NULL;
+             break;
+         }
+         iter = json_object_iter_next((json_t *)object, iter);
+     }
++
++out:
+     hashtable_del(parents, loop_key);
+ 
+     return result;
+ }
+ 
+ 
+@@ -665,23 +699,25 @@ static json_t *json_array_deep_copy(const json_t *array, hashtable_t *parents)
+ 
+     if (jsonp_loop_check(parents, array, loop_key, sizeof(loop_key)))
+         return NULL;
+ 
+     result = json_array();
+     if(!result)
+-        return NULL;
++        goto out;
+ 
+     for(i = 0; i < json_array_size(array); i++)
+     {
+         if (json_array_append_new(result, do_deep_copy(json_array_get(array, i), parents)))
+         {
+             json_decref(result);
+             result = NULL;
+             break;
+         }
+     }
++
++out:
+     hashtable_del(parents, loop_key);
+ 
+     return result;
+ }
+ 
+ /*** string ***/
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C025","maintenance_needed":true,"confidence":95,"change_types":["modified_functionality","new_state_requirement"],"affected_functions":["json_object_update_recursive","do_object_update_recursive","json_object_deep_copy","json_array_deep_copy"],"reason":"The commit changes recursive object-update behavior to track parent objects and reject loops, while the existing harness only parses bytes with json_loadb and serializes the resulting value. It never calls json_object_update_recursive or deep-copy APIs, and loader-produced JSON cannot exercise the programmatically constructed cyclic object graphs targeted by the new parents-set logic. The harness therefore needs a path that constructs multiple objects, optionally creates reference cycles, and invokes the affected recursive operation.","evidence":["H0 invokes only json_loadb followed by json_dumps or json_dump_callback.","json_object_update_recursive now initializes a hashtable_t parents_set and delegates to do_object_update_recursive.","do_object_update_recursive adds jsonp_loop_check(parents, other, ...) and propagates recursive-update failures.","The changed deep-copy helpers also manage loop-tracking cleanup, but H0 does not invoke any deep-copy API.","The required cyclic/shared in-memory object state is not controllable through H0's serialized JSON input alone."],"recommended_action":"Extend or add a harness mode that programmatically builds destination and source object graphs from fuzz input, permits nested/shared/cyclic references with safe ownership handling, and calls json_object_update_recursive; also exercise json_deep_copy if the deep-copy cleanup changes are in scope."}
+tokens used
+6,250

@@ -1,0 +1,360 @@
+PROJECT c-ares
+COMMIT fb43c04bae76b6c5fc509e8e634596a623523040
+PARENT eaa172a1571ea3bee647088a71c41a8e92c9f043
+SUBJECT Add TLSA record support (#600)
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/src/lib/ares_dns_mapping.c b/src/lib/ares_dns_mapping.c
+index 8e2ae639..26d6e509 100644
+--- a/src/lib/ares_dns_mapping.c
++++ b/src/lib/ares_dns_mapping.c
+@@ -89,8 +89,8 @@ ares_bool_t ares_dns_rec_type_isvalid(ares_dns_rec_type_t type,
+     case ARES_REC_TYPE_SRV:
+     case ARES_REC_TYPE_NAPTR:
+     case ARES_REC_TYPE_OPT:
+-#if 0
+     case ARES_REC_TYPE_TLSA:
++#if 0
+     case ARES_REC_TYPE_SVBC:
+     case ARES_REC_TYPE_HTTPS:
+ #endif
+@@ -193,9 +193,9 @@ const char *ares_dns_rec_type_tostr(ares_dns_rec_type_t type)
+       return "NAPTR";
+     case ARES_REC_TYPE_OPT:
+       return "OPT";
+-#if 0
+     case ARES_REC_TYPE_TLSA:
+       return "TLSA";
++#if 0
+     case ARES_REC_TYPE_SVBC:
+       return "SVBC";
+     case ARES_REC_TYPE_HTTPS:
+@@ -343,6 +343,18 @@ const char *ares_dns_rr_key_tostr(ares_dns_rr_key_t key)
+     case ARES_RR_OPT_FLAGS:
+       return "FLAGS";
+ 
++    case ARES_RR_TLSA_CERT_USAGE:
++      return "CERT_USAGE";
++
++    case ARES_RR_TLSA_SELECTOR:
++      return "SELECTOR";
++
++    case ARES_RR_TLSA_MATCH:
++      return "MATCH";
++
++    case ARES_RR_TLSA_DATA:
++      return "DATA";
++
+     case ARES_RR_URI_PRIORITY:
+       return "PRIORITY";
+ 
+@@ -419,9 +431,13 @@ ares_dns_datatype_t ares_dns_rr_key_datatype(ares_dns_rr_key_t key)
+ 
+     case ARES_RR_OPT_EXT_RCODE:
+     case ARES_RR_OPT_VERSION:
++    case ARES_RR_TLSA_CERT_USAGE:
++    case ARES_RR_TLSA_SELECTOR:
++    case ARES_RR_TLSA_MATCH:
+     case ARES_RR_CAA_CRITICAL:
+       return ARES_DATATYPE_U8;
+ 
++    case ARES_RR_TLSA_DATA:
+     case ARES_RR_CAA_VALUE:
+     case ARES_RR_TXT_DATA:
+     case ARES_RR_RAW_RR_DATA:
+@@ -457,6 +473,10 @@ static const ares_dns_rr_key_t rr_opt_keys[]    = { ARES_RR_OPT_UDP_SIZE,
+                                                     ARES_RR_OPT_EXT_RCODE,
+                                                     ARES_RR_OPT_VERSION,
+                                                     ARES_RR_OPT_FLAGS };
++static const ares_dns_rr_key_t rr_tlsa_keys[]   = { ARES_RR_TLSA_CERT_USAGE,
++                                                    ARES_RR_TLSA_SELECTOR,
++                                                    ARES_RR_TLSA_MATCH,
++                                                    ARES_RR_TLSA_DATA };
+ static const ares_dns_rr_key_t rr_uri_keys[]    = { ARES_RR_URI_PRIORITY,
+                                                     ARES_RR_URI_WEIGHT,
+                                                     ARES_RR_URI_TARGET };
+@@ -512,10 +532,10 @@ const ares_dns_rr_key_t       *ares_dns_rr_get_keys(ares_dns_rec_type_t type,
+     case ARES_REC_TYPE_OPT:
+       *cnt = sizeof(rr_opt_keys) / sizeof(*rr_opt_keys);
+       return rr_opt_keys;
+-#if 0
+     case ARES_REC_TYPE_TLSA:
+       *cnt = sizeof(rr_tlsa_keys) / sizeof(*rr_tlsa_keys);
+       return rr_tlsa_keys;
++#if 0
+     case ARES_REC_TYPE_SVBC:
+       *cnt = sizeof(rr_svbc_keys) / sizeof(*rr_svbc_keys);
+       return rr_svbc_keys;
+diff --git a/src/lib/ares_dns_parse.c b/src/lib/ares_dns_parse.c
+index f45a83b6..862bc1b6 100644
+--- a/src/lib/ares_dns_parse.c
++++ b/src/lib/ares_dns_parse.c
+@@ -392,7 +392,7 @@ static ares_status_t ares_dns_parse_rr_opt(ares__buf_t *buf, ares_dns_rr_t *rr,
+ {
+   ares_status_t status;
+ 
+-  (void)rdlength; /* Not needed */
++  (void)rdlength;
+ 
+   status = ares_dns_rr_set_u16(rr, ARES_RR_OPT_UDP_SIZE, raw_class);
+   if (status != ARES_SUCCESS) {
+@@ -422,6 +422,50 @@ static ares_status_t ares_dns_parse_rr_opt(ares__buf_t *buf, ares_dns_rr_t *rr,
+   return ARES_SUCCESS;
+ }
+ 
++
++static ares_status_t ares_dns_parse_rr_tlsa(ares__buf_t *buf, ares_dns_rr_t *rr,
++                                            size_t rdlength)
++{
++  ares_status_t  status;
++  size_t         orig_len = ares__buf_len(buf);
++  size_t         len;
++  unsigned char *data;
++
++  status = ares_dns_parse_and_set_u8(buf, rr, ARES_RR_TLSA_CERT_USAGE);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  status = ares_dns_parse_and_set_u8(buf, rr, ARES_RR_TLSA_SELECTOR);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  status = ares_dns_parse_and_set_u8(buf, rr, ARES_RR_TLSA_MATCH);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  len = ares_dns_rr_remaining_len(buf, orig_len, rdlength);
++  if (len == 0) {
++    return ARES_EBADRESP;
++  }
++
++  status = ares__buf_fetch_bytes_dup(buf, len, &data);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  status = ares_dns_rr_set_bin_own(rr, ARES_RR_TLSA_DATA, data, len);
++  if (status != ARES_SUCCESS) {
++    ares_free(data);
++    return status;
++  }
++
++  return ARES_SUCCESS;
++}
++
++
+ static ares_status_t ares_dns_parse_rr_uri(ares__buf_t *buf, ares_dns_rr_t *rr,
+                                            size_t rdlength)
+ {
+@@ -738,6 +782,8 @@ static ares_status_t
+       return ARES_EBADRESP;
+     case ARES_REC_TYPE_OPT:
+       return ares_dns_parse_rr_opt(buf, rr, rdlength, raw_class, raw_ttl);
++    case ARES_REC_TYPE_TLSA:
++      return ares_dns_parse_rr_tlsa(buf, rr, rdlength);
+     case ARES_REC_TYPE_URI:
+       return ares_dns_parse_rr_uri(buf, rr, rdlength);
+     case ARES_REC_TYPE_CAA:
+diff --git a/src/lib/ares_dns_record.c b/src/lib/ares_dns_record.c
+index 5a09abee..fc7fec0a 100644
+--- a/src/lib/ares_dns_record.c
++++ b/src/lib/ares_dns_record.c
+@@ -148,13 +148,12 @@ static void ares__dns_rr_free(ares_dns_rr_t *rr)
+     case ARES_REC_TYPE_OPT:
+       /* Once we support the attribute/values, we need to free here */
+       break;
+-#if 0
++
+     case ARES_REC_TYPE_TLSA:
+-      /* Once this record type is supported, need to free here
+-       * ares_free(rr->r.tlsa.);
+-       */
++      ares_free(rr->r.tlsa.data);
+       break;
+ 
++#if 0
+     case ARES_REC_TYPE_SVBC:
+       /* Once this record type is supported, need to free here
+        * ares_free(rr->r.svbc.);
+@@ -625,6 +624,22 @@ static void *ares_dns_rr_data_ptr(ares_dns_rr_t *dns_rr, ares_dns_rr_key_t key,
+     case ARES_RR_OPT_FLAGS:
+       return &dns_rr->r.opt.flags;
+ 
++    case ARES_RR_TLSA_CERT_USAGE:
++      return &dns_rr->r.tlsa.cert_usage;
++
++    case ARES_RR_TLSA_SELECTOR:
++      return &dns_rr->r.tlsa.selector;
++
++    case ARES_RR_TLSA_MATCH:
++      return &dns_rr->r.tlsa.match;
++
++    case ARES_RR_TLSA_DATA:
++      if (lenptr == NULL) {
++        return NULL;
++      }
++      *lenptr = &dns_rr->r.tlsa.data_len;
++      return &dns_rr->r.tlsa.data;
++
+     case ARES_RR_URI_PRIORITY:
+       return &dns_rr->r.uri.priority;
+ 
+diff --git a/src/lib/ares_dns_record.h b/src/lib/ares_dns_record.h
+index fbbe21e8..b3f59d5b 100644
+--- a/src/lib/ares_dns_record.h
++++ b/src/lib/ares_dns_record.h
+@@ -51,10 +51,11 @@ typedef enum {
+   ARES_REC_TYPE_SRV   = 33, /*!< RFC 2782. Server Selection. */
+   ARES_REC_TYPE_NAPTR = 35, /*!< RFC 3403. Naming Authority Pointer */
+   ARES_REC_TYPE_OPT   = 41, /*!< RFC 6891. EDNS0 option (meta-RR) */
++
++  ARES_REC_TYPE_TLSA  = 52, /*!< RFC 6698. DNS-Based Authentication of Named
++                             *   Entities (DANE) Transport Layer Security
++                             *   (TLS) Protocol: TLSA */
+ #if 0
+-  ARES_REC_TYPE_TLSA     = 52,    /*!< DNS-Based Authentication of Named
+-                                   *   Entities (DANE) Transport Layer Security
+-                                   *   (TLS) Protocol: TLSA */
+   ARES_REC_TYPE_SVBC     = 64,    /*!< General Purpose Service Binding */
+   ARES_REC_TYPE_HTTPS    = 65,    /*!< Service Binding type for use with HTTP */
+ #endif
+@@ -218,6 +219,14 @@ typedef enum {
+   ARES_RR_OPT_VERSION = (ARES_REC_TYPE_OPT * 100) + 3,
+   /*! OPT Record. Flags. Datatype: u16 */
+   ARES_RR_OPT_FLAGS = (ARES_REC_TYPE_OPT * 100) + 4,
++  /*! TLSA Record. Certificate Usage. Datatype: u8 */
++  ARES_RR_TLSA_CERT_USAGE = (ARES_REC_TYPE_TLSA * 100) + 1,
++  /*! TLSA Record. Selector. Datatype: u8 */
++  ARES_RR_TLSA_SELECTOR = (ARES_REC_TYPE_TLSA * 100) + 2,
++  /*! TLSA Record. Matching Type. Datatype: u8 */
++  ARES_RR_TLSA_MATCH = (ARES_REC_TYPE_TLSA * 100) + 3,
++  /*! TLSA Record. Certificate Association Data. Datatype: bin */
++  ARES_RR_TLSA_DATA = (ARES_REC_TYPE_TLSA * 100) + 4,
+   /*! URI Record. Priority. Datatype: u16 */
+   ARES_RR_URI_PRIORITY = (ARES_REC_TYPE_URI * 100) + 1,
+   /*! URI Record. Weight. Datatype: u16 */
+@@ -236,6 +245,37 @@ typedef enum {
+   ARES_RR_RAW_RR_DATA = (ARES_REC_TYPE_RAW_RR * 100) + 2,
+ } ares_dns_rr_key_t;
+ 
++/*! TLSA Record ARES_RR_TLSA_CERT_USAGE known values */
++typedef enum {
++  /*! Certificate Usage 0. CA Constraint. */
++  ARES_TLSA_USAGE_CA          = 0,
++  /*! Certificate Usage 1. Service Certificate Constraint. */
++  ARES_TLSA_USAGE_SERVICE     = 1,
++  /*! Certificate Usage 2. Trust Anchor Assertation. */
++  ARES_TLSA_USAGE_TRUSTANCHOR = 2,
++  /*! Certificate Usage 3. Domain-issued certificate. */
++  ARES_TLSA_USAGE_DOMAIN      = 3
++} ares_tlsa_usage_t;
++
++/*! TLSA Record ARES_RR_TLSA_SELECTOR known values */
++typedef enum {
++  /*! Full Certificate */
++  ARES_TLSA_SELECTOR_FULL = 0,
++  /*! DER-encoded SubjectPublicKeyInfo */
++  ARES_TLSA_SELECTOR_SUBJPUBKEYINFO = 1
++} ares_tlsa_selector_t;
++
++/*! TLSA Record ARES_RR_TLSA_MATCH known values */
++typedef enum {
++  /*! Exact match */
++  ARES_TLSA_MATCH_EXACT  = 0,
++  /*! Sha256 match */
++  ARES_TLSA_MATCH_SHA256 = 1,
++  /*! Sha512 match */
++  ARES_TLSA_MATCH_SHA512 = 2
++} ares_tlsa_match_t;
++
++
+ /*! String representation of DNS Record Type
+  *
+  *  \param[in] type  DNS Record Type
+@@ -743,6 +783,14 @@ typedef struct {
+    * not currently supported */
+ } ares__dns_opt_t;
+ 
++typedef struct {
++  unsigned char  cert_usage;
++  unsigned char  selector;
++  unsigned char  match;
++  unsigned char *data;
++  size_t         data_len;
++} ares__dns_tlsa_t;
++
+ typedef struct {
+   unsigned short priority;
+   unsigned short weight;
+@@ -784,6 +832,7 @@ struct ares_dns_rr {
+     ares__dns_srv_t    srv;
+     ares__dns_naptr_t  naptr;
+     ares__dns_opt_t    opt;
++    ares__dns_tlsa_t   tlsa;
+     ares__dns_uri_t    uri;
+     ares__dns_caa_t    caa;
+     ares__dns_raw_rr_t raw_rr;
+diff --git a/src/lib/ares_dns_write.c b/src/lib/ares_dns_write.c
+index 075784c8..438ca989 100644
+--- a/src/lib/ares_dns_write.c
++++ b/src/lib/ares_dns_write.c
+@@ -545,6 +545,43 @@ static ares_status_t ares_dns_write_rr_opt(ares__buf_t         *buf,
+   return ARES_SUCCESS;
+ }
+ 
++static ares_status_t ares_dns_write_rr_tlsa(ares__buf_t         *buf,
++                                            const ares_dns_rr_t *rr,
++                                            ares__llist_t      **namelist)
++{
++  ares_status_t        status;
++  const unsigned char *data;
++  size_t               len = 0;
++
++  (void)namelist;
++
++  /* CERT_USAGE */
++  status = ares_dns_write_rr_u8(buf, rr, ARES_RR_TLSA_CERT_USAGE);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  /* SELECTOR */
++  status = ares_dns_write_rr_u8(buf, rr, ARES_RR_TLSA_SELECTOR);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  /* MATCH */
++  status = ares_dns_write_rr_u8(buf, rr, ARES_RR_TLSA_MATCH);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  /* DATA -- binary, rest of buffer, required to be non-zero length */
++  data = ares_dns_rr_get_bin(rr, ARES_RR_TLSA_DATA, &len);
++  if (data == NULL || len == 0) {
++    return ARES_EFORMERR;
++  }
++
++  return ares__buf_append(buf, data, len);
++}
++
+ static ares_status_t ares_dns_write_rr_uri(ares__buf_t         *buf,
+                                            const ares_dns_rr_t *rr,
+                                            ares__llist_t      **namelist)
+@@ -755,6 +792,9 @@ static ares_status_t ares_dns_write_rr(ares_dns_record_t *dnsrec,
+       case ARES_REC_TYPE_OPT:
+         status = ares_dns_write_rr_opt(buf, rr, namelistptr);
+         break;
++      case ARES_REC_TYPE_TLSA:
++        status = ares_dns_write_rr_tlsa(buf, rr, namelistptr);
++        break;
+       case ARES_REC_TYPE_URI:
+         status = ares_dns_write_rr_uri(buf, rr, namelistptr);
+         break;
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===

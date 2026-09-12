@@ -1,0 +1,160 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/maintenance-gap_only-C045-tuexuw_z
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0863d-89ee-73d0-b423-e9cbf962e66c
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C045
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `tests/spng_read_fuzzer.cc`
+
+~~~~cpp
+#define SPNG_UNTESTED
+#include "../spng.h"
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+    unsigned char *out = NULL;
+    int flags;
+
+    spng_ctx *ctx = spng_ctx_new(0);
+    if(ctx == NULL) return 0;
+
+    if(spng_set_png_buffer(ctx, (void*)data, size)) goto err;
+
+    spng_set_image_limits(ctx, 200000, 200000);
+    
+    spng_set_chunk_limits(ctx, 4 * 1000 * 1000, 8 * 1000 * 1000);
+
+    spng_set_crc_action(ctx, SPNG_CRC_USE, SPNG_CRC_USE);
+
+    size_t out_size;
+    if(spng_decoded_image_size(ctx, SPNG_FMT_RGBA8, &out_size)) goto err;
+
+    if(out_size > 80000000) goto err;
+
+    out = (unsigned char*)malloc(out_size);
+    if(out == NULL) goto err;
+
+    flags = SPNG_DECODE_USE_TRNS | SPNG_DECODE_USE_GAMA | SPNG_DECODE_USE_SBIT;
+    if(spng_decode_image(ctx, out, out_size, SPNG_FMT_RGBA8, flags)) goto err;
+
+err:
+    spng_ctx_free(ctx);
+    if(out != NULL) free(out);
+
+    return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/libspng/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2018 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+mkdir build
+meson --buildtype=plain --default-library static build
+ninja -C build
+
+$CXX $CXXFLAGS -std=c++11 -I. \
+    $SRC/libspng/tests/spng_read_fuzzer.cc \
+    -o $OUT/spng_read_fuzzer \
+    $LIB_FUZZING_ENGINE $SRC/libspng/build/libspng.a -lz
+
+$CXX $CXXFLAGS -std=c++11 -I. \
+    $SRC/libspng/tests/spng_read_fuzzer.cc \
+    -o $OUT/spng_read_fuzzer_structure_aware \
+    -include ../fuzzer-test-suite/libpng-1.2.56/png_mutator.h \
+    -D PNG_MUTATOR_DEFINE_LIBFUZZER_CUSTOM_MUTATOR \
+    $LIB_FUZZING_ENGINE $SRC/libspng/build/libspng.a -lz
+
+find $SRC/libspng/tests/images -name "*.png" | \
+     xargs zip $OUT/spng_read_fuzzer_seed_corpus.zip
+
+cp $SRC/libspng/tests/spng.dict \
+   $SRC/libspng/tests/spng_read_fuzzer.options $OUT/
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `spng.c`
+
+~~~~diff
+diff --git a/spng.c b/spng.c
+--- a/spng.c
++++ b/spng.c
+@@ -1977,13 +1977,13 @@ int spng_set_chunk_limits(spng_ctx *ctx, size_t chunk_size, size_t cache_limit)
+ 
+     return 0;
+ }
+ 
+ int spng_get_chunk_limits(spng_ctx *ctx, size_t *chunk_size, size_t *cache_limit)
+ {
+-    if(ctx == NULL || chunk_size == NULL) return 1;
++    if(ctx == NULL || chunk_size == NULL || cache_limit == NULL) return 1;
+ 
+     *chunk_size = ctx->max_chunk_size;
+ 
+     *cache_limit = ctx->chunk_cache_limit;
+ 
+     return 0;
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C045","gap_exists":true,"gap_type":["fuzz-worthy entry point","API protocol","input semantics"],"confidence":98,"affected_functions":["spng_get_chunk_limits"],"reason":"H0 never calls spng_get_chunk_limits() and therefore cannot exercise its output-pointer validation, including the S1 branch rejecting a NULL cache_limit. Its fuzz bytes are used only as a PNG buffer, while the relevant behavior depends on API argument combinations rather than PNG contents.","evidence":["S1 changes spng_get_chunk_limits() from checking ctx == NULL || chunk_size == NULL to also checking cache_limit == NULL.","spng_get_chunk_limits() writes through both *chunk_size and *cache_limit after validation.","H0 calls spng_set_chunk_limits(ctx, 4 * 1000 * 1000, 8 * 1000 * 1000) but never calls spng_get_chunk_limits().","H0 does not derive pointer-nullability or API-call selection from the fuzz input."],"recommended_action":"Add an API-focused fuzz target or extend H0 to invoke spng_get_chunk_limits() with independently varied valid and NULL ctx, chunk_size, and cache_limit arguments, checking that invalid combinations return an error without dereferencing output pointers and valid combinations return the configured limits."}
+tokens used
+4,562

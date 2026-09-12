@@ -1,0 +1,532 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t5-direct_evolution_aware-T5023-iic_29f3
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08af0-142b-7ad2-bfdb-54befb02dbfe
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T5023
+
+## Existing harness H0
+
+Every project-owned C/C++ path containing `fuzz` at the pre-change snapshot is shown below. Framework and build-script scaffolding are not expanded.
+
+### H0 path: `tests/fuzz_main.c`
+
+~~~~cpp
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+
+/* fuzz target entry point, works without libFuzzer */
+
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size);
+
+int main(int argc, char **argv)
+{
+    FILE *f;
+    char *buf = NULL;
+    long siz_buf;
+
+    if(argc < 2)
+    {
+        fprintf(stderr, "no input file\n");
+        goto err;
+    }
+
+    f = fopen(argv[1], "rb");
+    if(f == NULL)
+    {
+        fprintf(stderr, "error opening input file %s\n", argv[1]);
+        goto err;
+    }
+
+    fseek(f, 0, SEEK_END);
+
+    siz_buf = ftell(f);
+    rewind(f);
+
+    if(siz_buf < 1) goto err;
+
+    buf = (char*)malloc(siz_buf);
+    if(buf == NULL)
+    {
+        fprintf(stderr, "malloc() failed\n");
+        goto err;
+    }
+
+    if(fread(buf, siz_buf, 1, f) != 1)
+    {
+        fprintf(stderr, "fread() failed\n");
+        goto err;
+    }
+
+    (void)LLVMFuzzerTestOneInput((uint8_t*)buf, siz_buf);
+
+err:
+    free(buf);
+
+    return 0;
+}
+~~~~
+
+### H0 path: `tests/spng_read_fuzzer.c`
+
+~~~~cpp
+#define SPNG_UNTESTED
+#include "../spng/spng.h"
+
+#include <string.h>
+
+struct buf_state
+{
+    const uint8_t *data;
+    size_t bytes_left;
+};
+
+static int buffer_read_fn(spng_ctx *ctx, void *user, void *dest, size_t length)
+{
+    struct buf_state *state = (struct buf_state*)user;
+
+    if(length > state->bytes_left) return SPNG_IO_EOF;
+
+    memcpy(dest, state->data, length);
+
+    state->bytes_left -= length;
+    state->data += length;
+
+    return 0;
+}
+
+#ifdef __cplusplus
+extern "C"
+#endif
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+    if(size < 4) return 0;
+
+    int flags = data[size - 1];
+    int fmt = data[size - 3] | (data[size - 2] << 8);
+    int stream = data[size - 4] & 1;
+    int progressive = data[size - 4] & 2;
+    int file_stream = data[size - 4] & 4;
+    int discard = data[size - 4] & 8;
+
+    size -= 4;
+
+    int ret;
+    unsigned char *out = NULL;
+    FILE *file = NULL;
+
+    spng_ctx *ctx = spng_ctx_new(SPNG_CTX_IGNORE_ADLER32);
+    if(ctx == NULL) return 0;
+
+    struct spng_ihdr ihdr;
+    struct spng_plte plte;
+    struct spng_trns trns;
+    struct spng_chrm chrm;
+    struct spng_chrm_int chrm_int;
+    double gamma;
+    struct spng_iccp iccp;
+    struct spng_sbit sbit;
+    uint8_t srgb_rendering_intent;
+    struct spng_text text[4] = {0};
+    struct spng_bkgd bkgd;
+    struct spng_hist hist;
+    struct spng_phys phys;
+    struct spng_splt splt[4] = {0};
+    struct spng_time time;
+    uint32_t n_text = 4, n_splt = 4;
+
+    struct buf_state state;
+    state.data = data;
+    state.bytes_left = size;
+
+    if(stream)
+    {
+        if(file_stream)
+        {
+#if defined(SPNGT_HAVE_FMEMOPEN)
+            file = fmemopen((void*)data, size, "rb");
+
+            if(file == NULL) goto err;
+#endif
+            ret = spng_set_png_file(ctx, file);
+        }
+        else ret = spng_set_png_stream(ctx, buffer_read_fn, &state);
+    }
+    else ret = spng_set_png_buffer(ctx, (void*)data, size);
+
+    if(ret) goto err;
+
+    spng_set_image_limits(ctx, 200000, 200000);
+
+    spng_set_chunk_limits(ctx, 4 * 1000 * 1000, 8 * 1000 * 1000);
+
+    spng_set_crc_action(ctx, SPNG_CRC_USE, discard ? SPNG_CRC_DISCARD : SPNG_CRC_USE);
+
+    size_t out_size;
+    if(spng_decoded_image_size(ctx, fmt, &out_size)) goto err;
+
+    if(out_size > 80000000) goto err;
+
+    out = (unsigned char*)malloc(out_size);
+    if(out == NULL) goto err;
+
+    spng_get_ihdr(ctx, &ihdr);
+    spng_get_plte(ctx, &plte);
+    spng_get_trns(ctx, &trns);
+    spng_get_chrm(ctx, &chrm);
+    spng_get_chrm_int(ctx, &chrm_int);
+    spng_get_gama(ctx, &gamma);
+    spng_get_iccp(ctx, &iccp);
+    spng_get_sbit(ctx, &sbit);
+    spng_get_srgb(ctx, &srgb_rendering_intent);
+
+    if(!spng_get_text(ctx, text, &n_text))
+    {/* Up to 4 entries were read, get the actual count */
+        spng_get_text(ctx, NULL, &n_text);
+
+        uint32_t i;
+        for(i=0; i < n_text; i++)
+        {/* All strings should be non-NULL */
+            if(text[i].text == NULL ||
+               text[i].keyword[0] == '\0' ||
+               text[i].language_tag == NULL ||
+               text[i].translated_keyword == NULL ||
+               memchr(text[i].keyword, 0, 80) == NULL)
+            {
+                spng_ctx_free(ctx);
+                if(out != NULL) free(out);
+                return 1;
+            }
+            /* This shouldn't cause issues either */
+            text[i].length = strlen(text[i].text);
+        }
+    }
+
+    spng_get_bkgd(ctx, &bkgd);
+    spng_get_hist(ctx, &hist);
+    spng_get_phys(ctx, &phys);
+
+    if(spng_get_splt(ctx, splt, &n_splt))
+    {/* Up to 4 entries were read, get the actual count */
+        spng_get_splt(ctx, NULL, &n_splt);
+
+        uint32_t i;
+        for(i=0; i < n_splt; i++)
+        {
+            if(splt[i].name[0] == '\0' ||
+               splt[i].entries == NULL ||
+               memchr(splt[i].name, 0, 80) == NULL)
+            {
+                spng_ctx_free(ctx);
+                if(out != NULL) free(out);
+                return 1;
+            }
+        }
+    }
+
+    if(progressive)
+    {
+        if(spng_decode_image(ctx, NULL, 0, fmt, flags | SPNG_DECODE_PROGRESSIVE)) goto err;
+
+        size_t ioffset, out_width = out_size / ihdr.height;
+        struct spng_row_info ri;
+
+        do
+        {
+            if(spng_get_row_info(ctx, &ri)) break;
+
+            ioffset = ri.row_num * out_width;
+
+        }while(!spng_decode_row(ctx, out + ioffset, out_size));
+    }
+    else if(spng_decode_image(ctx, out, out_size, fmt, flags)) goto err;
+
+    spng_get_time(ctx, &time);
+
+err:
+    spng_ctx_free(ctx);
+    if(out != NULL) free(out);
+    if(file != NULL) fclose(file);
+
+    return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed C/C++ production paths and all hunks are included. Function-context mode expands changed C/C++ function bodies; tests, examples, documentation, build files, and Harness files are excluded by the frozen rule.
+
+~~~~diff
+diff --git a/spng/spng.c b/spng/spng.c
+index 93463f3..5dfd210 100644
+--- a/spng/spng.c
++++ b/spng/spng.c
+@@ -4239,111 +4239,113 @@ static int encode_row(spng_ctx *ctx, const void *row, size_t len)
+ int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int flags)
+ {
+     if(ctx == NULL || img == NULL) return 1;
+     if(!ctx->state) return SPNG_EBADSTATE;
+     if(!ctx->stored.ihdr) return SPNG_ENOIHDR;
+     if(fmt != SPNG_FMT_PNG) return SPNG_EFMT;
+ 
+     int ret = 0;
+     size_t img_len = 0;
+     const struct spng_ihdr *ihdr = &ctx->ihdr;
+ 
++    if(ihdr->color_type == SPNG_COLOR_TYPE_INDEXED && !ctx->stored.plte) return SPNG_ENOPLTE;
++
+     ctx->channels = num_channels(ihdr);
+ 
+     ret = calculate_image_size(ctx, fmt, &img_len);
+     if(ret) return encode_err(ctx, ret);
+ 
+     if(img_len != len) return SPNG_EBUFSIZ;
+ 
+     ret = write_chunks_before_idat(ctx);
+     if(ret) return encode_err(ctx, ret);
+ 
+     ret = calculate_subimages(ctx);
+     if(ret) return encode_err(ctx, ret);
+ 
+     if(ihdr->bit_depth < 8) ctx->bytes_per_pixel = 1;
+     else ctx->bytes_per_pixel = ctx->channels * (ihdr->bit_depth / 8);
+ 
+     ctx->out_width = ctx->total_out_size / ihdr->height;
+ 
+     ret = spng__deflate_init(ctx, Z_DEFAULT_COMPRESSION, Z_FILTERED);
+     if(ret) return encode_err(ctx, ret);
+ 
+     size_t scanline_buf_size = ctx->subimage[ctx->widest_pass].scanline_width;
+ 
+     scanline_buf_size += 32;
+ 
+     if(scanline_buf_size < 32) return SPNG_EOVERFLOW;
+ 
+     ctx->scanline_buf = spng__malloc(ctx, scanline_buf_size);
+     ctx->prev_scanline_buf = spng__malloc(ctx, scanline_buf_size);
+ 
+     if(ctx->scanline_buf == NULL || ctx->prev_scanline_buf == NULL) return encode_err(ctx, SPNG_EMEM);
+ 
+     /* Maintain alignment for pixels while keeping the filter at [0] */
+     ctx->scanline = ctx->scanline_buf + 15;
+     ctx->prev_scanline = ctx->prev_scanline_buf + 15;
+ 
+     struct spng_subimage *sub = ctx->subimage;
+     struct spng_row_info *ri = &ctx->row_info;
+     struct spng_encode_flags f = ctx->encode_flags;
+ 
+     size_t img_width = img_len / ihdr->height;
+ 
+     ctx->fmt = fmt;
+ 
+     //z_stream *zstream = &ctx->zstream;
+     //uint32_t idat_length = SPNG_WRITE_SIZE;
+ 
+    // ret = write_header(ctx, type_idat, idat_length, &data);
+     //if(ret) return encode_err(ctx, ret);
+ 
+     //zstream->avail_out = idat_length;
+     //zstream->next_out = data;
+ 
+     if(ihdr->interlace_method) f.interlace = 1;
+ 
+     if(fmt & (SPNG_FMT_PNG | SPNG_FMT_RAW) ) f.same_layout = 1;
+ 
+     ctx->encode_flags = f;
+ 
+     while(!sub[ri->pass].width || !sub[ri->pass].height) ri->pass++;
+ 
+     if(f.interlace) ri->row_num = adam7_y_start[ri->pass];
+ 
+     ctx->pixel_size = 4; /* SPNG_FMT_RGBA8 */
+ 
+     if(fmt == SPNG_FMT_RGBA16) ctx->pixel_size = 8;
+     else if(fmt == SPNG_FMT_RGB8) ctx->pixel_size = 3;
+     else if(fmt == SPNG_FMT_G8) ctx->pixel_size = 1;
+     else if(fmt == SPNG_FMT_GA8) ctx->pixel_size = 2;
+     else if(ctx->fmt & (SPNG_FMT_PNG | SPNG_FMT_RAW))
+     {
+         if(ihdr->bit_depth >= 8) ctx->pixel_size = ctx->bytes_per_pixel;
+     }
+ 
+     //XXX: set state
+ 
+     do
+     {
+         size_t ioffset = ri->row_num * img_width;
+ 
+         ret = encode_row(ctx, (unsigned char*)img + ioffset, img_width);
+ 
+     }while(!ret);
+ 
+     if(ret != SPNG_EOI) return encode_err(ctx, ret);
+ 
+     ctx->state = SPNG_STATE_EOI;
+ 
+     ret = finish_idat(ctx);
+     if(ret) encode_err(ctx, ret);
+ 
+     ctx->state = SPNG_STATE_LAST_IDAT;
+ 
+     ret = write_chunks_after_idat(ctx);
+     if(ret) return encode_err(ctx, ret);
+ 
+     ctx->state = SPNG_STATE_IEND;
+ 
+     return 0;
+ }
+~~~~
+
+## Uniform selected declaration context
+
+The same mechanical rule is used for every case: in lexicographic changed-production-path order, show +/-24 lines around the first literal identity match in each snapshot.
+
+### S0
+
+Path: `spng/spng.c`; lines 4215-4263
+
+~~~~text
+004215: 
+004216: static int encode_row(spng_ctx *ctx, const void *row, size_t len)
+004217: {
+004218:     if(ctx == NULL || row == NULL) return SPNG_EINTERNAL;
+004219: 
+004220:     const struct spng_encode_flags *f = &ctx->encode_flags;
+004221: 
+004222:     if(!f->interlace) return encode_scanline(ctx, row, len);
+004223: 
+004224:     uint32_t k;
+004225:     int pass = ctx->row_info.pass;
+004226:     unsigned char *scanline = ctx->scanline + 1;
+004227:     unsigned pixel_size = ctx->pixel_size;
+004228: 
+004229:     for(k=0; k < ctx->subimage[pass].width; k++)
+004230:     {
+004231:         size_t ioffset = (adam7_x_start[pass] + (size_t) k * adam7_x_delta[pass]) * pixel_size;
+004232: 
+004233:         memcpy(scanline + k * pixel_size, (unsigned char*)row + ioffset, pixel_size);
+004234:     }
+004235: 
+004236:     return encode_scanline(ctx, scanline, len);
+004237: }
+004238: 
+004239: int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int flags)
+004240: {
+004241:     if(ctx == NULL || img == NULL) return 1;
+004242:     if(!ctx->state) return SPNG_EBADSTATE;
+004243:     if(!ctx->stored.ihdr) return SPNG_ENOIHDR;
+004244:     if(fmt != SPNG_FMT_PNG) return SPNG_EFMT;
+004245: 
+004246:     int ret = 0;
+004247:     size_t img_len = 0;
+004248:     const struct spng_ihdr *ihdr = &ctx->ihdr;
+004249: 
+004250:     ctx->channels = num_channels(ihdr);
+004251: 
+004252:     ret = calculate_image_size(ctx, fmt, &img_len);
+004253:     if(ret) return encode_err(ctx, ret);
+004254: 
+004255:     if(img_len != len) return SPNG_EBUFSIZ;
+004256: 
+004257:     ret = write_chunks_before_idat(ctx);
+004258:     if(ret) return encode_err(ctx, ret);
+004259: 
+004260:     ret = calculate_subimages(ctx);
+004261:     if(ret) return encode_err(ctx, ret);
+004262: 
+004263:     if(ihdr->bit_depth < 8) ctx->bytes_per_pixel = 1;
+~~~~
+
+### S1
+
+Path: `spng/spng.c`; lines 4215-4263
+
+~~~~text
+004215: 
+004216: static int encode_row(spng_ctx *ctx, const void *row, size_t len)
+004217: {
+004218:     if(ctx == NULL || row == NULL) return SPNG_EINTERNAL;
+004219: 
+004220:     const struct spng_encode_flags *f = &ctx->encode_flags;
+004221: 
+004222:     if(!f->interlace) return encode_scanline(ctx, row, len);
+004223: 
+004224:     uint32_t k;
+004225:     int pass = ctx->row_info.pass;
+004226:     unsigned char *scanline = ctx->scanline + 1;
+004227:     unsigned pixel_size = ctx->pixel_size;
+004228: 
+004229:     for(k=0; k < ctx->subimage[pass].width; k++)
+004230:     {
+004231:         size_t ioffset = (adam7_x_start[pass] + (size_t) k * adam7_x_delta[pass]) * pixel_size;
+004232: 
+004233:         memcpy(scanline + k * pixel_size, (unsigned char*)row + ioffset, pixel_size);
+004234:     }
+004235: 
+004236:     return encode_scanline(ctx, scanline, len);
+004237: }
+004238: 
+004239: int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int flags)
+004240: {
+004241:     if(ctx == NULL || img == NULL) return 1;
+004242:     if(!ctx->state) return SPNG_EBADSTATE;
+004243:     if(!ctx->stored.ihdr) return SPNG_ENOIHDR;
+004244:     if(fmt != SPNG_FMT_PNG) return SPNG_EFMT;
+004245: 
+004246:     int ret = 0;
+004247:     size_t img_len = 0;
+004248:     const struct spng_ihdr *ihdr = &ctx->ihdr;
+004249: 
+004250:     if(ihdr->color_type == SPNG_COLOR_TYPE_INDEXED && !ctx->stored.plte) return SPNG_ENOPLTE;
+004251: 
+004252:     ctx->channels = num_channels(ihdr);
+004253: 
+004254:     ret = calculate_image_size(ctx, fmt, &img_len);
+004255:     if(ret) return encode_err(ctx, ret);
+004256: 
+004257:     if(img_len != len) return SPNG_EBUFSIZ;
+004258: 
+004259:     ret = write_chunks_before_idat(ctx);
+004260:     if(ret) return encode_err(ctx, ret);
+004261: 
+004262:     ret = calculate_subimages(ctx);
+004263:     if(ret) return encode_err(ctx, ret);
+~~~~
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T5023","gap_exists":true,"gap_type":["entry_point","api_protocol","state"],"commit_induced":"NO","maintenance_needed":false,"confidence":99,"affected_functions":["spng_encode_image","LLVMFuzzerTestOneInput"],"reason":"H0 exercises PNG decoding through spng_decoded_image_size(), spng_decode_image(), and spng_decode_row(), but never calls the encoding entry point spng_encode_image() or constructs its required encoding state. This is a material pre-existing encoding coverage gap. The commit only adds an early validation in spng_encode_image() for indexed-color images without ctx->stored.plte; it neither creates nor materially aggravates the gap.","evidence":["H0's LLVMFuzzerTestOneInput calls decoding APIs including spng_decoded_image_size(), spng_decode_image(), and spng_decode_row(), with no call to spng_encode_image().","The sole S0-to-S1 change is `if(ihdr->color_type == SPNG_COLOR_TYPE_INDEXED && !ctx->stored.plte) return SPNG_ENOPLTE;` inside the already-existing spng_encode_image().","Both S0 and S1 require spng_encode_image() to receive a context with ctx->state and ctx->stored.ihdr, while the new branch additionally observes the existing ctx->stored.plte state.","Because H0 did not reach spng_encode_image() in S0, its inability to exercise the new SPNG_ENOPLTE branch in S1 is inherited rather than commit-induced."],"recommended_action":"No maintenance is required for this commit. Independently, a future encoding-focused harness could call spng_encode_image() and fuzz indexed-color IHDR and PLTE presence, but that addresses historical coverage."}
+tokens used
+7,947

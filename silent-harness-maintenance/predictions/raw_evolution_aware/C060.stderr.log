@@ -1,0 +1,2351 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/silent-maintenance-evolution_aware-C060-nm7jvq3t
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a089a4-ad9e-7f92-952a-94aa056406a4
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous Fuzz-Harness Maintenance Case
+
+Case ID
+
+C060
+
+## Evidence boundary
+
+The material below contains only the complete existing harness H0 and the complete production source diff from S0 to S1. No developer-updated harness, commit message, build result, coverage result, reachability result, or label is supplied.
+
+## Existing Harness H0
+
+### `fuzz/c/std/gif_fuzzer.c`
+
+```text
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN gif_fuzzer.c
+./a.out ../../../test/data/*.gif
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__GIF
+#define WUFFS_CONFIG__MODULE__LZW
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+#include "../fuzzlib/fuzzlib_image_decoder.c"
+
+void set_quirks(wuffs_gif__decoder* dec, uint64_t hash) {
+  uint32_t quirks[] = {
+      WUFFS_GIF__QUIRK_DELAY_NUM_DECODED_FRAMES,
+      WUFFS_GIF__QUIRK_FIRST_FRAME_LOCAL_PALETTE_MEANS_BLACK_BACKGROUND,
+      WUFFS_GIF__QUIRK_HONOR_BACKGROUND_COLOR,
+      WUFFS_GIF__QUIRK_IGNORE_TOO_MUCH_PIXEL_DATA,
+      WUFFS_GIF__QUIRK_IMAGE_BOUNDS_ARE_STRICT,
+      WUFFS_GIF__QUIRK_REJECT_EMPTY_FRAME,
+      WUFFS_GIF__QUIRK_REJECT_EMPTY_PALETTE,
+      0,
+  };
+
+  for (uint32_t i = 0; quirks[i]; i++) {
+    uint64_t bit = 1 << (i & 63);
+    if (hash & bit) {
+      wuffs_gif__decoder__set_quirk(dec, quirks[i], 1);
+    }
+  }
+}
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_gif__decoder dec;
+  wuffs_base__status status = wuffs_gif__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  hash = wuffs_base__u64__rotate_right(hash, 1);
+  uint64_t hash_8_bits = hash & 0xFF;
+  hash = wuffs_base__u64__rotate_right(hash, 8);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  set_quirks(&dec, hash);
+  return fuzz_image_decoder(
+      src, hash_8_bits,
+      wuffs_gif__decoder__upcast_as__wuffs_base__image_decoder(&dec));
+}
+
+```
+
+## Complete production source diff S0 -> S1
+
+The fixed `--function-context` rule includes the complete diff and expanded changed-function bodies where Git recognizes them.
+
+```diff
+diff --git a/release/c/wuffs-unsupported-snapshot.c b/release/c/wuffs-unsupported-snapshot.c
+index 5e2f92f80fe2477fc340fb134052f76db1b1065a..45f124610b96e48ff8ed2d981a043f233c6ddb7e 100644
+--- a/release/c/wuffs-unsupported-snapshot.c
++++ b/release/c/wuffs-unsupported-snapshot.c
+@@ -8280,6 +8280,7 @@ struct wuffs_lzw__decoder__struct {
+ 
+ // ---------------- Status Codes
+ 
++extern const char wuffs_gif__error__bad_lzw_code[];
+ extern const char wuffs_gif__error__bad_extension_label[];
+ extern const char wuffs_gif__error__bad_frame_size[];
+ extern const char wuffs_gif__error__bad_graphic_control[];
+@@ -8458,279 +8459,294 @@ wuffs_gif__decoder__decode_frame(
+ struct wuffs_gif__decoder__struct {
+   // Do not access the private_impl's or private_data's fields directly. There
+   // is no API/ABI compatibility or safety guarantee if you do so. Instead, use
+   // the wuffs_foo__bar__baz functions.
+   //
+   // It is a struct, not a struct*, so that the outermost wuffs_foo__bar struct
+   // can be stack allocated when WUFFS_IMPLEMENTATION is defined.
+ 
+   struct {
+     uint32_t magic;
+     uint32_t active_coroutine;
+     wuffs_base__vtable vtable_for__wuffs_base__image_decoder;
+     wuffs_base__vtable null_vtable;
+ 
+     uint32_t f_width;
+     uint32_t f_height;
+     uint8_t f_call_sequence;
+     bool f_report_metadata_iccp;
+     bool f_report_metadata_xmp;
+     uint32_t f_metadata_fourcc;
+     uint64_t f_metadata_io_position;
+     bool f_quirks[7];
+     bool f_delayed_num_decoded_frames;
+-    bool f_previous_lzw_decode_ended_abruptly;
+     bool f_seen_header;
++    bool f_ignored_but_affects_benchmarks;
+     bool f_has_global_palette;
+     uint8_t f_interlace;
+     bool f_seen_num_animation_loops_value;
+     uint32_t f_num_animation_loops_value;
+     uint32_t f_background_color_u32_argb_premul;
+     uint32_t f_black_color_u32_argb_premul;
+     bool f_gc_has_transparent_index;
+     uint8_t f_gc_transparent_index;
+     uint8_t f_gc_disposal;
+     uint64_t f_gc_duration;
+     uint64_t f_frame_config_io_position;
+     uint64_t f_num_decoded_frame_configs_value;
+     uint64_t f_num_decoded_frames_value;
+     uint32_t f_frame_rect_x0;
+     uint32_t f_frame_rect_y0;
+     uint32_t f_frame_rect_x1;
+     uint32_t f_frame_rect_y1;
+     uint32_t f_dst_x;
+     uint32_t f_dst_y;
+     uint32_t f_dirty_max_excl_y;
+     uint64_t f_compressed_ri;
+     uint64_t f_compressed_wi;
+     wuffs_base__pixel_swizzler f_swizzler;
++    uint32_t f_lzw_pending_literal_width_plus_one;
++    uint32_t f_lzw_literal_width;
++    uint32_t f_lzw_clear_code;
++    uint32_t f_lzw_end_code;
++    uint32_t f_lzw_save_code;
++    uint32_t f_lzw_prev_code;
++    uint32_t f_lzw_width;
++    uint32_t f_lzw_bits;
++    uint32_t f_lzw_n_bits;
++    uint32_t f_lzw_output_ri;
++    uint32_t f_lzw_output_wi;
++    uint32_t f_lzw_read_from_return_value;
++    uint16_t f_lzw_prefixes[4096];
+ 
+     uint32_t p_decode_image_config[1];
+     uint32_t p_do_decode_image_config[1];
+     uint32_t p_tell_me_more[1];
+     uint32_t p_do_tell_me_more[1];
+     uint32_t p_decode_frame_config[1];
+     uint32_t p_do_decode_frame_config[1];
+     uint32_t p_skip_frame[1];
+     uint32_t p_decode_frame[1];
+     uint32_t p_do_decode_frame[1];
+     uint32_t p_decode_up_to_id_part1[1];
+     uint32_t p_decode_header[1];
+     uint32_t p_decode_lsd[1];
+     uint32_t p_decode_extension[1];
+     uint32_t p_skip_blocks[1];
+     uint32_t p_decode_ae[1];
+     uint32_t p_decode_gc[1];
+     uint32_t p_decode_id_part0[1];
+     uint32_t p_decode_id_part1[1];
+     uint32_t p_decode_id_part2[1];
+   } private_impl;
+ 
+   struct {
+     uint8_t f_compressed[4096];
+     uint8_t f_palettes[2][1024];
+     uint8_t f_dst_palette[1024];
+-    wuffs_lzw__decoder f_lzw;
++    uint8_t f_lzw_suffixes[4096][8];
++    uint16_t f_lzw_lm1s[4096];
++    uint8_t f_lzw_output[8199];
+ 
+     struct {
+       uint32_t v_background_color;
+     } s_do_decode_frame_config[1];
+     struct {
+       uint64_t scratch;
+     } s_skip_frame[1];
+     struct {
+       uint8_t v_c[6];
+       uint32_t v_i;
+     } s_decode_header[1];
+     struct {
+       uint8_t v_flags;
+       uint8_t v_background_color_index;
+       uint32_t v_num_palette_entries;
+       uint32_t v_i;
+       uint64_t scratch;
+     } s_decode_lsd[1];
+     struct {
+       uint64_t scratch;
+     } s_skip_blocks[1];
+     struct {
+       uint8_t v_block_size;
+       bool v_is_animexts;
+       bool v_is_netscape;
+       bool v_is_iccp;
+       bool v_is_xmp;
+       uint64_t scratch;
+     } s_decode_ae[1];
+     struct {
+       uint64_t scratch;
+     } s_decode_gc[1];
+     struct {
+       uint64_t scratch;
+     } s_decode_id_part0[1];
+     struct {
+       uint8_t v_which_palette;
+       uint32_t v_num_palette_entries;
+       uint32_t v_i;
+       uint64_t scratch;
+     } s_decode_id_part1[1];
+     struct {
+       uint64_t v_block_size;
+       bool v_need_block_size;
+       uint64_t scratch;
+     } s_decode_id_part2[1];
+   } private_data;
+ 
+ #ifdef __cplusplus
+ #if defined(WUFFS_BASE__HAVE_UNIQUE_PTR)
+   using unique_ptr = std::unique_ptr<wuffs_gif__decoder, wuffs_unique_ptr_deleter>;
+ 
+   // On failure, the alloc_etc functions return nullptr. They don't throw.
+ 
+   static inline unique_ptr
+   alloc() {
+     return unique_ptr(wuffs_gif__decoder__alloc());
+   }
+ 
+   static inline wuffs_base__image_decoder::unique_ptr
+   alloc_as__wuffs_base__image_decoder() {
+     return wuffs_base__image_decoder::unique_ptr(
+         wuffs_gif__decoder__alloc_as__wuffs_base__image_decoder());
+   }
+ #endif  // defined(WUFFS_BASE__HAVE_UNIQUE_PTR)
+ 
+ #if defined(WUFFS_BASE__HAVE_EQ_DELETE) && !defined(WUFFS_IMPLEMENTATION)
+   // Disallow constructing or copying an object via standard C++ mechanisms,
+   // e.g. the "new" operator, as this struct is intentionally opaque. Its total
+   // size and field layout is not part of the public, stable, memory-safe API.
+   // Use malloc or memcpy and the sizeof__wuffs_foo__bar function instead, and
+   // call wuffs_foo__bar__baz methods (which all take a "this"-like pointer as
+   // their first argument) rather than tweaking bar.private_impl.qux fields.
+   //
+   // In C, we can just leave wuffs_foo__bar as an incomplete type (unless
+   // WUFFS_IMPLEMENTATION is #define'd). In C++, we define a complete type in
+   // order to provide convenience methods. These forward on "this", so that you
+   // can write "bar->baz(etc)" instead of "wuffs_foo__bar__baz(bar, etc)".
+   wuffs_gif__decoder__struct() = delete;
+   wuffs_gif__decoder__struct(const wuffs_gif__decoder__struct&) = delete;
+   wuffs_gif__decoder__struct& operator=(
+       const wuffs_gif__decoder__struct&) = delete;
+ #endif  // defined(WUFFS_BASE__HAVE_EQ_DELETE) && !defined(WUFFS_IMPLEMENTATION)
+ 
+ #if !defined(WUFFS_IMPLEMENTATION)
+   // As above, the size of the struct is not part of the public API, and unless
+   // WUFFS_IMPLEMENTATION is #define'd, this struct type T should be heap
+   // allocated, not stack allocated. Its size is not intended to be known at
+   // compile time, but it is unfortunately divulged as a side effect of
+   // defining C++ convenience methods. Use "sizeof__T()", calling the function,
+   // instead of "sizeof T", invoking the operator. To make the two values
+   // different, so that passing the latter will be rejected by the initialize
+   // function, we add an arbitrary amount of dead weight.
+   uint8_t dead_weight[123000000];  // 123 MB.
+ #endif  // !defined(WUFFS_IMPLEMENTATION)
+ 
+   inline wuffs_base__status WUFFS_BASE__WARN_UNUSED_RESULT
+   initialize(
+       size_t sizeof_star_self,
+       uint64_t wuffs_version,
+       uint32_t options) {
+     return wuffs_gif__decoder__initialize(
+         this, sizeof_star_self, wuffs_version, options);
+   }
+ 
+   inline wuffs_base__image_decoder*
+   upcast_as__wuffs_base__image_decoder() {
+     return (wuffs_base__image_decoder*)this;
+   }
+ 
+   inline uint64_t
+   get_quirk(
+       uint32_t a_key) const {
+     return wuffs_gif__decoder__get_quirk(this, a_key);
+   }
+ 
+   inline wuffs_base__status
+   set_quirk(
+       uint32_t a_key,
+       uint64_t a_value) {
+     return wuffs_gif__decoder__set_quirk(this, a_key, a_value);
+   }
+ 
+   inline wuffs_base__status
+   decode_image_config(
+       wuffs_base__image_config* a_dst,
+       wuffs_base__io_buffer* a_src) {
+     return wuffs_gif__decoder__decode_image_config(this, a_dst, a_src);
+   }
+ 
+   inline wuffs_base__empty_struct
+   set_report_metadata(
+       uint32_t a_fourcc,
+       bool a_report) {
+     return wuffs_gif__decoder__set_report_metadata(this, a_fourcc, a_report);
+   }
+ 
+   inline wuffs_base__status
+   tell_me_more(
+       wuffs_base__io_buffer* a_dst,
+       wuffs_base__more_information* a_minfo,
+       wuffs_base__io_buffer* a_src) {
+     return wuffs_gif__decoder__tell_me_more(this, a_dst, a_minfo, a_src);
+   }
+ 
+   inline uint32_t
+   num_animation_loops() const {
+     return wuffs_gif__decoder__num_animation_loops(this);
+   }
+ 
+   inline uint64_t
+   num_decoded_frame_configs() const {
+     return wuffs_gif__decoder__num_decoded_frame_configs(this);
+   }
+ 
+   inline uint64_t
+   num_decoded_frames() const {
+     return wuffs_gif__decoder__num_decoded_frames(this);
+   }
+ 
+   inline wuffs_base__rect_ie_u32
+   frame_dirty_rect() const {
+     return wuffs_gif__decoder__frame_dirty_rect(this);
+   }
+ 
+   inline wuffs_base__range_ii_u64
+   workbuf_len() const {
+     return wuffs_gif__decoder__workbuf_len(this);
+   }
+ 
+   inline wuffs_base__status
+   restart_frame(
+       uint64_t a_index,
+       uint64_t a_io_position) {
+     return wuffs_gif__decoder__restart_frame(this, a_index, a_io_position);
+   }
+ 
+   inline wuffs_base__status
+   decode_frame_config(
+       wuffs_base__frame_config* a_dst,
+       wuffs_base__io_buffer* a_src) {
+     return wuffs_gif__decoder__decode_frame_config(this, a_dst, a_src);
+   }
+ 
+   inline wuffs_base__status
+   decode_frame(
+       wuffs_base__pixel_buffer* a_dst,
+       wuffs_base__io_buffer* a_src,
+       wuffs_base__pixel_blend a_blend,
+       wuffs_base__slice_u8 a_workbuf,
+       wuffs_base__decode_frame_options* a_opts) {
+     return wuffs_gif__decoder__decode_frame(this, a_dst, a_src, a_blend, a_workbuf, a_opts);
+   }
+ 
+ #endif  // __cplusplus
+ };  // struct wuffs_gif__decoder__struct
+ 
+ #endif  // defined(__cplusplus) || defined(WUFFS_IMPLEMENTATION)
+ 
+ #endif  // !defined(WUFFS_CONFIG__MODULES) || defined(WUFFS_CONFIG__MODULE__GIF) || defined(WUFFS_NONMONOLITHIC)
+ 
+ #if !defined(WUFFS_CONFIG__MODULES) || defined(WUFFS_CONFIG__MODULE__GZIP) || defined(WUFFS_NONMONOLITHIC)
+ 
+ // ---------------- Status Codes
+@@ -35590,6 +35606,7 @@ wuffs_lzw__decoder__flush(
+ 
+ // ---------------- Status Codes Implementations
+ 
++const char wuffs_gif__error__bad_lzw_code[] = "#gif: bad LZW code";
+ const char wuffs_gif__error__bad_extension_label[] = "#gif: bad extension label";
+ const char wuffs_gif__error__bad_frame_size[] = "#gif: bad frame size";
+ const char wuffs_gif__error__bad_graphic_control[] = "#gif: bad graphic control";
+@@ -35597,7 +35614,7 @@ const char wuffs_gif__error__bad_header[] = "#gif: bad header";
+ const char wuffs_gif__error__bad_literal_width[] = "#gif: bad literal width";
+ const char wuffs_gif__error__bad_palette[] = "#gif: bad palette";
+ const char wuffs_gif__error__truncated_input[] = "#gif: truncated input";
+-const char wuffs_gif__error__internal_error_inconsistent_ri_wi[] = "#gif: internal error: inconsistent ri/wi";
++const char wuffs_gif__error__internal_error_inconsistent_i_o[] = "#gif: internal error: inconsistent I/O";
+ 
+ // ---------------- Private Consts
+ 
+@@ -35760,8 +35777,19 @@ static wuffs_base__status
+ wuffs_gif__decoder__copy_to_image_buffer(
+     wuffs_gif__decoder* self,
+     wuffs_base__pixel_buffer* a_pb,
+     wuffs_base__slice_u8 a_src);
+ 
++WUFFS_BASE__GENERATED_C_CODE
++static wuffs_base__empty_struct
++wuffs_gif__decoder__lzw_init(
++    wuffs_gif__decoder* self);
++
++WUFFS_BASE__GENERATED_C_CODE
++static wuffs_base__empty_struct
++wuffs_gif__decoder__lzw_read_from(
++    wuffs_gif__decoder* self,
++    wuffs_base__io_buffer* a_src);
++
+ // ---------------- VTables
+ 
+ const wuffs_base__image_decoder__func_ptrs
+@@ -35806,52 +35834,45 @@ wuffs_base__status WUFFS_BASE__WARN_UNUSED_RESULT
+ wuffs_gif__decoder__initialize(
+     wuffs_gif__decoder* self,
+     size_t sizeof_star_self,
+     uint64_t wuffs_version,
+     uint32_t options){
+   if (!self) {
+     return wuffs_base__make_status(wuffs_base__error__bad_receiver);
+   }
+   if (sizeof(*self) != sizeof_star_self) {
+     return wuffs_base__make_status(wuffs_base__error__bad_sizeof_receiver);
+   }
+   if (((wuffs_version >> 32) != WUFFS_VERSION_MAJOR) ||
+       (((wuffs_version >> 16) & 0xFFFF) > WUFFS_VERSION_MINOR)) {
+     return wuffs_base__make_status(wuffs_base__error__bad_wuffs_version);
+   }
+ 
+   if ((options & WUFFS_INITIALIZE__ALREADY_ZEROED) != 0) {
+     // The whole point of this if-check is to detect an uninitialized *self.
+     // We disable the warning on GCC. Clang-5.0 does not have this warning.
+ #if !defined(__clang__) && defined(__GNUC__)
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+ #endif
+     if (self->private_impl.magic != 0) {
+       return wuffs_base__make_status(wuffs_base__error__initialize_falsely_claimed_already_zeroed);
+     }
+ #if !defined(__clang__) && defined(__GNUC__)
+ #pragma GCC diagnostic pop
+ #endif
+   } else {
+     if ((options & WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED) == 0) {
+       memset(self, 0, sizeof(*self));
+       options |= WUFFS_INITIALIZE__ALREADY_ZEROED;
+     } else {
+       memset(&(self->private_impl), 0, sizeof(self->private_impl));
+     }
+   }
+ 
+-  {
+-    wuffs_base__status z = wuffs_lzw__decoder__initialize(
+-        &self->private_data.f_lzw, sizeof(self->private_data.f_lzw), WUFFS_VERSION, options);
+-    if (z.repr) {
+-      return z;
+-    }
+-  }
+   self->private_impl.magic = WUFFS_BASE__MAGIC;
+   self->private_impl.vtable_for__wuffs_base__image_decoder.vtable_name =
+       wuffs_base__image_decoder__vtable_name;
+   self->private_impl.vtable_for__wuffs_base__image_decoder.function_pointers =
+       (const void*)(&wuffs_gif__decoder__func_ptrs_for__wuffs_base__image_decoder);
+   return wuffs_base__make_status(NULL);
+ }
+@@ -37934,169 +37955,167 @@ static wuffs_base__status
+ wuffs_gif__decoder__decode_id_part1(
+     wuffs_gif__decoder* self,
+     wuffs_base__pixel_buffer* a_dst,
+     wuffs_base__io_buffer* a_src,
+     wuffs_base__pixel_blend a_blend) {
+   wuffs_base__status status = wuffs_base__make_status(NULL);
+ 
+   uint8_t v_flags = 0;
+   uint8_t v_which_palette = 0;
+   uint32_t v_num_palette_entries = 0;
+   uint32_t v_i = 0;
+   uint32_t v_argb = 0;
+   wuffs_base__status v_status = wuffs_base__make_status(NULL);
+   uint8_t v_lw = 0;
+ 
+   const uint8_t* iop_a_src = NULL;
+   const uint8_t* io0_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io1_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io2_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   if (a_src && a_src->data.ptr) {
+     io0_a_src = a_src->data.ptr;
+     io1_a_src = io0_a_src + a_src->meta.ri;
+     iop_a_src = io1_a_src;
+     io2_a_src = io0_a_src + a_src->meta.wi;
+   }
+ 
+   uint32_t coro_susp_point = self->private_impl.p_decode_id_part1[0];
+   if (coro_susp_point) {
+     v_which_palette = self->private_data.s_decode_id_part1[0].v_which_palette;
+     v_num_palette_entries = self->private_data.s_decode_id_part1[0].v_num_palette_entries;
+     v_i = self->private_data.s_decode_id_part1[0].v_i;
+   }
+   switch (coro_susp_point) {
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT_0;
+ 
+     {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(1);
+       if (WUFFS_BASE__UNLIKELY(iop_a_src == io2_a_src)) {
+         status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+         goto suspend;
+       }
+       uint8_t t_0 = *iop_a_src++;
+       v_flags = t_0;
+     }
+     if ((v_flags & 64u) != 0u) {
+       self->private_impl.f_interlace = 4u;
+     } else {
+       self->private_impl.f_interlace = 0u;
+     }
+     v_which_palette = 1u;
+     if ((v_flags & 128u) != 0u) {
+       v_num_palette_entries = (((uint32_t)(1u)) << (1u + (v_flags & 7u)));
+       v_i = 0u;
+       while (v_i < v_num_palette_entries) {
+         {
+           WUFFS_BASE__COROUTINE_SUSPENSION_POINT(2);
+           uint32_t t_1;
+           if (WUFFS_BASE__LIKELY(io2_a_src - iop_a_src >= 3)) {
+             t_1 = ((uint32_t)(wuffs_base__peek_u24be__no_bounds_check(iop_a_src)));
+             iop_a_src += 3;
+           } else {
+             self->private_data.s_decode_id_part1[0].scratch = 0;
+             WUFFS_BASE__COROUTINE_SUSPENSION_POINT(3);
+             while (true) {
+               if (WUFFS_BASE__UNLIKELY(iop_a_src == io2_a_src)) {
+                 status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+                 goto suspend;
+               }
+               uint64_t* scratch = &self->private_data.s_decode_id_part1[0].scratch;
+               uint32_t num_bits_1 = ((uint32_t)(*scratch & 0xFFu));
+               *scratch >>= 8;
+               *scratch <<= 8;
+               *scratch |= ((uint64_t)(*iop_a_src++)) << (56 - num_bits_1);
+               if (num_bits_1 == 16) {
+                 t_1 = ((uint32_t)(*scratch >> 40));
+                 break;
+               }
+               num_bits_1 += 8u;
+               *scratch |= ((uint64_t)(num_bits_1));
+             }
+           }
+           v_argb = t_1;
+         }
+         v_argb |= 4278190080u;
+         self->private_data.f_palettes[1u][((4u * v_i) + 0u)] = ((uint8_t)((v_argb >> 0u)));
+         self->private_data.f_palettes[1u][((4u * v_i) + 1u)] = ((uint8_t)((v_argb >> 8u)));
+         self->private_data.f_palettes[1u][((4u * v_i) + 2u)] = ((uint8_t)((v_argb >> 16u)));
+         self->private_data.f_palettes[1u][((4u * v_i) + 3u)] = ((uint8_t)((v_argb >> 24u)));
+         v_i += 1u;
+       }
+       while (v_i < 256u) {
+         self->private_data.f_palettes[1u][((4u * v_i) + 0u)] = 0u;
+         self->private_data.f_palettes[1u][((4u * v_i) + 1u)] = 0u;
+         self->private_data.f_palettes[1u][((4u * v_i) + 2u)] = 0u;
+         self->private_data.f_palettes[1u][((4u * v_i) + 3u)] = 255u;
+         v_i += 1u;
+       }
+     } else if (self->private_impl.f_quirks[6u] &&  ! self->private_impl.f_has_global_palette) {
+       status = wuffs_base__make_status(wuffs_gif__error__bad_palette);
+       goto exit;
+     } else if (self->private_impl.f_gc_has_transparent_index) {
+       wuffs_base__slice_u8__copy_from_slice(wuffs_base__make_slice_u8(self->private_data.f_palettes[1u], 1024), wuffs_base__make_slice_u8(self->private_data.f_palettes[0u], 1024));
+     } else {
+       v_which_palette = 0u;
+     }
+     if (self->private_impl.f_gc_has_transparent_index) {
+       self->private_data.f_palettes[1u][((4u * ((uint32_t)(self->private_impl.f_gc_transparent_index))) + 0u)] = 0u;
+       self->private_data.f_palettes[1u][((4u * ((uint32_t)(self->private_impl.f_gc_transparent_index))) + 1u)] = 0u;
+       self->private_data.f_palettes[1u][((4u * ((uint32_t)(self->private_impl.f_gc_transparent_index))) + 2u)] = 0u;
+       self->private_data.f_palettes[1u][((4u * ((uint32_t)(self->private_impl.f_gc_transparent_index))) + 3u)] = 0u;
+     }
+     v_status = wuffs_base__pixel_swizzler__prepare(&self->private_impl.f_swizzler,
+         wuffs_base__pixel_buffer__pixel_format(a_dst),
+         wuffs_base__pixel_buffer__palette_or_else(a_dst, wuffs_base__make_slice_u8(self->private_data.f_dst_palette, 1024)),
+         wuffs_base__utility__make_pixel_format(2198077448u),
+         wuffs_base__make_slice_u8(self->private_data.f_palettes[v_which_palette], 1024),
+         a_blend);
+     if ( ! wuffs_base__status__is_ok(&v_status)) {
+       status = v_status;
+       if (wuffs_base__status__is_error(&status)) {
+         goto exit;
+       } else if (wuffs_base__status__is_suspension(&status)) {
+         status = wuffs_base__make_status(wuffs_base__error__cannot_return_a_suspension);
+         goto exit;
+       }
+       goto ok;
+     }
+-    if (self->private_impl.f_previous_lzw_decode_ended_abruptly) {
+-      wuffs_base__ignore_status(wuffs_lzw__decoder__initialize(&self->private_data.f_lzw,
+-          sizeof (wuffs_lzw__decoder), WUFFS_VERSION, WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED));
++    if (self->private_impl.f_ignored_but_affects_benchmarks) {
+     }
+     {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(4);
+       if (WUFFS_BASE__UNLIKELY(iop_a_src == io2_a_src)) {
+         status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+         goto suspend;
+       }
+       uint8_t t_2 = *iop_a_src++;
+       v_lw = t_2;
+     }
+     if (v_lw > 8u) {
+       status = wuffs_base__make_status(wuffs_gif__error__bad_literal_width);
+       goto exit;
+     }
+-    wuffs_lzw__decoder__set_quirk(&self->private_data.f_lzw, 1348378624u, ((uint64_t)((1u + v_lw))));
+-    self->private_impl.f_previous_lzw_decode_ended_abruptly = true;
++    self->private_impl.f_lzw_pending_literal_width_plus_one = ((uint32_t)((1u + v_lw)));
++    self->private_impl.f_ignored_but_affects_benchmarks = true;
+ 
+     ok:
+     self->private_impl.p_decode_id_part1[0] = 0;
+     goto exit;
+   }
+ 
+   goto suspend;
+   suspend:
+   self->private_impl.p_decode_id_part1[0] = wuffs_base__status__is_suspension(&status) ? coro_susp_point : 0;
+   self->private_data.s_decode_id_part1[0].v_which_palette = v_which_palette;
+   self->private_data.s_decode_id_part1[0].v_num_palette_entries = v_num_palette_entries;
+   self->private_data.s_decode_id_part1[0].v_i = v_i;
+ 
+   goto exit;
+   exit:
+   if (a_src && a_src->data.ptr) {
+     a_src->meta.ri = ((size_t)(iop_a_src - a_src->data.ptr));
+   }
+ 
+   return status;
+ }
+ 
+ // -------- func gif.decoder.decode_id_part2
+@@ -38106,224 +38125,221 @@ static wuffs_base__status
+ wuffs_gif__decoder__decode_id_part2(
+     wuffs_gif__decoder* self,
+     wuffs_base__pixel_buffer* a_dst,
+     wuffs_base__io_buffer* a_src,
+     wuffs_base__slice_u8 a_workbuf) {
+-  wuffs_base__io_buffer empty_io_buffer = wuffs_base__empty_io_buffer();
+-
+   wuffs_base__status status = wuffs_base__make_status(NULL);
+ 
+   uint64_t v_block_size = 0;
+   bool v_need_block_size = false;
+   uint32_t v_n_copied = 0;
+   uint64_t v_n_compressed = 0;
+   wuffs_base__io_buffer u_r = wuffs_base__empty_io_buffer();
+   wuffs_base__io_buffer* v_r = &u_r;
+   const uint8_t* iop_v_r WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io0_v_r WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io1_v_r WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io2_v_r WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   uint64_t v_mark = 0;
+-  wuffs_base__status v_lzw_status = wuffs_base__make_status(NULL);
+   wuffs_base__status v_copy_status = wuffs_base__make_status(NULL);
+-  wuffs_base__slice_u8 v_uncompressed = {0};
+ 
+   const uint8_t* iop_a_src = NULL;
+   const uint8_t* io0_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io1_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io2_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   if (a_src && a_src->data.ptr) {
+     io0_a_src = a_src->data.ptr;
+     io1_a_src = io0_a_src + a_src->meta.ri;
+     iop_a_src = io1_a_src;
+     io2_a_src = io0_a_src + a_src->meta.wi;
+   }
+ 
+   uint32_t coro_susp_point = self->private_impl.p_decode_id_part2[0];
+   if (coro_susp_point) {
+     v_block_size = self->private_data.s_decode_id_part2[0].v_block_size;
+     v_need_block_size = self->private_data.s_decode_id_part2[0].v_need_block_size;
+   }
+   switch (coro_susp_point) {
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT_0;
+ 
++    wuffs_gif__decoder__lzw_init(self);
+     v_need_block_size = true;
+     label__outer__continue:;
+     while (true) {
+       if (v_need_block_size) {
+         v_need_block_size = false;
+         {
+           WUFFS_BASE__COROUTINE_SUSPENSION_POINT(1);
+           if (WUFFS_BASE__UNLIKELY(iop_a_src == io2_a_src)) {
+             status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+             goto suspend;
+           }
+           uint64_t t_0 = *iop_a_src++;
+           v_block_size = t_0;
+         }
+       }
+       if (v_block_size == 0u) {
+         break;
+       }
+       while (((uint64_t)(io2_a_src - iop_a_src)) == 0u) {
+         status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT_MAYBE_SUSPEND(2);
+       }
+       if (self->private_impl.f_compressed_ri == self->private_impl.f_compressed_wi) {
+         self->private_impl.f_compressed_ri = 0u;
+         self->private_impl.f_compressed_wi = 0u;
+       }
+       while (self->private_impl.f_compressed_wi <= 3841u) {
+         v_n_compressed = wuffs_base__u64__min(v_block_size, ((uint64_t)(io2_a_src - iop_a_src)));
+         if (v_n_compressed <= 0u) {
+           break;
+         }
+         v_n_copied = wuffs_base__io_reader__limited_copy_u32_to_slice(
+             &iop_a_src, io2_a_src,((uint32_t)(v_n_compressed)), wuffs_base__make_slice_u8_ij(self->private_data.f_compressed, self->private_impl.f_compressed_wi, 4096));
+         wuffs_base__u64__sat_add_indirect(&self->private_impl.f_compressed_wi, ((uint64_t)(v_n_copied)));
+         wuffs_base__u64__sat_sub_indirect(&v_block_size, ((uint64_t)(v_n_copied)));
+         if (v_block_size > 0u) {
+           break;
+         }
+         if (((uint64_t)(io2_a_src - iop_a_src)) <= 0u) {
+           v_need_block_size = true;
+           break;
+         }
+         v_block_size = ((uint64_t)(wuffs_base__peek_u8be__no_bounds_check(iop_a_src)));
+         iop_a_src += 1u;
+       }
+       while (true) {
+         if ((self->private_impl.f_compressed_ri > self->private_impl.f_compressed_wi) || (self->private_impl.f_compressed_wi > 4096u)) {
+-          status = wuffs_base__make_status(wuffs_gif__error__internal_error_inconsistent_ri_wi);
++          status = wuffs_base__make_status(wuffs_gif__error__internal_error_inconsistent_i_o);
+           goto exit;
+         }
+         {
+           wuffs_base__io_buffer* o_0_v_r = v_r;
+           const uint8_t *o_0_iop_v_r = iop_v_r;
+           const uint8_t *o_0_io0_v_r = io0_v_r;
+           const uint8_t *o_0_io1_v_r = io1_v_r;
+           const uint8_t *o_0_io2_v_r = io2_v_r;
+           v_r = wuffs_base__io_reader__set(
+               &u_r,
+               &iop_v_r,
+               &io0_v_r,
+               &io1_v_r,
+               &io2_v_r,
+               wuffs_base__make_slice_u8_ij(self->private_data.f_compressed,
+               self->private_impl.f_compressed_ri,
+               self->private_impl.f_compressed_wi),
+               0u);
+           v_mark = ((uint64_t)(iop_v_r - io0_v_r));
+-          {
+-            u_r.meta.ri = ((size_t)(iop_v_r - u_r.data.ptr));
+-            wuffs_base__status t_1 = wuffs_lzw__decoder__transform_io(&self->private_data.f_lzw, &empty_io_buffer, v_r, wuffs_base__utility__empty_slice_u8());
+-            v_lzw_status = t_1;
+-            iop_v_r = u_r.data.ptr + u_r.meta.ri;
+-          }
++          u_r.meta.ri = ((size_t)(iop_v_r - u_r.data.ptr));
++          wuffs_gif__decoder__lzw_read_from(self, v_r);
++          iop_v_r = u_r.data.ptr + u_r.meta.ri;
+           wuffs_base__u64__sat_add_indirect(&self->private_impl.f_compressed_ri, wuffs_base__io__count_since(v_mark, ((uint64_t)(iop_v_r - io0_v_r))));
+           v_r = o_0_v_r;
+           iop_v_r = o_0_iop_v_r;
+           io0_v_r = o_0_io0_v_r;
+           io1_v_r = o_0_io1_v_r;
+           io2_v_r = o_0_io2_v_r;
+         }
+-        v_uncompressed = wuffs_lzw__decoder__flush(&self->private_data.f_lzw);
+-        if (((uint64_t)(v_uncompressed.len)) > 0u) {
+-          v_copy_status = wuffs_gif__decoder__copy_to_image_buffer(self, a_dst, v_uncompressed);
++        if (self->private_impl.f_lzw_output_ri < self->private_impl.f_lzw_output_wi) {
++          v_copy_status = wuffs_gif__decoder__copy_to_image_buffer(self, a_dst, wuffs_base__make_slice_u8_ij(self->private_data.f_lzw_output,
++              self->private_impl.f_lzw_output_ri,
++              self->private_impl.f_lzw_output_wi));
+           if (wuffs_base__status__is_error(&v_copy_status)) {
+             status = v_copy_status;
+             goto exit;
+           }
++          self->private_impl.f_lzw_output_ri = 0u;
++          self->private_impl.f_lzw_output_wi = 0u;
+         }
+-        if (wuffs_base__status__is_ok(&v_lzw_status)) {
+-          self->private_impl.f_previous_lzw_decode_ended_abruptly = false;
++        if (self->private_impl.f_lzw_read_from_return_value == 0u) {
++          self->private_impl.f_ignored_but_affects_benchmarks = false;
+           if (v_need_block_size || (v_block_size > 0u)) {
+             self->private_data.s_decode_id_part2[0].scratch = ((uint32_t)(v_block_size));
+             WUFFS_BASE__COROUTINE_SUSPENSION_POINT(3);
+             if (self->private_data.s_decode_id_part2[0].scratch > ((uint64_t)(io2_a_src - iop_a_src))) {
+               self->private_data.s_decode_id_part2[0].scratch -= ((uint64_t)(io2_a_src - iop_a_src));
+               iop_a_src = io2_a_src;
+               status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+               goto suspend;
+             }
+             iop_a_src += self->private_data.s_decode_id_part2[0].scratch;
+             if (a_src) {
+               a_src->meta.ri = ((size_t)(iop_a_src - a_src->data.ptr));
+             }
+             WUFFS_BASE__COROUTINE_SUSPENSION_POINT(4);
+             status = wuffs_gif__decoder__skip_blocks(self, a_src);
+             if (a_src) {
+               iop_a_src = a_src->data.ptr + a_src->meta.ri;
+             }
+             if (status.repr) {
+               goto suspend;
+             }
+           }
+           goto label__outer__break;
+-        } else if (v_lzw_status.repr == wuffs_base__suspension__short_read) {
+-          goto label__outer__continue;
+-        } else if (v_lzw_status.repr == wuffs_base__suspension__short_write) {
++        } else if (self->private_impl.f_lzw_read_from_return_value == 1u) {
+           continue;
++        } else if (self->private_impl.f_lzw_read_from_return_value == 2u) {
++          goto label__outer__continue;
+         } else if (self->private_impl.f_quirks[3u] && (self->private_impl.f_dst_y >= self->private_impl.f_frame_rect_y1) && (self->private_impl.f_interlace == 0u)) {
+           if (v_need_block_size || (v_block_size > 0u)) {
+             self->private_data.s_decode_id_part2[0].scratch = ((uint32_t)(v_block_size));
+             WUFFS_BASE__COROUTINE_SUSPENSION_POINT(5);
+             if (self->private_data.s_decode_id_part2[0].scratch > ((uint64_t)(io2_a_src - iop_a_src))) {
+               self->private_data.s_decode_id_part2[0].scratch -= ((uint64_t)(io2_a_src - iop_a_src));
+               iop_a_src = io2_a_src;
+               status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+               goto suspend;
+             }
+             iop_a_src += self->private_data.s_decode_id_part2[0].scratch;
+             if (a_src) {
+               a_src->meta.ri = ((size_t)(iop_a_src - a_src->data.ptr));
+             }
+             WUFFS_BASE__COROUTINE_SUSPENSION_POINT(6);
+             status = wuffs_gif__decoder__skip_blocks(self, a_src);
+             if (a_src) {
+               iop_a_src = a_src->data.ptr + a_src->meta.ri;
+             }
+             if (status.repr) {
+               goto suspend;
+             }
+           }
+           goto label__outer__break;
+-        }
+-        status = v_lzw_status;
+-        if (wuffs_base__status__is_error(&status)) {
++        } else if (self->private_impl.f_lzw_read_from_return_value == 3u) {
++          status = wuffs_base__make_status(wuffs_gif__error__truncated_input);
+           goto exit;
+-        } else if (wuffs_base__status__is_suspension(&status)) {
+-          status = wuffs_base__make_status(wuffs_base__error__cannot_return_a_suspension);
++        } else if (self->private_impl.f_lzw_read_from_return_value == 4u) {
++          status = wuffs_base__make_status(wuffs_gif__error__bad_lzw_code);
+           goto exit;
+         }
+-        goto ok;
++        status = wuffs_base__make_status(wuffs_gif__error__internal_error_inconsistent_i_o);
++        goto exit;
+       }
+     }
+     label__outer__break:;
+     self->private_impl.f_compressed_ri = 0u;
+     self->private_impl.f_compressed_wi = 0u;
+     if ((self->private_impl.f_dst_y < self->private_impl.f_frame_rect_y1) && (self->private_impl.f_frame_rect_x0 != self->private_impl.f_frame_rect_x1) && (self->private_impl.f_frame_rect_y0 != self->private_impl.f_frame_rect_y1)) {
+       status = wuffs_base__make_status(wuffs_base__error__not_enough_data);
+       goto exit;
+     }
+ 
+     ok:
+     self->private_impl.p_decode_id_part2[0] = 0;
+     goto exit;
+   }
+ 
+   goto suspend;
+   suspend:
+   self->private_impl.p_decode_id_part2[0] = wuffs_base__status__is_suspension(&status) ? coro_susp_point : 0;
+   self->private_data.s_decode_id_part2[0].v_block_size = v_block_size;
+   self->private_data.s_decode_id_part2[0].v_need_block_size = v_need_block_size;
+ 
+   goto exit;
+   exit:
+   if (a_src && a_src->data.ptr) {
+     a_src->meta.ri = ((size_t)(iop_a_src - a_src->data.ptr));
+   }
+ 
+   return status;
+ }
+ 
+ // -------- func gif.decoder.copy_to_image_buffer
+@@ -38333,125 +38349,336 @@ static wuffs_base__status
+ wuffs_gif__decoder__copy_to_image_buffer(
+     wuffs_gif__decoder* self,
+     wuffs_base__pixel_buffer* a_pb,
+     wuffs_base__slice_u8 a_src) {
+   wuffs_base__slice_u8 v_dst = {0};
+   wuffs_base__slice_u8 v_src = {0};
+   uint64_t v_width_in_bytes = 0;
+   uint64_t v_n = 0;
+   uint64_t v_src_ri = 0;
+   wuffs_base__pixel_format v_pixfmt = {0};
+   uint32_t v_bytes_per_pixel = 0;
+   uint32_t v_bits_per_pixel = 0;
+   wuffs_base__table_u8 v_tab = {0};
+   uint64_t v_i = 0;
+   uint64_t v_j = 0;
+   uint32_t v_replicate_y0 = 0;
+   uint32_t v_replicate_y1 = 0;
+   wuffs_base__slice_u8 v_replicate_dst = {0};
+   wuffs_base__slice_u8 v_replicate_src = {0};
+ 
+   v_pixfmt = wuffs_base__pixel_buffer__pixel_format(a_pb);
+   v_bits_per_pixel = wuffs_base__pixel_format__bits_per_pixel(&v_pixfmt);
+   if ((v_bits_per_pixel & 7u) != 0u) {
+     return wuffs_base__make_status(wuffs_base__error__unsupported_option);
+   }
+   v_bytes_per_pixel = (v_bits_per_pixel >> 3u);
+   v_width_in_bytes = ((uint64_t)((self->private_impl.f_width * v_bytes_per_pixel)));
+   v_tab = wuffs_base__pixel_buffer__plane(a_pb, 0u);
+   while (v_src_ri < ((uint64_t)(a_src.len))) {
+     v_src = wuffs_base__slice_u8__subslice_i(a_src, v_src_ri);
+     if (self->private_impl.f_dst_y >= self->private_impl.f_frame_rect_y1) {
+       if (self->private_impl.f_quirks[3u]) {
+         return wuffs_base__make_status(NULL);
+       }
+       return wuffs_base__make_status(wuffs_base__error__too_much_data);
+     }
+     v_dst = wuffs_base__table_u8__row_u32(v_tab, self->private_impl.f_dst_y);
+     if (self->private_impl.f_dst_y >= self->private_impl.f_height) {
+       v_dst = wuffs_base__slice_u8__subslice_j(v_dst, 0u);
+     } else if (v_width_in_bytes < ((uint64_t)(v_dst.len))) {
+       v_dst = wuffs_base__slice_u8__subslice_j(v_dst, v_width_in_bytes);
+     }
+     v_i = (((uint64_t)(self->private_impl.f_dst_x)) * ((uint64_t)(v_bytes_per_pixel)));
+     if (v_i < ((uint64_t)(v_dst.len))) {
+       v_j = (((uint64_t)(self->private_impl.f_frame_rect_x1)) * ((uint64_t)(v_bytes_per_pixel)));
+       if ((v_i <= v_j) && (v_j <= ((uint64_t)(v_dst.len)))) {
+         v_dst = wuffs_base__slice_u8__subslice_ij(v_dst, v_i, v_j);
+       } else {
+         v_dst = wuffs_base__slice_u8__subslice_i(v_dst, v_i);
+       }
+       v_n = wuffs_base__pixel_swizzler__swizzle_interleaved_from_slice(&self->private_impl.f_swizzler, v_dst, wuffs_base__make_slice_u8(self->private_data.f_dst_palette, 1024), v_src);
+       wuffs_base__u64__sat_add_indirect(&v_src_ri, v_n);
+       wuffs_base__u32__sat_add_indirect(&self->private_impl.f_dst_x, ((uint32_t)(v_n)));
+       self->private_impl.f_dirty_max_excl_y = wuffs_base__u32__max(self->private_impl.f_dirty_max_excl_y, wuffs_base__u32__sat_add(self->private_impl.f_dst_y, 1u));
+     }
+     if (self->private_impl.f_frame_rect_x1 <= self->private_impl.f_dst_x) {
+       self->private_impl.f_dst_x = self->private_impl.f_frame_rect_x0;
+       if (self->private_impl.f_interlace == 0u) {
+         wuffs_base__u32__sat_add_indirect(&self->private_impl.f_dst_y, 1u);
+         continue;
+       }
+       if ((self->private_impl.f_num_decoded_frames_value == 0u) &&  ! self->private_impl.f_gc_has_transparent_index && (self->private_impl.f_interlace > 1u)) {
+         v_replicate_src = wuffs_base__table_u8__row_u32(v_tab, self->private_impl.f_dst_y);
+         v_replicate_y0 = wuffs_base__u32__sat_add(self->private_impl.f_dst_y, 1u);
+         v_replicate_y1 = wuffs_base__u32__sat_add(self->private_impl.f_dst_y, ((uint32_t)(WUFFS_GIF__INTERLACE_COUNT[self->private_impl.f_interlace])));
+         v_replicate_y1 = wuffs_base__u32__min(v_replicate_y1, self->private_impl.f_frame_rect_y1);
+         while (v_replicate_y0 < v_replicate_y1) {
+           v_replicate_dst = wuffs_base__table_u8__row_u32(v_tab, v_replicate_y0);
+           wuffs_base__slice_u8__copy_from_slice(v_replicate_dst, v_replicate_src);
+           v_replicate_y0 += 1u;
+         }
+         self->private_impl.f_dirty_max_excl_y = wuffs_base__u32__max(self->private_impl.f_dirty_max_excl_y, v_replicate_y1);
+       }
+       wuffs_base__u32__sat_add_indirect(&self->private_impl.f_dst_y, ((uint32_t)(WUFFS_GIF__INTERLACE_DELTA[self->private_impl.f_interlace])));
+       while ((self->private_impl.f_interlace > 0u) && (self->private_impl.f_dst_y >= self->private_impl.f_frame_rect_y1)) {
+ #if defined(__GNUC__)
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wconversion"
+ #endif
+         self->private_impl.f_interlace -= 1u;
+ #if defined(__GNUC__)
+ #pragma GCC diagnostic pop
+ #endif
+         self->private_impl.f_dst_y = wuffs_base__u32__sat_add(self->private_impl.f_frame_rect_y0, WUFFS_GIF__INTERLACE_START[self->private_impl.f_interlace]);
+       }
+       continue;
+     }
+     if (((uint64_t)(a_src.len)) == v_src_ri) {
+       break;
+     } else if (((uint64_t)(a_src.len)) < v_src_ri) {
+-      return wuffs_base__make_status(wuffs_gif__error__internal_error_inconsistent_ri_wi);
++      return wuffs_base__make_status(wuffs_gif__error__internal_error_inconsistent_i_o);
+     }
+     v_n = ((uint64_t)((self->private_impl.f_frame_rect_x1 - self->private_impl.f_dst_x)));
+     v_n = wuffs_base__u64__min(v_n, (((uint64_t)(a_src.len)) - v_src_ri));
+     wuffs_base__u64__sat_add_indirect(&v_src_ri, v_n);
+     wuffs_base__u32__sat_add_indirect(&self->private_impl.f_dst_x, ((uint32_t)(v_n)));
+     if (self->private_impl.f_frame_rect_x1 <= self->private_impl.f_dst_x) {
+       self->private_impl.f_dst_x = self->private_impl.f_frame_rect_x0;
+       wuffs_base__u32__sat_add_indirect(&self->private_impl.f_dst_y, ((uint32_t)(WUFFS_GIF__INTERLACE_DELTA[self->private_impl.f_interlace])));
+       while ((self->private_impl.f_interlace > 0u) && (self->private_impl.f_dst_y >= self->private_impl.f_frame_rect_y1)) {
+ #if defined(__GNUC__)
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wconversion"
+ #endif
+         self->private_impl.f_interlace -= 1u;
+ #if defined(__GNUC__)
+ #pragma GCC diagnostic pop
+ #endif
+         self->private_impl.f_dst_y = wuffs_base__u32__sat_add(self->private_impl.f_frame_rect_y0, WUFFS_GIF__INTERLACE_START[self->private_impl.f_interlace]);
+       }
+       continue;
+     }
+     if (v_src_ri != ((uint64_t)(a_src.len))) {
+-      return wuffs_base__make_status(wuffs_gif__error__internal_error_inconsistent_ri_wi);
++      return wuffs_base__make_status(wuffs_gif__error__internal_error_inconsistent_i_o);
+     }
+     break;
+   }
+   return wuffs_base__make_status(NULL);
+ }
+ 
++// -------- func gif.decoder.lzw_init
++
++WUFFS_BASE__GENERATED_C_CODE
++static wuffs_base__empty_struct
++wuffs_gif__decoder__lzw_init(
++    wuffs_gif__decoder* self) {
++  uint32_t v_i = 0;
++
++  self->private_impl.f_lzw_literal_width = 8u;
++  if (self->private_impl.f_lzw_pending_literal_width_plus_one > 0u) {
++    self->private_impl.f_lzw_literal_width = (self->private_impl.f_lzw_pending_literal_width_plus_one - 1u);
++  }
++  self->private_impl.f_lzw_clear_code = (((uint32_t)(1u)) << self->private_impl.f_lzw_literal_width);
++  self->private_impl.f_lzw_end_code = (self->private_impl.f_lzw_clear_code + 1u);
++  self->private_impl.f_lzw_save_code = self->private_impl.f_lzw_end_code;
++  self->private_impl.f_lzw_prev_code = self->private_impl.f_lzw_end_code;
++  self->private_impl.f_lzw_width = (self->private_impl.f_lzw_literal_width + 1u);
++  self->private_impl.f_lzw_bits = 0u;
++  self->private_impl.f_lzw_n_bits = 0u;
++  self->private_impl.f_lzw_output_ri = 0u;
++  self->private_impl.f_lzw_output_wi = 0u;
++  v_i = 0u;
++  while (v_i < self->private_impl.f_lzw_clear_code) {
++    self->private_data.f_lzw_lm1s[v_i] = 0u;
++    self->private_data.f_lzw_suffixes[v_i][0u] = ((uint8_t)(v_i));
++    v_i += 1u;
++  }
++  return wuffs_base__make_empty_struct();
++}
++
++// -------- func gif.decoder.lzw_read_from
++
++WUFFS_BASE__GENERATED_C_CODE
++static wuffs_base__empty_struct
++wuffs_gif__decoder__lzw_read_from(
++    wuffs_gif__decoder* self,
++    wuffs_base__io_buffer* a_src) {
++  uint32_t v_clear_code = 0;
++  uint32_t v_end_code = 0;
++  uint32_t v_save_code = 0;
++  uint32_t v_prev_code = 0;
++  uint32_t v_width = 0;
++  uint32_t v_bits = 0;
++  uint32_t v_n_bits = 0;
++  uint32_t v_output_wi = 0;
++  uint32_t v_code = 0;
++  uint32_t v_c = 0;
++  uint32_t v_o = 0;
++  uint32_t v_steps = 0;
++  uint8_t v_first_byte = 0;
++  uint16_t v_lm1_b = 0;
++  uint16_t v_lm1_a = 0;
++
++  const uint8_t* iop_a_src = NULL;
++  const uint8_t* io0_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
++  const uint8_t* io1_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
++  const uint8_t* io2_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
++  if (a_src && a_src->data.ptr) {
++    io0_a_src = a_src->data.ptr;
++    io1_a_src = io0_a_src + a_src->meta.ri;
++    iop_a_src = io1_a_src;
++    io2_a_src = io0_a_src + a_src->meta.wi;
++  }
++
++  v_clear_code = self->private_impl.f_lzw_clear_code;
++  v_end_code = self->private_impl.f_lzw_end_code;
++  v_save_code = self->private_impl.f_lzw_save_code;
++  v_prev_code = self->private_impl.f_lzw_prev_code;
++  v_width = self->private_impl.f_lzw_width;
++  v_bits = self->private_impl.f_lzw_bits;
++  v_n_bits = self->private_impl.f_lzw_n_bits;
++  v_output_wi = self->private_impl.f_lzw_output_wi;
++  while (true) {
++    if (v_n_bits < v_width) {
++      if (((uint64_t)(io2_a_src - iop_a_src)) >= 4u) {
++        v_bits |= ((uint32_t)(wuffs_base__peek_u32le__no_bounds_check(iop_a_src) << v_n_bits));
++        iop_a_src += ((31u - v_n_bits) >> 3u);
++        v_n_bits |= 24u;
++      } else if (((uint64_t)(io2_a_src - iop_a_src)) <= 0u) {
++        if (a_src && a_src->meta.closed) {
++          self->private_impl.f_lzw_read_from_return_value = 3u;
++        } else {
++          self->private_impl.f_lzw_read_from_return_value = 2u;
++        }
++        break;
++      } else {
++        v_bits |= (((uint32_t)(wuffs_base__peek_u8be__no_bounds_check(iop_a_src))) << v_n_bits);
++        iop_a_src += 1u;
++        v_n_bits += 8u;
++        if (v_n_bits >= v_width) {
++        } else if (((uint64_t)(io2_a_src - iop_a_src)) <= 0u) {
++          if (a_src && a_src->meta.closed) {
++            self->private_impl.f_lzw_read_from_return_value = 3u;
++          } else {
++            self->private_impl.f_lzw_read_from_return_value = 2u;
++          }
++          break;
++        } else {
++          v_bits |= (((uint32_t)(wuffs_base__peek_u8be__no_bounds_check(iop_a_src))) << v_n_bits);
++          iop_a_src += 1u;
++          v_n_bits += 8u;
++          if (v_n_bits < v_width) {
++            self->private_impl.f_lzw_read_from_return_value = 5u;
++            break;
++          }
++        }
++      }
++    }
++    v_code = ((v_bits) & WUFFS_BASE__LOW_BITS_MASK__U32(v_width));
++    v_bits >>= v_width;
++    v_n_bits -= v_width;
++    if (v_code < v_clear_code) {
++      self->private_data.f_lzw_output[v_output_wi] = ((uint8_t)(v_code));
++      v_output_wi = ((v_output_wi + 1u) & 8191u);
++      if (v_save_code <= 4095u) {
++        v_lm1_a = (((uint16_t)(self->private_data.f_lzw_lm1s[v_prev_code] + 1u)) & 4095u);
++        self->private_data.f_lzw_lm1s[v_save_code] = v_lm1_a;
++        if ((v_lm1_a % 8u) != 0u) {
++          self->private_impl.f_lzw_prefixes[v_save_code] = self->private_impl.f_lzw_prefixes[v_prev_code];
++          memcpy(self->private_data.f_lzw_suffixes[v_save_code],self->private_data.f_lzw_suffixes[v_prev_code], sizeof(self->private_data.f_lzw_suffixes[v_save_code]));
++          self->private_data.f_lzw_suffixes[v_save_code][(v_lm1_a % 8u)] = ((uint8_t)(v_code));
++        } else {
++          self->private_impl.f_lzw_prefixes[v_save_code] = ((uint16_t)(v_prev_code));
++          self->private_data.f_lzw_suffixes[v_save_code][0u] = ((uint8_t)(v_code));
++        }
++        v_save_code += 1u;
++        if (v_width < 12u) {
++          v_width += (1u & (v_save_code >> v_width));
++        }
++        v_prev_code = v_code;
++      }
++    } else if (v_code <= v_end_code) {
++      if (v_code == v_end_code) {
++        self->private_impl.f_lzw_read_from_return_value = 0u;
++        break;
++      }
++      v_save_code = v_end_code;
++      v_prev_code = v_end_code;
++      v_width = (self->private_impl.f_lzw_literal_width + 1u);
++    } else if (v_code <= v_save_code) {
++      v_c = v_code;
++      if (v_code == v_save_code) {
++        v_c = v_prev_code;
++      }
++      v_o = ((v_output_wi + (((uint32_t)(self->private_data.f_lzw_lm1s[v_c])) & 4294967288u)) & 8191u);
++      v_output_wi = ((v_output_wi + 1u + ((uint32_t)(self->private_data.f_lzw_lm1s[v_c]))) & 8191u);
++      v_steps = (((uint32_t)(self->private_data.f_lzw_lm1s[v_c])) >> 3u);
++      while (true) {
++        memcpy((self->private_data.f_lzw_output)+(v_o), (self->private_data.f_lzw_suffixes[v_c]), 8u);
++        if (v_steps <= 0u) {
++          break;
++        }
++        v_steps -= 1u;
++        v_o = (((uint32_t)(v_o - 8u)) & 8191u);
++        v_c = ((uint32_t)(self->private_impl.f_lzw_prefixes[v_c]));
++      }
++      v_first_byte = self->private_data.f_lzw_suffixes[v_c][0u];
++      if (v_code == v_save_code) {
++        self->private_data.f_lzw_output[v_output_wi] = v_first_byte;
++        v_output_wi = ((v_output_wi + 1u) & 8191u);
++      }
++      if (v_save_code <= 4095u) {
++        v_lm1_b = (((uint16_t)(self->private_data.f_lzw_lm1s[v_prev_code] + 1u)) & 4095u);
++        self->private_data.f_lzw_lm1s[v_save_code] = v_lm1_b;
++        if ((v_lm1_b % 8u) != 0u) {
++          self->private_impl.f_lzw_prefixes[v_save_code] = self->private_impl.f_lzw_prefixes[v_prev_code];
++          memcpy(self->private_data.f_lzw_suffixes[v_save_code],self->private_data.f_lzw_suffixes[v_prev_code], sizeof(self->private_data.f_lzw_suffixes[v_save_code]));
++          self->private_data.f_lzw_suffixes[v_save_code][(v_lm1_b % 8u)] = v_first_byte;
++        } else {
++          self->private_impl.f_lzw_prefixes[v_save_code] = ((uint16_t)(v_prev_code));
++          self->private_data.f_lzw_suffixes[v_save_code][0u] = ((uint8_t)(v_first_byte));
++        }
++        v_save_code += 1u;
++        if (v_width < 12u) {
++          v_width += (1u & (v_save_code >> v_width));
++        }
++        v_prev_code = v_code;
++      }
++    } else {
++      self->private_impl.f_lzw_read_from_return_value = 4u;
++      break;
++    }
++    if (v_output_wi > 4095u) {
++      self->private_impl.f_lzw_read_from_return_value = 1u;
++      break;
++    }
++  }
++  if (self->private_impl.f_lzw_read_from_return_value != 2u) {
++    while (v_n_bits >= 8u) {
++      v_n_bits -= 8u;
++      if (iop_a_src > io1_a_src) {
++        iop_a_src--;
++      } else {
++        self->private_impl.f_lzw_read_from_return_value = 5u;
++        break;
++      }
++    }
++  }
++  self->private_impl.f_lzw_save_code = v_save_code;
++  self->private_impl.f_lzw_prev_code = v_prev_code;
++  self->private_impl.f_lzw_width = v_width;
++  self->private_impl.f_lzw_bits = v_bits;
++  self->private_impl.f_lzw_n_bits = v_n_bits;
++  self->private_impl.f_lzw_output_wi = v_output_wi;
++  if (a_src && a_src->data.ptr) {
++    a_src->meta.ri = ((size_t)(iop_a_src - a_src->data.ptr));
++  }
++
++  return wuffs_base__make_empty_struct();
++}
++
+ #endif  // !defined(WUFFS_CONFIG__MODULES) || defined(WUFFS_CONFIG__MODULE__GIF)
+ 
+ #if !defined(WUFFS_CONFIG__MODULES) || defined(WUFFS_CONFIG__MODULE__GZIP)
+ 
+ // ---------------- Status Codes Implementations
+diff --git a/script/manual-test-truncated-input.cc b/script/manual-test-truncated-input.cc
+index 962f331400187b0c402f29f6c7e1bb2bf91d5962..6c31d19d4659485a3375de282ffbd3c6fed18e46 100644
+--- a/script/manual-test-truncated-input.cc
++++ b/script/manual-test-truncated-input.cc
+@@ -1,90 +1,89 @@
+ // Copyright 2023 The Wuffs Authors.
+ //
+ // Licensed under the Apache License, Version 2.0 (the "License");
+ // you may not use this file except in compliance with the License.
+ // You may obtain a copy of the License at
+ //
+ //    https://www.apache.org/licenses/LICENSE-2.0
+ //
+ // Unless required by applicable law or agreed to in writing, software
+ // distributed under the License is distributed on an "AS IS" BASIS,
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+ // ----------------
+ 
+ // manual-test-truncated-input tests that decoding truncated versions of
+ // well-formed files produces a "truncated input" error.
+ //
+ // It tests every M-byte prefix of a valid N-byte file, for every positive M
+ // that satisfies (M < 65536) or ((N - M) <= 1024). The truncation point is
+ // either within 64 KiB of the start or 1 KiB of the end. It does not test
+ // every potential M in between, as that would take O(N**2) time.
+ 
+ #include <dirent.h>
+ #include <fcntl.h>
+ #include <inttypes.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
+ 
+ // Wuffs ships as a "single file C library" or "header file library" as per
+ // https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+ //
+ // To use that single file as a "foo.c"-like implementation, instead of a
+ // "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+ // compiling it.
+ #define WUFFS_IMPLEMENTATION
+ 
+ // Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+ // combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+ // functions have static storage.
+ //
+ // This can help the compiler ignore or discard unused code, which can produce
+ // faster compiles and smaller binaries. Other motivations are discussed in the
+ // "ALLOW STATIC IMPLEMENTATION" section of
+ // https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+ #define WUFFS_CONFIG__STATIC_FUNCTIONS
+ 
+ // Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+ // release/c/etc.c choose which parts of Wuffs to build. That file contains the
+ // entire Wuffs standard library, implementing a variety of codecs and file
+ // formats. Without this macro definition, an optimizing compiler or linker may
+ // very well discard Wuffs code for unused codecs, but listing the Wuffs
+ // modules we use makes that process explicit. Preprocessing means that such
+ // code simply isn't compiled.
+ #define WUFFS_CONFIG__MODULES
+ #define WUFFS_CONFIG__MODULE__ADLER32
+ #define WUFFS_CONFIG__MODULE__BASE
+ #define WUFFS_CONFIG__MODULE__BMP
+ #define WUFFS_CONFIG__MODULE__BZIP2
+ #define WUFFS_CONFIG__MODULE__CRC32
+ #define WUFFS_CONFIG__MODULE__DEFLATE
+ #define WUFFS_CONFIG__MODULE__GIF
+ #define WUFFS_CONFIG__MODULE__GZIP
+ #define WUFFS_CONFIG__MODULE__JPEG
+-#define WUFFS_CONFIG__MODULE__LZW
+ #define WUFFS_CONFIG__MODULE__NETPBM
+ #define WUFFS_CONFIG__MODULE__NIE
+ #define WUFFS_CONFIG__MODULE__PNG
+ #define WUFFS_CONFIG__MODULE__TGA
+ #define WUFFS_CONFIG__MODULE__WBMP
+ #define WUFFS_CONFIG__MODULE__ZLIB
+ 
+ // If building this program in an environment that doesn't easily accommodate
+ // relative includes, you can use the script/inline-c-relative-includes.go
+ // program to generate a stand-alone C file.
+ #include "../release/c/wuffs-unsupported-snapshot.c"
+ 
+ // ----
+ 
+ #ifndef DST_BUFFER_ARRAY_SIZE
+ #define DST_BUFFER_ARRAY_SIZE (64 * 1024 * 1024)
+ #endif
+ 
+ #ifndef WORKBUF_ARRAY_SIZE
+ #define WORKBUF_ARRAY_SIZE (256 * 1024 * 1024)
+ #endif
+diff --git a/script/print-average-pixel.cc b/script/print-average-pixel.cc
+index 3f29fec317453c4355f7ef91ab5cb106871249d8..35e5878d49163e6b2c1e96c3a287322f6dc933b3 100644
+--- a/script/print-average-pixel.cc
++++ b/script/print-average-pixel.cc
+@@ -20,53 +20,52 @@ the image file format, width and height). It's a toy program to demonstrate how
+ to use the wuffs_aux C++ API to decode an image and iterate over its pixels.
+ */
+ 
+ #include <inttypes.h>
+ #include <stdio.h>
+ 
+ // Wuffs ships as a "single file C library" or "header file library" as per
+ // https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+ //
+ // To use that single file as a "foo.c"-like implementation, instead of a
+ // "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+ // compiling it.
+ #define WUFFS_IMPLEMENTATION
+ 
+ // Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+ // combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+ // functions have static storage.
+ //
+ // This can help the compiler ignore or discard unused code, which can produce
+ // faster compiles and smaller binaries. Other motivations are discussed in the
+ // "ALLOW STATIC IMPLEMENTATION" section of
+ // https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+ #define WUFFS_CONFIG__STATIC_FUNCTIONS
+ 
+ // Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+ // release/c/etc.c choose which parts of Wuffs to build. That file contains the
+ // entire Wuffs standard library, implementing a variety of codecs and file
+ // formats. Without this macro definition, an optimizing compiler or linker may
+ // very well discard Wuffs code for unused codecs, but listing the Wuffs
+ // modules we use makes that process explicit. Preprocessing means that such
+ // code simply isn't compiled.
+ #define WUFFS_CONFIG__MODULES
+ #define WUFFS_CONFIG__MODULE__ADLER32
+ #define WUFFS_CONFIG__MODULE__AUX__BASE
+ #define WUFFS_CONFIG__MODULE__AUX__IMAGE
+ #define WUFFS_CONFIG__MODULE__BASE
+ #define WUFFS_CONFIG__MODULE__BMP
+ #define WUFFS_CONFIG__MODULE__CRC32
+ #define WUFFS_CONFIG__MODULE__DEFLATE
+ #define WUFFS_CONFIG__MODULE__GIF
+ #define WUFFS_CONFIG__MODULE__JPEG
+-#define WUFFS_CONFIG__MODULE__LZW
+ #define WUFFS_CONFIG__MODULE__NETPBM
+ #define WUFFS_CONFIG__MODULE__NIE
+ #define WUFFS_CONFIG__MODULE__PNG
+ #define WUFFS_CONFIG__MODULE__TGA
+ #define WUFFS_CONFIG__MODULE__WBMP
+ #define WUFFS_CONFIG__MODULE__ZLIB
+ 
+ // If building this program in an environment that doesn't easily accommodate
+ // relative includes, you can use the script/inline-c-relative-includes.go
+ // program to generate a stand-alone C file.
+ #include "../release/c/wuffs-unsupported-snapshot.c"
+diff --git a/script/print-image-metadata.cc b/script/print-image-metadata.cc
+index 56bebac422a795774844daef92450ec83c44f9c2..d68351215f56cf9cf5affeb831edf3edee2f08d7 100644
+--- a/script/print-image-metadata.cc
++++ b/script/print-image-metadata.cc
+@@ -17,68 +17,67 @@
+ /*
+ print-image-metadata prints images' metadata.
+ */
+ 
+ #include <inttypes.h>
+ #include <stdio.h>
+ 
+ // Wuffs ships as a "single file C library" or "header file library" as per
+ // https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+ //
+ // To use that single file as a "foo.c"-like implementation, instead of a
+ // "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+ // compiling it.
+ #define WUFFS_IMPLEMENTATION
+ 
+ // Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+ // combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+ // functions have static storage.
+ //
+ // This can help the compiler ignore or discard unused code, which can produce
+ // faster compiles and smaller binaries. Other motivations are discussed in the
+ // "ALLOW STATIC IMPLEMENTATION" section of
+ // https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+ #define WUFFS_CONFIG__STATIC_FUNCTIONS
+ 
+ // Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+ // release/c/etc.c choose which parts of Wuffs to build. That file contains the
+ // entire Wuffs standard library, implementing a variety of codecs and file
+ // formats. Without this macro definition, an optimizing compiler or linker may
+ // very well discard Wuffs code for unused codecs, but listing the Wuffs
+ // modules we use makes that process explicit. Preprocessing means that such
+ // code simply isn't compiled.
+ #define WUFFS_CONFIG__MODULES
+ #define WUFFS_CONFIG__MODULE__ADLER32
+ #define WUFFS_CONFIG__MODULE__BASE
+ #define WUFFS_CONFIG__MODULE__BMP
+ #define WUFFS_CONFIG__MODULE__CRC32
+ #define WUFFS_CONFIG__MODULE__DEFLATE
+ #define WUFFS_CONFIG__MODULE__GIF
+ #define WUFFS_CONFIG__MODULE__JPEG
+-#define WUFFS_CONFIG__MODULE__LZW
+ #define WUFFS_CONFIG__MODULE__NETPBM
+ #define WUFFS_CONFIG__MODULE__NIE
+ #define WUFFS_CONFIG__MODULE__PNG
+ #define WUFFS_CONFIG__MODULE__TGA
+ #define WUFFS_CONFIG__MODULE__WBMP
+ #define WUFFS_CONFIG__MODULE__ZLIB
+ 
+ // If building this program in an environment that doesn't easily accommodate
+ // relative includes, you can use the script/inline-c-relative-includes.go
+ // program to generate a stand-alone C file.
+ #include "../release/c/wuffs-unsupported-snapshot.c"
+ 
+ // ----
+ 
+ #ifndef SRC_BUFFER_ARRAY_SIZE
+ #define SRC_BUFFER_ARRAY_SIZE (64 * 1024)
+ #endif
+ 
+ #ifndef META_BUFFER_ARRAY_SIZE
+ #define META_BUFFER_ARRAY_SIZE (64 * 1024)
+ #endif
+ 
+ #ifndef WORKBUF_ARRAY_SIZE
+ #define WORKBUF_ARRAY_SIZE (256 * 1024 * 1024)
+ #endif
+ 
+ #define PRINTBUF_ARRAY_SIZE 80
+diff --git a/std/gif/common_consts.wuffs b/std/gif/common_consts.wuffs
+index 8e3af00630a9fe878c4177113a9631843edf1995..3121dfa1a0a1232d96c8e072468c9974a3058733 100644
+--- a/std/gif/common_consts.wuffs
++++ b/std/gif/common_consts.wuffs
+@@ -12,8 +12,11 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++// TODO: remove this no-longer-used `use` line. That affects the topological
++// sort of std/etc packages, which makes a large diff for the generated C code.
+ use "std/lzw"
+ 
++pub status "#bad LZW code"
+ pub status "#bad extension label"
+ pub status "#bad frame size"
+ pub status "#bad graphic control"
+@@ -22,7 +25,7 @@ pub status "#bad literal width"
+ pub status "#bad palette"
+ pub status "#truncated input"
+ 
+-pri status "#internal error: inconsistent ri/wi"
++pri status "#internal error: inconsistent I/O"
+ 
+ pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0
+ 
+diff --git a/std/gif/decode_gif.wuffs b/std/gif/decode_gif.wuffs
+index 0131bef0cc648531611f38202f1f501cb9e9ad62..bebcb0692c567888a6493f1a5f7e3418da0aa1a6 100644
+--- a/std/gif/decode_gif.wuffs
++++ b/std/gif/decode_gif.wuffs
+@@ -15,80 +15,100 @@
+ pub struct decoder? implements base.image_decoder(
+         // These upper bounds should be 0xFFFF, on a strict reading of the GIF
+         // spec, but our looser implementation uses 0x1_FFFE. See
+         // test/data/artificial-gif/frame-out-of-bounds.gif.make-artificial.txt
+         width  : base.u32[..= 0x1_FFFE],
+         height : base.u32[..= 0x1_FFFE],
+ 
+         // The call sequence state machine is discussed in
+         // (/doc/std/image-decoders-call-sequence.md).
+         //
+         // A GIF's first frame's bounds affects the overall image bounds (per
+         // test/data/artificial/gif-frame-out-of-bounds.gif.make-artificial.txt).
+         // Decoding the first frame's bounds is part of decode_image_config even
+         // though it's conceptually part of the first decode_frame_config.
+         call_sequence : base.u8,
+ 
+         report_metadata_iccp : base.bool,
+         report_metadata_xmp  : base.bool,
+         metadata_fourcc      : base.u32,
+         metadata_io_position : base.u64,
+ 
+         quirks : array[QUIRKS_COUNT] base.bool,
+ 
+-        delayed_num_decoded_frames         : base.bool,
+-        previous_lzw_decode_ended_abruptly : base.bool,
+-        seen_header                        : base.bool,
++        delayed_num_decoded_frames : base.bool,
++        seen_header                : base.bool,
++
++        // This field used to be called "previous_lzw_decode_ended_abruptly".
++        // It's no longer used, but removing it changes the subsequent field
++        // offsets, which can worsen the benchmarks.
++        ignored_but_affects_benchmarks : base.bool,
+ 
+         has_global_palette : base.bool,
+ 
+         // interlace indexes the INTERLACE_START and INTERLACE_DELTA arrays.
+         interlace : base.u8[..= 4],
+ 
+         // Absent an ANIMEXTS1.0 or NETSCAPE2.0 extension, the implicit number of
+         // animation loops is 1.
+         seen_num_animation_loops_value : base.bool,
+         num_animation_loops_value      : base.u32,
+ 
+         background_color_u32_argb_premul : base.u32,
+         black_color_u32_argb_premul      : base.u32,
+ 
+         gc_has_transparent_index : base.bool,
+         gc_transparent_index     : base.u8,
+         gc_disposal              : base.u8,
+         // There are 7_056000 flicks per centisecond.
+         gc_duration : base.u64[..= 0xFFFF * 7_056000],
+ 
+         frame_config_io_position : base.u64,
+ 
+         num_decoded_frame_configs_value : base.u64,
+         num_decoded_frames_value        : base.u64,
+ 
+         frame_rect_x0 : base.u32[..= 0x0_FFFF],
+         frame_rect_y0 : base.u32[..= 0x0_FFFF],
+         frame_rect_x1 : base.u32[..= 0x1_FFFE],
+         frame_rect_y1 : base.u32[..= 0x1_FFFE],
+ 
+         // The dst_etc fields are the output cursor during copy_to_image_buffer.
+         dst_x            : base.u32,
+         dst_y            : base.u32,
+         dirty_max_excl_y : base.u32,
+ 
+         // Indexes into the compressed array, defined below.
+         compressed_ri : base.u64,
+         compressed_wi : base.u64,
+ 
+         swizzler : base.pixel_swizzler,
+ 
++        lzw_pending_literal_width_plus_one : base.u32[..= 9],
++        lzw_literal_width                  : base.u32[..= 8],
++        lzw_clear_code                     : base.u32[..= 256],
++        lzw_end_code                       : base.u32[..= 257],
++        lzw_save_code                      : base.u32[..= 4096],
++        lzw_prev_code                      : base.u32[..= 4095],
++        lzw_width                          : base.u32[..= 12],
++        lzw_bits                           : base.u32,
++        lzw_n_bits                         : base.u32[..= 31],
++        lzw_output_ri                      : base.u32[..= 8191],
++        lzw_output_wi                      : base.u32[..= 8191],
++        lzw_read_from_return_value         : base.u32,
++        lzw_prefixes                       : array[4096] base.u16[..= 4095],
++
+         util : base.utility,
+ ) + (
+         compressed : array[4096] base.u8,
+ 
+         // palettes[0] and palettes[1] are the Global and Local Color Table.
+         palettes : array[2] array[4 * 256] base.u8,
+         // dst_palette is the swizzled color table.
+         dst_palette : array[4 * 256] base.u8,
+ 
+-        lzw : lzw.decoder,
++        lzw_suffixes : array[4096] array[8] base.u8,
++        lzw_lm1s     : array[4096] base.u16,
++        lzw_output   : array[8192 + 7] base.u8,
+ )
+ 
+ pub func decoder.get_quirk(key: base.u32) base.u64 {
+@@ -826,205 +846,210 @@ pri func decoder.decode_id_part0?(src: base.io_reader) {
+ pri func decoder.decode_id_part1?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend) {
+     var flags               : base.u8
+     var which_palette       : base.u8[..= 1]
+     var num_palette_entries : base.u32[..= 256]
+     var i                   : base.u32
+     var argb                : base.u32
+     var status              : base.status
+     var lw                  : base.u8
+ 
+     flags = args.src.read_u8?()
+     if (flags & 0x40) <> 0 {
+         this.interlace = 4
+     } else {
+         this.interlace = 0
+     }
+ 
+     // Read the optional Local Color Table.
+     which_palette = 1
+     if (flags & 0x80) <> 0 {
+         num_palette_entries = (1 as base.u32) << (1 + (flags & 0x07))
+         i = 0
+         while i < num_palette_entries {
+             assert i < 256 via "a < b: a < c; c <= b"(c: num_palette_entries)
+             // Convert from RGB (in memory order) to ARGB (in native u32 order)
+             // to BGRA (in memory order).
+             argb = args.src.read_u24be_as_u32?()
+             argb |= 0xFF00_0000
+             this.palettes[1][(4 * i) + 0] = ((argb >> 0) & 0xFF) as base.u8
+             this.palettes[1][(4 * i) + 1] = ((argb >> 8) & 0xFF) as base.u8
+             this.palettes[1][(4 * i) + 2] = ((argb >> 16) & 0xFF) as base.u8
+             this.palettes[1][(4 * i) + 3] = ((argb >> 24) & 0xFF) as base.u8
+             i += 1
+         } endwhile
+         // Set the remaining palette entries to opaque black.
+         while i < 256 {
+             this.palettes[1][(4 * i) + 0] = 0x00
+             this.palettes[1][(4 * i) + 1] = 0x00
+             this.palettes[1][(4 * i) + 2] = 0x00
+             this.palettes[1][(4 * i) + 3] = 0xFF
+             i += 1
+         } endwhile
+     } else if this.quirks[QUIRK_REJECT_EMPTY_PALETTE - QUIRKS_BASE] and (not this.has_global_palette) {
+         return "#bad palette"
+     } else if this.gc_has_transparent_index {
+         this.palettes[1][..].copy_from_slice!(s: this.palettes[0][..])
+     } else {
+         which_palette = 0
+     }
+ 
+     // Set the gc_transparent_index palette entry to transparent black.
+     if this.gc_has_transparent_index {
+         this.palettes[1][(4 * (this.gc_transparent_index as base.u32)) + 0] = 0x00
+         this.palettes[1][(4 * (this.gc_transparent_index as base.u32)) + 1] = 0x00
+         this.palettes[1][(4 * (this.gc_transparent_index as base.u32)) + 2] = 0x00
+         this.palettes[1][(4 * (this.gc_transparent_index as base.u32)) + 3] = 0x00
+     }
+ 
+     status = this.swizzler.prepare!(
+             dst_pixfmt: args.dst.pixel_format(),
+             dst_palette: args.dst.palette_or_else(fallback: this.dst_palette[..]),
+             src_pixfmt: this.util.make_pixel_format(repr: base.PIXEL_FORMAT__INDEXED__BGRA_BINARY),
+             src_palette: this.palettes[which_palette][..],
+             blend: args.blend)
+     if not status.is_ok() {
+         return status
+     }
+ 
+     // Other GIF implementations accept GIF files that aren't completely spec
+     // compliant. For example, the test/data/gifplayer-muybridge.gif file
+     // (created by the gifsicle program) is accepted by other GIF decoders.
+     // However, in that file, frame #61's embedded LZW data is truncated,
+     // finishing with only 8 of the 9 bits required of the LZW end code. The
+     // end code itself, 0x81, is representable in only 8 bits, but the number
+     // of bits for the decoder to read has ticked over from 8 to 9 just before
+     // that end code is encountered.
+     //
+     // To accommodate such malformed GIFs, we detect when the previous frame's
+     // LZW decoding ended abruptly. The previous LZW decode 'works', in that it
+     // decodes as much pixel data as is available, but without seeing that end
+     // code (i.e. returning the "ok" status code), the LZW decoder is stuck in
+     // a coroutine-in-progress lzw_decoder.decode call, still waiting for that
+     // end code. To cancel that coroutine, we reset the LZW decoder.
+-    if this.previous_lzw_decode_ended_abruptly {
+-        this.lzw.reset!()
++    if this.ignored_but_affects_benchmarks {
++        // No-op. This used to be "this.lzw.reset!()".
+     }
+ 
+     // Process the LZW literal width. The spec says that "images which have one
+     // color bit must be indicated as having a code size [i.e. literal width]
+     // of 2", but in practice, some encoders use a literal width of 1 or 0.
+     lw = args.src.read_u8?()
+     if lw > 8 {
+         return "#bad literal width"
+     }
+-    this.lzw.set_quirk!(key: lzw.QUIRK_LITERAL_WIDTH_PLUS_ONE, value: (1 + lw) as base.u64)
++    this.lzw_pending_literal_width_plus_one = (1 + lw) as base.u32
+ 
+-    this.previous_lzw_decode_ended_abruptly = true
++    this.ignored_but_affects_benchmarks = true
+ }
+ 
+ pri func decoder.decode_id_part2?(dst: ptr base.pixel_buffer, src: base.io_reader, workbuf: slice base.u8) {
+     var block_size      : base.u64[..= 255]
+     var need_block_size : base.bool
+     var n_copied        : base.u32
+     var n_compressed    : base.u64
+     var r               : base.io_reader
+     var mark            : base.u64
+-    var lzw_status      : base.status
+     var copy_status     : base.status
+-    var uncompressed    : roslice base.u8
+ 
++    this.lzw_init!()
+     need_block_size = true
+     while.outer true {
+         if need_block_size {
+             need_block_size = false
+             block_size = args.src.read_u8_as_u64?()
+         }
+         if block_size == 0 {
+             break.outer
+         }
+         while args.src.length() == 0 {
+             yield? base."$short read"
+         } endwhile
+ 
+         if this.compressed_ri == this.compressed_wi {
+             this.compressed_ri = 0
+             this.compressed_wi = 0
+         }
+         while this.compressed_wi <= (4096 - 255) {
+             n_compressed = block_size.min(no_more_than: args.src.length())
+             if n_compressed <= 0 {
+                 break
+             }
+             n_copied = args.src.limited_copy_u32_to_slice!(
+                     up_to: (n_compressed & 0xFFFF_FFFF) as base.u32,
+                     s: this.compressed[this.compressed_wi ..])
+             this.compressed_wi ~sat+= n_copied as base.u64
+             block_size ~sat-= n_copied as base.u64
+             if block_size > 0 {
+                 break
+             }
+             if args.src.length() <= 0 {
+                 need_block_size = true
+                 break
+             }
+             block_size = args.src.peek_u8_as_u64()
+             args.src.skip_u32_fast!(actual: 1, worst_case: 1)
+         } endwhile
+ 
+         while.inner true {
+             if (this.compressed_ri > this.compressed_wi) or (this.compressed_wi > 4096) {
+-                return "#internal error: inconsistent ri/wi"
++                return "#internal error: inconsistent I/O"
+             }
+             io_bind (io: r, data: this.compressed[this.compressed_ri .. this.compressed_wi], history_position: 0) {
+                 mark = r.mark()
+-                lzw_status =? this.lzw.transform_io?(
+-                        dst: this.util.empty_io_writer(), src: r, workbuf: this.util.empty_slice_u8())
++                this.lzw_read_from!(src: r)
+                 this.compressed_ri ~sat+= r.count_since(mark: mark)
+             }
+ 
+-            uncompressed = this.lzw.flush!()
+-            if uncompressed.length() > 0 {
+-                copy_status = this.copy_to_image_buffer!(pb: args.dst, src: uncompressed)
++            if this.lzw_output_ri < this.lzw_output_wi {
++                copy_status = this.copy_to_image_buffer!(
++                        pb: args.dst, src: this.lzw_output[this.lzw_output_ri .. this.lzw_output_wi])
+                 if copy_status.is_error() {
+                     return copy_status
+                 }
++                this.lzw_output_ri = 0
++                this.lzw_output_wi = 0
+             }
+ 
+-            if lzw_status.is_ok() {
+-                this.previous_lzw_decode_ended_abruptly = false
++            if this.lzw_read_from_return_value == 0 {
++                this.ignored_but_affects_benchmarks = false
+ 
+                 // Skip any trailing blocks.
+                 if need_block_size or (block_size > 0) {
+                     args.src.skip_u32?(n: block_size as base.u32)
+                     this.skip_blocks?(src: args.src)
+                 }
+-
+                 break.outer
+-            } else if lzw_status == base."$short read" {
+-                continue.outer
+-            } else if lzw_status == base."$short write" {
++            } else if this.lzw_read_from_return_value == 1 {
++                // This is an LZW flush.
+                 continue.inner
++            } else if this.lzw_read_from_return_value == 2 {
++                // This is an LZW "$short read" equivalent.
++                continue.outer
+             } else if this.quirks[QUIRK_IGNORE_TOO_MUCH_PIXEL_DATA - QUIRKS_BASE] and
+                     (this.dst_y >= this.frame_rect_y1) and (this.interlace == 0) {
+                 // It's invalid LZW-compressed data, but we still have a full
+                 // frame and have opted in to QUIRK_IGNORE_TOO_MUCH_PIXEL_DATA,
+-                // so treat it like the lzw_status.is_ok() case, other than not
+-                // clearing this.previous_lzw_decode_ended_abruptly.
++                // so treat it like the OK case, other than not clearing
++                // this.ignored_but_affects_benchmarks.
+                 if need_block_size or (block_size > 0) {
+                     args.src.skip_u32?(n: block_size as base.u32)
+                     this.skip_blocks?(src: args.src)
+                 }
+                 break.outer
++            } else if this.lzw_read_from_return_value == 3 {
++                return "#truncated input"
++            } else if this.lzw_read_from_return_value == 4 {
++                return "#bad LZW code"
+             }
+-            return lzw_status
++            return "#internal error: inconsistent I/O"
+         } endwhile.inner
+     } endwhile.outer
+ 
+     this.compressed_ri = 0
+     this.compressed_wi = 0
+ 
+     if (this.dst_y < this.frame_rect_y1) and
+             (this.frame_rect_x0 <> this.frame_rect_x1) and
+             (this.frame_rect_y0 <> this.frame_rect_y1) {
+         return base."#not enough data"
+     }
+ }
+@@ -1032,138 +1057,138 @@ pri func decoder.decode_id_part2?(dst: ptr base.pixel_buffer, src: base.io_reade
+ pri func decoder.copy_to_image_buffer!(pb: ptr base.pixel_buffer, src: roslice base.u8) base.status {
+     // TODO: don't assume an interleaved pixel format.
+     var dst             : slice base.u8
+     var src             : roslice base.u8
+     var width_in_bytes  : base.u64
+     var n               : base.u64
+     var src_ri          : base.u64
+     var pixfmt          : base.pixel_format
+     var bytes_per_pixel : base.u32[..= 32]
+     var bits_per_pixel  : base.u32[..= 256]
+     var tab             : table base.u8
+     var i               : base.u64
+     var j               : base.u64
+     var replicate_y0    : base.u32
+     var replicate_y1    : base.u32
+     var replicate_dst   : slice base.u8
+     var replicate_src   : roslice base.u8
+ 
+     // TODO: the pixfmt variable shouldn't be necessary. We should be able to
+     // chain the two calls: "args.pb.pixel_format().bits_per_pixel()".
+     pixfmt = args.pb.pixel_format()
+     bits_per_pixel = pixfmt.bits_per_pixel()
+     if (bits_per_pixel & 7) <> 0 {
+         return base."#unsupported option"
+     }
+     bytes_per_pixel = bits_per_pixel >> 3
+ 
+     width_in_bytes = (this.width * bytes_per_pixel) as base.u64
+     tab = args.pb.plane(p: 0)
+     while src_ri < args.src.length() {
+         src = args.src[src_ri ..]
+ 
+         if this.dst_y >= this.frame_rect_y1 {
+             if this.quirks[QUIRK_IGNORE_TOO_MUCH_PIXEL_DATA - QUIRKS_BASE] {
+                 return ok
+             }
+             return base."#too much data"
+         }
+ 
+         // First, copy from src to that part of the frame rect that is inside
+         // args.pb's bounds (clipped to the image bounds).
+ 
+         dst = tab.row_u32(y: this.dst_y)
+         if this.dst_y >= this.height {
+             dst = dst[.. 0]
+         } else if width_in_bytes < dst.length() {
+             dst = dst[.. width_in_bytes]
+         }
+ 
+         i = (this.dst_x as base.u64) * (bytes_per_pixel as base.u64)
+         if i < dst.length() {
+             j = (this.frame_rect_x1 as base.u64) * (bytes_per_pixel as base.u64)
+             if (i <= j) and (j <= dst.length()) {
+                 dst = dst[i .. j]
+             } else {
+                 dst = dst[i ..]
+             }
+             n = this.swizzler.swizzle_interleaved_from_slice!(
+                     dst: dst, dst_palette: this.dst_palette[..], src: src)
+ 
+             src_ri ~sat+= n
+             this.dst_x ~sat+= (n & 0xFFFF_FFFF) as base.u32
+ 
+             this.dirty_max_excl_y = this.dirty_max_excl_y.max(no_less_than: this.dst_y ~sat+ 1)
+         }
+ 
+         if this.frame_rect_x1 <= this.dst_x {
+             this.dst_x = this.frame_rect_x0
+             if this.interlace == 0 {
+                 this.dst_y ~sat+= 1
+                 continue
+             }
+ 
+             // For the first frame of an interlaced, non-transparent GIF,
+             // replicate the early passes' rows. For example, when such an
+             // image is downloaded over a slow network, this produces a richer
+             // intermediate image while waiting for the complete image.
+             //
+             // Some other GIF implementations call this progressive display or
+             // a "Haeberli inspired" technique.
+             if (this.num_decoded_frames_value == 0) and
+                     (not this.gc_has_transparent_index) and
+                     (this.interlace > 1) {
+ 
+                 replicate_src = tab.row_u32(y: this.dst_y)
+                 replicate_y0 = this.dst_y ~sat+ 1
+                 replicate_y1 = this.dst_y ~sat+ (INTERLACE_COUNT[this.interlace] as base.u32)
+                 replicate_y1 = replicate_y1.min(no_more_than: this.frame_rect_y1)
+                 while replicate_y0 < replicate_y1 {
+                     assert replicate_y0 < 0xFFFF_FFFF via "a < b: a < c; c <= b"(c: replicate_y1)
+                     replicate_dst = tab.row_u32(y: replicate_y0)
+                     replicate_dst.copy_from_slice!(s: replicate_src)
+                     replicate_y0 += 1
+                 } endwhile
+                 this.dirty_max_excl_y = this.dirty_max_excl_y.max(no_less_than: replicate_y1)
+             }
+ 
+             this.dst_y ~sat+= INTERLACE_DELTA[this.interlace] as base.u32
+             while (this.interlace > 0) and (this.dst_y >= this.frame_rect_y1) {
+                 this.interlace -= 1
+                 this.dst_y = this.frame_rect_y0 ~sat+ INTERLACE_START[this.interlace]
+             } endwhile
+             continue
+         }
+ 
+         if args.src.length() == src_ri {
+             break
+         } else if args.src.length() < src_ri {
+-            return "#internal error: inconsistent ri/wi"
++            return "#internal error: inconsistent I/O"
+         }
+ 
+         // Second, skip over src for that part of the frame rect that is
+         // outside args.pb's bounds. This second step should be infrequent.
+ 
+         // Set n to the number of pixels (i.e. the number of bytes) to skip.
+         n = (this.frame_rect_x1 - this.dst_x) as base.u64
+         n = n.min(no_more_than: args.src.length() - src_ri)
+ 
+         src_ri ~sat+= n
+         this.dst_x ~sat+= (n & 0xFFFF_FFFF) as base.u32
+ 
+         if this.frame_rect_x1 <= this.dst_x {
+             this.dst_x = this.frame_rect_x0
+             this.dst_y ~sat+= INTERLACE_DELTA[this.interlace] as base.u32
+             while (this.interlace > 0) and (this.dst_y >= this.frame_rect_y1) {
+                 this.interlace -= 1
+                 this.dst_y = this.frame_rect_y0 ~sat+ INTERLACE_START[this.interlace]
+             } endwhile
+             continue
+         }
+ 
+         if src_ri <> args.src.length() {
+-            return "#internal error: inconsistent ri/wi"
++            return "#internal error: inconsistent I/O"
+         }
+         break
+     } endwhile
+     return ok
+ }
+diff --git a/std/gif/decode_lzw.wuffs b/std/gif/decode_lzw.wuffs
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c836d3b63f276c86181eb1432575dbee7daadd8
+--- /dev/null
++++ b/std/gif/decode_lzw.wuffs
+@@ -0,0 +1,264 @@
++// Copyright 2023 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// --------
++
++// This file (in std/gif) is a fork of std/lzw/decode_lzw.wuffs, inlined so
++// that the gif 'caller' can take the this.lzw_output[this.lzw_output_ri ..
++// this.lzw_output_wi] slice directly. Wuffs version 0.3 provided this as the
++// lzw.decoder.flush!() method, but we'd like to deprecate (and eventually
++// remove) methods that return anything pointer-y (including slices).
++//
++// It also changes the ? methods to ! methods, so that the LZW-decoder does not
++// need a "this.lzw.reset!()" call in case of a recoverable error.
++
++pri func decoder.lzw_init!() {
++    var i : base.u32[..= 8191]
++
++    this.lzw_literal_width = 8
++    if this.lzw_pending_literal_width_plus_one > 0 {
++        this.lzw_literal_width = this.lzw_pending_literal_width_plus_one - 1
++    }
++    this.lzw_clear_code = (1 as base.u32) << this.lzw_literal_width
++    this.lzw_end_code = this.lzw_clear_code + 1
++    this.lzw_save_code = this.lzw_end_code
++    this.lzw_prev_code = this.lzw_end_code
++    this.lzw_width = this.lzw_literal_width + 1
++    this.lzw_bits = 0
++    this.lzw_n_bits = 0
++    this.lzw_output_ri = 0
++    this.lzw_output_wi = 0
++    i = 0
++    while i < this.lzw_clear_code {
++        assert i < 256 via "a < b: a < c; c <= b"(c: this.lzw_clear_code)
++        this.lzw_lm1s[i] = 0
++        this.lzw_suffixes[i][0] = i as base.u8
++        i += 1
++    } endwhile
++}
++
++pri func decoder.lzw_read_from!(src: base.io_reader) {
++    var clear_code : base.u32[..= 256]
++    var end_code   : base.u32[..= 257]
++
++    var save_code : base.u32[..= 4096]
++    var prev_code : base.u32[..= 4095]
++    var width     : base.u32[..= 12]
++    var bits      : base.u32
++    var n_bits    : base.u32[..= 31]
++    var output_wi : base.u32[..= 8191]
++
++    var code       : base.u32[..= 4095]
++    var c          : base.u32[..= 4095]
++    var o          : base.u32[..= 8191]
++    var steps      : base.u32
++    var first_byte : base.u8
++    var lm1_b      : base.u16[..= 4095]
++    var lm1_a      : base.u16[..= 4095]
++
++    clear_code = this.lzw_clear_code
++    end_code = this.lzw_end_code
++
++    save_code = this.lzw_save_code
++    prev_code = this.lzw_prev_code
++    width = this.lzw_width
++    bits = this.lzw_bits
++    n_bits = this.lzw_n_bits
++    output_wi = this.lzw_output_wi
++
++    while true {
++        if n_bits < width {
++            assert n_bits < 12 via "a < b: a < c; c <= b"(c: width)
++            if args.src.length() >= 4 {
++                // Read 4 bytes, using the "Variant 4" technique of
++                // https://fgiesen.wordpress.com/2018/02/20/reading-bits-in-far-too-many-ways-part-2/
++                bits |= args.src.peek_u32le() ~mod<< n_bits
++                args.src.skip_u32_fast!(actual: (31 - n_bits) >> 3, worst_case: 3)
++                n_bits |= 24
++                assert width <= n_bits via "a <= b: a <= c; c <= b"(c: 12)
++                assert n_bits >= width via "a >= b: b <= a"()
++            } else if args.src.length() <= 0 {
++                if args.src.is_closed() {
++                    this.lzw_read_from_return_value = 3
++                } else {
++                    this.lzw_read_from_return_value = 2
++                }
++                break
++            } else {
++                bits |= args.src.peek_u8_as_u32() << n_bits
++                args.src.skip_u32_fast!(actual: 1, worst_case: 1)
++                n_bits += 8
++                if n_bits >= width {
++                    // No-op.
++                } else if args.src.length() <= 0 {
++                    if args.src.is_closed() {
++                        this.lzw_read_from_return_value = 3
++                    } else {
++                        this.lzw_read_from_return_value = 2
++                    }
++                    break
++                } else {
++                    bits |= args.src.peek_u8_as_u32() << n_bits
++                    args.src.skip_u32_fast!(actual: 1, worst_case: 1)
++                    n_bits += 8
++                    assert width <= n_bits via "a <= b: a <= c; c <= b"(c: 12)
++                    assert n_bits >= width via "a >= b: b <= a"()
++
++                    // This if condition is always false, but for some unknown
++                    // reason, removing it worsens the benchmarks slightly.
++                    if n_bits < width {
++                        this.lzw_read_from_return_value = 5
++                        break
++                    }
++                }
++            }
++        }
++
++        code = bits.low_bits(n: width)
++        bits >>= width
++        n_bits -= width
++
++        if code < clear_code {
++            assert code < 256 via "a < b: a < c; c <= b"(c: clear_code)
++            this.lzw_output[output_wi] = code as base.u8
++            output_wi = (output_wi + 1) & 8191
++            if save_code <= 4095 {
++                lm1_a = (this.lzw_lm1s[prev_code] ~mod+ 1) & 4095
++                this.lzw_lm1s[save_code] = lm1_a
++
++                if (lm1_a % 8) <> 0 {
++                    this.lzw_prefixes[save_code] = this.lzw_prefixes[prev_code]
++                    this.lzw_suffixes[save_code] = this.lzw_suffixes[prev_code]
++                    this.lzw_suffixes[save_code][lm1_a % 8] = code as base.u8
++                } else {
++                    this.lzw_prefixes[save_code] = prev_code as base.u16
++                    this.lzw_suffixes[save_code][0] = code as base.u8
++                }
++
++                save_code += 1
++                if width < 12 {
++                    width += 1 & (save_code >> width)
++                }
++                prev_code = code
++            }
++
++        } else if code <= end_code {
++            if code == end_code {
++                this.lzw_read_from_return_value = 0
++                break
++            }
++            save_code = end_code
++            prev_code = end_code
++            width = this.lzw_literal_width + 1
++
++        } else if code <= save_code {
++            c = code
++            if code == save_code {
++                c = prev_code
++            }
++
++            // Letting old_wi and new_wi denote the values of output_wi before
++            // and after these two lines of code, the decoded bytes will be
++            // written to output[old_wi:new_wi]. They will be written
++            // back-to-front, 8 bytes at a time, starting by writing
++            // output[o:o + 8], which will contain output[new_wi - 1].
++            //
++            // In the special case that code == save_code, the decoded bytes
++            // contain an extra copy (at the end) of the first byte, and will
++            // be written to output[old_wi:new_wi + 1].
++            o = (output_wi + ((this.lzw_lm1s[c] as base.u32) & 0xFFFF_FFF8)) & 8191
++            output_wi = (output_wi + 1 + (this.lzw_lm1s[c] as base.u32)) & 8191
++
++            steps = (this.lzw_lm1s[c] as base.u32) >> 3
++            while true {
++                assert o <= (o + 8) via "a <= (a + b): 0 <= b"(b: 8)
++
++                // The final "8" is redundant semantically, but helps the
++                // wuffs-c code generator recognize that both slices have the
++                // same constant length, and hence produce efficient C code.
++                this.lzw_output[o .. o + 8].copy_from_slice!(s: this.lzw_suffixes[c][.. 8])
++
++                if steps <= 0 {
++                    break
++                }
++                steps -= 1
++
++                // This line is essentially "o -= 8". The "& 8191" is a no-op
++                // in practice, but is necessary for the overflow checker.
++                o = (o ~mod- 8) & 8191
++                c = this.lzw_prefixes[c] as base.u32
++            } endwhile
++            first_byte = this.lzw_suffixes[c][0]
++
++            if code == save_code {
++                this.lzw_output[output_wi] = first_byte
++                output_wi = (output_wi + 1) & 8191
++            }
++
++            if save_code <= 4095 {
++                lm1_b = (this.lzw_lm1s[prev_code] ~mod+ 1) & 4095
++                this.lzw_lm1s[save_code] = lm1_b
++
++                if (lm1_b % 8) <> 0 {
++                    this.lzw_prefixes[save_code] = this.lzw_prefixes[prev_code]
++                    this.lzw_suffixes[save_code] = this.lzw_suffixes[prev_code]
++                    this.lzw_suffixes[save_code][lm1_b % 8] = first_byte
++                } else {
++                    this.lzw_prefixes[save_code] = prev_code as base.u16
++                    this.lzw_suffixes[save_code][0] = first_byte as base.u8
++                }
++
++                save_code += 1
++                if width < 12 {
++                    width += 1 & (save_code >> width)
++                }
++                prev_code = code
++            }
++
++        } else {
++            this.lzw_read_from_return_value = 4
++            break
++        }
++
++        // Flush the output if it could be too full to contain the entire
++        // decoding of the next code. The longest possible decoding is slightly
++        // less than 4096 and output's length is 8192, so a conservative
++        // threshold is ensuring that output_wi <= 4095.
++        if output_wi > 4095 {
++            this.lzw_read_from_return_value = 1
++            break
++        }
++    } endwhile
++
++    // Rewind args.src, if we're not in "$short read" and we've read too many
++    // bits.
++    if this.lzw_read_from_return_value <> 2 {
++        while n_bits >= 8 {
++            n_bits -= 8
++            if args.src.can_undo_byte() {
++                args.src.undo_byte!()
++            } else {
++                this.lzw_read_from_return_value = 5
++                break
++            }
++        } endwhile
++    }
++
++    this.lzw_save_code = save_code
++    this.lzw_prev_code = prev_code
++    this.lzw_width = width
++    this.lzw_bits = bits
++    this.lzw_n_bits = n_bits
++    this.lzw_output_wi = output_wi
++}
+diff --git a/std/lzw/decode_lzw.wuffs b/std/lzw/decode_lzw.wuffs
+index 3112f9b0cf84c79b3669e441c6d9a08bda374494..75f75e6713d74642cc16d72ce880c1e4eafe275a 100644
+--- a/std/lzw/decode_lzw.wuffs
++++ b/std/lzw/decode_lzw.wuffs
+@@ -375,6 +375,10 @@ pri func decoder.write_to?(dst: base.io_writer) {
+     } endwhile
+ }
+ 
++// Deprecated. Use transform_io and an io_writer instead.
++//
++// We'd like to deprecate (and eventually remove) methods that return anything
++// pointer-y (including slices).
+ pub func decoder.flush!() roslice base.u8 {
+     var ri : base.u32[..= 8191]
+     var wi : base.u32[..= 8191]
+
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C060","gap_exists":false,"gap_type":[],"commit_induced":"NO","maintenance_needed":false,"confidence":99,"affected_functions":["fuzz","set_quirks","wuffs_gif__decoder__decode_id_part1","wuffs_gif__decoder__decode_id_part2","wuffs_gif__decoder__copy_to_image_buffer","wuffs_gif__decoder__lzw_init","wuffs_gif__decoder__lzw_read_from"],"reason":"S1 replaces the GIF decoder's internal use of wuffs_lzw__decoder with private inlined LZW state and helpers, but does not add a new public entry point, API protocol, configuration requirement, or independently controllable input. H0 still initializes wuffs_gif__decoder, configures its quirks, and passes arbitrary GIF source data through fuzz_image_decoder, which exercises the changed decode_id_part1 and decode_id_part2 path and thereby the new lzw_init and lzw_read_from helpers. The retained WUFFS_CONFIG__MODULE__LZW definition is unnecessary in S1 but does not prevent or materially limit coverage.","evidence":["H0 calls wuffs_gif__decoder__initialize and passes wuffs_gif__decoder__upcast_as__wuffs_base__image_decoder(&dec) to fuzz_image_decoder.","H0 supplies the fuzz-controlled src buffer to fuzz_image_decoder and uses hash bits for initialization options, hash_8_bits, and set_quirks.","S1 invokes wuffs_gif__decoder__lzw_init(self) and wuffs_gif__decoder__lzw_read_from(self, v_r) internally from wuffs_gif__decoder__decode_id_part2; neither helper is a new external entry point.","S1 keeps GIF LZW decoding behind the existing wuffs_gif__decoder image-decoder interface while replacing private_data.f_lzw with f_lzw_suffixes, f_lzw_lm1s, f_lzw_output, and related private_impl fields.","H0 already defines WUFFS_CONFIG__MODULE__GIF and WUFFS_CONFIG__MODULE__LZW, so the changed GIF implementation remains compiled and reachable."],"recommended_action":"No harness maintenance is needed for this commit; retain H0 as-is, with optional later cleanup of the now-redundant WUFFS_CONFIG__MODULE__LZW definition."}
+tokens used
+31,587

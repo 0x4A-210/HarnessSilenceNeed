@@ -1,0 +1,770 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-direct_evolution_aware-T8014-g4ovxnpo
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a09402-b2b9-70a1-83ee-a1a469d6b4a1
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8014
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `fuzz/html.c`
+
+~~~~cpp
+/*
+ * html.c: a libFuzzer target to test several HTML parser interfaces.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#include <libxml/HTMLparser.h>
+#include <libxml/HTMLtree.h>
+#include <libxml/catalog.h>
+#include "fuzz.h"
+
+int
+LLVMFuzzerInitialize(int *argc ATTRIBUTE_UNUSED,
+                     char ***argv ATTRIBUTE_UNUSED) {
+    xmlFuzzMemSetup();
+    xmlInitParser();
+#ifdef LIBXML_CATALOG_ENABLED
+    xmlInitializeCatalog();
+#endif
+    xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+
+    return 0;
+}
+
+int
+LLVMFuzzerTestOneInput(const char *data, size_t size) {
+    xmlParserCtxtPtr ctxt;
+    htmlDocPtr doc;
+    const char *docBuffer;
+    size_t maxAlloc, docSize;
+    int opts;
+
+    xmlFuzzDataInit(data, size);
+    opts = (int) xmlFuzzReadInt(4);
+    maxAlloc = xmlFuzzReadInt(4) % (size + 100);
+
+    docBuffer = xmlFuzzReadRemaining(&docSize);
+    if (docBuffer == NULL) {
+        xmlFuzzDataCleanup();
+        return(0);
+    }
+
+    /* Pull parser */
+
+    xmlFuzzMemSetLimit(maxAlloc);
+    ctxt = htmlNewParserCtxt();
+    if (ctxt != NULL) {
+        doc = htmlCtxtReadMemory(ctxt, docBuffer, docSize, NULL, NULL, opts);
+        xmlFuzzCheckMallocFailure("htmlCtxtReadMemory",
+                                  ctxt->errNo == XML_ERR_NO_MEMORY);
+
+        if (doc != NULL) {
+            xmlDocPtr copy;
+
+#ifdef LIBXML_OUTPUT_ENABLED
+            xmlOutputBufferPtr out;
+            const xmlChar *content;
+
+            /*
+             * Also test the serializer. Call htmlDocContentDumpOutput with our
+             * own buffer to avoid encoding the output. The HTML encoding is
+             * excruciatingly slow (see htmlEntityValueLookup).
+             */
+            xmlFuzzResetMallocFailed();
+            out = xmlAllocOutputBuffer(NULL);
+            htmlDocContentDumpOutput(out, doc, NULL);
+            content = xmlOutputBufferGetContent(out);
+            xmlFuzzCheckMallocFailure("htmlDocContentDumpOutput",
+                                      content == NULL);
+            xmlOutputBufferClose(out);
+#endif
+
+            xmlFuzzResetMallocFailed();
+            copy = xmlCopyDoc(doc, 1);
+            xmlFuzzCheckMallocFailure("xmlCopyNode", copy == NULL);
+            xmlFreeDoc(copy);
+
+            xmlFreeDoc(doc);
+        }
+
+        htmlFreeParserCtxt(ctxt);
+    }
+
+
+    /* Push parser */
+
+#ifdef LIBXML_PUSH_ENABLED
+    {
+        static const size_t maxChunkSize = 128;
+        size_t consumed, chunkSize;
+
+        xmlFuzzMemSetLimit(maxAlloc);
+        ctxt = htmlCreatePushParserCtxt(NULL, NULL, NULL, 0, NULL,
+                                        XML_CHAR_ENCODING_NONE);
+
+        if (ctxt != NULL) {
+            htmlCtxtUseOptions(ctxt, opts);
+
+            for (consumed = 0; consumed < docSize; consumed += chunkSize) {
+                chunkSize = docSize - consumed;
+                if (chunkSize > maxChunkSize)
+                    chunkSize = maxChunkSize;
+                htmlParseChunk(ctxt, docBuffer + consumed, chunkSize, 0);
+            }
+
+            htmlParseChunk(ctxt, NULL, 0, 1);
+            xmlFuzzCheckMallocFailure("htmlParseChunk",
+                                      ctxt->errNo == XML_ERR_NO_MEMORY);
+            xmlFreeDoc(ctxt->myDoc);
+            htmlFreeParserCtxt(ctxt);
+        }
+    }
+#endif
+
+    /* Cleanup */
+
+    xmlFuzzMemSetLimit(0);
+    xmlFuzzDataCleanup();
+    xmlResetLastError();
+
+    return(0);
+}
+~~~~
+
+### H0 path: `fuzz/schema.c`
+
+~~~~cpp
+/*
+ * schema.c: a libFuzzer target to test the XML Schema processor.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#include <libxml/catalog.h>
+#include <libxml/xmlschemas.h>
+#include "fuzz.h"
+
+int
+LLVMFuzzerInitialize(int *argc ATTRIBUTE_UNUSED,
+                     char ***argv ATTRIBUTE_UNUSED) {
+    xmlFuzzMemSetup();
+    xmlInitParser();
+#ifdef LIBXML_CATALOG_ENABLED
+    xmlInitializeCatalog();
+#endif
+    xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+    xmlSetExternalEntityLoader(xmlFuzzEntityLoader);
+
+    return 0;
+}
+
+int
+LLVMFuzzerTestOneInput(const char *data, size_t size) {
+    xmlSchemaParserCtxtPtr pctxt;
+    size_t maxAlloc;
+
+    if (size > 50000)
+        return(0);
+
+    maxAlloc = xmlFuzzReadInt(4) % (size + 100);
+
+    xmlFuzzDataInit(data, size);
+    xmlFuzzReadEntities();
+
+    xmlFuzzMemSetLimit(maxAlloc);
+    pctxt = xmlSchemaNewParserCtxt(xmlFuzzMainUrl());
+    xmlSchemaSetParserErrors(pctxt, xmlFuzzErrorFunc, xmlFuzzErrorFunc, NULL);
+    xmlSchemaFree(xmlSchemaParse(pctxt));
+    xmlSchemaFreeParserCtxt(pctxt);
+
+    xmlFuzzMemSetLimit(0);
+    xmlFuzzDataCleanup();
+    xmlResetLastError();
+
+    return(0);
+}
+~~~~
+
+### H0 path: `fuzz/valid.c`
+
+~~~~cpp
+/*
+ * valid.c: a libFuzzer target to test DTD validation.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#include <libxml/catalog.h>
+#include <libxml/parser.h>
+#include <libxml/tree.h>
+#include <libxml/xmlerror.h>
+#include <libxml/xmlreader.h>
+#include "fuzz.h"
+
+int
+LLVMFuzzerInitialize(int *argc ATTRIBUTE_UNUSED,
+                     char ***argv ATTRIBUTE_UNUSED) {
+    xmlFuzzMemSetup();
+    xmlInitParser();
+#ifdef LIBXML_CATALOG_ENABLED
+    xmlInitializeCatalog();
+#endif
+    xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+    xmlSetExternalEntityLoader(xmlFuzzEntityLoader);
+
+    return 0;
+}
+
+int
+LLVMFuzzerTestOneInput(const char *data, size_t size) {
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr doc;
+    xmlValidCtxtPtr vctxt;
+    const char *docBuffer, *docUrl;
+    size_t maxAlloc, docSize;
+    int opts;
+
+    xmlFuzzDataInit(data, size);
+    opts = (int) xmlFuzzReadInt(4);
+    opts &= ~XML_PARSE_XINCLUDE;
+    opts |= XML_PARSE_DTDVALID;
+    maxAlloc = xmlFuzzReadInt(4) % (size + 100);
+
+    xmlFuzzReadEntities();
+    docBuffer = xmlFuzzMainEntity(&docSize);
+    docUrl = xmlFuzzMainUrl();
+    if (docBuffer == NULL)
+        goto exit;
+
+    /* Pull parser */
+
+    xmlFuzzMemSetLimit(maxAlloc);
+    ctxt = xmlNewParserCtxt();
+    if (ctxt != NULL) {
+        doc = xmlCtxtReadMemory(ctxt, docBuffer, docSize, docUrl, NULL, opts);
+        xmlFuzzCheckMallocFailure("xmlCtxtReadMemory",
+                                  ctxt->errNo == XML_ERR_NO_MEMORY);
+        xmlFreeDoc(doc);
+        xmlFreeParserCtxt(ctxt);
+    }
+
+    /* Post validation */
+
+    xmlFuzzMemSetLimit(maxAlloc);
+    doc = xmlReadMemory(docBuffer, docSize, docUrl, NULL,
+                        opts & ~XML_PARSE_DTDVALID);
+    vctxt = xmlNewValidCtxt();
+    xmlValidateDocument(vctxt, doc);
+    xmlFreeValidCtxt(vctxt);
+    xmlFreeDoc(doc);
+
+    /* Push parser */
+
+#ifdef LIBXML_PUSH_ENABLED
+    {
+        static const size_t maxChunkSize = 128;
+        size_t consumed, chunkSize;
+
+        xmlFuzzMemSetLimit(maxAlloc);
+        ctxt = xmlCreatePushParserCtxt(NULL, NULL, NULL, 0, docUrl);
+        if (ctxt != NULL) {
+            xmlCtxtUseOptions(ctxt, opts);
+
+            for (consumed = 0; consumed < docSize; consumed += chunkSize) {
+                chunkSize = docSize - consumed;
+                if (chunkSize > maxChunkSize)
+                    chunkSize = maxChunkSize;
+                xmlParseChunk(ctxt, docBuffer + consumed, chunkSize, 0);
+            }
+
+            xmlParseChunk(ctxt, NULL, 0, 1);
+            xmlFuzzCheckMallocFailure("xmlParseChunk",
+                                      ctxt->errNo == XML_ERR_NO_MEMORY);
+            xmlFreeDoc(ctxt->myDoc);
+            xmlFreeParserCtxt(ctxt);
+        }
+    }
+#endif
+
+    /* Reader */
+
+#ifdef LIBXML_READER_ENABLED
+    {
+        xmlTextReaderPtr reader;
+        const xmlError *error;
+        int j;
+
+        xmlFuzzMemSetLimit(maxAlloc);
+        reader = xmlReaderForMemory(docBuffer, docSize, NULL, NULL, opts);
+        if (reader != NULL) {
+            while (xmlTextReaderRead(reader) == 1) {
+                if (xmlTextReaderNodeType(reader) == XML_ELEMENT_NODE) {
+                    int i, n = xmlTextReaderAttributeCount(reader);
+                    for (i=0; i<n; i++) {
+                        xmlTextReaderMoveToAttributeNo(reader, i);
+                        while (xmlTextReaderReadAttributeValue(reader) == 1);
+                    }
+                }
+            }
+            for (j = 0; j < 10; j++)
+                xmlTextReaderRead(reader);
+            error = xmlTextReaderGetLastError(reader);
+            xmlFuzzCheckMallocFailure("xmlTextReaderRead",
+                                      error->code == XML_ERR_NO_MEMORY);
+            xmlFreeTextReader(reader);
+        }
+    }
+#endif
+
+exit:
+    xmlFuzzMemSetLimit(0);
+    xmlFuzzDataCleanup();
+    xmlResetLastError();
+    return(0);
+}
+~~~~
+
+### H0 path: `fuzz/xinclude.c`
+
+~~~~cpp
+/*
+ * xinclude.c: a libFuzzer target to test the XInclude engine.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#include <libxml/catalog.h>
+#include <libxml/parser.h>
+#include <libxml/tree.h>
+#include <libxml/xmlerror.h>
+#include <libxml/xinclude.h>
+#include <libxml/xmlreader.h>
+#include "fuzz.h"
+
+int
+LLVMFuzzerInitialize(int *argc ATTRIBUTE_UNUSED,
+                     char ***argv ATTRIBUTE_UNUSED) {
+    xmlFuzzMemSetup();
+    xmlInitParser();
+#ifdef LIBXML_CATALOG_ENABLED
+    xmlInitializeCatalog();
+#endif
+    xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+    xmlSetExternalEntityLoader(xmlFuzzEntityLoader);
+
+    return 0;
+}
+
+int
+LLVMFuzzerTestOneInput(const char *data, size_t size) {
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr doc;
+    const char *docBuffer, *docUrl;
+    size_t maxAlloc, docSize;
+    int opts;
+
+    xmlFuzzDataInit(data, size);
+    opts = (int) xmlFuzzReadInt(4);
+    opts |= XML_PARSE_XINCLUDE;
+    maxAlloc = xmlFuzzReadInt(4) % (size + 100);
+
+    xmlFuzzReadEntities();
+    docBuffer = xmlFuzzMainEntity(&docSize);
+    docUrl = xmlFuzzMainUrl();
+    if (docBuffer == NULL)
+        goto exit;
+
+    /* Pull parser */
+
+    xmlFuzzMemSetLimit(maxAlloc);
+    ctxt = xmlNewParserCtxt();
+    if (ctxt != NULL) {
+        xmlXIncludeCtxtPtr xinc;
+        xmlDocPtr copy;
+
+        doc = xmlCtxtReadMemory(ctxt, docBuffer, docSize, docUrl, NULL, opts);
+        xmlFuzzCheckMallocFailure("xmlCtxtReadMemory",
+                                  ctxt->errNo == XML_ERR_NO_MEMORY);
+
+        xmlFuzzResetMallocFailed();
+        xinc = xmlXIncludeNewContext(doc);
+        xmlXIncludeSetFlags(xinc, opts);
+        xmlXIncludeProcessNode(xinc, (xmlNodePtr) doc);
+        if (doc != NULL) {
+            xmlFuzzCheckMallocFailure("xmlXIncludeProcessNode",
+                    xinc == NULL ||
+                    xmlXIncludeGetLastError(xinc) == XML_ERR_NO_MEMORY);
+        }
+        xmlXIncludeFreeContext(xinc);
+
+        xmlFuzzResetMallocFailed();
+        copy = xmlCopyDoc(doc, 1);
+        if (doc != NULL)
+            xmlFuzzCheckMallocFailure("xmlCopyNode", copy == NULL);
+        xmlFreeDoc(copy);
+
+        xmlFreeDoc(doc);
+        xmlFreeParserCtxt(ctxt);
+    }
+
+    /* Reader */
+
+#ifdef LIBXML_READER_ENABLED
+    {
+        xmlTextReaderPtr reader;
+        int j;
+
+        xmlFuzzMemSetLimit(maxAlloc);
+        reader = xmlReaderForMemory(docBuffer, docSize, NULL, NULL, opts);
+        if (reader == NULL)
+            goto exit;
+        while (xmlTextReaderRead(reader) == 1) {
+            if (xmlTextReaderNodeType(reader) == XML_ELEMENT_NODE) {
+                int i, n = xmlTextReaderAttributeCount(reader);
+                for (i=0; i<n; i++) {
+                    xmlTextReaderMoveToAttributeNo(reader, i);
+                    while (xmlTextReaderReadAttributeValue(reader) == 1);
+                }
+            }
+        }
+        for (j = 0; j < 10; j++)
+            xmlTextReaderRead(reader);
+        xmlFreeTextReader(reader);
+    }
+#endif
+
+exit:
+    xmlFuzzMemSetLimit(0);
+    xmlFuzzDataCleanup();
+    xmlResetLastError();
+    return(0);
+}
+~~~~
+
+### H0 path: `fuzz/xml.c`
+
+~~~~cpp
+/*
+ * xml.c: a libFuzzer target to test several XML parser interfaces.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#include <libxml/catalog.h>
+#include <libxml/parser.h>
+#include <libxml/tree.h>
+#include <libxml/xmlerror.h>
+#include <libxml/xmlreader.h>
+#include <libxml/xmlsave.h>
+#include "fuzz.h"
+
+int
+LLVMFuzzerInitialize(int *argc ATTRIBUTE_UNUSED,
+                     char ***argv ATTRIBUTE_UNUSED) {
+    xmlFuzzMemSetup();
+    xmlInitParser();
+#ifdef LIBXML_CATALOG_ENABLED
+    xmlInitializeCatalog();
+#endif
+    xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+    xmlSetExternalEntityLoader(xmlFuzzEntityLoader);
+
+    return 0;
+}
+
+int
+LLVMFuzzerTestOneInput(const char *data, size_t size) {
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr doc;
+    const char *docBuffer, *docUrl;
+    size_t maxAlloc, docSize;
+    int opts;
+
+    xmlFuzzDataInit(data, size);
+    opts = (int) xmlFuzzReadInt(4);
+    /*
+     * Disable options that are known to cause timeouts
+     */
+    opts &= ~XML_PARSE_XINCLUDE &
+            ~XML_PARSE_DTDVALID &
+            ~XML_PARSE_SAX1;
+    maxAlloc = xmlFuzzReadInt(4) % (size + 100);
+
+    xmlFuzzReadEntities();
+    docBuffer = xmlFuzzMainEntity(&docSize);
+    docUrl = xmlFuzzMainUrl();
+    if (docBuffer == NULL)
+        goto exit;
+
+    /* Pull parser */
+
+    xmlFuzzMemSetLimit(maxAlloc);
+    ctxt = xmlNewParserCtxt();
+    if (ctxt != NULL) {
+        doc = xmlCtxtReadMemory(ctxt, docBuffer, docSize, docUrl, NULL, opts);
+        xmlFuzzCheckMallocFailure("xmlCtxtReadMemory",
+                                  ctxt->errNo == XML_ERR_NO_MEMORY);
+
+        if (doc != NULL) {
+#ifdef LIBXML_OUTPUT_ENABLED
+            xmlBufferPtr buffer;
+            xmlSaveCtxtPtr save;
+
+            /* Also test the serializer. */
+            xmlFuzzResetMallocFailed();
+            buffer = xmlBufferCreate();
+            save = xmlSaveToBuffer(buffer, NULL, 0);
+            if (save != NULL) {
+                int errNo;
+
+                xmlSaveDoc(save, doc);
+                errNo = xmlSaveFinish(save);
+                xmlFuzzCheckMallocFailure("xmlDocDumpMemory",
+                                          errNo == XML_ERR_NO_MEMORY);
+            }
+            xmlBufferFree(buffer);
+#endif
+            xmlFreeDoc(doc);
+        }
+
+        xmlFreeParserCtxt(ctxt);
+    }
+
+    /* Push parser */
+
+#ifdef LIBXML_PUSH_ENABLED
+    {
+        static const size_t maxChunkSize = 128;
+        size_t consumed, chunkSize;
+
+        xmlFuzzMemSetLimit(maxAlloc);
+        ctxt = xmlCreatePushParserCtxt(NULL, NULL, NULL, 0, docUrl);
+        if (ctxt != NULL) {
+            xmlCtxtUseOptions(ctxt, opts);
+
+            for (consumed = 0; consumed < docSize; consumed += chunkSize) {
+                chunkSize = docSize - consumed;
+                if (chunkSize > maxChunkSize)
+                    chunkSize = maxChunkSize;
+                xmlParseChunk(ctxt, docBuffer + consumed, chunkSize, 0);
+            }
+
+            xmlParseChunk(ctxt, NULL, 0, 1);
+            xmlFuzzCheckMallocFailure("xmlParseChunk",
+                                      ctxt->errNo == XML_ERR_NO_MEMORY);
+            xmlFreeDoc(ctxt->myDoc);
+            xmlFreeParserCtxt(ctxt);
+        }
+    }
+#endif
+
+    /* Reader */
+
+#ifdef LIBXML_READER_ENABLED
+    {
+        xmlTextReaderPtr reader;
+        const xmlError *error;
+        int j;
+
+        xmlFuzzMemSetLimit(maxAlloc);
+        reader = xmlReaderForMemory(docBuffer, docSize, NULL, NULL, opts);
+        if (reader != NULL) {
+            while (xmlTextReaderRead(reader) == 1) {
+                if (xmlTextReaderNodeType(reader) == XML_ELEMENT_NODE) {
+                    int i, n = xmlTextReaderAttributeCount(reader);
+                    for (i=0; i<n; i++) {
+                        xmlTextReaderMoveToAttributeNo(reader, i);
+                        while (xmlTextReaderReadAttributeValue(reader) == 1);
+                    }
+                }
+            }
+            for (j = 0; j < 10; j++)
+                xmlTextReaderRead(reader);
+            error = xmlTextReaderGetLastError(reader);
+            xmlFuzzCheckMallocFailure("xmlTextReaderRead",
+                                      error->code == XML_ERR_NO_MEMORY);
+            xmlFreeTextReader(reader);
+        }
+    }
+#endif
+
+exit:
+    xmlFuzzMemSetLimit(0);
+    xmlFuzzDataCleanup();
+    xmlResetLastError();
+    return(0);
+}
+~~~~
+
+### H0 path: `fuzz/xpath.c`
+
+~~~~cpp
+/*
+ * xpath.c: a libFuzzer target to test XPath and XPointer expressions.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#include <libxml/parser.h>
+#include <libxml/xpointer.h>
+#include "fuzz.h"
+
+int
+LLVMFuzzerInitialize(int *argc ATTRIBUTE_UNUSED,
+                     char ***argv ATTRIBUTE_UNUSED) {
+    xmlFuzzMemSetup();
+    xmlInitParser();
+    xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+
+    return 0;
+}
+
+int
+LLVMFuzzerTestOneInput(const char *data, size_t size) {
+    xmlDocPtr doc;
+    const char *expr, *xml;
+    size_t maxAlloc, exprSize, xmlSize;
+
+    if (size > 10000)
+        return(0);
+
+    xmlFuzzDataInit(data, size);
+
+    maxAlloc = xmlFuzzReadInt(4) % (size + 100);
+    expr = xmlFuzzReadString(&exprSize);
+    xml = xmlFuzzReadString(&xmlSize);
+
+    /* Recovery mode allows more input to be fuzzed. */
+    doc = xmlReadMemory(xml, xmlSize, NULL, NULL, XML_PARSE_RECOVER);
+    if (doc != NULL) {
+        xmlXPathContextPtr xpctxt;
+
+        xmlFuzzMemSetLimit(maxAlloc);
+
+        xpctxt = xmlXPathNewContext(doc);
+        if (xpctxt != NULL) {
+            int res;
+
+            /* Operation limit to avoid timeout */
+            xpctxt->opLimit = 500000;
+
+            res = xmlXPathContextSetCache(xpctxt, 1, 4, 0);
+            xmlFuzzCheckMallocFailure("xmlXPathContextSetCache", res == -1);
+
+            xmlFuzzResetMallocFailed();
+            xmlXPathFreeObject(xmlXPtrEval(BAD_CAST expr, xpctxt));
+            xmlFuzzCheckMallocFailure("xmlXPtrEval",
+                                      xpctxt->lastError.code ==
+                                      XML_ERR_NO_MEMORY);
+            xmlXPathFreeContext(xpctxt);
+        }
+
+        xmlFuzzMemSetLimit(0);
+        xmlFreeDoc(doc);
+    }
+
+    xmlFuzzDataCleanup();
+    xmlResetLastError();
+
+    return(0);
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/parser.c b/parser.c
+index aa5cd841..6c141c06 100644
+--- a/parser.c
++++ b/parser.c
+@@ -5354,35 +5354,41 @@ static void
+ xmlParseCatalogPI(xmlParserCtxtPtr ctxt, const xmlChar *catalog) {
+     xmlChar *URL = NULL;
+     const xmlChar *tmp, *base;
+     xmlChar marker;
+ 
+     tmp = catalog;
+     while (IS_BLANK_CH(*tmp)) tmp++;
+     if (xmlStrncmp(tmp, BAD_CAST"catalog", 7))
+ 	goto error;
+     tmp += 7;
+     while (IS_BLANK_CH(*tmp)) tmp++;
+     if (*tmp != '=') {
+ 	return;
+     }
+     tmp++;
+     while (IS_BLANK_CH(*tmp)) tmp++;
+     marker = *tmp;
+     if ((marker != '\'') && (marker != '"'))
+ 	goto error;
+     tmp++;
+     base = tmp;
+     while ((*tmp != 0) && (*tmp != marker)) tmp++;
+     if (*tmp == 0)
+ 	goto error;
+     URL = xmlStrndup(base, tmp - base);
+     tmp++;
+     while (IS_BLANK_CH(*tmp)) tmp++;
+     if (*tmp != 0)
+ 	goto error;
+ 
+     if (URL != NULL) {
++        /*
++         * Unfortunately, the catalog API doesn't report OOM errors.
++         * xmlGetLastError isn't very helpful since we don't know
++         * where the last error came from. We'd have to reset it
++         * before this call and restore it afterwards.
++         */
+ 	ctxt->catalogs = xmlCatalogAddLocal(ctxt->catalogs, URL);
+ 	xmlFree(URL);
+     }
+     return;
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8014","gap_exists":false,"gap_type":[],"commit_induced":"NO","maintenance_needed":false,"confidence":99,"affected_functions":["xmlParseCatalogPI"],"reason":"The only S0-to-S1 change in xmlParseCatalogPI adds a comment describing xmlCatalogAddLocal error-reporting limitations; it does not alter any entry point, API call, parser state, configuration, input semantics, control flow, or attack surface. H0 already exercises parser entry points such as xmlCtxtReadMemory, xmlParseChunk, and xmlReaderForMemory with fuzz-controlled document data and options, so no material harness gap is established or introduced.","evidence":["In parser.c, the executable statement ctxt->catalogs = xmlCatalogAddLocal(ctxt->catalogs, URL) is identical across S0 and S1.","All added lines are inside a /* ... */ comment immediately before xmlCatalogAddLocal.","fuzz/xml.c supplies fuzz-derived docBuffer, docSize, docUrl, and opts to xmlCtxtReadMemory and also exercises push-parser and reader interfaces.","Several H0 initializers call xmlInitializeCatalog when LIBXML_CATALOG_ENABLED is defined."],"recommended_action":"No harness maintenance is needed for this commit."}
+tokens used
+19,504

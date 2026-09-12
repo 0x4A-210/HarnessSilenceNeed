@@ -1,0 +1,803 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t5-gap_only-T5019-gbdssrsl
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08aea-be5e-7341-8ee9-868b07cb3b41
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T5019
+
+## Existing harness H0
+
+Every project-owned C/C++ path containing `fuzz` at the pre-change snapshot is shown below. Framework and build-script scaffolding are not expanded.
+
+### H0 path: `tests/fuzz_main.c`
+
+~~~~cpp
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+
+/* fuzz target entry point, works without libFuzzer */
+
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size);
+
+int main(int argc, char **argv)
+{
+    FILE *f;
+    char *buf = NULL;
+    long siz_buf;
+
+    if(argc < 2)
+    {
+        fprintf(stderr, "no input file\n");
+        goto err;
+    }
+
+    f = fopen(argv[1], "rb");
+    if(f == NULL)
+    {
+        fprintf(stderr, "error opening input file %s\n", argv[1]);
+        goto err;
+    }
+
+    fseek(f, 0, SEEK_END);
+
+    siz_buf = ftell(f);
+    rewind(f);
+
+    if(siz_buf < 1) goto err;
+
+    buf = (char*)malloc(siz_buf);
+    if(buf == NULL)
+    {
+        fprintf(stderr, "malloc() failed\n");
+        goto err;
+    }
+
+    if(fread(buf, siz_buf, 1, f) != 1)
+    {
+        fprintf(stderr, "fread() failed\n");
+        goto err;
+    }
+
+    (void)LLVMFuzzerTestOneInput((uint8_t*)buf, siz_buf);
+
+err:
+    free(buf);
+
+    return 0;
+}
+~~~~
+
+### H0 path: `tests/spng_read_fuzzer.c`
+
+~~~~cpp
+#define SPNG_UNTESTED
+#include "../spng/spng.h"
+
+#include <string.h>
+
+struct buf_state
+{
+    const uint8_t *data;
+    size_t bytes_left;
+};
+
+static int buffer_read_fn(spng_ctx *ctx, void *user, void *dest, size_t length)
+{
+    struct buf_state *state = (struct buf_state*)user;
+
+    if(length > state->bytes_left) return SPNG_IO_EOF;
+
+    memcpy(dest, state->data, length);
+
+    state->bytes_left -= length;
+    state->data += length;
+
+    return 0;
+}
+
+#ifdef __cplusplus
+extern "C"
+#endif
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+    if(size < 4) return 0;
+
+    int flags = data[size - 1];
+    int fmt = data[size - 3] | (data[size - 2] << 8);
+    int stream = data[size - 4] & 1;
+    int progressive = data[size - 4] & 2;
+    int file_stream = data[size - 4] & 4;
+    int discard = data[size - 4] & 8;
+
+    size -= 4;
+
+    int ret;
+    unsigned char *out = NULL;
+    FILE *file = NULL;
+
+    spng_ctx *ctx = spng_ctx_new(SPNG_CTX_IGNORE_ADLER32);
+    if(ctx == NULL) return 0;
+
+    struct spng_ihdr ihdr;
+    struct spng_plte plte;
+    struct spng_trns trns;
+    struct spng_chrm chrm;
+    struct spng_chrm_int chrm_int;
+    double gamma;
+    struct spng_iccp iccp;
+    struct spng_sbit sbit;
+    uint8_t srgb_rendering_intent;
+    struct spng_text text[4] = {0};
+    struct spng_bkgd bkgd;
+    struct spng_hist hist;
+    struct spng_phys phys;
+    struct spng_splt splt[4] = {0};
+    struct spng_time time;
+    struct spng_unknown_chunk chunks[4] = {0};
+    uint32_t n_text = 4, n_splt = 4, n_chunks = 4;
+
+    struct buf_state state;
+    state.data = data;
+    state.bytes_left = size;
+
+    if(stream)
+    {
+        if(file_stream)
+        {
+#if defined(SPNGT_HAVE_FMEMOPEN)
+            file = fmemopen((void*)data, size, "rb");
+
+            if(file == NULL) goto err;
+#endif
+            ret = spng_set_png_file(ctx, file);
+        }
+        else ret = spng_set_png_stream(ctx, buffer_read_fn, &state);
+    }
+    else ret = spng_set_png_buffer(ctx, (void*)data, size);
+
+    if(ret) goto err;
+
+    spng_set_image_limits(ctx, 200000, 200000);
+
+    spng_set_chunk_limits(ctx, 4 * 1000 * 1000, 8 * 1000 * 1000);
+
+    spng_set_crc_action(ctx, SPNG_CRC_USE, discard ? SPNG_CRC_DISCARD : SPNG_CRC_USE);
+
+    size_t out_size;
+    if(spng_decoded_image_size(ctx, fmt, &out_size)) goto err;
+
+    if(out_size > 80000000) goto err;
+
+    out = (unsigned char*)malloc(out_size);
+    if(out == NULL) goto err;
+
+    spng_get_ihdr(ctx, &ihdr);
+    spng_get_plte(ctx, &plte);
+    spng_get_trns(ctx, &trns);
+    spng_get_chrm(ctx, &chrm);
+    spng_get_chrm_int(ctx, &chrm_int);
+    spng_get_gama(ctx, &gamma);
+    spng_get_iccp(ctx, &iccp);
+    spng_get_sbit(ctx, &sbit);
+    spng_get_srgb(ctx, &srgb_rendering_intent);
+
+    if(!spng_get_text(ctx, text, &n_text))
+    {/* Up to 4 entries were read, get the actual count */
+        spng_get_text(ctx, NULL, &n_text);
+
+        uint32_t i;
+        for(i=0; i < n_text; i++)
+        {/* All strings should be non-NULL */
+            if(text[i].text == NULL ||
+               text[i].keyword[0] == '\0' ||
+               text[i].language_tag == NULL ||
+               text[i].translated_keyword == NULL ||
+               memchr(text[i].keyword, 0, 80) == NULL)
+            {
+                spng_ctx_free(ctx);
+                free(out);
+                return 1;
+            }
+            /* This shouldn't cause issues either */
+            text[i].length = strlen(text[i].text);
+        }
+    }
+
+    spng_get_bkgd(ctx, &bkgd);
+    spng_get_hist(ctx, &hist);
+    spng_get_phys(ctx, &phys);
+
+    if(!spng_get_splt(ctx, splt, &n_splt))
+    {/* Up to 4 entries were read, get the actual count */
+        spng_get_splt(ctx, NULL, &n_splt);
+
+        uint32_t i;
+        for(i=0; i < n_splt; i++)
+        {
+            if(splt[i].name[0] == '\0' ||
+               splt[i].entries == NULL ||
+               memchr(splt[i].name, 0, 80) == NULL)
+            {
+                spng_ctx_free(ctx);
+                free(out);
+                return 1;
+            }
+        }
+    }
+
+    if(!spng_get_unknown_chunks(ctx, chunks, &n_chunks))
+    {
+        spng_get_unknown_chunks(ctx, NULL, &n_chunks);
+
+        uint32_t i;
+        for(i=0; i < n_chunks; i++)
+        {
+            if( (chunks[i].length && !chunks[i].data) ||
+                (!chunks[i].length && chunks[i].data) )
+            {
+                spng_ctx_free(ctx);
+                free(out);
+                return 1;
+            }
+        }
+    }
+
+    if(progressive)
+    {
+        if(spng_decode_image(ctx, NULL, 0, fmt, flags | SPNG_DECODE_PROGRESSIVE)) goto err;
+
+        size_t ioffset, out_width = out_size / ihdr.height;
+        struct spng_row_info ri;
+
+        do
+        {
+            if(spng_get_row_info(ctx, &ri)) break;
+
+            ioffset = ri.row_num * out_width;
+
+        }while(!spng_decode_row(ctx, out + ioffset, out_size));
+    }
+    else if(spng_decode_image(ctx, out, out_size, fmt, flags)) goto err;
+
+    spng_get_time(ctx, &time);
+
+err:
+    spng_ctx_free(ctx);
+    free(out);
+    if(file != NULL) fclose(file);
+
+    return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed C/C++ production paths and all hunks are included. Function-context mode expands changed C/C++ function bodies; tests, examples, documentation, build files, and Harness files are excluded by the frozen rule.
+
+~~~~diff
+diff --git a/spng/spng.c b/spng/spng.c
+index 41c4539..a7a6cf1 100644
+--- a/spng/spng.c
++++ b/spng/spng.c
+@@ -152,11 +152,11 @@ struct decode_flags
+     unsigned unpack:      1;
+ };
+ 
+-struct spng_encode_flags
++struct encode_flags
+ {
+     unsigned chunk_zerocopy: 1;
+     unsigned interlace:      1;
+     unsigned same_layout:    1;
+ 
+     int filter_choice;
+ };
+@@ -213,133 +213,133 @@ typedef void spng__undo(spng_ctx *ctx);
+ struct spng_ctx
+ {
+     size_t data_size;
+     size_t bytes_read;
+     unsigned char *stream_buf;
+     const unsigned char *data;
+ 
+     /* User-defined pointers for streaming */
+     spng_read_fn *read_fn;
+     void *read_user_ptr;
+ 
+     /* Used for buffer reads */
+     const unsigned char *png_base;
+     size_t bytes_left;
+     size_t last_read_size;
+ 
+     /* Used for encoding */
+     int user_owns_out_png;
+     unsigned char *out_png;
+     unsigned char *write_ptr;
+     size_t out_png_size;
+     size_t bytes_encoded;
+ 
+     /* These are updated by read_header()/read_chunk_bytes() */
+     struct spng_chunk current_chunk;
+     uint32_t cur_chunk_bytes_left;
+     uint32_t cur_actual_crc;
+ 
+     struct spng_alloc alloc;
+ 
+     int flags; /* context flags */
+     int fmt;
+ 
+     enum spng_state state;
+ 
+     unsigned streaming: 1;
+ 
+     unsigned inflate: 1;
+     unsigned deflate: 1;
+     unsigned encode_only: 1;
+     unsigned strict: 1;
+     unsigned discard: 1;
+     unsigned skip_crc: 1;
+     unsigned keep_unknown: 1;
+     unsigned prev_was_idat: 1;
+ 
+     struct spng__deflate_options image_options;
+     struct spng__deflate_options text_options;
+ 
+     spng__undo *undo;
+ 
+     /* input file contains this chunk */
+     struct spng_chunk_bitfield file;
+ 
+     /* chunk was stored with spng_set_*() */
+     struct spng_chunk_bitfield user;
+ 
+     /* chunk was stored by reading or with spng_set_*() */
+     struct spng_chunk_bitfield stored;
+ 
+     /* used to reset the above in case of an error */
+     struct spng_chunk_bitfield prev_stored;
+ 
+     struct spng_chunk first_idat, last_idat;
+ 
+     uint32_t max_width, max_height;
+ 
+     size_t max_chunk_size;
+     size_t chunk_cache_limit;
+     size_t chunk_cache_usage;
+ 
+     int crc_action_critical;
+     int crc_action_ancillary;
+ 
+     struct spng_ihdr ihdr;
+ 
+     struct spng_plte plte;
+ 
+     struct spng_chrm_int chrm_int;
+     struct spng_iccp iccp;
+ 
+     uint32_t gama;
+ 
+     struct spng_sbit sbit;
+ 
+     uint8_t srgb_rendering_intent;
+ 
+     uint32_t n_text;
+     struct spng_text2 *text_list;
+ 
+     struct spng_bkgd bkgd;
+     struct spng_hist hist;
+     struct spng_trns trns;
+     struct spng_phys phys;
+ 
+     uint32_t n_splt;
+     struct spng_splt *splt_list;
+ 
+     struct spng_time time;
+     struct spng_offs offs;
+     struct spng_exif exif;
+ 
+     uint32_t n_chunks;
+     struct spng_unknown_chunk *chunk_list;
+ 
+     struct spng_subimage subimage[7];
+ 
+     z_stream zstream;
+     unsigned char *scanline_buf, *prev_scanline_buf, *row_buf, *filtered_scanline_buf;
+     unsigned char *scanline, *prev_scanline, *row, *filtered_scanline;
+ 
+     size_t total_out_size;
+     size_t out_width; /* total_out_size / ihdr.height */
+ 
+     unsigned channels;
+     unsigned bytes_per_pixel; /* derived from ihdr */
+     unsigned pixel_size; /* derived from spng_format+ihdr */
+     int widest_pass;
+     int last_pass; /* last non-empty pass */
+ 
+     uint16_t *gamma_lut; /* points to either _lut8 or _lut16 */
+     uint16_t *gamma_lut16;
+     uint16_t gamma_lut8[256];
+     unsigned char trns_px[8];
+     union spng__decode_plte decode_plte;
+     struct spng_sbit decode_sb;
+     struct decode_flags decode_flags;
+     struct spng_row_info row_info;
+ 
+-    struct spng_encode_flags encode_flags;
++    struct encode_flags encode_flags;
+ };
+ 
+ static const uint32_t png_u32max = 2147483647;
+@@ -4424,72 +4424,72 @@ static int finish_idat(spng_ctx *ctx)
+ 
+ static int encode_scanline(spng_ctx *ctx, const void *scanline, size_t len)
+ {
+-    if(ctx == NULL) return SPNG_EINTERNAL;
++    if(ctx == NULL || scanline == NULL) return SPNG_EINTERNAL;
+ 
+     int ret, pass = ctx->row_info.pass;
+     uint8_t filter = 0;
+     struct spng_row_info *ri = &ctx->row_info;
+     const struct spng_subimage *sub = ctx->subimage;
+-    struct spng_encode_flags f = ctx->encode_flags;
++    struct encode_flags f = ctx->encode_flags;
+     unsigned char *filtered_scanline = ctx->filtered_scanline;
+     size_t scanline_width = sub[pass].scanline_width;
+ 
+     /* encode_row() interlaces directly to ctx->scanline */
+     if(scanline != ctx->scanline) memcpy(ctx->scanline, scanline, scanline_width - 1);
+ 
+     if(ctx->ihdr.bit_depth == 16 && ctx->fmt != SPNG_FMT_RAW) u16_row_to_bigendian(ctx->scanline, scanline_width - 1);
+ 
+     const int requires_previous = f.filter_choice & (SPNG_FILTER_CHOICE_UP | SPNG_FILTER_CHOICE_AVG | SPNG_FILTER_CHOICE_PAETH);
+ 
+     /* XXX: exclude 'requires_previous' filters by default for first scanline? */
+     if(!ri->scanline_idx && requires_previous)
+     {
+         /* prev_scanline is all zeros for the first scanline */
+         memset(ctx->prev_scanline, 0, scanline_width);
+     }
+ 
+     filter = get_best_filter(ctx->prev_scanline, ctx->scanline, scanline_width, ctx->bytes_per_pixel, f.filter_choice);
+ 
+     if(!filter) filtered_scanline = ctx->scanline;
+ 
+     filtered_scanline[-1] = filter;
+ 
+     if(filter)
+     {
+         ret = filter_scanline(filtered_scanline, ctx->prev_scanline, ctx->scanline, scanline_width, ctx->bytes_per_pixel, filter);
+         if(ret) return encode_err(ctx, ret);
+     }
+ 
+     ret = write_idat_bytes(ctx, filtered_scanline - 1, scanline_width, Z_NO_FLUSH);
+     if(ret) return encode_err(ctx, ret);
+ 
+     /* The previous scanline is always defiltered */
+     void *t = ctx->prev_scanline;
+     ctx->prev_scanline = ctx->scanline;
+     ctx->scanline = t;
+ 
+     if(ri->scanline_idx == (sub[pass].height - 1)) /* Last scanline */
+     {
+         if(ri->pass == ctx->last_pass)
+         {
+             ctx->state = SPNG_STATE_EOI;
+ 
+             return SPNG_EOI;
+         }
+ 
+         ri->scanline_idx = 0;
+         ri->pass++;
+ 
+         /* Skip empty passes */
+         while( (!sub[ri->pass].width || !sub[ri->pass].height) && (ri->pass < ctx->last_pass)) ri->pass++;
+     }
+     else
+     {
+         ri->row_num++;
+         ri->scanline_idx++;
+     }
+ 
+     if(f.interlace) ri->row_num = adam7_y_start[ri->pass] + ri->scanline_idx * adam7_y_delta[ri->pass];
+ 
+     return 0;
+ }
+@@ -4552,140 +4552,163 @@ static int encode_row(spng_ctx *ctx, const void *row, size_t len)
+     return encode_scanline(ctx, ctx->scanline, len);
+ }
+ 
++int spng_encode_scanline(spng_ctx *ctx, const void *scanline, size_t len)
++{
++    if(ctx == NULL || scanline == NULL) return SPNG_EINVAL;
++    if(ctx->state >= SPNG_STATE_EOI) return SPNG_EOI;
++    if(len < (ctx->subimage[ctx->row_info.pass].scanline_width -1) ) return SPNG_EBUFSIZ;
++
++    return encode_scanline(ctx, scanline, len);
++}
++
++int spng_encode_row(spng_ctx *ctx, const void *row, size_t len)
++{
++    if(ctx == NULL || row == NULL) return SPNG_EINVAL;
++    if(ctx->state >= SPNG_STATE_EOI) return SPNG_EOI;
++    if(len < ctx->out_width) return SPNG_EBUFSIZ;
++
++    return encode_row(ctx, row, len);
++}
++
+ int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int flags)
+ {
+     if(ctx == NULL || img == NULL) return 1;
+     if(!ctx->state) return SPNG_EBADSTATE;
+     if(!ctx->stored.ihdr) return SPNG_ENOIHDR;
+     if(fmt != SPNG_FMT_PNG) return SPNG_EFMT;
+ 
+     int ret = 0;
+     size_t img_len = 0;
+     const struct spng_ihdr *ihdr = &ctx->ihdr;
+-    struct spng_encode_flags *encode_flags = &ctx->encode_flags;
++    struct encode_flags *encode_flags = &ctx->encode_flags;
+ 
+     if(ihdr->color_type == SPNG_COLOR_TYPE_INDEXED && !ctx->stored.plte) return SPNG_ENOPLTE;
+ 
+     ctx->channels = num_channels(ihdr);
+ 
+     ret = calculate_image_size(ctx, fmt, &img_len);
+     if(ret) return encode_err(ctx, ret);
+ 
+     if(img_len != len) return SPNG_EBUFSIZ;
+ 
+     ret = write_chunks_before_idat(ctx);
+     if(ret) return encode_err(ctx, ret);
+ 
+     ret = calculate_subimages(ctx);
+     if(ret) return encode_err(ctx, ret);
+ 
+     if(ihdr->bit_depth < 8) ctx->bytes_per_pixel = 1;
+     else ctx->bytes_per_pixel = ctx->channels * (ihdr->bit_depth / 8);
+ 
+     ctx->out_width = ctx->total_out_size / ihdr->height;
+ 
+     if(!ctx->image_options.compression_level)
+     {
+         encode_flags->filter_choice = 0; /* Filtering would make no difference */
+     }
+ 
+     if(ihdr->color_type == SPNG_COLOR_TYPE_INDEXED || ihdr->bit_depth < 8)
+     {
+         encode_flags->filter_choice = 0;
+     }
+ 
+     /* This is the same as disabling filtering */
+     if(encode_flags->filter_choice == SPNG_FILTER_CHOICE_NONE)
+     {
+         encode_flags->filter_choice = 0;
+     }
+ 
+     if(!encode_flags->filter_choice)
+     {
+         ctx->image_options.strategy = Z_DEFAULT_STRATEGY;
+     }
+ 
+     ret = spng__deflate_init(ctx, &ctx->image_options);
+     if(ret) return encode_err(ctx, ret);
+ 
+     size_t scanline_buf_size = ctx->subimage[ctx->widest_pass].scanline_width;
+ 
+     scanline_buf_size += 32;
+ 
+     if(scanline_buf_size < 32) return SPNG_EOVERFLOW;
+ 
+     ctx->scanline_buf = spng__malloc(ctx, scanline_buf_size);
+     ctx->prev_scanline_buf = spng__malloc(ctx, scanline_buf_size);
+ 
+     if(ctx->scanline_buf == NULL || ctx->prev_scanline_buf == NULL) return encode_err(ctx, SPNG_EMEM);
+ 
+     /* Maintain alignment for pixels, filter at [-1] */
+     ctx->scanline = ctx->scanline_buf + 16;
+     ctx->prev_scanline = ctx->prev_scanline_buf + 16;
+ 
+     if(encode_flags->filter_choice)
+     {
+         ctx->filtered_scanline_buf = spng__malloc(ctx, scanline_buf_size);
+         if(ctx->filtered_scanline_buf == NULL) return encode_err(ctx, SPNG_EMEM);
+ 
+         ctx->filtered_scanline = ctx->filtered_scanline_buf + 16;
+     }
+ 
+     struct spng_subimage *sub = ctx->subimage;
+     struct spng_row_info *ri = &ctx->row_info;
+ 
+     size_t img_width = img_len / ihdr->height;
+ 
+     ctx->fmt = fmt;
+ 
+     z_stream *zstream = &ctx->zstream;
+     zstream->avail_out = SPNG_WRITE_SIZE;
+ 
+     ret = write_header(ctx, type_idat, zstream->avail_out, &zstream->next_out);
+     if(ret) return encode_err(ctx, ret);
+ 
+     if(ihdr->interlace_method) encode_flags->interlace = 1;
+ 
+     if(fmt & (SPNG_FMT_PNG | SPNG_FMT_RAW) ) encode_flags->same_layout = 1;
+ 
+     while(!sub[ri->pass].width || !sub[ri->pass].height) ri->pass++;
+ 
+     if(encode_flags->interlace) ri->row_num = adam7_y_start[ri->pass];
+ 
+     ctx->pixel_size = 4; /* SPNG_FMT_RGBA8 */
+ 
+     if(fmt == SPNG_FMT_RGBA16) ctx->pixel_size = 8;
+     else if(fmt == SPNG_FMT_RGB8) ctx->pixel_size = 3;
+     else if(fmt == SPNG_FMT_G8) ctx->pixel_size = 1;
+     else if(fmt == SPNG_FMT_GA8) ctx->pixel_size = 2;
+     else if(ctx->fmt & (SPNG_FMT_PNG | SPNG_FMT_RAW))
+     {
+         if(ihdr->bit_depth >= 8) ctx->pixel_size = ctx->bytes_per_pixel;
+     }
+ 
+     ctx->state = SPNG_STATE_FIRST_IDAT;
+ 
++    if(flags & SPNG_ENCODE_PROGRESSIVE)
++    {
++        return 0;
++    }
++
+     do
+     {
+         size_t ioffset = ri->row_num * img_width;
+ 
+         ret = encode_row(ctx, (unsigned char*)img + ioffset, img_width);
+ 
+     }while(!ret);
+ 
+     if(ret != SPNG_EOI) return encode_err(ctx, ret);
+ 
+     ctx->state = SPNG_STATE_EOI;
+ 
+     ret = finish_idat(ctx);
+     if(ret) encode_err(ctx, ret);
+ 
+     ctx->state = SPNG_STATE_LAST_IDAT;
+ 
+     ret = write_chunks_after_idat(ctx);
+     if(ret) return encode_err(ctx, ret);
+ 
+     ctx->state = SPNG_STATE_IEND;
+ 
+     return 0;
+ }
+diff --git a/spng/spng.h b/spng/spng.h
+index 0294964..9d555b9 100644
+--- a/spng/spng.h
++++ b/spng/spng.h
+@@ -200,6 +200,11 @@ enum spng_crc_action
+     SPNG_CRC_USE = 2
+ };
+ 
++enum spng_encode_flags
++{
++    SPNG_ENCODE_PROGRESSIVE = 1, /* Initialize for progressive writes */
++};
++
+ struct spng_ihdr
+ {
+     uint32_t width;
+@@ -446,11 +451,16 @@ SPNG_API int spng_decode_image(spng_ctx *ctx, void *out, size_t len, int fmt, in
+ SPNG_API int spng_decode_scanline(spng_ctx *ctx, void *out, size_t len);
+ SPNG_API int spng_decode_row(spng_ctx *ctx, void *out, size_t len);
+ 
++/* Encode/decode */
+ SPNG_API int spng_get_row_info(spng_ctx *ctx, struct spng_row_info *row_info);
+ 
+ /* Encode */
+ SPNG_API int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int flags);
+ 
++/* Progressive encode */
++SPNG_API int spng_encode_scanline(spng_ctx *ctx, const void *scanline, size_t len);
++SPNG_API int spng_encode_row(spng_ctx *ctx, const void *row, size_t len);
++
+ SPNG_API int spng_get_ihdr(spng_ctx *ctx, struct spng_ihdr *ihdr);
+ SPNG_API int spng_get_plte(spng_ctx *ctx, struct spng_plte *plte);
+ SPNG_API int spng_get_trns(spng_ctx *ctx, struct spng_trns *trns);
+~~~~
+
+## Uniform selected declaration context
+
+The same mechanical rule is used for every case: in lexicographic changed-production-path order, show +/-24 lines around the first literal identity match in each snapshot.
+
+### S0
+
+~~~~text
+<no matching declaration in the selected production files>
+~~~~
+
+### S1
+
+Path: `spng/spng.c`; lines 4540-4588
+
+~~~~text
+004540:         }
+004541: 
+004542:         return encode_scanline(ctx, ctx->scanline, len);
+004543:     }
+004544: 
+004545:     for(k=0; k < ctx->subimage[pass].width; k++)
+004546:     {
+004547:         size_t ioffset = (adam7_x_start[pass] + (size_t) k * adam7_x_delta[pass]) * pixel_size;
+004548: 
+004549:         memcpy(ctx->scanline + k * pixel_size, (unsigned char*)row + ioffset, pixel_size);
+004550:     }
+004551: 
+004552:     return encode_scanline(ctx, ctx->scanline, len);
+004553: }
+004554: 
+004555: int spng_encode_scanline(spng_ctx *ctx, const void *scanline, size_t len)
+004556: {
+004557:     if(ctx == NULL || scanline == NULL) return SPNG_EINVAL;
+004558:     if(ctx->state >= SPNG_STATE_EOI) return SPNG_EOI;
+004559:     if(len < (ctx->subimage[ctx->row_info.pass].scanline_width -1) ) return SPNG_EBUFSIZ;
+004560: 
+004561:     return encode_scanline(ctx, scanline, len);
+004562: }
+004563: 
+004564: int spng_encode_row(spng_ctx *ctx, const void *row, size_t len)
+004565: {
+004566:     if(ctx == NULL || row == NULL) return SPNG_EINVAL;
+004567:     if(ctx->state >= SPNG_STATE_EOI) return SPNG_EOI;
+004568:     if(len < ctx->out_width) return SPNG_EBUFSIZ;
+004569: 
+004570:     return encode_row(ctx, row, len);
+004571: }
+004572: 
+004573: int spng_encode_image(spng_ctx *ctx, const void *img, size_t len, int fmt, int flags)
+004574: {
+004575:     if(ctx == NULL || img == NULL) return 1;
+004576:     if(!ctx->state) return SPNG_EBADSTATE;
+004577:     if(!ctx->stored.ihdr) return SPNG_ENOIHDR;
+004578:     if(fmt != SPNG_FMT_PNG) return SPNG_EFMT;
+004579: 
+004580:     int ret = 0;
+004581:     size_t img_len = 0;
+004582:     const struct spng_ihdr *ihdr = &ctx->ihdr;
+004583:     struct encode_flags *encode_flags = &ctx->encode_flags;
+004584: 
+004585:     if(ihdr->color_type == SPNG_COLOR_TYPE_INDEXED && !ctx->stored.plte) return SPNG_ENOPLTE;
+004586: 
+004587:     ctx->channels = num_channels(ihdr);
+004588: 
+~~~~
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T5019","gap_exists":true,"gap_type":["fuzz-worthy entry point","API protocol","state","input semantics"],"confidence":99,"affected_functions":["spng_encode_image","spng_encode_scanline","spng_encode_row","encode_scanline","encode_row"],"reason":"H0 exercises PNG decoding and metadata getters only; it never creates or drives an encoding workflow. S1 exposes progressive encoding through SPNG_ENCODE_PROGRESSIVE and the new public spng_encode_scanline() and spng_encode_row() APIs. This introduces a stateful protocol in which spng_encode_image() initializes encoding and returns early, after which callers supply scanlines or rows with variable lengths across row/pass transitions. The protocol's initialization requirements, buffer-length boundaries, repeated or out-of-order calls, interlaced pass state, and EOI behavior are not reachable from H0.","evidence":["tests/spng_read_fuzzer.c calls spng_decoded_image_size(), spng_decode_image(), and spng_decode_row(), but contains no call to spng_encode_image(), spng_encode_scanline(), or spng_encode_row().","spng_encode_image() now returns immediately when flags contains SPNG_ENCODE_PROGRESSIVE, leaving subsequent encoding to separate API calls.","spng_encode_scanline() indexes ctx->subimage[ctx->row_info.pass], checks len against scanline_width - 1, and then calls encode_scanline().","spng_encode_row() checks len against ctx->out_width and then calls encode_row().","encode_scanline() mutates ctx->row_info.pass, row_num, and scanline_idx and returns SPNG_EOI at the final scanline, making call sequencing and boundary transitions material fuzz inputs."],"recommended_action":"Add an encoder-focused harness mode that constructs valid encoder contexts and IHDR/chunk configurations, calls spng_encode_image() with SPNG_ENCODE_PROGRESSIVE, and fuzzes sequences of spng_encode_row() and spng_encode_scanline() calls, including undersized/exact/oversized lengths, null arguments, calls before initialization and after SPNG_EOI, interlaced images, and mixed row/scanline usage."}
+tokens used
+20,970

@@ -1,0 +1,464 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-direct_evolution_aware-T8013-kp209khi
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a09402-9880-7192-87ef-c30a569a5402
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8013
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `fuzz/xml.c`
+
+~~~~cpp
+/*
+ * xml.c: a libFuzzer target to test several XML parser interfaces.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#include <libxml/parser.h>
+#include <libxml/tree.h>
+#include <libxml/xmlerror.h>
+#include <libxml/xmlreader.h>
+#include "fuzz.h"
+
+int
+LLVMFuzzerInitialize(int *argc ATTRIBUTE_UNUSED,
+                     char ***argv ATTRIBUTE_UNUSED) {
+    xmlInitParser();
+    xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+    xmlSetExternalEntityLoader(xmlFuzzEntityLoader);
+
+    return 0;
+}
+
+int
+LLVMFuzzerTestOneInput(const char *data, size_t size) {
+    static const size_t maxChunkSize = 128;
+    xmlDocPtr doc;
+    xmlParserCtxtPtr ctxt;
+    xmlTextReaderPtr reader;
+    xmlChar *out;
+    const char *docBuffer;
+    size_t docSize, consumed, chunkSize;
+    int opts, outSize;
+
+    xmlFuzzDataInit(data, size);
+    opts = xmlFuzzReadInt();
+    /* XML_PARSE_HUGE still causes timeouts. */
+    opts &= ~XML_PARSE_HUGE;
+
+    xmlFuzzReadEntities();
+    docBuffer = xmlFuzzMainEntity(&docSize);
+    if (docBuffer == NULL) {
+        xmlFuzzDataCleanup();
+        return(0);
+    }
+
+    /* Pull parser */
+
+    doc = xmlReadMemory(docBuffer, docSize, NULL, NULL, opts);
+    /* Also test the serializer. */
+    xmlDocDumpMemory(doc, &out, &outSize);
+    xmlFree(out);
+    xmlFreeDoc(doc);
+
+    /* Push parser */
+
+    ctxt = xmlCreatePushParserCtxt(NULL, NULL, NULL, 0, NULL);
+    xmlCtxtUseOptions(ctxt, opts);
+
+    for (consumed = 0; consumed < docSize; consumed += chunkSize) {
+        chunkSize = docSize - consumed;
+        if (chunkSize > maxChunkSize)
+            chunkSize = maxChunkSize;
+        xmlParseChunk(ctxt, docBuffer + consumed, chunkSize, 0);
+    }
+
+    xmlParseChunk(ctxt, NULL, 0, 1);
+    xmlFreeDoc(ctxt->myDoc);
+    xmlFreeParserCtxt(ctxt);
+
+    /* Reader */
+
+    reader = xmlReaderForMemory(docBuffer, docSize, NULL, NULL, opts);
+    while (xmlTextReaderRead(reader) == 1) {
+        if (xmlTextReaderNodeType(reader) == XML_ELEMENT_NODE) {
+            int i, n = xmlTextReaderAttributeCount(reader);
+            for (i=0; i<n; i++) {
+                xmlTextReaderMoveToAttributeNo(reader, i);
+                while (xmlTextReaderReadAttributeValue(reader) == 1);
+            }
+        }
+    }
+    xmlFreeTextReader(reader);
+
+    /* Cleanup */
+
+    xmlFuzzDataCleanup();
+
+    return(0);
+}
+~~~~
+
+### H0 path: `fuzz/xmlSeed.c`
+
+~~~~cpp
+/*
+ * xmlSeed.c: Generate the XML seed corpus for fuzzing.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#include <stdio.h>
+#include "fuzz.h"
+
+int
+main(int argc, char **argv) {
+    int opts = XML_PARSE_NOENT | XML_PARSE_DTDLOAD;
+
+    if (argc != 2) {
+        fprintf(stderr, "Usage: xmlSeed [FILE]\n");
+        return(1);
+    }
+
+    fwrite(&opts, sizeof(opts), 1, stdout);
+
+    xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+    xmlSetExternalEntityLoader(xmlFuzzEntityRecorder);
+    xmlFreeDoc(xmlReadFile(argv[1], NULL, opts));
+    xmlFuzzDataCleanup();
+
+    return(0);
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/xinclude.c b/xinclude.c
+index 5ea87ade..41ff4e5f 100644
+--- a/xinclude.c
++++ b/xinclude.c
+@@ -66,26 +66,28 @@ struct _xmlXIncludeRef {
+ struct _xmlXIncludeCtxt {
+     xmlDocPtr             doc; /* the source document */
+     int               incBase; /* the first include for this document */
+     int                 incNr; /* number of includes */
+     int                incMax; /* size of includes tab */
+     xmlXIncludeRefPtr *incTab; /* array of included references */
+ 
+     int                 txtNr; /* number of unparsed documents */
+     int                txtMax; /* size of unparsed documents tab */
+     xmlNodePtr        *txtTab; /* array of unparsed text nodes */
+     xmlURL         *txturlTab; /* array of unparsed text URLs */
+ 
+     xmlChar *             url; /* the current URL processed */
+     int                 urlNr; /* number of URLs stacked */
+     int                urlMax; /* size of URL stack */
+     xmlChar *         *urlTab; /* URL stack */
+ 
+     int              nbErrors; /* the number of errors detected */
+     int                legacy; /* using XINCLUDE_OLD_NS */
+     int            parseFlags; /* the flags used for parsing XML documents */
+     xmlChar *		 base; /* the current xml:base */
+ 
+     void            *_private; /* application data */
++
++    unsigned long    incTotal; /* total number of processed inclusions */
+ };
+ 
+ static int
+@@ -668,93 +670,95 @@ static void
+ xmlXIncludeRecurseDoc(xmlXIncludeCtxtPtr ctxt, xmlDocPtr doc,
+ 	              const xmlURL url ATTRIBUTE_UNUSED) {
+     xmlXIncludeCtxtPtr newctxt;
+     int i;
+ 
+     /*
+      * Avoid recursion in already substituted resources
+     for (i = 0;i < ctxt->urlNr;i++) {
+ 	if (xmlStrEqual(doc->URL, ctxt->urlTab[i]))
+ 	    return;
+     }
+      */
+ 
+ #ifdef DEBUG_XINCLUDE
+     xmlGenericError(xmlGenericErrorContext, "Recursing in doc %s\n", doc->URL);
+ #endif
+     /*
+      * Handle recursion here.
+      */
+ 
+     newctxt = xmlXIncludeNewContext(doc);
+     if (newctxt != NULL) {
+ 	/*
+ 	 * Copy the private user data
+ 	 */
+ 	newctxt->_private = ctxt->_private;
+ 	/*
+ 	 * Copy the existing document set
+ 	 */
+ 	newctxt->incMax = ctxt->incMax;
+ 	newctxt->incNr = ctxt->incNr;
+         newctxt->incTab = (xmlXIncludeRefPtr *) xmlMalloc(newctxt->incMax *
+ 		                          sizeof(newctxt->incTab[0]));
+         if (newctxt->incTab == NULL) {
+ 	    xmlXIncludeErrMemory(ctxt, (xmlNodePtr) doc, "processing doc");
+ 	    xmlFree(newctxt);
+ 	    return;
+ 	}
+ 	/*
+ 	 * copy the urlTab
+ 	 */
+ 	newctxt->urlMax = ctxt->urlMax;
+ 	newctxt->urlNr = ctxt->urlNr;
+ 	newctxt->urlTab = ctxt->urlTab;
+ 
+ 	/*
+ 	 * Inherit the existing base
+ 	 */
+ 	newctxt->base = xmlStrdup(ctxt->base);
+ 
+ 	/*
+ 	 * Inherit the documents already in use by other includes
+ 	 */
+ 	newctxt->incBase = ctxt->incNr;
+ 	for (i = 0;i < ctxt->incNr;i++) {
+ 	    newctxt->incTab[i] = ctxt->incTab[i];
+ 	    newctxt->incTab[i]->count++; /* prevent the recursion from
+ 					    freeing it */
+ 	}
+ 	/*
+ 	 * The new context should also inherit the Parse Flags
+ 	 * (bug 132597)
+ 	 */
+ 	newctxt->parseFlags = ctxt->parseFlags;
++        newctxt->incTotal = ctxt->incTotal;
+ 	xmlXIncludeDoProcess(newctxt, doc, xmlDocGetRootElement(doc));
++        ctxt->incTotal = newctxt->incTotal;
+ 	for (i = 0;i < ctxt->incNr;i++) {
+ 	    newctxt->incTab[i]->count--;
+ 	    newctxt->incTab[i] = NULL;
+ 	}
+ 
+ 	/* urlTab may have been reallocated */
+ 	ctxt->urlTab = newctxt->urlTab;
+ 	ctxt->urlMax = newctxt->urlMax;
+ 
+ 	newctxt->urlMax = 0;
+ 	newctxt->urlNr = 0;
+ 	newctxt->urlTab = NULL;
+ 
+ 	xmlXIncludeFreeContext(newctxt);
+     }
+ #ifdef DEBUG_XINCLUDE
+     xmlGenericError(xmlGenericErrorContext, "Done recursing in doc %s\n", url);
+ #endif
+ }
+ 
+ /**
+  * xmlXIncludeAddTxt:
+  * @ctxt:  the XInclude context
+  * @txt:  the new text node
+  * @url:  the associated URL
+  *
+  * Add a new text node to the list
+  */
+@@ -1974,55 +1978,57 @@ static int
+ xmlXIncludeLoadFallback(xmlXIncludeCtxtPtr ctxt, xmlNodePtr fallback, int nr) {
+     xmlXIncludeCtxtPtr newctxt;
+     int ret = 0;
+     int oldNbErrors = ctxt->nbErrors;
+ 
+     if ((fallback == NULL) || (fallback->type == XML_NAMESPACE_DECL) ||
+         (ctxt == NULL))
+ 	return(-1);
+     if (fallback->children != NULL) {
+         xmlNodePtr child, next;
+ 
+ 	/*
+ 	 * It's possible that the fallback also has 'includes'
+ 	 * (Bug 129969), so we re-process the fallback just in case
+ 	 */
+ 	newctxt = xmlXIncludeNewContext(ctxt->doc);
+ 	if (newctxt == NULL)
+ 	    return (-1);
+ 	newctxt->_private = ctxt->_private;
+ 	newctxt->base = xmlStrdup(ctxt->base);	/* Inherit the base from the existing context */
+ 	xmlXIncludeSetFlags(newctxt, ctxt->parseFlags);
++        newctxt->incTotal = ctxt->incTotal;
+         for (child = fallback->children; child != NULL; child = next) {
+             next = child->next;
+ 	    if (xmlXIncludeDoProcess(newctxt, ctxt->doc, child) < 0)
+                 ret = -1;
+         }
++        ctxt->incTotal = newctxt->incTotal;
+ 	if (ctxt->nbErrors > oldNbErrors)
+ 	    ret = -1;
+ 	xmlXIncludeFreeContext(newctxt);
+ 
+ 	ctxt->incTab[nr]->inc = xmlDocCopyNodeList(ctxt->doc,
+ 	                                           fallback->children);
+     } else {
+         ctxt->incTab[nr]->inc = NULL;
+ 	ctxt->incTab[nr]->emptyFb = 1;	/* flag empty callback */
+     }
+     return(ret);
+ }
+ 
+ /************************************************************************
+  *									*
+  *			XInclude Processing				*
+  *									*
+  ************************************************************************/
+ 
+ /**
+  * xmlXIncludePreProcessNode:
+  * @ctxt: an XInclude context
+  * @node: an XInclude node
+  *
+  * Implement the XInclude preprocessing, currently just adding the element
+  * for further processing.
+  *
+  * Returns the result list or NULL in case of error
+  */
+@@ -2390,83 +2396,92 @@ static int
+ xmlXIncludeDoProcess(xmlXIncludeCtxtPtr ctxt, xmlDocPtr doc, xmlNodePtr tree) {
+     xmlNodePtr cur;
+     int ret = 0;
+     int i, start;
+ 
+     if ((doc == NULL) || (tree == NULL) || (tree->type == XML_NAMESPACE_DECL))
+ 	return(-1);
+     if (ctxt == NULL)
+ 	return(-1);
+ 
+     if (doc->URL != NULL) {
+ 	ret = xmlXIncludeURLPush(ctxt, doc->URL);
+ 	if (ret < 0)
+ 	    return(-1);
+     }
+     start = ctxt->incNr;
+ 
+     /*
+      * First phase: lookup the elements in the document
+      */
+     cur = tree;
+     do {
+ 	/* TODO: need to work on entities -> stack */
+         if (xmlXIncludeTestNode(ctxt, cur) == 1) {
++#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
++            /*
++             * Avoid superlinear expansion by limiting the total number
++             * of replacements.
++             */
++            if (ctxt->incTotal >= 20)
++                return(-1);
++#endif
++            ctxt->incTotal++;
+             xmlXIncludePreProcessNode(ctxt, cur);
+         } else if ((cur->children != NULL) &&
+                    (cur->children->type != XML_ENTITY_DECL) &&
+                    (cur->children->type != XML_XINCLUDE_START) &&
+                    (cur->children->type != XML_XINCLUDE_END)) {
+             cur = cur->children;
+             continue;
+         }
+         do {
+             if (cur == tree)
+                 break;
+             if (cur->next != NULL) {
+                 cur = cur->next;
+                 break;
+             }
+             cur = cur->parent;
+         } while (cur != NULL);
+     } while ((cur != NULL) && (cur != tree));
+ 
+     /*
+      * Second Phase : collect the infosets fragments
+      */
+     for (i = start;i < ctxt->incNr; i++) {
+         xmlXIncludeLoadNode(ctxt, i);
+ 	ret++;
+     }
+ 
+     /*
+      * Third phase: extend the original document infoset.
+      *
+      * Originally we bypassed the inclusion if there were any errors
+      * encountered on any of the XIncludes.  A bug was raised (bug
+      * 132588) requesting that we output the XIncludes without error,
+      * so the check for inc!=NULL || xptr!=NULL was put in.  This may
+      * give some other problems in the future, but for now it seems to
+      * work ok.
+      *
+      */
+     for (i = ctxt->incBase;i < ctxt->incNr; i++) {
+ 	if ((ctxt->incTab[i]->inc != NULL) ||
+ 		(ctxt->incTab[i]->xptr != NULL) ||
+ 		(ctxt->incTab[i]->emptyFb != 0))	/* (empty fallback) */
+ 	    xmlXIncludeIncludeNode(ctxt, i);
+     }
+ 
+     if (doc->URL != NULL)
+ 	xmlXIncludeURLPop(ctxt);
+     return(ret);
+ }
+ 
+ /**
+  * xmlXIncludeSetFlags:
+  * @ctxt:  an XInclude processing context
+  * @flags: a set of xmlParserOption used for parsing XML includes
+  *
+  * Set the flags used for further processing of XML resources.
+  *
+  * Returns 0 in case of success and -1 in case of error.
+  */
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8013","gap_exists":false,"gap_type":[],"commit_induced":"NO","maintenance_needed":false,"confidence":96,"affected_functions":["xmlXIncludeRecurseDoc","xmlXIncludeLoadFallback","xmlXIncludeDoProcess"],"reason":"The commit adds and propagates the internal xmlXIncludeCtxt.incTotal counter and, under FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION, stops XInclude processing after 20 replacements. It does not add an entry point, protocol, configuration requirement, input semantic, or new attack surface. H0 already supplies parser options through xmlFuzzReadInt, structured main/entity data through xmlFuzzReadEntities and xmlFuzzMainEntity, and exercises xmlReadMemory, push parsing, and xmlReaderForMemory. Thus no material harness gap is shown, and the commit does not create a maintenance need.","evidence":["H0 derives opts from xmlFuzzReadInt and passes it to xmlReadMemory, xmlCtxtUseOptions, and xmlReaderForMemory, preserving input control over parser configuration.","H0 calls xmlFuzzReadEntities and xmlFuzzMainEntity and installs xmlFuzzEntityLoader, providing document and referenced-resource input state relevant to inclusion processing.","xmlXIncludeDoProcess only adds ctxt->incTotal++, a fuzz-build-only ctxt->incTotal >= 20 check, and otherwise retains the existing xmlXIncludeTestNode, xmlXIncludePreProcessNode, load, and replacement flow.","xmlXIncludeRecurseDoc and xmlXIncludeLoadFallback merely copy incTotal into nested contexts and copy the resulting value back; they introduce no new externally controlled state or API.","Compared with S0 + H0, S1 + H0 retains the same harness-reachable parser interfaces and inputs; the change is an internal fuzzing resource limit rather than an uncovered behavior surface."],"recommended_action":"No harness maintenance is needed for this commit."}
+tokens used
+7,237

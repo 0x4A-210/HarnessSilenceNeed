@@ -1,0 +1,1624 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/n4-gap_only-C003-_fwd3lyy
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08a72-6906-7410-ad0b-b9fe0b43433e
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+C003
+
+## Existing harness H0
+
+The complete project-owned harness translation unit is shown below. Framework
+main/CLI scaffolding is not expanded; directly included semantic helper files
+are shown separately under the fixed context rule.
+
+Path: `fuzz/c/std/jpeg_fuzzer.c`
+
+```c
+// Copyright 2023 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN jpeg_fuzzer.c
+./a.out ../../../test/data/*.jpeg
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__JPEG
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+#include "../fuzzlib/fuzzlib_image_decoder.c"
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_jpeg__decoder dec;
+  wuffs_base__status status = wuffs_jpeg__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  hash = wuffs_base__u64__rotate_right(hash, 1);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  return fuzz_image_decoder(
+      src, hash,
+      wuffs_jpeg__decoder__upcast_as__wuffs_base__image_decoder(&dec));
+}
+```
+
+### Direct H0 helper: `fuzz/c/fuzzlib/fuzzlib_image_decoder.c`
+
+```c
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef WUFFS_INCLUDE_GUARD
+#error "Wuffs' .h files need to be included before this file"
+#endif
+
+static const char*  //
+fuzz_image_decoder(wuffs_base__io_buffer* src,
+                   uint64_t hash,
+                   wuffs_base__image_decoder* dec) {
+  const char* ret = NULL;
+  wuffs_base__slice_u8 pixbuf = ((wuffs_base__slice_u8){});
+  wuffs_base__slice_u8 workbuf = ((wuffs_base__slice_u8){});
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    wuffs_base__status status =
+        wuffs_base__image_decoder__decode_image_config(dec, &ic, src);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    // 50% of the time, choose BGRA_PREMUL instead of the native pixel config.
+    if (hash & 1) {
+      wuffs_base__pixel_config__set(
+          &ic.pixcfg, WUFFS_BASE__PIXEL_FORMAT__BGRA_PREMUL,
+          WUFFS_BASE__PIXEL_SUBSAMPLING__NONE,
+          wuffs_base__pixel_config__width(&ic.pixcfg),
+          wuffs_base__pixel_config__height(&ic.pixcfg));
+    }
+    hash >>= 1;
+
+    // Wuffs allows either statically or dynamically allocated work buffers.
+    // This program exercises dynamic allocation.
+    uint64_t n = wuffs_base__image_decoder__workbuf_len(dec).max_incl;
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      workbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!workbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    n = wuffs_base__pixel_config__pixbuf_len(&ic.pixcfg);
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      pixbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!pixbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    status = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, pixbuf);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      wuffs_base__frame_config fc = ((wuffs_base__frame_config){});
+      status = wuffs_base__image_decoder__decode_frame_config(dec, &fc, src);
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+
+      status = wuffs_base__image_decoder__decode_frame(
+          dec, &pb, src, WUFFS_BASE__PIXEL_BLEND__SRC, workbuf, NULL);
+
+      wuffs_base__rect_ie_u32 frame_rect =
+          wuffs_base__frame_config__bounds(&fc);
+      wuffs_base__rect_ie_u32 dirty_rect =
+          wuffs_base__image_decoder__frame_dirty_rect(dec);
+      if (!wuffs_base__rect_ie_u32__contains_rect(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not contain dirty_rect";
+        goto exit;
+      }
+
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+      seen_ok = true;
+
+      if (!wuffs_base__rect_ie_u32__equals(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not equal dirty_rect";
+        goto exit;
+      }
+    }
+  }
+
+exit:
+  free(workbuf.ptr);
+  free(pixbuf.ptr);
+  return ret;
+}
+```
+
+## Complete S0 -> S1 hand-written production-source diff
+
+The fixed rule includes every changed `std/**/*.wuffs` production file. It
+excludes generated release snapshots, tests, docs, examples, and commit text.
+
+```diff
+diff --git a/std/jpeg/decode_jpeg.wuffs b/std/jpeg/decode_jpeg.wuffs
+index 3c60b17c..c52411dd 100644
+--- a/std/jpeg/decode_jpeg.wuffs
++++ b/std/jpeg/decode_jpeg.wuffs
+@@ -238,24 +238,29 @@ pub struct decoder? implements base.image_decoder(
+         //   3: my_mul = 768   mx_mul = 16   offset = 0x0000 + 0x0188 =  392
+         //   4: my_mul = 192   mx_mul =  8   offset = 0x0600 + 0x0000 = 1536
+         //   5: my_mul = 192   mx_mul =  8   offset = 0x0780 + 0x0000 = 1920
+         mcu_blocks_offset : array[10] base.u64[..= 0xC_00D8_03D8],  // (8 * 3 * (0x1_0008 + 1)) + 0xC_00C0_0300
+         mcu_blocks_mx_mul : array[10] base.u32[..= 0x00_0020],  // 8 * 4.
+         mcu_blocks_my_mul : array[10] base.u32[..= 0x20_0100],  // 8 * 4 * 0x1_0008.
+ 
+         mcu_blocks_dc_hselector : array[10] base.u8[..= 3],
+         mcu_blocks_ac_hselector : array[10] base.u8[..= 7],
+ 
+         mcu_previous_dc_values : array[4] base.u16,
+ 
++        block_smoothing_lowest_scan_al : array[4] array[10] base.u8[..= 16],
++        block_smoothing_dc_values      : array[5] array[5] base.u16,
++        block_smoothing_mx_max_incl    : base.u32[..= 0x1FFF],
++        block_smoothing_my_max_incl    : base.u32[..= 0x1FFF],
++
+         restart_interval       : base.u16,
+         saved_restart_interval : base.u16,
+         restarts_remaining     : base.u16,
+ 
+         // End-Of-Band run count, per Section G.1.2.2: "Progressive encoding of
+         // AC coefficients with Huffman coding... An EOB run of length 5 means
+         // that the current block and the next four blocks have an end-of-band
+         // with no intervening non-zero coefficients".
+         eob_run : base.u16,
+ 
+         frame_config_io_position : base.u64,
+ 
+@@ -690,24 +695,36 @@ pri func decoder.decode_sof?(src: base.io_reader) {
+     this.components_workbuf_heights[3] = upper_bound.min(no_more_than:
+             8 * this.height_in_mcus * (this.components_v[3] as base.u32))
+ 
+     wh0 = (this.components_workbuf_widths[0] as base.u64) * (this.components_workbuf_heights[0] as base.u64)
+     wh1 = (this.components_workbuf_widths[1] as base.u64) * (this.components_workbuf_heights[1] as base.u64)
+     wh2 = (this.components_workbuf_widths[2] as base.u64) * (this.components_workbuf_heights[2] as base.u64)
+     wh3 = (this.components_workbuf_widths[3] as base.u64) * (this.components_workbuf_heights[3] as base.u64)
+ 
+     progressive = 0
+     if this.sof_marker >= 0xC2 {
+         // Pre-IDCT block coefficients (mcu_blocks elements) are 2 bytes each.
+         progressive = 2
++
++        i = 0
++        while i < 4 {
++            j = 0
++            while j < 10,
++                    inv i < 4,
++            {
++                this.block_smoothing_lowest_scan_al[i][j] = 16
++                j += 1
++            } endwhile
++            i += 1
++        } endwhile
+     }
+ 
+     this.components_workbuf_offsets[0] = 0
+     this.components_workbuf_offsets[1] = this.components_workbuf_offsets[0] + wh0
+     this.components_workbuf_offsets[2] = this.components_workbuf_offsets[1] + wh1
+     this.components_workbuf_offsets[3] = this.components_workbuf_offsets[2] + wh2
+     this.components_workbuf_offsets[4] = this.components_workbuf_offsets[3] + wh3
+     this.components_workbuf_offsets[5] = this.components_workbuf_offsets[4] + (wh0 * progressive)
+     this.components_workbuf_offsets[6] = this.components_workbuf_offsets[5] + (wh1 * progressive)
+     this.components_workbuf_offsets[7] = this.components_workbuf_offsets[6] + (wh2 * progressive)
+     this.components_workbuf_offsets[8] = this.components_workbuf_offsets[7] + (wh3 * progressive)
+ }
+@@ -1243,28 +1260,29 @@ pri func decoder.decode_sos?(dst: ptr base.pixel_buffer, src: base.io_reader, wo
+                 }
+             }
+ 
+             mx += 1
+         } endwhile
+         my += 1
+     } endwhile
+ 
+     this.scan_count ~sat+= 1
+ }
+ 
+ pri func decoder.prepare_scan?(src: base.io_reader) {
+-    var c      : base.u8
+-    var i      : base.u32
+-    var j      : base.u32
+-    var failed : base.bool
++    var c          : base.u8
++    var i          : base.u32
++    var j          : base.u32
++    var j_max_incl : base.u32[..= 9]
++    var failed     : base.bool
+ 
+     if (this.payload_length < 6) or (this.payload_length > 12) {
+         return "#bad SOS marker"
+     }
+     c = args.src.read_u8?()
+     if (c < 1) or (c > 4) {
+         return "#bad SOS marker"
+     }
+     this.scan_num_components = c as base.u32
+     if (this.scan_num_components > this.num_components) or
+             ((this.scan_num_components < this.num_components) and (this.sof_marker < 0xC2)) or
+             (this.payload_length <> (4 + (2 * this.scan_num_components))) {
+@@ -1377,24 +1395,34 @@ pri func decoder.prepare_scan?(src: base.io_reader) {
+     i = 0
+     while i < this.scan_num_components {
+         assert i < 4 via "a < b: a < c; c <= b"(c: this.scan_num_components)
+         if ((this.scan_ss == 0) and (not this.seen_dht[0 | this.scan_comps_td[i]])) or
+                 ((this.scan_se <> 0) and (not this.seen_dht[4 | this.scan_comps_ta[i]])) {
+             // TODO: while not required by the spec, we could fall back to
+             // implicit tables? See section K.3 "Typical Huffman tables for
+             // 8-bit precision luminance and chrominance" and
+             // https://github.com/libjpeg-turbo/libjpeg-turbo/commit/a113506d175d03ae0e40965c3d3d21a5d561e119
+             return "#missing Huffman table"
+         }
+ 
++        j = this.scan_ss as base.u32
++        j_max_incl = (this.scan_se.min(no_more_than: 9)) as base.u32
++        while j <= j_max_incl,
++                inv i < 4,
++        {
++            assert j <= 9 via "a <= b: a <= c; c <= b"(c: j_max_incl)
++            this.block_smoothing_lowest_scan_al[this.scan_comps_cselector[i]][j] = this.scan_al
++            j += 1
++        } endwhile
++
+         i += 1
+     } endwhile
+ 
+     if this.scan_num_components == 1 {
+         this.calculate_single_component_scan_fields!()
+     } else {
+         failed = this.calculate_multiple_component_scan_fields!()
+         if failed {
+             return "#bad SOS marker"
+         }
+     }
+ }
+@@ -1541,39 +1569,37 @@ pri func decoder.fill_bitstream!(src: base.io_reader) {
+             if wi < new_wi {
+                 assert new_wi > wi via "a > b: b < a"()
+                 this.bitstream_padding ~sat-= new_wi - wi
+                 this.bitstream_buffer[wi .. new_wi].bulk_memset!(byte_value: 0)
+                 wi = new_wi
+             }
+         }
+     }
+ 
+     this.bitstream_wi = wi
+ }
+ 
+-pri func decoder.load_mcu_blocks_for_single_component!(mx: base.u32[..= 0x2000], my: base.u32[..= 0x2000], workbuf: slice base.u8, csel: base.u32[..= 3]) {
++pri func decoder.load_mcu_blocks_for_single_component!(mx: base.u32[..= 0x2000], my: base.u32[..= 0x2000], workbuf: slice base.u8, csel: base.u32[..= 3]),
++        choosy,
++{
+     var stride16 : base.u64[..= 0x10_0080]
+     var offset   : base.u64
+ 
+-    // "while true" is redundant but minimizes the diff with load_mcu_blocks.
+-    while true {
+-        stride16 = (this.components_workbuf_widths[args.csel] * 16) as base.u64
+-        offset = this.components_workbuf_offsets[args.csel | 4] +
+-                ((args.mx as base.u64) * 128) +
+-                ((args.my as base.u64) * stride16)
+-        if offset <= args.workbuf.length() {
+-            this.mcu_blocks[.. 1].bulk_load_host_endian!(src: args.workbuf[offset ..])
+-        }
+-        break
+-    } endwhile
++    stride16 = (this.components_workbuf_widths[args.csel] * 16) as base.u64
++    offset = this.components_workbuf_offsets[args.csel | 4] +
++            ((args.mx as base.u64) * 128) +
++            ((args.my as base.u64) * stride16)
++    if offset <= args.workbuf.length() {
++        this.mcu_blocks[.. 1].bulk_load_host_endian!(src: args.workbuf[offset ..])
++    }
+ }
+ 
+ pri func decoder.load_mcu_blocks!(mx: base.u32[..= 0x2000], my: base.u32[..= 0x2000], workbuf: slice base.u8) {
+     var b        : base.u32
+     var csel     : base.u8[..= 3]
+     var h        : base.u64[..= 4]
+     var v        : base.u64[..= 4]
+     var stride16 : base.u64[..= 0x10_0080]
+     var offset   : base.u64
+ 
+     h = 1
+     v = 1
+@@ -1665,47 +1691,79 @@ pri func decoder.skip_past_the_next_restart_marker?(src: base.io_reader) {
+             // expected one (neither leading or lagging). Consume it and break.
+             args.src.skip_u32_fast!(actual: 2, worst_case: 2)
+             break
+         }
+     } endwhile
+ 
+     this.next_restart_marker = (this.next_restart_marker ~mod+ 1) & 7
+ }
+ 
+ pri func decoder.apply_progressive_idct!(workbuf: slice base.u8) {
+     var csel : base.u32
+ 
++    var block_smoothing_applicable : base.bool
++
+     var scan_width_in_mcus  : base.u32[..= 0x2000]
+     var scan_height_in_mcus : base.u32[..= 0x2000]
+     var mcu_blocks_mx_mul_0 : base.u32[..= 0x00_0020]
+     var mcu_blocks_my_mul_0 : base.u32[..= 0x20_0100]
+ 
+     var my : base.u32
+     var mx : base.u32
+ 
+     var stride : base.u64[..= 0x1_0008]
+     var offset : base.u64
+ 
++    block_smoothing_applicable = true
++    csel = 0
++    while csel < this.num_components {
++        assert csel < 4 via "a < b: a < c; c <= b"(c: this.num_components)
++        if (this.block_smoothing_lowest_scan_al[csel][0] >= 16) or
++                this.top_left_quants_has_zero(q: this.components_tq[csel] as base.u32) {
++            block_smoothing_applicable = false
++        }
++        csel += 1
++    } endwhile
++
+     csel = 0
+     while csel < this.num_components {
+         assert csel < 4 via "a < b: a < c; c <= b"(c: this.num_components)
+ 
+         // Fake a single-component scan.
+         scan_width_in_mcus = this.quantize_dimension(
+                 width: this.width, h: this.components_h[csel], max_incl_h: this.max_incl_components_h)
+         scan_height_in_mcus = this.quantize_dimension(
+                 width: this.height, h: this.components_v[csel], max_incl_h: this.max_incl_components_v)
+         mcu_blocks_mx_mul_0 = 8
+         mcu_blocks_my_mul_0 = 8 * this.components_workbuf_widths[csel]
+ 
++        // For partially loaded progressive JPEGs, apply what libjpeg-turbo
++        // calls "block smoothing".
++        if block_smoothing_applicable and (0 <> (
++                this.block_smoothing_lowest_scan_al[csel][1] |
++                this.block_smoothing_lowest_scan_al[csel][2] |
++                this.block_smoothing_lowest_scan_al[csel][3] |
++                this.block_smoothing_lowest_scan_al[csel][4] |
++                this.block_smoothing_lowest_scan_al[csel][5] |
++                this.block_smoothing_lowest_scan_al[csel][6] |
++                this.block_smoothing_lowest_scan_al[csel][8] |
++                this.block_smoothing_lowest_scan_al[csel][8] |
++                this.block_smoothing_lowest_scan_al[csel][9])) {
++            choose load_mcu_blocks_for_single_component = [load_mcu_blocks_for_single_component_smooth]
++            this.block_smoothing_mx_max_incl = scan_width_in_mcus ~sat- 1
++            this.block_smoothing_my_max_incl = scan_height_in_mcus ~sat- 1
++        } else {
++            choose load_mcu_blocks_for_single_component = [load_mcu_blocks_for_single_component]
++        }
++
+         // Apply IDCT to the MCU blocks in the csel'th component.
+         my = 0
+         while my < scan_height_in_mcus,
+                 inv csel < 4,
+         {
+             assert my < 0x2000 via "a < b: a < c; c <= b"(c: scan_height_in_mcus)
+             mx = 0
+             while mx < scan_width_in_mcus,
+                     inv csel < 4,
+                     inv my < 0x2000,
+             {
+                 assert mx < 0x2000 via "a < b: a < c; c <= b"(c: scan_width_in_mcus)
+@@ -1863,42 +1921,61 @@ pub func decoder.num_decoded_frames() base.u64 {
+ }
+ 
+ pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+     var i : base.u32
+     var j : base.u32
+ 
+     if this.call_sequence < 0x20 {
+         return base."#bad call sequence"
+     }
+     if args.index <> 0 {
+         return base."#bad argument"
+     }
++
+     this.call_sequence = 0x28
+     this.frame_config_io_position = args.io_position
+     this.scan_count = 0
+     this.restart_interval = this.saved_restart_interval
++
++    i = 0
+     while i < 4 {
+         this.seen_dqt[i] = this.saved_seen_dqt[i]
++        j = 0
+         while j < 64,
+                 inv i < 4,
+         {
+             this.quant_tables[i][j] = this.saved_quant_tables[i][j]
+             j += 1
+         } endwhile
+         i += 1
+     } endwhile
++
++    i = 0
++    while i < 4 {
++        j = 0
++        while j < 10,
++                inv i < 4,
++        {
++            this.block_smoothing_lowest_scan_al[i][j] = 16
++            j += 1
++        } endwhile
++        i += 1
++    } endwhile
++
++    i = 0
+     while i < 8 {
+         this.seen_dht[i] = false
+         i += 1
+     } endwhile
++
+     return ok
+ }
+ 
+ pub func decoder.set_report_metadata!(fourcc: base.u32, report: base.bool) {
+     // TODO: implement.
+ }
+ 
+ pub func decoder.tell_me_more?(dst: base.io_writer, minfo: nptr base.more_information, src: base.io_reader) {
+     return base."#no more information"
+ }
+ 
+ pub func decoder.workbuf_len() base.range_ii_u64 {
+diff --git a/std/jpeg/decode_load_smooth.wuffs b/std/jpeg/decode_load_smooth.wuffs
+new file mode 100644
+index 00000000..f8d4eb40
+--- /dev/null
++++ b/std/jpeg/decode_load_smooth.wuffs
+@@ -0,0 +1,892 @@
++// Copyright 2023 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// ----
++
++// Consider the 8×8 = 64 coefficients (1 DC, 63 AC) in a block. The low
++// frequency ones are in the top-left corner and their offsets into the
++// this.mcu_blocks[0] array are:
++//
++//   0x00 0x01 0x02 0x03 .... .... .... ....   // 0x00 is the DC coefficient.
++//   0x08 0x09 0x0A .... .... .... .... ....
++//   0x10 0x11 .... .... .... .... .... ....
++//   0x18 .... .... .... .... .... .... ....
++//   .... .... .... .... .... .... .... ....
++//   .... .... .... .... .... .... .... ....
++//   .... .... .... .... .... .... .... ....
++//   .... .... .... .... .... .... .... ....
++//
++// These are the first 10 coefficients (in zig-zag order), the 10 elements of
++// each this.block_smoothing_lowest_scan_al[csel] array:
++//
++//   zig0 zig1 zig5 zig6 .... .... .... ....   // zig0 is the DC coefficient.
++//   zig2 zig4 zig7 .... .... .... .... ....
++//   zig3 zig8 .... .... .... .... .... ....
++//   zig9 .... .... .... .... .... .... ....
++//   .... .... .... .... .... .... .... ....
++//   .... .... .... .... .... .... .... ....
++//   .... .... .... .... .... .... .... ....
++//   .... .... .... .... .... .... .... ....
++
++pri func decoder.top_left_quants_has_zero(q: base.u32[..= 3]) base.bool {
++    // Examine the top-left 10 of the 8×8 = 64 quantization factors.
++    return (this.quant_tables[args.q][0x00] == 0) or
++            (this.quant_tables[args.q][0x01] == 0) or
++            (this.quant_tables[args.q][0x02] == 0) or
++            (this.quant_tables[args.q][0x03] == 0) or
++            (this.quant_tables[args.q][0x08] == 0) or
++            (this.quant_tables[args.q][0x09] == 0) or
++            (this.quant_tables[args.q][0x0A] == 0) or
++            (this.quant_tables[args.q][0x10] == 0) or
++            (this.quant_tables[args.q][0x11] == 0) or
++            (this.quant_tables[args.q][0x18] == 0)
++}
++
++pri func decoder.load_mcu_blocks_for_single_component_smooth!(mx: base.u32[..= 0x2000], my: base.u32[..= 0x2000], workbuf: slice base.u8, csel: base.u32[..= 3]) {
++    var stride16 : base.u64[..= 0x10_0080]
++    var offset   : base.u64
++
++    var dx : base.u32
++    var dy : base.u32
++
++    var mx : base.u32[..= 0x1FFF]
++    var my : base.u32[..= 0x1FFF]
++
++    var q       : base.u8[..= 3]
++    var q_00    : base.u32
++    var q_xy    : base.u32
++    var al      : base.u8[..= 16]
++    var scratch : base.u32
++    var limit   : base.u32
++
++    stride16 = (this.components_workbuf_widths[args.csel] * 16) as base.u64
++    offset = this.components_workbuf_offsets[args.csel | 4] +
++            ((args.mx as base.u64) * 128) +
++            ((args.my as base.u64) * stride16)
++    if offset <= args.workbuf.length() {
++        this.mcu_blocks[.. 1].bulk_load_host_endian!(src: args.workbuf[offset ..])
++    }
++
++    dy = 0
++    while dy < 5 {
++        my = this.block_smoothing_my_max_incl.min(no_more_than: (args.my + dy) ~sat- 2)
++        dx = 0
++        while dx < 5,
++                inv dy < 5,
++        {
++            mx = this.block_smoothing_mx_max_incl.min(no_more_than: (args.mx + dx) ~sat- 2)
++
++            offset = this.components_workbuf_offsets[args.csel | 4] +
++                    ((mx as base.u64) * 128) +
++                    ((my as base.u64) * stride16)
++            if offset <= args.workbuf.length() {
++                assert dx <= (dx + 1) via "a <= (a + b): 0 <= b"()
++                this.block_smoothing_dc_values[dy][dx .. (dx + 1)].bulk_load_host_endian!(src: args.workbuf[offset ..])
++            }
++
++            dx += 1
++        } endwhile
++        dy += 1
++    } endwhile
++
++    q = this.components_tq[args.csel]
++    q_00 = this.quant_tables[q][0x00] as base.u32
++    if q_00 <= 0 {
++        return nothing
++    }
++
++    // See "Consider the 8×8" above.
++    //
++    // There are two sets of formulae, adjusting 10 or 5 coefficients:
++    //  - Major: 0x00, 0x01, 0x02, 0x03, 0x08, 0x09, 0x0A, 0x10, 0x11, 0x18.
++    //           zig0, zig1, zig5, zig6, zig2, zig4, zig7, zig3, zig8, zig9.
++    //  - Minor:       0x01, 0x02,       0x08, 0x09,       0x10.
++    //                 zig1, zig5,       zig2, zig4,       zig3.
++    //
++    // We only do major smoothing (including DC interpolation) if no AC
++    // coefficients are available.
++    if 0 <> (16 &
++            this.block_smoothing_lowest_scan_al[args.csel][1] &
++            this.block_smoothing_lowest_scan_al[args.csel][2] &
++            this.block_smoothing_lowest_scan_al[args.csel][3] &
++            this.block_smoothing_lowest_scan_al[args.csel][4] &
++            this.block_smoothing_lowest_scan_al[args.csel][5] &
++            this.block_smoothing_lowest_scan_al[args.csel][6] &
++            this.block_smoothing_lowest_scan_al[args.csel][7] &
++            this.block_smoothing_lowest_scan_al[args.csel][8] &
++            this.block_smoothing_lowest_scan_al[args.csel][9]) {
++        // Major smoothing.
++
++        // Offset=0x00 DC coefficient. Weights total to +256:
++        //
++        //   -2   -6   -8   -6   -2
++        //   -6   +6  +42   +6   -6
++        //   -8  +42 +152  +42   -8
++        //   -6   +6  +42   +6   -6
++        //   -2   -6   -8   -6   -2
++        if true {
++            scratch = 0
++
++            scratch ~mod+= 0xFFFF_FFFE ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0xFFFF_FFFA ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0xFFFF_FFF8 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0xFFFF_FFFA ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0xFFFF_FFFE ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0xFFFF_FFFA ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_0006 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_002A ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0x0000_0006 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0xFFFF_FFFA ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0xFFFF_FFF8 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_002A ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0x0000_0098 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0x0000_002A ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0xFFFF_FFF8 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0xFFFF_FFFA ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0x0000_0006 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0x0000_002A ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0x0000_0006 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0xFFFF_FFFA ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0xFFFF_FFFE ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0xFFFF_FFFA ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0xFFFF_FFF8 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0xFFFF_FFFA ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0xFFFF_FFFE ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ (((0 ~mod+ scratch) ~mod+ (1 << 7)) / (1 << 8))
++            } else {
++                scratch = 0 ~mod- (((0 ~mod- scratch) ~mod+ (1 << 7)) / (1 << 8))
++            }
++            this.mcu_blocks[0][0x00] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x01 AC coefficient. Weights total to zero:
++        //
++        //   -1   -1    0   +1   +1
++        //   -3  +13    0  -13   +3
++        //   -3  +38    0  -38   +3
++        //   -3  +13    0  -13   +3
++        //   -1   -1    0   +1   +1
++        q_xy = this.quant_tables[q][0x01] as base.u32
++        if (q_xy > 0) and (this.mcu_blocks[0][0x01] == 0) {
++            scratch = 0
++
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0xFFFF_FFFD ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_000D ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0xFFFF_FFF3 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0003 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0xFFFF_FFFD ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_0026 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0xFFFF_FFDA ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0003 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0xFFFF_FFFD ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0x0000_000D ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0xFFFF_FFF3 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0003 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            } else {
++                scratch = 0 ~mod- (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            }
++            this.mcu_blocks[0][0x01] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x02 AC coefficient. Weights total to zero:
++        //
++        //    0    0    0    0    0
++        //    0   +2   -5   +2    0
++        //   +1   +7  -14   +7   +1
++        //    0   +2   -5   +2    0
++        //    0    0    0    0    0
++        q_xy = this.quant_tables[q][0x02] as base.u32
++        if (q_xy > 0) and (this.mcu_blocks[0][0x02] == 0) {
++            scratch = 0
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_0002 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0xFFFF_FFFB ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0x0000_0002 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_0007 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0xFFFF_FFF2 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0x0000_0007 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0x0000_0002 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0xFFFF_FFFB ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0x0000_0002 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            } else {
++                scratch = 0 ~mod- (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            }
++            this.mcu_blocks[0][0x02] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x03 AC coefficient. Weights total to zero:
++        //
++        //    0    0    0    0    0
++        //    0   +1    0   -1    0
++        //    0   +2    0   -2    0
++        //    0   +1    0   -1    0
++        //    0    0    0    0    0
++        q_xy = this.quant_tables[q][0x03] as base.u32
++        if (q_xy > 0) and (this.mcu_blocks[0][0x03] == 0) {
++            scratch = 0
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_0002 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0xFFFF_FFFE ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            } else {
++                scratch = 0 ~mod- (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            }
++            this.mcu_blocks[0][0x03] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x08 AC coefficient. Weights total to zero:
++        //
++        //   -1   -3   -3   -3   -1
++        //   -1  +13  +38  +13   -1
++        //    0    0    0    0    0
++        //   +1  -13  -38  -13   +1
++        //   +1   +3   +3   +3   +1
++        q_xy = this.quant_tables[q][0x08] as base.u32
++        if (q_xy > 0) and (this.mcu_blocks[0][0x08] == 0) {
++            scratch = 0
++
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0xFFFF_FFFD ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0xFFFF_FFFD ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0xFFFF_FFFD ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_000D ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_0026 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0x0000_000D ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0xFFFF_FFF3 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0xFFFF_FFDA ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0xFFFF_FFF3 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0003 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0003 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0003 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            } else {
++                scratch = 0 ~mod- (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            }
++            this.mcu_blocks[0][0x08] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x09 AC coefficient. Weights total to zero:
++        //
++        //   -1    0    0    0   +1
++        //    0   +9    0   -9    0
++        //    0    0    0    0    0
++        //    0   -9    0   +9    0
++        //   +1    0    0    0   -1
++        q_xy = this.quant_tables[q][0x09] as base.u32
++        if (q_xy > 0) and (this.mcu_blocks[0][0x09] == 0) {
++            scratch = 0
++
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_0009 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0xFFFF_FFF7 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0xFFFF_FFF7 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0x0000_0009 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            } else {
++                scratch = 0 ~mod- (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            }
++            this.mcu_blocks[0][0x09] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x0A AC coefficient. Weights total to zero:
++        //
++        //    0    0    0    0    0
++        //    0   +1   -3   +1    0
++        //    0    0    0    0    0
++        //    0   -1   +3   -1    0
++        //    0    0    0    0    0
++        q_xy = this.quant_tables[q][0x0A] as base.u32
++        if (q_xy > 0) and (this.mcu_blocks[0][0x0A] == 0) {
++            scratch = 0
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0xFFFF_FFFD ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0x0000_0003 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            } else {
++                scratch = 0 ~mod- (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            }
++            this.mcu_blocks[0][0x0A] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x10 AC coefficient. Weights total to zero:
++        //
++        //    0    0   +1    0    0
++        //    0   +2   +7   +2    0
++        //    0   -5  -14   -5    0
++        //    0   +2   +7   +2    0
++        //    0    0   +1    0    0
++        q_xy = this.quant_tables[q][0x10] as base.u32
++        if (q_xy > 0) and (this.mcu_blocks[0][0x10] == 0) {
++            scratch = 0
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_0002 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_0007 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0x0000_0002 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0xFFFF_FFFB ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0xFFFF_FFF2 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0xFFFF_FFFB ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0x0000_0002 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0x0000_0007 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0x0000_0002 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            } else {
++                scratch = 0 ~mod- (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            }
++            this.mcu_blocks[0][0x10] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x11 AC coefficient. Weights total to zero:
++        //
++        //    0    0    0    0    0
++        //    0   +1    0   -1    0
++        //    0   -3    0   +3    0
++        //    0   +1    0   -1    0
++        //    0    0    0    0    0
++        q_xy = this.quant_tables[q][0x11] as base.u32
++        if (q_xy > 0) and (this.mcu_blocks[0][0x11] == 0) {
++            scratch = 0
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0xFFFF_FFFD ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0x0000_0003 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            } else {
++                scratch = 0 ~mod- (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            }
++            this.mcu_blocks[0][0x11] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x18 AC coefficient. Weights total to zero:
++        //
++        //    0    0    0    0    0
++        //    0   +1   +2   +1    0
++        //    0    0    0    0    0
++        //    0   -1   -2   -1    0
++        //    0    0    0    0    0
++        q_xy = this.quant_tables[q][0x18] as base.u32
++        if (q_xy > 0) and (this.mcu_blocks[0][0x18] == 0) {
++            scratch = 0
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_0002 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0xFFFF_FFFE ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            } else {
++                scratch = 0 ~mod- (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8))
++            }
++            this.mcu_blocks[0][0x18] = (scratch & 0xFFFF) as base.u16
++        }
++
++    } else {
++        // Minor smoothing.
++
++        // Offset=0x01 AC coefficient. Weights total to zero:
++        //
++        //    0    0    0    0    0
++        //    0    0    0    0    0
++        //   -7  +50    0  -50   +7
++        //    0    0    0    0    0
++        //    0    0    0    0    0
++        al = this.block_smoothing_lowest_scan_al[args.csel][1]
++        q_xy = this.quant_tables[q][0x01] as base.u32
++        if (al > 0) and (q_xy > 0) and (this.mcu_blocks[0][0x01] == 0) {
++            limit = ((1 as base.u32) << al) - 1
++            scratch = 0
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0xFFFF_FFF9 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_0032 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0xFFFF_FFCE ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0007 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ limit.min(no_more_than: (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8)))
++            } else {
++                scratch = 0 ~mod- limit.min(no_more_than: (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8)))
++            }
++            this.mcu_blocks[0][0x01] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x02 AC coefficient. Weights total to zero:
++        //
++        //    0    0    0    0    0
++        //    0    0    0    0    0
++        //   -1  +13  -24  +13   -1
++        //    0    0    0    0    0
++        //    0    0    0    0    0
++        al = this.block_smoothing_lowest_scan_al[args.csel][5]
++        q_xy = this.quant_tables[q][0x02] as base.u32
++        if (al > 0) and (q_xy > 0) and (this.mcu_blocks[0][0x02] == 0) {
++            limit = ((1 as base.u32) << al) - 1
++            scratch = 0
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_000D ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0xFFFF_FFE8 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0x0000_000D ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ limit.min(no_more_than: (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8)))
++            } else {
++                scratch = 0 ~mod- limit.min(no_more_than: (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8)))
++            }
++            this.mcu_blocks[0][0x02] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x08 AC coefficient. Weights total to zero:
++        //
++        //    0    0   -7    0    0
++        //    0    0  +50    0    0
++        //    0    0    0    0    0
++        //    0    0  -50    0    0
++        //    0    0   +7    0    0
++        al = this.block_smoothing_lowest_scan_al[args.csel][2]
++        q_xy = this.quant_tables[q][0x08] as base.u32
++        if (al > 0) and (q_xy > 0) and (this.mcu_blocks[0][0x08] == 0) {
++            limit = ((1 as base.u32) << al) - 1
++            scratch = 0
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0xFFFF_FFF9 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_0032 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0xFFFF_FFCE ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0007 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ limit.min(no_more_than: (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8)))
++            } else {
++                scratch = 0 ~mod- limit.min(no_more_than: (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8)))
++            }
++            this.mcu_blocks[0][0x08] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x09 AC coefficient. Weights total to zero:
++        //
++        //    0   -1    0   +1    0
++        //   -1  +10    0  -10   +1
++        //    0    0    0    0    0
++        //   +1  -10    0  +10   -1
++        //    0   +1    0   -1    0
++        al = this.block_smoothing_lowest_scan_al[args.csel][4]
++        q_xy = this.quant_tables[q][0x09] as base.u32
++        if (al > 0) and (q_xy > 0) and (this.mcu_blocks[0][0x09] == 0) {
++            limit = ((1 as base.u32) << al) - 1
++            scratch = 0
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_000A ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0xFFFF_FFF6 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0xFFFF_FFF6 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0x0000_000A ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0001 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ limit.min(no_more_than: (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8)))
++            } else {
++                scratch = 0 ~mod- limit.min(no_more_than: (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8)))
++            }
++            this.mcu_blocks[0][0x09] = (scratch & 0xFFFF) as base.u16
++        }
++
++        // Offset=0x10 AC coefficient. Weights total to zero:
++        //
++        //    0    0   -1    0    0
++        //    0    0  +13    0    0
++        //    0    0  -24    0    0
++        //    0    0  +13    0    0
++        //    0    0   -1    0    0
++        al = this.block_smoothing_lowest_scan_al[args.csel][3]
++        q_xy = this.quant_tables[q][0x10] as base.u32
++        if (al > 0) and (q_xy > 0) and (this.mcu_blocks[0][0x10] == 0) {
++            limit = ((1 as base.u32) << al) - 1
++            scratch = 0
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][1])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[0][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][1])
++            scratch ~mod+= 0x0000_000D ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[1][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][1])
++            scratch ~mod+= 0xFFFF_FFE8 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[2][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][1])
++            scratch ~mod+= 0x0000_000D ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[3][4])
++
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][0])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][1])
++            scratch ~mod+= 0xFFFF_FFFF ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][2])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][3])
++            scratch ~mod+= 0x0000_0000 ~mod* this.util.sign_extend_convert_u16_u32(a: this.block_smoothing_dc_values[4][4])
++
++            scratch ~mod*= q_00
++            if scratch < 0x8000_0000 {
++                scratch = 0 ~mod+ limit.min(no_more_than: (((0 ~mod+ scratch) ~mod+ (q_xy << 7)) / (q_xy << 8)))
++            } else {
++                scratch = 0 ~mod- limit.min(no_more_than: (((0 ~mod- scratch) ~mod+ (q_xy << 7)) / (q_xy << 8)))
++            }
++            this.mcu_blocks[0][0x10] = (scratch & 0xFFFF) as base.u16
++        }
++    }
++}
+```
+
+## Uniform selected declaration context
+
+This same mechanically selected S0/S1 context is supplied for every case.
+
+### S0
+
+```text
+lines 1840-1888
+001840:     return this.util.make_rect_ie_u32(
+001841:             min_incl_x: 0,
+001842:             min_incl_y: 0,
+001843:             max_excl_x: this.width,
+001844:             max_excl_y: this.height)
+001845: }
+001846: 
+001847: pub func decoder.num_animation_loops() base.u32 {
+001848:     return 0
+001849: }
+001850: 
+001851: pub func decoder.num_decoded_frame_configs() base.u64 {
+001852:     if this.call_sequence > 0x20 {
+001853:         return 1
+001854:     }
+001855:     return 0
+001856: }
+001857: 
+001858: pub func decoder.num_decoded_frames() base.u64 {
+001859:     if this.call_sequence > 0x40 {
+001860:         return 1
+001861:     }
+001862:     return 0
+001863: }
+001864: 
+001865: pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+001866:     var i : base.u32
+001867:     var j : base.u32
+001868: 
+001869:     if this.call_sequence < 0x20 {
+001870:         return base."#bad call sequence"
+001871:     }
+001872:     if args.index <> 0 {
+001873:         return base."#bad argument"
+001874:     }
+001875:     this.call_sequence = 0x28
+001876:     this.frame_config_io_position = args.io_position
+001877:     this.scan_count = 0
+001878:     this.restart_interval = this.saved_restart_interval
+001879:     while i < 4 {
+001880:         this.seen_dqt[i] = this.saved_seen_dqt[i]
+001881:         while j < 64,
+001882:                 inv i < 4,
+001883:         {
+001884:             this.quant_tables[i][j] = this.saved_quant_tables[i][j]
+001885:             j += 1
+001886:         } endwhile
+001887:         i += 1
+001888:     } endwhile
+```
+
+### S1
+
+```text
+lines 1898-1946
+001898:     return this.util.make_rect_ie_u32(
+001899:             min_incl_x: 0,
+001900:             min_incl_y: 0,
+001901:             max_excl_x: this.width,
+001902:             max_excl_y: this.height)
+001903: }
+001904: 
+001905: pub func decoder.num_animation_loops() base.u32 {
+001906:     return 0
+001907: }
+001908: 
+001909: pub func decoder.num_decoded_frame_configs() base.u64 {
+001910:     if this.call_sequence > 0x20 {
+001911:         return 1
+001912:     }
+001913:     return 0
+001914: }
+001915: 
+001916: pub func decoder.num_decoded_frames() base.u64 {
+001917:     if this.call_sequence > 0x40 {
+001918:         return 1
+001919:     }
+001920:     return 0
+001921: }
+001922: 
+001923: pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+001924:     var i : base.u32
+001925:     var j : base.u32
+001926: 
+001927:     if this.call_sequence < 0x20 {
+001928:         return base."#bad call sequence"
+001929:     }
+001930:     if args.index <> 0 {
+001931:         return base."#bad argument"
+001932:     }
+001933: 
+001934:     this.call_sequence = 0x28
+001935:     this.frame_config_io_position = args.io_position
+001936:     this.scan_count = 0
+001937:     this.restart_interval = this.saved_restart_interval
+001938: 
+001939:     i = 0
+001940:     while i < 4 {
+001941:         this.seen_dqt[i] = this.saved_seen_dqt[i]
+001942:         j = 0
+001943:         while j < 64,
+001944:                 inv i < 4,
+001945:         {
+001946:             this.quant_tables[i][j] = this.saved_quant_tables[i][j]
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C003","gap_exists":true,"gap_type":["API protocol","state transition"],"confidence":99,"affected_functions":["decoder.restart_frame!","decoder.prepare_scan?","decoder.apply_progressive_idct!","decoder.load_mcu_blocks_for_single_component_smooth!"],"reason":"H0 exercises only initialization followed by decode_image_config, decode_frame_config, and decode_frame. It never calls the public decoder.restart_frame! entry point or decodes again after a restart. S1 makes that transition materially relevant by resetting block_smoothing_lowest_scan_al to 16 in restart_frame!, while prepare_scan? repopulates that state and apply_progressive_idct! uses it to select load_mcu_blocks_for_single_component_smooth!. Therefore stale, incorrectly reset, or incorrectly rebuilt progressive block-smoothing state across restart-and-redecode is not covered.","evidence":["fuzz_image_decoder calls wuffs_base__image_decoder__decode_image_config, then repeatedly calls decode_frame_config and decode_frame; no restart_frame call appears in H0.","S1 decoder.restart_frame! sets call_sequence to 0x28, restores saved quantization state, resets scan_count, and explicitly initializes every block_smoothing_lowest_scan_al[i][j] to 16.","S1 decoder.prepare_scan? writes scan_al into block_smoothing_lowest_scan_al[this.scan_comps_cselector[i]][j].","S1 decoder.apply_progressive_idct! reads block_smoothing_lowest_scan_al to decide whether block smoothing is applicable and whether to choose load_mcu_blocks_for_single_component_smooth."],"recommended_action":"Extend the JPEG harness with a hash-selected restart protocol: after reaching a valid post-configuration or post-frame state, call restart_frame with index 0 and fuzzed relevant io_position/source repositioning, then decode frame configuration and frame data again. Include progressive multi-scan inputs that drive both major and minor smoothing, plus invalid call-sequence and nonzero-index restart calls."}
+tokens used
+43,023

@@ -1,0 +1,388 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-blind-run-40ko0e9q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0854e-7ac2-79a0-b13e-cdae790ee40c
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C018
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `test/ossfuzz/json_load_dump_fuzzer.cc`
+
+~~~~cpp
+#include <stdint.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <inttypes.h>
+
+#include "jansson.h"
+
+static int enable_diags;
+
+#define FUZZ_DEBUG(FMT, ...)                                                  \
+        if (enable_diags)                                                     \
+        {                                                                     \
+          fprintf(stderr, FMT, ##__VA_ARGS__);                                \
+          fprintf(stderr, "\n");                                              \
+        }
+
+
+static int json_dump_counter(const char *buffer, size_t size, void *data)
+{
+  uint64_t *counter = reinterpret_cast<uint64_t *>(data);
+  *counter += size;
+  return 0;
+}
+
+
+#define NUM_COMMAND_BYTES  (sizeof(size_t) + sizeof(size_t) + 1)
+
+#define FUZZ_DUMP_CALLBACK 0x00
+#define FUZZ_DUMP_STRING   0x01
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+  json_error_t error;
+  unsigned char dump_mode;
+
+  // Enable or disable diagnostics based on the FUZZ_VERBOSE environment flag.
+  enable_diags = (getenv("FUZZ_VERBOSE") != NULL);
+
+  FUZZ_DEBUG("Input data length: %zd", size);
+
+  if (size < NUM_COMMAND_BYTES)
+  {
+    return 0;
+  }
+
+  // Use the first sizeof(size_t) bytes as load flags.
+  size_t load_flags = *(const size_t*)data;
+  data += sizeof(size_t);
+
+  FUZZ_DEBUG("load_flags: 0x%zx\n"
+             "& JSON_REJECT_DUPLICATES =  0x%zx\n"
+             "& JSON_DECODE_ANY =         0x%zx\n"
+             "& JSON_DISABLE_EOF_CHECK =  0x%zx\n"
+             "& JSON_DECODE_INT_AS_REAL = 0x%zx\n"
+             "& JSON_ALLOW_NUL =          0x%zx\n",
+             load_flags,
+             load_flags & JSON_REJECT_DUPLICATES,
+             load_flags & JSON_DECODE_ANY,
+             load_flags & JSON_DISABLE_EOF_CHECK,
+             load_flags & JSON_DECODE_INT_AS_REAL,
+             load_flags & JSON_ALLOW_NUL);
+
+  // Use the next sizeof(size_t) bytes as dump flags.
+  size_t dump_flags = *(const size_t*)data;
+  data += sizeof(size_t);
+
+  FUZZ_DEBUG("dump_flags: 0x%zx\n"
+             "& JSON_MAX_INDENT =     0x%zx\n"
+             "& JSON_COMPACT =        0x%zx\n"
+             "& JSON_ENSURE_ASCII =   0x%zx\n"
+             "& JSON_SORT_KEYS =      0x%zx\n"
+             "& JSON_PRESERVE_ORDER = 0x%zx\n"
+             "& JSON_ENCODE_ANY =     0x%zx\n"
+             "& JSON_ESCAPE_SLASH =   0x%zx\n"
+             "& JSON_REAL_PRECISION = 0x%zx\n"
+             "& JSON_EMBED =          0x%zx\n",
+             dump_flags,
+             dump_flags & JSON_MAX_INDENT,
+             dump_flags & JSON_COMPACT,
+             dump_flags & JSON_ENSURE_ASCII,
+             dump_flags & JSON_SORT_KEYS,
+             dump_flags & JSON_PRESERVE_ORDER,
+             dump_flags & JSON_ENCODE_ANY,
+             dump_flags & JSON_ESCAPE_SLASH,
+             ((dump_flags >> 11) & 0x1F) << 11,
+             dump_flags & JSON_EMBED);
+
+  // Use the next byte as the dump mode.
+  dump_mode = data[0];
+  data++;
+
+  FUZZ_DEBUG("dump_mode: 0x%x", (unsigned int)dump_mode);
+
+  // Remove the command bytes from the size total.
+  size -= NUM_COMMAND_BYTES;
+
+  // Attempt to load the remainder of the data with the given load flags.
+  const char* text = reinterpret_cast<const char *>(data);
+  json_t* jobj = json_loadb(text, size, load_flags, &error);
+
+  if (jobj == NULL)
+  {
+    return 0;
+  }
+
+  if (dump_mode & FUZZ_DUMP_STRING)
+  {
+    // Dump as a string. Remove indents so that we don't run out of memory.
+    char *out = json_dumps(jobj, dump_flags & ~JSON_MAX_INDENT);
+    if (out != NULL)
+    {
+      free(out);
+    }
+  }
+  else
+  {
+    // Default is callback mode.
+    //
+    // Attempt to dump the loaded json object with the given dump flags.
+    uint64_t counter = 0;
+
+    json_dump_callback(jobj, json_dump_counter, &counter, dump_flags);
+    FUZZ_DEBUG("Counter function counted %" PRIu64 " bytes.", counter);
+  }
+
+  if (jobj)
+  {
+    json_decref(jobj);
+  }
+
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/jansson/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2019 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+# Run the OSS-Fuzz script in the project.
+./test/ossfuzz/ossfuzz.sh
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `src/pack_unpack.c`
+- `src/value.c`
+
+~~~~diff
+diff --git a/src/pack_unpack.c b/src/pack_unpack.c
+--- a/src/pack_unpack.c
++++ b/src/pack_unpack.c
+@@ -559,14 +559,13 @@ static int unpack_object(scanner_t *s, json_t *root, va_list *ap) {
+         int keys_res = 1;
+         strbuffer_t unrecognized_keys;
+         json_t *value;
+         long unpacked = 0;
+ 
+         if (gotopt || json_object_size(root) != key_set.size) {
+-            json_object_foreach(root, key, value) {
+-                key_len = strlen(key);
++            json_object_keylen_foreach(root, key, key_len, value) {
+                 if (!hashtable_get(&key_set, key, key_len)) {
+                     unpacked++;
+ 
+                     /* Save unrecognized keys for the error message */
+                     if (keys_res == 1) {
+                         keys_res = strbuffer_init(&unrecognized_keys);
+diff --git a/src/value.c b/src/value.c
+--- a/src/value.c
++++ b/src/value.c
+@@ -188,19 +188,20 @@ int json_object_clear(json_t *json) {
+ 
+     return 0;
+ }
+ 
+ int json_object_update(json_t *object, json_t *other) {
+     const char *key;
++    size_t key_len;
+     json_t *value;
+ 
+     if (!json_is_object(object) || !json_is_object(other))
+         return -1;
+ 
+-    json_object_foreach(other, key, value) {
+-        if (json_object_set_nocheck(object, key, value))
++    json_object_keylen_foreach(other, key, key_len, value) {
++        if (json_object_setn_nocheck(object, key, key_len, value))
+             return -1;
+     }
+ 
+     return 0;
+ }
+ 
+@@ -219,20 +220,21 @@ int json_object_update_existing(json_t *object, json_t *other) {
+ 
+     return 0;
+ }
+ 
+ int json_object_update_missing(json_t *object, json_t *other) {
+     const char *key;
++    size_t key_len;
+     json_t *value;
+ 
+     if (!json_is_object(object) || !json_is_object(other))
+         return -1;
+ 
+-    json_object_foreach(other, key, value) {
+-        if (!json_object_get(object, key))
+-            json_object_set_nocheck(object, key, value);
++    json_object_keylen_foreach(other, key, key_len, value) {
++        if (!json_object_getn(object, key, key_len))
++            json_object_setn_nocheck(object, key, key_len, value);
+     }
+ 
+     return 0;
+ }
+ 
+ int do_object_update_recursive(json_t *object, json_t *other, hashtable_t *parents) {
+@@ -247,13 +249,13 @@ int do_object_update_recursive(json_t *object, json_t *other, hashtable_t *paren
+         return -1;
+ 
+     if (jsonp_loop_check(parents, other, loop_key, sizeof(loop_key), &loop_key_len))
+         return -1;
+ 
+     json_object_keylen_foreach(other, key, key_len, value) {
+-        json_t *v = json_object_get(object, key);
++        json_t *v = json_object_getn(object, key, key_len);
+ 
+         if (json_is_object(v) && json_is_object(value)) {
+             if (do_object_update_recursive(v, value, parents)) {
+                 res = -1;
+                 break;
+             }
+@@ -349,38 +351,41 @@ void *json_object_key_to_iter(const char *key) {
+ 
+     return hashtable_key_to_iter(key);
+ }
+ 
+ static int json_object_equal(const json_t *object1, const json_t *object2) {
+     const char *key;
++    size_t key_len;
+     const json_t *value1, *value2;
+ 
+     if (json_object_size(object1) != json_object_size(object2))
+         return 0;
+ 
+-    json_object_foreach((json_t *)object1, key, value1) {
+-        value2 = json_object_get(object2, key);
++    json_object_keylen_foreach((json_t *)object1, key, key_len, value1) {
++        value2 = json_object_getn(object2, key, key_len);
+ 
+         if (!json_equal(value1, value2))
+             return 0;
+     }
+ 
+     return 1;
+ }
+ 
+ static json_t *json_object_copy(json_t *object) {
+     json_t *result;
+ 
+     const char *key;
++    size_t key_len;
+     json_t *value;
+ 
+     result = json_object();
+     if (!result)
+         return NULL;
+ 
+-    json_object_foreach(object, key, value) json_object_set_nocheck(result, key, value);
++    json_object_keylen_foreach(object, key, key_len, value)
++        json_object_setn_nocheck(result, key, key_len, value);
+ 
+     return result;
+ }
+ 
+ static json_t *json_object_deep_copy(const json_t *object, hashtable_t *parents) {
+     json_t *result;
+@@ -397,17 +402,20 @@ static json_t *json_object_deep_copy(const json_t *object, hashtable_t *parents)
+ 
+     /* Cannot use json_object_foreach because object has to be cast
+        non-const */
+     iter = json_object_iter((json_t *)object);
+     while (iter) {
+         const char *key;
++        size_t key_len;
+         const json_t *value;
+         key = json_object_iter_key(iter);
++        key_len = json_object_iter_key_len(iter);
+         value = json_object_iter_value(iter);
+ 
+-        if (json_object_set_new_nocheck(result, key, do_deep_copy(value, parents))) {
++        if (json_object_setn_new_nocheck(result, key, key_len,
++                                         do_deep_copy(value, parents))) {
+             json_decref(result);
+             result = NULL;
+             break;
+         }
+         iter = json_object_iter_next((json_t *)object, iter);
+     }
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C018","maintenance_needed":true,"confidence":94,"change_types":["modified object-key semantics","expanded effective input handling"],"affected_functions":["unpack_object","json_object_update","json_object_update_missing","do_object_update_recursive","json_object_equal","json_object_copy","json_object_deep_copy"],"reason":"The commit changes several update, equality, copy, and unpack paths to preserve explicit object-key lengths instead of relying on NUL-terminated keys. This makes keys containing embedded NUL bytes a relevant input class for those paths. Although the harness can create such keys through json_loadb when JSON_ALLOW_NUL is selected, it only calls json_dumps or json_dump_callback afterward, so none of the changed update, equality, copy, deep-copy, or unpack operations are exercised.","evidence":["The harness's only high-level operations after json_loadb are json_dumps and json_dump_callback.","JSON_ALLOW_NUL is controlled by fuzz input through load_flags, allowing the harness to parse the key form implicated by the length-aware changes.","json_object_update and json_object_update_missing now use json_object_keylen_foreach plus json_object_getn/json_object_setn_nocheck.","json_object_equal, json_object_copy, and json_object_deep_copy now propagate key_len through length-aware APIs.","unpack_object replaces strlen(key) with json_object_keylen_foreach, changing handling of keys whose stored length differs from strlen."],"recommended_action":"Extend the target with input-selected modes that invoke object update/update-missing, recursive update, equality, shallow/deep copy, and object unpacking on parsed objects, while retaining JSON_ALLOW_NUL control so embedded-NUL keys reach the changed length-aware paths."}
+tokens used
+17,883

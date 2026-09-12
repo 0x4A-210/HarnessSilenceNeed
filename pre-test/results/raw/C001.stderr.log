@@ -1,0 +1,411 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-blind-run-40ko0e9q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0854c-f28c-7621-b483-e7ea74cba20c
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C001
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `c/fuzz/decode_fuzzer.c`
+
+~~~~c
+// Copyright 2015 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#include <brotli/decode.h>
+
+// Entry point for LibFuzzer.
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  size_t addend = 0;
+  if (size > 0)
+    addend = data[size - 1] & 7;
+  const uint8_t* next_in = data;
+
+  const int kBufferSize = 1024;
+  uint8_t* buffer = (uint8_t*) malloc(kBufferSize);
+  if (!buffer) {
+    // OOM is out-of-scope here.
+    return 0;
+  }
+  /* The biggest "magic number" in brotli is 16MiB - 16, so no need to check
+     the cases with much longer output. */
+  const size_t total_out_limit = (addend == 0) ? (1 << 26) : (1 << 24);
+  size_t total_out = 0;
+
+  BrotliDecoderState* state = BrotliDecoderCreateInstance(0, 0, 0);
+
+  if (addend == 0)
+    addend = size;
+  /* Test both fast (addend == size) and slow (addend <= 7) decoding paths. */
+  for (size_t i = 0; i < size;) {
+    size_t next_i = i + addend;
+    if (next_i > size)
+      next_i = size;
+    size_t avail_in = next_i - i;
+    i = next_i;
+    BrotliDecoderResult result = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
+    while (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
+      size_t avail_out = kBufferSize;
+      uint8_t* next_out = buffer;
+      result = BrotliDecoderDecompressStream(
+          state, &avail_in, &next_in, &avail_out, &next_out, &total_out);
+      if (total_out > total_out_limit)
+        break;
+    }
+    if (total_out > total_out_limit)
+      break;
+    if (result != BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT)
+      break;
+  }
+
+  BrotliDecoderDestroyInstance(state);
+  free(buffer);
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/brotli/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2016 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+cmake . -DBUILD_TESTING=OFF -DBUILD_SHARED_LIBS=OFF
+make clean
+make -j$(nproc) brotlidec
+
+$CC $CFLAGS -c -std=c99 -I. -I./c/include c/fuzz/decode_fuzzer.c 
+
+$CXX $CXXFLAGS ./decode_fuzzer.o  -o $OUT/decode_fuzzer \
+    $LIB_FUZZING_ENGINE ./libbrotlidec.a ./libbrotlicommon.a
+
+cp java/org/brotli/integration/fuzz_data.zip $OUT/decode_fuzzer_seed_corpus.zip
+chmod a-x $OUT/decode_fuzzer_seed_corpus.zip # we will try to run it otherwise
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `c/dec/bit_reader.c`
+- `c/dec/bit_reader.h`
+
+~~~~diff
+diff --git a/c/dec/bit_reader.c b/c/dec/bit_reader.c
+--- a/c/dec/bit_reader.c
++++ b/c/dec/bit_reader.c
+@@ -26,24 +26,25 @@ const brotli_reg_t kBrotliBitMask[33] = {   0x00000000,
+     0x01FFFFFF, 0x03FFFFFF, 0x07FFFFFF, 0x0FFFFFFF,
+     0x1FFFFFFF, 0x3FFFFFFF, 0x7FFFFFFF, 0xFFFFFFFF
+ };
+ 
+ void BrotliInitBitReader(BrotliBitReader* const br) {
+   br->val_ = 0;
+-  br->bit_pos_ = sizeof(br->val_) << 3;
++  br->bit_pos_ = 0;
+ }
+ 
+ BROTLI_BOOL BrotliWarmupBitReader(BrotliBitReader* const br) {
+   size_t aligned_read_mask = (sizeof(br->val_) >> 1) - 1;
+   /* Fixing alignment after unaligned BrotliFillWindow would result accumulator
+      overflow. If unalignment is caused by BrotliSafeReadBits, then there is
+      enough space in accumulator to fix alignment. */
+   if (BROTLI_UNALIGNED_READ_FAST) {
+     aligned_read_mask = 0;
+   }
+   if (BrotliGetAvailableBits(br) == 0) {
++    br->val_ = 0;
+     if (!BrotliPullByte(br)) {
+       return BROTLI_FALSE;
+     }
+   }
+ 
+   while ((((size_t)br->next_in) & aligned_read_mask) != 0) {
+diff --git a/c/dec/bit_reader.h b/c/dec/bit_reader.h
+--- a/c/dec/bit_reader.h
++++ b/c/dec/bit_reader.h
+@@ -99,13 +99,13 @@ static BROTLI_INLINE void BrotliBitReaderRestoreState(
+   to->next_in = from->next_in;
+   BrotliBitReaderSetInput(to, from->next_in, from->avail_in);
+ }
+ 
+ static BROTLI_INLINE brotli_reg_t BrotliGetAvailableBits(
+     const BrotliBitReader* br) {
+-  return (BROTLI_64_BITS ? 64 : 32) - br->bit_pos_;
++  return br->bit_pos_;
+ }
+ 
+ /* Returns amount of unread bytes the bit reader still has buffered from the
+    BrotliInput, including whole bytes in br->val_. Result is capped with
+    maximal ring-buffer size (larger number won't be utilized anyway). */
+ static BROTLI_INLINE size_t BrotliGetRemainingBytes(BrotliBitReader* br) {
+@@ -119,67 +119,73 @@ static BROTLI_INLINE size_t BrotliGetRemainingBytes(BrotliBitReader* br) {
+    (excluding the bits remaining in br->val_). */
+ static BROTLI_INLINE BROTLI_BOOL BrotliCheckInputAmount(
+     BrotliBitReader* const br) {
+   return TO_BROTLI_BOOL(br->next_in < br->guard_in);
+ }
+ 
++/* Load more bits into accumulator. */
++static BROTLI_INLINE brotli_reg_t BrotliBitReaderLoadBits(brotli_reg_t val,
++                                                          brotli_reg_t new_bits,
++                                                          brotli_reg_t count,
++                                                          brotli_reg_t offset) {
++  BROTLI_DCHECK(
++      !((val >> offset) & ~new_bits & ~(~((brotli_reg_t)0) << count)));
++  (void)count;
++  return val | (new_bits << offset);
++}
++
+ /* Guarantees that there are at least |n_bits| + 1 bits in accumulator.
+    Precondition: accumulator contains at least 1 bit.
+    |n_bits| should be in the range [1..24] for regular build. For portable
+    non-64-bit little-endian build only 16 bits are safe to request. */
+ static BROTLI_INLINE void BrotliFillBitWindow(
+     BrotliBitReader* const br, brotli_reg_t n_bits) {
+ #if (BROTLI_64_BITS)
+   if (BROTLI_UNALIGNED_READ_FAST && BROTLI_IS_CONSTANT(n_bits) &&
+       (n_bits <= 8)) {
+     brotli_reg_t bit_pos = br->bit_pos_;
+-    if (bit_pos >= 56) {
+-      br->val_ =
+-          (br->val_ >> 56) | (BROTLI_UNALIGNED_LOAD64LE(br->next_in) << 8);
+-      br->bit_pos_ =
+-          bit_pos ^ 56; /* here same as -= 56 because of the if condition */
++    if (bit_pos <= 8) {
++      br->val_ = BrotliBitReaderLoadBits(br->val_,
++          BROTLI_UNALIGNED_LOAD64LE(br->next_in), 56, bit_pos);
++      br->bit_pos_ = bit_pos + 56;
+       br->next_in += 7;
+     }
+   } else if (BROTLI_UNALIGNED_READ_FAST && BROTLI_IS_CONSTANT(n_bits) &&
+              (n_bits <= 16)) {
+     brotli_reg_t bit_pos = br->bit_pos_;
+-    if (bit_pos >= 48) {
+-      br->val_ =
+-          (br->val_ >> 48) | (BROTLI_UNALIGNED_LOAD64LE(br->next_in) << 16);
+-      br->bit_pos_ =
+-          bit_pos ^ 48; /* here same as -= 48 because of the if condition */
++    if (bit_pos <= 16) {
++      br->val_ = BrotliBitReaderLoadBits(br->val_,
++          BROTLI_UNALIGNED_LOAD64LE(br->next_in), 48, bit_pos);
++      br->bit_pos_ = bit_pos + 48;
+       br->next_in += 6;
+     }
+   } else {
+     brotli_reg_t bit_pos = br->bit_pos_;
+-    if (bit_pos >= 32) {
+-      br->val_ = (br->val_ >> 32) |
+-                 (((uint64_t)BROTLI_UNALIGNED_LOAD32LE(br->next_in)) << 32);
+-      br->bit_pos_ =
+-          bit_pos ^ 32; /* here same as -= 32 because of the if condition */
++    if (bit_pos <= 32) {
++      br->val_ = BrotliBitReaderLoadBits(br->val_,
++          (uint64_t)BROTLI_UNALIGNED_LOAD32LE(br->next_in), 32, bit_pos);
++      br->bit_pos_ = bit_pos + 32;
+       br->next_in += BROTLI_SHORT_FILL_BIT_WINDOW_READ;
+     }
+   }
+ #else
+   if (BROTLI_UNALIGNED_READ_FAST && BROTLI_IS_CONSTANT(n_bits) &&
+       (n_bits <= 8)) {
+     brotli_reg_t bit_pos = br->bit_pos_;
+-    if (bit_pos >= 24) {
+-      br->val_ =
+-          (br->val_ >> 24) | (BROTLI_UNALIGNED_LOAD32LE(br->next_in) << 8);
+-      br->bit_pos_ =
+-          bit_pos ^ 24; /* here same as -= 24 because of the if condition */
++    if (bit_pos <= 8) {
++      br->val_ = BrotliBitReaderLoadBits(br->val_,
++          BROTLI_UNALIGNED_LOAD32LE(br->next_in), 24, bit_pos);
++      br->bit_pos_ = bit_pos + 24;
+       br->next_in += 3;
+     }
+   } else {
+     brotli_reg_t bit_pos = br->bit_pos_;
+-    if (bit_pos >= 16) {
+-      br->val_ = (br->val_ >> 16) |
+-                 (((brotli_reg_t)BROTLI_UNALIGNED_LOAD16LE(br->next_in)) << 16);
+-      br->bit_pos_ =
+-          bit_pos ^ 16; /* here same as -= 16 because of the if condition */
++    if (bit_pos <= 16) {
++      br->val_ = BrotliBitReaderLoadBits(br->val_,
++          (uint32_t)BROTLI_UNALIGNED_LOAD16LE(br->next_in), 16, bit_pos);
++      br->bit_pos_ = bit_pos + 16;
+       br->next_in += BROTLI_SHORT_FILL_BIT_WINDOW_READ;
+     }
+   }
+ #endif
+ }
+ 
+@@ -192,28 +198,24 @@ static BROTLI_INLINE void BrotliFillBitWindow16(BrotliBitReader* const br) {
+ /* Tries to pull one byte of input to accumulator.
+    Returns BROTLI_FALSE if there is no input available. */
+ static BROTLI_INLINE BROTLI_BOOL BrotliPullByte(BrotliBitReader* const br) {
+   if (br->next_in == br->last_in) {
+     return BROTLI_FALSE;
+   }
+-  br->val_ >>= 8;
+-#if (BROTLI_64_BITS)
+-  br->val_ |= ((uint64_t)*br->next_in) << 56;
+-#else
+-  br->val_ |= ((brotli_reg_t)*br->next_in) << 24;
+-#endif
+-  br->bit_pos_ -= 8;
++  br->val_ = BrotliBitReaderLoadBits(br->val_,
++      (brotli_reg_t)*br->next_in, 8, br->bit_pos_);
++  br->bit_pos_ += 8;
+   ++br->next_in;
+   return BROTLI_TRUE;
+ }
+ 
+ /* Returns currently available bits.
+    The number of valid bits could be calculated by BrotliGetAvailableBits. */
+ static BROTLI_INLINE brotli_reg_t BrotliGetBitsUnmasked(
+     BrotliBitReader* const br) {
+-  return br->val_ >> br->bit_pos_;
++  return br->val_;
+ }
+ 
+ /* Like BrotliGetBits, but does not mask the result.
+    The result contains at least 16 valid bits. */
+ static BROTLI_INLINE brotli_reg_t BrotliGet16BitsUnmasked(
+     BrotliBitReader* const br) {
+@@ -242,26 +244,26 @@ static BROTLI_INLINE BROTLI_BOOL BrotliSafeGetBits(
+   return BROTLI_TRUE;
+ }
+ 
+ /* Advances the bit pos by |n_bits|. */
+ static BROTLI_INLINE void BrotliDropBits(
+     BrotliBitReader* const br, brotli_reg_t n_bits) {
+-  br->bit_pos_ += n_bits;
++  br->bit_pos_ -= n_bits;
++  br->val_ >>= n_bits;
+ }
+ 
+ static BROTLI_INLINE void BrotliBitReaderUnload(BrotliBitReader* br) {
+   brotli_reg_t unused_bytes = BrotliGetAvailableBits(br) >> 3;
+   brotli_reg_t unused_bits = unused_bytes << 3;
+   br->next_in =
+       (unused_bytes == 0) ? br->next_in : (br->next_in - unused_bytes);
+-  if (unused_bits == sizeof(br->val_) << 3) {
++  br->bit_pos_ -= unused_bits;
++  /* Prepare for possible input discontinuity. */
++  if (br->bit_pos_ == 0) {
+     br->val_ = 0;
+-  } else {
+-    br->val_ <<= unused_bits;
+   }
+-  br->bit_pos_ += unused_bits;
+ }
+ 
+ /* Reads the specified number of bits from |br| and advances the bit pos.
+    Precondition: accumulator MUST contain at least |n_bits|. */
+ static BROTLI_INLINE void BrotliTakeBits(BrotliBitReader* const br,
+                                          brotli_reg_t n_bits,
+@@ -370,22 +372,27 @@ static BROTLI_INLINE void BrotliCopyBytes(uint8_t* dest,
+   while (BrotliGetAvailableBits(br) >= 8 && num > 0) {
+     *dest = (uint8_t)BrotliGetBitsUnmasked(br);
+     BrotliDropBits(br, 8);
+     ++dest;
+     --num;
+   }
++  /* Prepare for possible input discontinuity. */
++  if (br->bit_pos_ == 0) {
++    br->val_ = 0;
++  }
+   if (num > 0) {
+     memcpy(dest, br->next_in, num);
+     BrotliDropBytes(br, num);
+   }
+ }
+ 
+ BROTLI_UNUSED_FUNCTION void BrotliBitReaderSuppressUnusedFunctions(void) {
+   BROTLI_UNUSED(&BrotliBitReaderSuppressUnusedFunctions);
+ 
+   BROTLI_UNUSED(&BrotliBitReaderGetAvailIn);
++  BROTLI_UNUSED(&BrotliBitReaderLoadBits);
+   BROTLI_UNUSED(&BrotliBitReaderRestoreState);
+   BROTLI_UNUSED(&BrotliBitReaderSaveState);
+   BROTLI_UNUSED(&BrotliBitReaderSetInput);
+   BROTLI_UNUSED(&BrotliBitReaderUnload);
+   BROTLI_UNUSED(&BrotliCheckInputAmount);
+   BROTLI_UNUSED(&BrotliCopyBytes);
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C001","maintenance_needed":false,"confidence":98,"change_types":["internal bit-reader representation refactor","decoder implementation change"],"affected_functions":["BrotliInitBitReader","BrotliWarmupBitReader","BrotliGetAvailableBits","BrotliFillBitWindow","BrotliPullByte","BrotliGetBitsUnmasked","BrotliDropBits","BrotliBitReaderUnload","BrotliCopyBytes","BrotliDecoderDecompressStream"],"reason":"The commit reverses the internal meaning of bit_pos_ and adjusts accumulator loading, consumption, and unloading accordingly, but it does not add a decoder entry point, alter the public streaming API, require new initialization or configuration, or impose a new input protocol. The existing harness already drives BrotliDecoderDecompressStream with arbitrary data and both whole-input and fragmented-input delivery, so the changed internal bit-reader functionality remains exercised through the relevant high-level path without harness maintenance.","evidence":["The harness creates decoder state with BrotliDecoderCreateInstance(0, 0, 0) and invokes BrotliDecoderDecompressStream on fuzzer-controlled bytes.","The harness explicitly tests both fast delivery (addend == size) and slow fragmented delivery (addend <= 7), including repeated NEEDS_MORE_INPUT and NEEDS_MORE_OUTPUT behavior.","All changed identifiers are internal bit-reader operations in c/dec/bit_reader.c and c/dec/bit_reader.h; no public decoder function signature or calling requirement changes.","BrotliInitBitReader, BrotliGetAvailableBits, BrotliFillBitWindow, BrotliPullByte, and BrotliDropBits are changed consistently around a new accumulator representation, indicating an internal implementation refactor rather than a new externally selectable feature.","The added BrotliBitReaderLoadBits helper is reached through existing decoding operations and introduces no separate entry point or harness-controlled state."],"recommended_action":"Keep the existing decode_fuzzer unchanged; no new target, initialization, configuration, or input construction is justified by this diff."}
+tokens used
+18,565

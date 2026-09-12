@@ -1,0 +1,768 @@
+# Case ID
+
+P017
+
+## Existing Fuzz Harness H0
+
+### `prog/fuzzing/fpix2_fuzzer.cc`
+
+~~~~cpp
+#include "leptfuzz.h"
+
+//static void MakePtas(l_int32 i, PTA **pptas, PTA **pptad);
+
+extern "C" int
+LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) { 
+    if(size<3) return 0;
+ 
+    leptSetStdNullHandler();
+
+
+    PIX *tmp_pixs = pixReadMemSpix(data, size);
+    if(tmp_pixs == NULL) return 0;
+
+    DPIX *dpix_payload = pixConvertToDPix(tmp_pixs, 1);
+    if(dpix_payload == NULL) {
+        pixDestroy(&tmp_pixs);
+        return 0;
+    }
+    
+    FPIX *fpix_payload = dpixConvertToFPix(dpix_payload);
+    if(fpix_payload == NULL) {
+        pixDestroy(&tmp_pixs);
+        dpixDestroy(&dpix_payload);
+        return 0;
+    }
+
+    DPIX *dpix_copy1 = dpixCopy(NULL, dpix_payload);
+    dpixAddMultConstant(dpix_copy1, 1.0, 1.2);
+    dpixDestroy(&dpix_copy1);
+
+
+    DPIX *dpix_copy2 = dpixCopy(NULL, dpix_payload);
+    FPIX *fpixs1 = dpixConvertToFPix(dpix_copy2);
+    fpixDestroy(&fpixs1);
+    dpixDestroy(&dpix_copy2);
+
+
+    DPIX *dpix_copy3 = dpixCopy(NULL, dpix_payload);
+    PIX *pix1 = dpixConvertToPix(dpix_copy3, 8, L_CLIP_TO_ZERO, 0);
+    pixDestroy(&pix1);
+    dpixDestroy(&dpix_copy3);
+
+ 
+    l_float64 l_f1;
+    l_int32 l_i1;
+    l_int32 l_i2;
+    DPIX *dpix_copy4 = dpixCopy(NULL, dpix_payload);
+    dpixGetMax(dpix_copy4, &l_f1, &l_i1, &l_i2);
+    dpixDestroy(&dpix_copy4);
+
+
+    l_float64 l_f2;
+    l_int32 l_i3;
+    l_int32 l_i4;
+    DPIX *dpix_copy5 = dpixCopy(NULL, dpix_payload);
+    dpixGetMin(dpix_copy5, &l_f2, &l_i3, &l_i4);
+    dpixDestroy(&dpix_copy5);
+
+ 
+    DPIX *dpix1 = dpixCreate(300, 300);
+    DPIX *dpix2 = dpixCreate(300, 300);
+    DPIX *dpix_copy6 = dpixCopy(NULL, dpix_payload);
+    DPIX *dpix3 = dpixLinearCombination(dpix_copy6, dpix1, dpix2, 1.1, 1.2);
+    dpixDestroy(&dpix1);
+    dpixDestroy(&dpix2);
+    dpixDestroy(&dpix3);
+    
+    
+    DPIX *dpix_copy7 = dpixCopy(NULL, dpix_payload);
+    DPIX *dpix4 = dpixScaleByInteger(dpix_copy7, 1);
+    dpixDestroy(&dpix4);
+    dpixDestroy(&dpix_copy7);
+    
+
+    DPIX *dpix_copy8 = dpixCopy(NULL, dpix_payload);
+    dpixSetAllArbitrary(dpix_copy8, 1.1);
+    dpixDestroy(&dpix_copy8);
+
+    
+    FPIX *fpix_copy1 = fpixCopy(NULL, fpix_payload);
+    FPIX *fpix2 = fpixAddContinuedBorder(fpix_copy1, 1, 1, 1, 1);
+    fpixDestroy(&fpix_copy1);
+    fpixDestroy(&fpix2);
+
+    
+    FPIX *fpix4 = fpixCreate(300, 300);
+    PTA *pta1 = ptaCreate(0);
+    PTA *pta2 = ptaCreate(0);
+    FPIX *fpix_copy92 = fpixCopy(NULL, fpix_payload);
+    FPIX *fpix3 = fpixAffinePta(fpix_copy92, pta1, pta2, 1, 0);
+    fpixDestroy(&fpix4);
+    fpixDestroy(&fpix3);
+    fpixDestroy(&fpix_copy92);
+    ptaDestroy(&pta1);
+    ptaDestroy(&pta2);
+
+
+    FPIX *fpix_copy2 = fpixCopy(NULL, fpix_payload);
+    DPIX *dpix_return1 = fpixConvertToDPix(fpix_copy2);
+    fpixDestroy(&fpix_copy2);
+    dpixDestroy(&dpix_return1);
+ 
+    
+    FPIX *fpix5 = fpixCreate(300, 300);
+    FPIX *fpix6 = fpixCreate(300, 300);
+    FPIX *fpix_copy3 = fpixCopy(NULL, fpix_payload);
+    fpixLinearCombination(fpix_copy3, fpix5, fpix6, 1.1, 1.1);
+    fpixDestroy(&fpix_copy3);
+    fpixDestroy(&fpix5);
+    fpixDestroy(&fpix6);
+
+
+    PTA *ptas, *ptad;
+    ptas = ptaCreate(0);
+    ptad = ptaCreate(0);
+    FPIX *fpix7 = fpixCreate(300, 300);
+    FPIX *fpix_copy4 = fpixCopy(NULL, fpix_payload);
+    FPIX *fpix_return2 = fpixProjectivePta(fpix_copy4, ptas, ptad, 200, 0.0);
+    fpixDestroy(&fpix_return2);
+    fpixDestroy(&fpix7);
+    fpixDestroy(&fpix_copy4);
+    ptaDestroy(&ptas);
+    ptaDestroy(&ptad);
+ 
+
+    pixDestroy(&tmp_pixs);
+    dpixDestroy(&dpix_payload);
+    fpixDestroy(&fpix_payload);
+    return 0;
+}
+~~~~
+
+## Production Source Change (S0 -> S1)
+
+Harness changes, commit messages, tests, outcomes, and future evidence are excluded. The source diff is complete.
+
+~~~~diff
+diff --git a/src/allheaders.h b/src/allheaders.h
+index c39d40f..18f65f9 100644
+--- a/src/allheaders.h
++++ b/src/allheaders.h
+@@ -845,8 +845,7 @@ LEPT_DLL extern l_int32 fmorphopgen_low_1 ( l_uint32 *datad, l_int32 w, l_int32
+ LEPT_DLL extern FPIX * fpixCreate ( l_int32 width, l_int32 height );
+ LEPT_DLL extern FPIX * fpixCreateTemplate ( FPIX *fpixs );
+ LEPT_DLL extern FPIX * fpixClone ( FPIX *fpix );
+-LEPT_DLL extern FPIX * fpixCopy ( FPIX *fpixd, FPIX *fpixs );
+-LEPT_DLL extern l_ok fpixResizeImageData ( FPIX *fpixd, FPIX *fpixs );
++LEPT_DLL extern FPIX * fpixCopy ( FPIX *fpixs );
+ LEPT_DLL extern void fpixDestroy ( FPIX **pfpix );
+ LEPT_DLL extern l_ok fpixGetDimensions ( FPIX *fpix, l_int32 *pw, l_int32 *ph );
+ LEPT_DLL extern l_ok fpixSetDimensions ( FPIX *fpix, l_int32 w, l_int32 h );
+@@ -875,8 +874,7 @@ LEPT_DLL extern l_ok fpixaSetPixel ( FPIXA *fpixa, l_int32 index, l_int32 x, l_i
+ LEPT_DLL extern DPIX * dpixCreate ( l_int32 width, l_int32 height );
+ LEPT_DLL extern DPIX * dpixCreateTemplate ( DPIX *dpixs );
+ LEPT_DLL extern DPIX * dpixClone ( DPIX *dpix );
+-LEPT_DLL extern DPIX * dpixCopy ( DPIX *dpixd, DPIX *dpixs );
+-LEPT_DLL extern l_ok dpixResizeImageData ( DPIX *dpixd, DPIX *dpixs );
++LEPT_DLL extern DPIX * dpixCopy ( DPIX *dpixs );
+ LEPT_DLL extern void dpixDestroy ( DPIX **pdpix );
+ LEPT_DLL extern l_ok dpixGetDimensions ( DPIX *dpix, l_int32 *pw, l_int32 *ph );
+ LEPT_DLL extern l_ok dpixSetDimensions ( DPIX *dpix, l_int32 w, l_int32 h );
+diff --git a/src/dewarp3.c b/src/dewarp3.c
+index 1b195c9..4b27a5b 100644
+--- a/src/dewarp3.c
++++ b/src/dewarp3.c
+@@ -832,7 +832,7 @@ FPIX       *fpixt1, *fpixt2;
+          * extending it as required to make it big enough.  Use x,y
+          * to determine the amounts on each side. */
+     if (!dew->fullvdispar) {
+-        fpixt1 = fpixCopy(NULL, dew->sampvdispar);
++        fpixt1 = fpixCopy(dew->sampvdispar);
+         if (redfactor == 2)
+             fpixAddMultConstant(fpixt1, 0.0, (l_float32)redfactor);
+         fpixt2 = fpixScaleByInteger(fpixt1, dew->sampling * redfactor);
+@@ -851,7 +851,7 @@ FPIX       *fpixt1, *fpixt2;
+          * doesn't exist.  Do this even if useboth == 1, but
+          * not if required to skip running horizontal disparity. */
+     if (!dew->fullhdispar && dew->samphdispar && !dew->skip_horiz) {
+-        fpixt1 = fpixCopy(NULL, dew->samphdispar);
++        fpixt1 = fpixCopy(dew->samphdispar);
+         if (redfactor == 2)
+             fpixAddMultConstant(fpixt1, 0.0, (l_float32)redfactor);
+         fpixt2 = fpixScaleByInteger(fpixt1, dew->sampling * redfactor);
+diff --git a/src/fpix1.c b/src/fpix1.c
+index 809b19b..6e15a89 100644
+--- a/src/fpix1.c
++++ b/src/fpix1.c
+@@ -40,7 +40,6 @@
+  *          FPIX          *fpixCreateTemplate()
+  *          FPIX          *fpixClone()
+  *          FPIX          *fpixCopy()
+- *          l_int32        fpixResizeImageData()
+  *          void           fpixDestroy()
+  *
+  *    FPix accessors
+@@ -82,7 +81,6 @@
+  *          DPIX          *dpixCreateTemplate()
+  *          DPIX          *dpixClone()
+  *          DPIX          *dpixCopy()
+- *          l_int32        dpixResizeImageData()
+  *          void           dpixDestroy()
+  *
+  *    DPix accessors
+@@ -250,66 +248,27 @@ fpixClone(FPIX  *fpix)
+ /*!
+  * \brief   fpixCopy()
+  *
+- * \param[in]    fpixd    [optional] can be null, or equal to fpixs,
+- *                        or different from fpixs
+  * \param[in]    fpixs
+  * \return  fpixd, or NULL on error
+- *
+- * <pre>
+- * Notes:
+- *      (1) There are three cases:
+- *            (a) fpixd == null  (makes a new fpix; refcount = 1)
+- *            (b) fpixd == fpixs  (no-op)
+- *            (c) fpixd != fpixs  (data copy; no change in refcount)
+- *          If the refcount of fpixd > 1, case (c) will side-effect
+- *          these handles.
+- *      (2) The general pattern of use is:
+- *             fpixd = fpixCopy(fpixd, fpixs);
+- *          This will work for all three cases.
+- *          For clarity when the case is known, you can use:
+- *            (a) fpixd = fpixCopy(NULL, fpixs);
+- *            (c) fpixCopy(fpixd, fpixs);
+- *      (3) For case (c), we check if fpixs and fpixd are the same size.
+- *          If so, the data is copied directly.
+- *          Otherwise, the data is reallocated to the correct size
+- *          and the copy proceeds.  The refcount of fpixd is unchanged.
+- *      (4) This operation, like all others that may involve a pre-existing
+- *          fpixd, will side-effect any existing clones of fpixd.
+- * </pre>
+  */
+ FPIX *
+-fpixCopy(FPIX  *fpixd,   /* can be null */
+-         FPIX  *fpixs)
++fpixCopy(FPIX  *fpixs)
+ {
+ l_int32     w, h, bytes;
+ l_float32  *datas, *datad;
++FPIX       *fpixd;
+ 
+     PROCNAME("fpixCopy");
+ 
+     if (!fpixs)
+         return (FPIX *)ERROR_PTR("fpixs not defined", procName, NULL);
+-    if (fpixs == fpixd)
+-        return fpixd;
+ 
+         /* Total bytes in image data */
+     fpixGetDimensions(fpixs, &w, &h);
+     bytes = 4 * w * h;
+ 
+-        /* If we're making a new fpix ... */
+-    if (!fpixd) {
+-        if ((fpixd = fpixCreateTemplate(fpixs)) == NULL)
+-            return (FPIX *)ERROR_PTR("fpixd not made", procName, NULL);
+-        datas = fpixGetData(fpixs);
+-        datad = fpixGetData(fpixd);
+-        memcpy(datad, datas, bytes);
+-        return fpixd;
+-    }
+-
+-        /* Reallocate image data if sizes are different */
+-    fpixResizeImageData(fpixd, fpixs);
+-
+-        /* Copy data */
+-    fpixCopyResolution(fpixd, fpixs);
++    if ((fpixd = fpixCreateTemplate(fpixs)) == NULL)
++        return (FPIX *)ERROR_PTR("fpixd not made", procName, NULL);
+     datas = fpixGetData(fpixs);
+     datad = fpixGetData(fpixd);
+     memcpy(datad, datas, bytes);
+@@ -317,51 +276,6 @@ l_float32  *datas, *datad;
+ }
+ 
+ 
+-/*!
+- * \brief   fpixResizeImageData()
+- *
+- * \param[in]    fpixd, fpixs
+- * \return  0 if OK, 1 on error
+- *
+- * <pre>
+- * Notes:
+- *      (1) If the data sizes differ, this destroys the existing
+- *          data in fpixd and allocates a new, uninitialized, data array
+- *          of the same size as the data in fpixs.  Otherwise, this
+- *          doesn't do anything.
+- * </pre>
+- */
+-l_ok
+-fpixResizeImageData(FPIX  *fpixd,
+-                    FPIX  *fpixs)
+-{
+-l_int32     ws, hs, wd, hd, bytes;
+-l_float32  *data;
+-
+-    PROCNAME("fpixResizeImageData");
+-
+-    if (!fpixs)
+-        return ERROR_INT("fpixs not defined", procName, 1);
+-    if (!fpixd)
+-        return ERROR_INT("fpixd not defined", procName, 1);
+-
+-    fpixGetDimensions(fpixs, &ws, &hs);
+-    fpixGetDimensions(fpixd, &wd, &hd);
+-    if (ws == wd && hs == hd)  /* nothing to do */
+-        return 0;
+-
+-    fpixSetDimensions(fpixd, ws, hs);
+-    fpixSetWpl(fpixd, ws);
+-    bytes = 4 * ws * hs;
+-    data = fpixGetData(fpixd);
+-    if (data) LEPT_FREE(data);
+-    if ((data = (l_float32 *)LEPT_MALLOC(bytes)) == NULL)
+-        return ERROR_INT("LEPT_MALLOC fail for data", procName, 1);
+-    fpixSetData(fpixd, data);
+-    return 0;
+-}
+-
+-
+ /*!
+  * \brief   fpixDestroy()
+  *
+@@ -855,7 +769,7 @@ FPIX    *fpixc;
+     if (copyflag == L_INSERT)
+         fpixc = fpix;
+     else if (copyflag == L_COPY)
+-        fpixc = fpixCopy(NULL, fpix);
++        fpixc = fpixCopy(fpix);
+     else if (copyflag == L_CLONE)
+         fpixc = fpixClone(fpix);
+     else
+@@ -1003,7 +917,7 @@ fpixaGetFPix(FPIXA   *fpixa,
+         return (FPIX *)ERROR_PTR("index not valid", procName, NULL);
+ 
+     if (accesstype == L_COPY)
+-        return fpixCopy(NULL, fpixa->fpix[index]);
++        return fpixCopy(fpixa->fpix[index]);
+     else if (accesstype == L_CLONE)
+         return fpixClone(fpixa->fpix[index]);
+     else
+@@ -1250,7 +1164,6 @@ dpixClone(DPIX  *dpix)
+     if (!dpix)
+         return (DPIX *)ERROR_PTR("dpix not defined", procName, NULL);
+     dpixChangeRefcount(dpix, 1);
+-
+     return dpix;
+ }
+ 
+@@ -1258,66 +1171,27 @@ dpixClone(DPIX  *dpix)
+ /*!
+  * \brief   dpixCopy()
+  *
+- * \param[in]    dpixd    [optional] can be null, or equal to dpixs,
+- *                        or different from dpixs
+  * \param[in]    dpixs
+  * \return  dpixd, or NULL on error
+- *
+- * <pre>
+- * Notes:
+- *      (1) There are three cases:
+- *            (a) dpixd == null  (makes a new dpix; refcount = 1)
+- *            (b) dpixd == dpixs  (no-op)
+- *            (c) dpixd != dpixs  (data copy; no change in refcount)
+- *          If the refcount of dpixd > 1, case (c) will side-effect
+- *          these handles.
+- *      (2) The general pattern of use is:
+- *             dpixd = dpixCopy(dpixd, dpixs);
+- *          This will work for all three cases.
+- *          For clarity when the case is known, you can use:
+- *            (a) dpixd = dpixCopy(NULL, dpixs);
+- *            (c) dpixCopy(dpixd, dpixs);
+- *      (3) For case (c), we check if dpixs and dpixd are the same size.
+- *          If so, the data is copied directly.
+- *          Otherwise, the data is reallocated to the correct size
+- *          and the copy proceeds.  The refcount of dpixd is unchanged.
+- *      (4) This operation, like all others that may involve a pre-existing
+- *          dpixd, will side-effect any existing clones of dpixd.
+- * </pre>
+  */
+ DPIX *
+-dpixCopy(DPIX  *dpixd,   /* can be null */
+-         DPIX  *dpixs)
++dpixCopy(DPIX  *dpixs)
+ {
+ l_int32     w, h, bytes;
+ l_float64  *datas, *datad;
++DPIX       *dpixd;
+ 
+     PROCNAME("dpixCopy");
+ 
+     if (!dpixs)
+         return (DPIX *)ERROR_PTR("dpixs not defined", procName, NULL);
+-    if (dpixs == dpixd)
+-        return dpixd;
+ 
+         /* Total bytes in image data */
+     dpixGetDimensions(dpixs, &w, &h);
+     bytes = 8 * w * h;
+ 
+-        /* If we're making a new dpix ... */
+-    if (!dpixd) {
+-        if ((dpixd = dpixCreateTemplate(dpixs)) == NULL)
+-            return (DPIX *)ERROR_PTR("dpixd not made", procName, NULL);
+-        datas = dpixGetData(dpixs);
+-        datad = dpixGetData(dpixd);
+-        memcpy(datad, datas, bytes);
+-        return dpixd;
+-    }
+-
+-        /* Reallocate image data if sizes are different */
+-    dpixResizeImageData(dpixd, dpixs);
+-
+-        /* Copy data */
+-    dpixCopyResolution(dpixd, dpixs);
++    if ((dpixd = dpixCreateTemplate(dpixs)) == NULL)
++        return (DPIX *)ERROR_PTR("dpixd not made", procName, NULL);
+     datas = dpixGetData(dpixs);
+     datad = dpixGetData(dpixd);
+     memcpy(datad, datas, bytes);
+@@ -1325,43 +1199,6 @@ l_float64  *datas, *datad;
+ }
+ 
+ 
+-/*!
+- * \brief   dpixResizeImageData()
+- *
+- * \param[in]    dpixd, dpixs
+- * \return  0 if OK, 1 on error
+- */
+-l_ok
+-dpixResizeImageData(DPIX  *dpixd,
+-                    DPIX  *dpixs)
+-{
+-l_int32     ws, hs, wd, hd, bytes;
+-l_float64  *data;
+-
+-    PROCNAME("dpixResizeImageData");
+-
+-    if (!dpixs)
+-        return ERROR_INT("dpixs not defined", procName, 1);
+-    if (!dpixd)
+-        return ERROR_INT("dpixd not defined", procName, 1);
+-
+-    dpixGetDimensions(dpixs, &ws, &hs);
+-    dpixGetDimensions(dpixd, &wd, &hd);
+-    if (ws == wd && hs == hd)  /* nothing to do */
+-        return 0;
+-
+-    dpixSetDimensions(dpixd, ws, hs);
+-    dpixSetWpl(dpixd, ws);  /* 8 byte words */
+-    bytes = 8 * ws * hs;
+-    data = dpixGetData(dpixd);
+-    if (data) LEPT_FREE(data);
+-    if ((data = (l_float64 *)LEPT_MALLOC(bytes)) == NULL)
+-        return ERROR_INT("LEPT_MALLOC fail for data", procName, 1);
+-    dpixSetData(dpixd, data);
+-    return 0;
+-}
+-
+-
+ /*!
+  * \brief   dpixDestroy()
+  *
+@@ -1943,7 +1780,7 @@ FILE    *fp;
+ /*!
+  * \brief   fpixEndianByteSwap()
+  *
+- * \param[in]    fpixd     can be equal to fpixs or NULL
++ * \param[in]    fpixd     [optional] can be either NULL, or equal to fpixs
+  * \param[in]    fpixs
+  * \return  fpixd always
+  *
+@@ -1977,7 +1814,8 @@ fpixEndianByteSwap(FPIX  *fpixd,
+     l_uint32   word;
+ 
+         fpixGetDimensions(fpixs, &w, &h);
+-        fpixd = fpixCopy(fpixd, fpixs);  /* no copy if fpixd == fpixs */
++        if (!fpixd)
++            fpixd = fpixCopy(fpixs);
+ 
+         data = (l_uint32 *)fpixGetData(fpixd);
+         for (i = 0; i < h; i++) {
+@@ -2241,7 +2079,7 @@ FILE    *fp;
+ /*!
+  * \brief   dpixEndianByteSwap()
+  *
+- * \param[in]    dpixd     can be equal to dpixs or NULL
++ * \param[in]    dpixd     [optional] can be either NULL, or equal to dpixs
+  * \param[in]    dpixs
+  * \return  dpixd always
+  *
+@@ -2275,7 +2113,8 @@ dpixEndianByteSwap(DPIX  *dpixd,
+     l_uint32   word;
+ 
+         dpixGetDimensions(dpixs, &w, &h);
+-        dpixd = dpixCopy(dpixd, dpixs);  /* no copy if dpixd == dpixs */
++        if (!dpixd)
++            dpixd = dpixCopy(dpixs);
+ 
+         data = (l_uint32 *)dpixGetData(dpixd);
+         for (i = 0; i < h; i++) {
+diff --git a/src/fpix2.c b/src/fpix2.c
+index befe30e..4ac1c15 100644
+--- a/src/fpix2.c
++++ b/src/fpix2.c
+@@ -1087,8 +1087,7 @@ DPIX       *dpixd;
+ /*!
+  * \brief   fpixLinearCombination()
+  *
+- * \param[in]    fpixd    [optional] this can be null, equal to fpixs1, or
+- *                        different from fpixs1
++ * \param[in]    fpixd    [optional] this can be null, or equal to fpixs1
+  * \param[in]    fpixs1   can be equal to fpixd
+  * \param[in]    fpixs2
+  * \param[in]    a, b     multiplication factors on fpixs1 and fpixs2, rsp.
+@@ -1097,13 +1096,12 @@ DPIX       *dpixd;
+  * <pre>
+  * Notes:
+  *      (1) Computes pixelwise linear combination: a * src1 + b * src2
+- *      (2) Alignment is to UL corner.
+- *      (3) There are 3 cases.  The result can go to a new dest,
+- *          in-place to fpixs1, or to an existing input dest:
++ *      (2) Alignment is to UL corner; src1 and src2 do not have to be
++ *          the same size.
++ *      (3) There are 2 cases.  The result can go to a new dest, or
++ *          in-place to fpixs1:
+  *          * fpixd == null:   (src1 + src2) --> new fpixd
+  *          * fpixd == fpixs1:  (src1 + src2) --> src1  (in-place)
+- *          * fpixd != fpixs1: (src1 + src2) --> input fpixd
+- *      (4) fpixs2 must be different from both fpixd and fpixs1.
+  * </pre>
+  */
+ FPIX *
+@@ -1122,14 +1120,11 @@ l_float32  *datas, *datad, *lines, *lined;
+         return (FPIX *)ERROR_PTR("fpixs1 not defined", procName, fpixd);
+     if (!fpixs2)
+         return (FPIX *)ERROR_PTR("fpixs2 not defined", procName, fpixd);
+-    if (fpixs1 == fpixs2)
+-        return (FPIX *)ERROR_PTR("fpixs1 == fpixs2", procName, fpixd);
+-    if (fpixs2 == fpixd)
+-        return (FPIX *)ERROR_PTR("fpixs2 == fpixd", procName, fpixd);
+-
+-    if (fpixs1 != fpixd)
+-        fpixd = fpixCopy(fpixd, fpixs1);
++    if (fpixd && (fpixd != fpixs1))
++        return (FPIX *)ERROR_PTR("invalid inplace operation", procName, fpixd);
+ 
++    if (!fpixd)
++        fpixd = fpixCopy(fpixs1);
+     datas = fpixGetData(fpixs2);
+     datad = fpixGetData(fpixd);
+     wpls = fpixGetWpl(fpixs2);
+@@ -1206,8 +1201,7 @@ l_float32  *line, *data;
+ /*!
+  * \brief   dpixLinearCombination()
+  *
+- * \param[in]    dpixd    [optional] this can be null, equal to dpixs1, or
+- *                        different from dpixs1
++ * \param[in]    dpixd    [optional] this can be null, or equal to dpixs1
+  * \param[in]    dpixs1   can be equal to dpixd
+  * \param[in]    dpixs2
+  * \param[in]    a, b     multiplication factors on dpixs1 and dpixs2, rsp.
+@@ -1216,13 +1210,12 @@ l_float32  *line, *data;
+  * <pre>
+  * Notes:
+  *      (1) Computes pixelwise linear combination: a * src1 + b * src2
+- *      (2) Alignment is to UL corner.
+- *      (3) There are 3 cases.  The result can go to a new dest,
+- *          in-place to dpixs1, or to an existing input dest:
++ *      (2) Alignment is to UL corner; src1 and src2 do not have to be
++ *          the same size.
++ *      (3) There are 2 cases.  The result can go to a new dest, or
++ *          in-place to dpixs1:
+  *          * dpixd == null:   (src1 + src2) --> new dpixd
+  *          * dpixd == dpixs1:  (src1 + src2) --> src1  (in-place)
+- *          * dpixd != dpixs1: (src1 + src2) --> input dpixd
+- *      (4) dpixs2 must be different from both dpixd and dpixs1.
+  * </pre>
+  */
+ DPIX *
+@@ -1241,14 +1234,11 @@ l_float64  *datas, *datad, *lines, *lined;
+         return (DPIX *)ERROR_PTR("dpixs1 not defined", procName, dpixd);
+     if (!dpixs2)
+         return (DPIX *)ERROR_PTR("dpixs2 not defined", procName, dpixd);
+-    if (dpixs1 == dpixs2)
+-        return (DPIX *)ERROR_PTR("dpixs1 == dpixs2", procName, dpixd);
+-    if (dpixs2 == dpixd)
+-        return (DPIX *)ERROR_PTR("dpixs2 == dpixd", procName, dpixd);
+-
+-    if (dpixs1 != dpixd)
+-        dpixd = dpixCopy(dpixd, dpixs1);
++    if (dpixd && (dpixd != dpixs1))
++        return (DPIX *)ERROR_PTR("invalid inplace operation", procName, dpixd);
+ 
++    if (!dpixd)
++        dpixd = dpixCopy(dpixs1);
+     datas = dpixGetData(dpixs2);
+     datad = dpixGetData(dpixd);
+     wpls = dpixGetWpl(dpixs2);
+@@ -1417,7 +1407,7 @@ FPIX    *fpixd;
+         return (FPIX *)ERROR_PTR("fpixs not defined", procName, NULL);
+ 
+     if (left <= 0 && right <= 0 && top <= 0 && bot <= 0)
+-        return fpixCopy(NULL, fpixs);
++        return fpixCopy(fpixs);
+     fpixGetDimensions(fpixs, &ws, &hs);
+     wd = ws + left + right;
+     hd = hs + top + bot;
+@@ -1453,7 +1443,7 @@ FPIX    *fpixd;
+         return (FPIX *)ERROR_PTR("fpixs not defined", procName, NULL);
+ 
+     if (left <= 0 && right <= 0 && top <= 0 && bot <= 0)
+-        return fpixCopy(NULL, fpixs);
++        return fpixCopy(fpixs);
+     fpixGetDimensions(fpixs, &ws, &hs);
+     wd = ws - left - right;
+     hd = hs - top - bot;
+@@ -1774,7 +1764,7 @@ fpixRotateOrth(FPIX     *fpixs,
+         return (FPIX *)ERROR_PTR("quads not in {0,1,2,3}", procName, NULL);
+ 
+     if (quads == 0)
+-        return fpixCopy(NULL, fpixs);
++        return fpixCopy(fpixs);
+     else if (quads == 1)
+         return fpixRotate90(fpixs, 1);
+     else if (quads == 2)
+@@ -1787,8 +1777,7 @@ fpixRotateOrth(FPIX     *fpixs,
+ /*!
+  * \brief   fpixRotate180()
+  *
+- * \param[in]    fpixd    [optional] can be null, equal to fpixs,
+- *                        or different from fpixs
++ * \param[in]    fpixd    [optional] can be null, or equal to fpixs
+  * \param[in]    fpixs
+  * \return  fpixd, or NULL on error
+  *
+@@ -1798,14 +1787,12 @@ fpixRotateOrth(FPIX     *fpixs,
+  *          which is equivalent to a left-right flip about a vertical
+  *          line through the image center, followed by a top-bottom
+  *          flip about a horizontal line through the image center.
+- *      (2) There are 3 cases for input:
++ *      (2) There are 2 cases for input:
+  *          (a) fpixd == null (creates a new fpixd)
+  *          (b) fpixd == fpixs (in-place operation)
+- *          (c) fpixd != fpixs (existing fpixd)
+- *      (3) For clarity, use these three patterns, respectively:
++ *      (3) For clarity, use these two patterns:
+  *          (a) fpixd = fpixRotate180(NULL, fpixs);
+  *          (b) fpixRotate180(fpixs, fpixs);
+- *          (c) fpixRotate180(fpixd, fpixs);
+  * </pre>
+  */
+ FPIX *
+@@ -1818,8 +1805,8 @@ fpixRotate180(FPIX  *fpixd,
+         return (FPIX *)ERROR_PTR("fpixs not defined", procName, NULL);
+ 
+         /* Prepare pixd for in-place operation */
+-    if ((fpixd = fpixCopy(fpixd, fpixs)) == NULL)
+-        return (FPIX *)ERROR_PTR("fpixd not made", procName, NULL);
++    if (!fpixd)
++        fpixd = fpixCopy(fpixs);
+ 
+     fpixFlipLR(fpixd, fpixd);
+     fpixFlipTB(fpixd, fpixd);
+@@ -1892,8 +1879,7 @@ FPIX       *fpixd;
+ /*!
+  * \brief   pixFlipLR()
+  *
+- * \param[in]    fpixd    [optional] can be null, equal to fpixs,
+- *                        or different from fpixs
++ * \param[in]    fpixd    [optional] can be null, or equal to fpixs
+  * \param[in]    fpixs
+  * \return  fpixd, or NULL on error
+  *
+@@ -1902,16 +1888,12 @@ FPIX       *fpixd;
+  *      (1) This does a left-right flip of the image, which is
+  *          equivalent to a rotation out of the plane about a
+  *          vertical line through the image center.
+- *      (2) There are 3 cases for input:
++ *      (2) There are 2 cases for input:
+  *          (a) fpixd == null (creates a new fpixd)
+  *          (b) fpixd == fpixs (in-place operation)
+- *          (c) fpixd != fpixs (existing fpixd)
+- *      (3) For clarity, use these three patterns, respectively:
++ *      (3) For clarity, use these two patterns:
+  *          (a) fpixd = fpixFlipLR(NULL, fpixs);
+  *          (b) fpixFlipLR(fpixs, fpixs);
+- *          (c) fpixFlipLR(fpixd, fpixs);
+- *      (4) If an existing fpixd is not the same size as fpixs, the
+- *          image data will be reallocated.
+  * </pre>
+  */
+ FPIX *
+@@ -1926,12 +1908,11 @@ l_float32  *line, *data, *buffer;
+     if (!fpixs)
+         return (FPIX *)ERROR_PTR("fpixs not defined", procName, NULL);
+ 
+-    fpixGetDimensions(fpixs, &w, &h);
+-
+         /* Prepare fpixd for in-place operation */
+-    if ((fpixd = fpixCopy(fpixd, fpixs)) == NULL)
+-        return (FPIX *)ERROR_PTR("fpixd not made", procName, NULL);
++    if (!fpixd)
++        fpixd = fpixCopy(fpixs);
+ 
++    fpixGetDimensions(fpixd, &w, &h);
+     data = fpixGetData(fpixd);
+     wpl = fpixGetWpl(fpixd);  /* 4-byte words */
+     bpl = 4 * wpl;
+@@ -1953,8 +1934,7 @@ l_float32  *line, *data, *buffer;
+ /*!
+  * \brief   fpixFlipTB()
+  *
+- * \param[in]    fpixd    [optional] can be null, equal to fpixs,
+- *                        or different from fpixs
++ * \param[in]    fpixd    [optional] can be null, or equal to fpixs
+  * \param[in]    fpixs
+  * \return  fpixd, or NULL on error
+  *
+@@ -1963,16 +1943,12 @@ l_float32  *line, *data, *buffer;
+  *      (1) This does a top-bottom flip of the image, which is
+  *          equivalent to a rotation out of the plane about a
+  *          horizontal line through the image center.
+- *      (2) There are 3 cases for input:
++ *      (2) There are 2 cases for input:
+  *          (a) fpixd == null (creates a new fpixd)
+  *          (b) fpixd == fpixs (in-place operation)
+- *          (c) fpixd != fpixs (existing fpixd)
+- *      (3) For clarity, use these three patterns, respectively:
++ *      (3) For clarity, use these two patterns:
+  *          (a) fpixd = fpixFlipTB(NULL, fpixs);
+  *          (b) fpixFlipTB(fpixs, fpixs);
+- *          (c) fpixFlipTB(fpixd, fpixs);
+- *      (4) If an existing fpixd is not the same size as fpixs, the
+- *          image data will be reallocated.
+  * </pre>
+  */
+ FPIX *
+@@ -1988,8 +1964,8 @@ l_float32  *linet, *lineb, *data, *buffer;
+         return (FPIX *)ERROR_PTR("fpixs not defined", procName, NULL);
+ 
+         /* Prepare fpixd for in-place operation */
+-    if ((fpixd = fpixCopy(fpixd, fpixs)) == NULL)
+-        return (FPIX *)ERROR_PTR("fpixd not made", procName, NULL);
++    if (!fpixd)
++        fpixd = fpixCopy(fpixs);
+ 
+     data = fpixGetData(fpixd);
+     wpl = fpixGetWpl(fpixd);
+~~~~
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.

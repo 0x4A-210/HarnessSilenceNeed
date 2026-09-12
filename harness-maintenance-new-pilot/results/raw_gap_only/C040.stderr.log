@@ -1,0 +1,102 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/maintenance-gap_only-C040-vyjtlczh
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0863c-d7d2-7be0-976f-39fd4bb1cd9c
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C040
+
+## Existing Fuzz Harness H0
+
+### `tests/spng_read_fuzzer.cc`
+
+~~~~cpp
+#include "../src/spng.h"
+#include "../src/common.h"
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+    unsigned char *out = NULL;
+
+    spng_ctx *ctx = spng_ctx_new(0);
+    if(ctx == NULL) return 0;
+
+    if(spng_set_png_buffer(ctx, (void*)data, size)) goto err;
+
+    spng_set_image_limits(ctx, 200000, 200000);
+    
+    spng_set_chunk_limits(ctx, 4 * 1000 * 1000, 8 * 1000 * 1000);
+
+    spng_set_crc_action(ctx, SPNG_CRC_USE, SPNG_CRC_USE);
+
+    size_t out_size;
+    if(spng_decoded_image_size(ctx, SPNG_FMT_RGBA8, &out_size)) goto err;
+
+    if(out_size > 80000000) goto err;
+
+    out = (unsigned char*)malloc(out_size);
+    if(out == NULL) goto err;
+
+    if(spng_decode_image(ctx, out, out_size, SPNG_FMT_RGBA8, SPNG_DECODE_USE_TRNS | SPNG_DECODE_USE_GAMA)) goto err;
+
+err:
+    spng_ctx_free(ctx);
+    if(out != NULL) free(out);
+
+    return 0;
+}
+~~~~
+
+## Production Source Change (S0 -> S1)
+
+Harness changes, commit messages, tests, outcomes, and future evidence are excluded. The source diff is complete.
+
+~~~~diff
+diff --git a/src/common.h b/src/common.h
+index bac0e56..676204f 100644
+--- a/src/common.h
++++ b/src/common.h
+@@ -210,8 +210,4 @@ int check_exif(struct spng_exif *exif);
+ int check_png_keyword(const char str[80]);
+ int check_png_text(const char *str, size_t len);
+ 
+-/* These functions are only available internally at this time */
+-int spng_set_chunk_limits(spng_ctx *ctx, size_t chunk_size, size_t cache_size);
+-int spng_get_chunk_limits(spng_ctx *ctx, size_t *chunk_size, size_t *cache_size);
+-
+ #endif /* SPNG_COMMON_H */
+~~~~
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C040","gap_exists":true,"gap_type":["harness build compatibility","internal API dependency"],"confidence":98,"affected_functions":["LLVMFuzzerTestOneInput","spng_set_chunk_limits"],"reason":"H0 calls spng_set_chunk_limits(), but S1 removes its declaration from common.h, the header H0 includes. Because H0 is C++, the undeclared call prevents the harness from compiling against S1, eliminating fuzz coverage rather than merely reducing coverage of one path.","evidence":["H0 includes ../src/common.h and directly calls spng_set_chunk_limits(ctx, 4 * 1000 * 1000, 8 * 1000 * 1000).","The complete S0-to-S1 diff removes the spng_set_chunk_limits declaration from src/common.h.","No remaining declaration for spng_set_chunk_limits is visible in the supplied S1 evidence."],"recommended_action":"Restore a supported declaration/API for configuring chunk limits or update H0 to use an S1-declared equivalent, then verify that tests/spng_read_fuzzer.cc compiles and continues fuzzing decode paths under bounded chunk and cache limits."}
+tokens used
+4,112

@@ -1,0 +1,560 @@
+PROJECT h2o
+COMMIT b235819d26819c506b64da995487e0d48793c679
+PARENT 7999ee87437e1dae22b5284cb3394989de89f77d
+SUBJECT Remove h2o_timer_val
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/include/h2o/timer_val.h b/include/h2o/timer_val.h
+index a3ee25d064..f53cd40fde 100644
+--- a/include/h2o/timer_val.h
++++ b/include/h2o/timer_val.h
+@@ -5,34 +5,8 @@
+ extern "C" {
+ #endif
+ 
+-typedef struct st_h2o_timer_val_t {
+-    unsigned int set : 1;
+-    uint64_t val : 63;
+-} h2o_timer_val_t;
+-
+-typedef struct st_h2o_timer_abs_t {
+-    unsigned int set : 1;
+-    uint64_t val : 63;
+-} h2o_timer_abs_t;
+-
+-#define H2O_TIMEOUT_VAL_UNSET ((h2o_timer_val_t){0, 0})
+-#define H2O_TIMEOUT_ABS_UNSET ((h2o_timer_abs_t){0, 0})
+-static inline h2o_timer_val_t h2o_timer_val_from_uint(uint64_t val)
+-{
+-    h2o_timer_val_t t = {1, val};
+-    return t;
+-}
+-
+-static inline h2o_timer_abs_t h2o_timer_abs_from_uint(uint64_t val)
+-{
+-    h2o_timer_abs_t t = {1, val};
+-    return t;
+-}
+-
+-static inline int h2o_timer_val_equal(h2o_timer_val_t a, h2o_timer_val_t b)
+-{
+-    return a.set == b.set && a.val == b.val;
+-}
++typedef uint64_t h2o_timer_val_t;
++typedef uint64_t h2o_timer_abs_t;
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/lib/common/http1client.c b/lib/common/http1client.c
+index 7bc3069f5c..15d169142e 100644
+--- a/lib/common/http1client.c
++++ b/lib/common/http1client.c
+@@ -386,7 +386,7 @@ static void on_send_request(h2o_socket_t *sock, const char *err)
+     }
+ 
+     h2o_socket_read_start(client->super.sock, on_head);
+-    if (client->super.ctx->first_byte_timeout.set) {
++    if (client->super.ctx->first_byte_timeout) {
+         h2o_timer_init(&client->_timeout, on_head_timeout);
+         h2o_timer_add(client->super.ctx->loop, &client->_timeout, client->super.ctx->first_byte_timeout);
+     }
+diff --git a/lib/common/redis.c b/lib/common/redis.c
+index b75556d215..3f9220c965 100644
+--- a/lib/common/redis.c
++++ b/lib/common/redis.c
+@@ -90,7 +90,7 @@ void h2o_redis_connect(h2o_redis_conn_t *conn, const char *host, uint16_t port)
+     if (redis->err != REDIS_OK) {
+         /* some connection failures can be detected at this time */
+         h2o_timer_init(&conn->_timeout_entry, on_connect_error_deferred);
+-        h2o_timer_add(conn->loop, &conn->_timeout_entry, h2o_timer_val_from_uint(0));
++        h2o_timer_add(conn->loop, &conn->_timeout_entry, 0);
+         return;
+     }
+ 
+@@ -134,14 +134,14 @@ h2o_redis_command_t *h2o_redis_command(h2o_redis_conn_t *conn, h2o_redis_command
+     h2o_timer_init(&command->_timeout_entry, on_command_error_deferred);
+ 
+     if (conn->state == H2O_REDIS_CONNECTION_STATE_CLOSED) {
+-        h2o_timer_add(conn->loop, &conn->_timeout_entry, h2o_timer_val_from_uint(0));
++        h2o_timer_add(conn->loop, &conn->_timeout_entry, 0);
+     } else {
+         va_list ap;
+         va_start(ap, format);
+         if (redisvAsyncCommand(conn->_redis, on_command, command, format, ap) != REDIS_OK) {
+             /* the case that redisAsyncContext is disconnecting or freeing */
+             /* call the callback immediately with NULL reply */
+-            h2o_timer_add(conn->loop, &conn->_timeout_entry, h2o_timer_val_from_uint(0));
++            h2o_timer_add(conn->loop, &conn->_timeout_entry, 0);
+         }
+         va_end(ap);
+     }
+diff --git a/lib/common/socket/evloop.c.h b/lib/common/socket/evloop.c.h
+index 6edacee90f..bf8e21f22b 100644
+--- a/lib/common/socket/evloop.c.h
++++ b/lib/common/socket/evloop.c.h
+@@ -705,12 +705,9 @@ static h2o_timer_wheel_slot_t *compute_slot(h2o_timer_wheel_t *w, h2o_timer_t *t
+     return slot;
+ }
+ 
+-int h2o_timer_add_(h2o_timer_wheel_t *w, h2o_timer_t *timer, h2o_timer_abs_t t_abs_expire)
++int h2o_timer_add_(h2o_timer_wheel_t *w, h2o_timer_t *timer, h2o_timer_abs_t abs_expire)
+ {
+     h2o_timer_wheel_slot_t *slot;
+-    uint64_t abs_expire = t_abs_expire.val;
+-
+-    assert(t_abs_expire.set == 1);
+ 
+     if (abs_expire > w->last_run && (abs_expire - w->last_run) > 0xffffffff) {
+         return -1;
+@@ -777,7 +774,7 @@ static void cascade(h2o_timer_wheel_t *w, int wheel, int slot)
+     while (!h2o_linklist_is_empty(s)) {
+         h2o_timer_t *entry = H2O_STRUCT_FROM_MEMBER(h2o_timer_t, _link, s->next);
+         h2o_linklist_unlink(&entry->_link);
+-        h2o_timer_add_(w, entry, h2o_timer_abs_from_uint(entry->expire_at));
++        h2o_timer_add_(w, entry, entry->expire_at);
+     }
+ }
+ 
+@@ -857,9 +854,7 @@ size_t h2o_timer_wheel__run(h2o_loop_t *loop, uint64_t now)
+ 
+ static h2o_timer_abs_t h2o_timer_now_plus(h2o_loop_t *loop, h2o_timer_val_t timeout)
+ {
+-    assert(timeout.set == 1);
+-    h2o_timer_abs_t abs = {1, timeout.val + h2o_now(loop)};
+-    return abs;
++    return timeout + h2o_now(loop);
+ }
+ 
+ int h2o_timer_add(h2o_loop_t *l, h2o_timer_t *timer, h2o_timer_val_t t_rel_expire)
+diff --git a/lib/common/socketpool.c b/lib/common/socketpool.c
+index 75b8335b5b..c366b788d0 100644
+--- a/lib/common/socketpool.c
++++ b/lib/common/socketpool.c
+@@ -89,7 +89,7 @@ static void destroy_expired(h2o_socketpool_t *pool)
+         return;
+ 
+     /* caller should lock the mutex */
+-    uint64_t expire_before = h2o_now(pool->_interval_cb.loop) - pool->timeout.val;
++    uint64_t expire_before = h2o_now(pool->_interval_cb.loop) - pool->timeout;
+     while (!h2o_linklist_is_empty(&pool->_shared.sockets)) {
+         struct pool_entry_t *entry = H2O_STRUCT_FROM_MEMBER(struct pool_entry_t, all_link, pool->_shared.sockets.next);
+         if (entry->added_at > expire_before)
+@@ -121,7 +121,7 @@ static void common_init(h2o_socketpool_t *pool, h2o_socketpool_target_vector_t t
+     memset(pool, 0, sizeof(*pool));
+ 
+     pool->capacity = capacity;
+-    pool->timeout = h2o_timer_val_from_uint(2000);
++    pool->timeout = 2000;
+ 
+     pthread_mutex_init(&pool->_shared.mutex, NULL);
+     h2o_linklist_init_anchor(&pool->_shared.sockets);
+@@ -317,7 +317,7 @@ void h2o_socketpool_register_loop(h2o_socketpool_t *pool, h2o_loop_t *loop)
+         return;
+ 
+     pool->_interval_cb.loop = loop;
+-    pool->_interval_cb.timeout = h2o_timer_val_from_uint(1000);
++    pool->_interval_cb.timeout = 1000;
+     h2o_timer_init(&pool->_interval_cb.entry, on_timeout);
+     h2o_timer_add(loop, &pool->_interval_cb.entry, pool->_interval_cb.timeout);
+ }
+@@ -615,5 +615,5 @@ int h2o_socketpool_return(h2o_socketpool_t *pool, h2o_socket_t *sock)
+ 
+ int h2o_socketpool_can_keepalive(h2o_socketpool_t *pool)
+ {
+-    return pool->timeout.set && pool->timeout.val > 0;
++    return pool->timeout > 0;
+ }
+diff --git a/lib/common/timer.c b/lib/common/timer.c
+index e06839ef45..2b45eba565 100644
+--- a/lib/common/timer.c
++++ b/lib/common/timer.c
+@@ -38,7 +38,7 @@ static void on_timeout(uv_timer_t *uv_timer)
+ int h2o_timer_add(h2o_loop_t *l, h2o_timer_t *timer, h2o_timer_val_t t_rel_expire)
+ {
+     uv_timer_init(l, &timer->_backend.timer);
+-    uv_timer_start(&timer->_backend.timer, on_timeout, h2o_now(l) + t_rel_expire.val, 0);
++    uv_timer_start(&timer->_backend.timer, on_timeout, h2o_now(l) + t_rel_expire, 0);
+     return 1;
+ }
+ 
+diff --git a/lib/core/config.c b/lib/core/config.c
+index 9579aa83f7..1339e6f09f 100644
+--- a/lib/core/config.c
++++ b/lib/core/config.c
+@@ -175,15 +175,15 @@ void h2o_config_init(h2o_globalconf_t *config)
+     config->server_name = h2o_iovec_init(H2O_STRLIT("h2o/" H2O_VERSION));
+     config->max_request_entity_size = H2O_DEFAULT_MAX_REQUEST_ENTITY_SIZE;
+     config->max_delegations = H2O_DEFAULT_MAX_DELEGATIONS;
+-    config->handshake_timeout = h2o_timer_val_from_uint(H2O_DEFAULT_HANDSHAKE_TIMEOUT);
+-    config->http1.req_timeout = h2o_timer_val_from_uint(H2O_DEFAULT_HTTP1_REQ_TIMEOUT);
++    config->handshake_timeout = H2O_DEFAULT_HANDSHAKE_TIMEOUT;
++    config->http1.req_timeout = H2O_DEFAULT_HTTP1_REQ_TIMEOUT;
+     config->http1.upgrade_to_http2 = H2O_DEFAULT_HTTP1_UPGRADE_TO_HTTP2;
+     config->http1.callbacks = H2O_HTTP1_CALLBACKS;
+-    config->http2.idle_timeout = h2o_timer_val_from_uint(H2O_DEFAULT_HTTP2_IDLE_TIMEOUT);
+-    config->http2.graceful_shutdown_timeout = h2o_timer_val_from_uint(H2O_DEFAULT_HTTP2_GRACEFUL_SHUTDOWN_TIMEOUT);
+-    config->proxy.io_timeout = h2o_timer_val_from_uint(H2O_DEFAULT_PROXY_IO_TIMEOUT);
+-    config->proxy.connect_timeout = h2o_timer_val_from_uint(H2O_DEFAULT_PROXY_IO_TIMEOUT);
+-    config->proxy.first_byte_timeout = h2o_timer_val_from_uint(H2O_DEFAULT_PROXY_IO_TIMEOUT);
++    config->http2.idle_timeout = H2O_DEFAULT_HTTP2_IDLE_TIMEOUT;
++    config->http2.graceful_shutdown_timeout = H2O_DEFAULT_HTTP2_GRACEFUL_SHUTDOWN_TIMEOUT;
++    config->proxy.io_timeout = H2O_DEFAULT_PROXY_IO_TIMEOUT;
++    config->proxy.connect_timeout = H2O_DEFAULT_PROXY_IO_TIMEOUT;
++    config->proxy.first_byte_timeout = H2O_DEFAULT_PROXY_IO_TIMEOUT;
+     config->proxy.emit_x_forwarded_headers = 1;
+     config->proxy.emit_via_header = 1;
+     config->http2.max_concurrent_requests_per_connection = H2O_HTTP2_SETTINGS_HOST.max_concurrent_streams;
+diff --git a/lib/core/configurator.c b/lib/core/configurator.c
+index 2fd86cc731..9462510e02 100644
+--- a/lib/core/configurator.c
++++ b/lib/core/configurator.c
+@@ -127,10 +127,7 @@ static int config_timeout(h2o_configurator_command_t *cmd, yoml_t *node, h2o_tim
+     if (h2o_configurator_scanf(cmd, node, "%" SCNu64, &timeout_in_secs) != 0)
+         return -1;
+ 
+-    if (timeout_in_secs == 0)
+-        *slot = H2O_TIMEOUT_VAL_UNSET;
+-    else
+-        *slot = h2o_timer_val_from_uint(timeout_in_secs * 1000);
++    *slot = timeout_in_secs * 1000;
+     return 0;
+ }
+ 
+diff --git a/lib/core/proxy.c b/lib/core/proxy.c
+index 134b9554f5..3e8edbd1df 100644
+--- a/lib/core/proxy.c
++++ b/lib/core/proxy.c
+@@ -669,7 +669,7 @@ static struct rp_generator_t *proxy_send_prepare(h2o_req_t *req, int keepalive,
+     self->super.proceed = do_proceed;
+     self->super.stop = do_close;
+     self->src_req = req;
+-    if (client_ctx->websocket_timeout.set && h2o_lcstris(req->upgrade.base, req->upgrade.len, H2O_STRLIT("websocket"))) {
++    if (client_ctx->websocket_timeout && h2o_lcstris(req->upgrade.base, req->upgrade.len, H2O_STRLIT("websocket"))) {
+         self->is_websocket_handshake = 1;
+     } else {
+         self->is_websocket_handshake = 0;
+diff --git a/lib/core/request.c b/lib/core/request.c
+index 9aa7e42bd1..f5ffaff45f 100644
+--- a/lib/core/request.c
++++ b/lib/core/request.c
+@@ -72,7 +72,7 @@ static struct st_deferred_request_action_t *create_deferred_action(h2o_req_t *re
+     struct st_deferred_request_action_t *action = h2o_mem_alloc_shared(&req->pool, sz, on_deferred_action_dispose);
+     action->req = req;
+     h2o_timer_init(&action->timeout, cb);
+-    h2o_timer_add(req->conn->ctx->loop, &action->timeout, h2o_timer_val_from_uint(0));
++    h2o_timer_add(req->conn->ctx->loop, &action->timeout, 0);
+     return action;
+ }
+ 
+@@ -491,7 +491,7 @@ void h2o_ostream_send_next(h2o_ostream_t *ostream, h2o_req_t *req, h2o_iovec_t *
+         assert(req->_ostr_top == ostream);
+         req->_ostr_top = ostream->next;
+     } else if (bufcnt == 0) {
+-        h2o_timer_add(req->conn->ctx->loop, &req->_timeout_entry, h2o_timer_val_from_uint(0));
++        h2o_timer_add(req->conn->ctx->loop, &req->_timeout_entry, 0);
+         return;
+     }
+     ostream->next->do_send(ostream->next, req, bufs, bufcnt, state);
+@@ -565,7 +565,7 @@ void h2o_send_error_generic(h2o_req_t *req, int status, const char *reason, cons
+         struct st_send_error_deferred_t *args = h2o_mem_alloc_pool(&req->pool, sizeof(*args));                                     \
+         *args = (struct st_send_error_deferred_t){req, status_, reason, body, flags};                                              \
+         h2o_timer_init(&args->_timeout, send_error_deferred_cb_##status_);                                                 \
+-        h2o_timer_add(req->conn->ctx->loop, &args->_timeout, h2o_timer_val_from_uint(0));                            \
++        h2o_timer_add(req->conn->ctx->loop, &args->_timeout, 0);                            \
+     }
+ 
+ DECL_SEND_ERROR_DEFERRED(502)
+diff --git a/lib/core/util.c b/lib/core/util.c
+index e062f06955..1b380061a7 100644
+--- a/lib/core/util.c
++++ b/lib/core/util.c
+@@ -270,7 +270,7 @@ static void redis_resumption_get(h2o_socket_t *sock, h2o_iovec_t session_id)
+         // abort resumption
+         h2o_timer_del(&accept_data->super.timeout);
+         h2o_timer_init(&accept_data->super.timeout, on_redis_resumption_get_failed);
+-        h2o_timer_add(accept_data->super.ctx->ctx->loop, &accept_data->super.timeout, h2o_timer_val_from_uint(0));
++        h2o_timer_add(accept_data->super.ctx->ctx->loop, &accept_data->super.timeout, 0);
+     }
+ }
+ 
+diff --git a/lib/handler/configurator/fastcgi.c b/lib/handler/configurator/fastcgi.c
+index 2056d5dc28..c7bf5227b7 100644
+--- a/lib/handler/configurator/fastcgi.c
++++ b/lib/handler/configurator/fastcgi.c
+@@ -46,10 +46,7 @@ static int configure_timer(h2o_configurator_command_t *cmd, yoml_t *node, h2o_ti
+     ret = h2o_configurator_scanf(cmd, node, "%" SCNu64, &timeout);
+     if (ret < 0)
+         return ret;
+-    if (timeout > 0)
+-        *timer = h2o_timer_val_from_uint(timeout);
+-    else
+-        *timer = H2O_TIMEOUT_VAL_UNSET;
++    *timer = timeout;
+ 
+     return 0;
+ }
+@@ -385,8 +382,8 @@ void h2o_fastcgi_register_configurator(h2o_globalconf_t *conf)
+ 
+     /* set default vars */
+     c->vars = c->_vars_stack;
+-    c->vars->io_timeout = h2o_timer_val_from_uint(H2O_DEFAULT_FASTCGI_IO_TIMEOUT);
+-    c->vars->keepalive_timeout = H2O_TIMEOUT_VAL_UNSET;
++    c->vars->io_timeout = H2O_DEFAULT_FASTCGI_IO_TIMEOUT;
++    c->vars->keepalive_timeout = 0;
+ 
+     /* setup handlers */
+     c->super.enter = on_config_enter;
+diff --git a/lib/handler/configurator/proxy.c b/lib/handler/configurator/proxy.c
+index 66b3e24b7a..c2b6eea3ee 100644
+--- a/lib/handler/configurator/proxy.c
++++ b/lib/handler/configurator/proxy.c
+@@ -49,10 +49,7 @@ static int configure_timer(h2o_configurator_command_t *cmd, yoml_t *node, h2o_ti
+     ret = h2o_configurator_scanf(cmd, node, "%" SCNu64, &timeout);
+     if (ret < 0)
+         return ret;
+-    if (timeout > 0)
+-        *timer = h2o_timer_val_from_uint(timeout);
+-    else
+-        *timer = H2O_TIMEOUT_VAL_UNSET;
++    *timer = timeout;
+ 
+     return 0;
+ }
+@@ -119,10 +116,7 @@ static int on_config_websocket_timeout(h2o_configurator_command_t *cmd, h2o_conf
+     ret = h2o_configurator_scanf(cmd, node, "%" SCNu64, &timeout);
+     if (ret < 0)
+         return ret;
+-    if (timeout > 0)
+-        self->vars->conf.websocket.timeout = h2o_timer_val_from_uint(timeout);
+-    else
+-        self->vars->conf.websocket.timeout = H2O_TIMEOUT_VAL_UNSET;
++    self->vars->conf.websocket.timeout = timeout;
+     return ret;
+ }
+ 
+@@ -321,7 +315,7 @@ static int on_config_reverse_url(h2o_configurator_command_t *cmd, h2o_configurat
+         }
+     }
+ 
+-    if (self->vars->keepalive_timeout.val != 0 && self->vars->conf.use_proxy_protocol) {
++    if (self->vars->keepalive_timeout != 0 && self->vars->conf.use_proxy_protocol) {
+         h2o_configurator_errprintf(cmd, node, "please either set `proxy.use-proxy-protocol` to `OFF` or disable keep-alive by "
+                                               "setting `proxy.timeout.keepalive` to zero; the features are mutually exclusive");
+         return -1;
+@@ -430,11 +424,11 @@ void h2o_proxy_register_configurator(h2o_globalconf_t *conf)
+ 
+     /* set default vars */
+     c->vars = c->_vars_stack;
+-    c->vars->conf.io_timeout = h2o_timer_val_from_uint(H2O_DEFAULT_PROXY_IO_TIMEOUT);
+-    c->vars->conf.connect_timeout = h2o_timer_val_from_uint(H2O_DEFAULT_PROXY_IO_TIMEOUT);
+-    c->vars->conf.first_byte_timeout = h2o_timer_val_from_uint(H2O_DEFAULT_PROXY_IO_TIMEOUT);
++    c->vars->conf.io_timeout = H2O_DEFAULT_PROXY_IO_TIMEOUT;
++    c->vars->conf.connect_timeout = H2O_DEFAULT_PROXY_IO_TIMEOUT;
++    c->vars->conf.first_byte_timeout = H2O_DEFAULT_PROXY_IO_TIMEOUT;
+     c->vars->conf.websocket.enabled = 0; /* have websocket proxying disabled by default; until it becomes non-experimental */
+-    c->vars->conf.websocket.timeout = h2o_timer_val_from_uint(H2O_DEFAULT_PROXY_WEBSOCKET_TIMEOUT);
++    c->vars->conf.websocket.timeout = H2O_DEFAULT_PROXY_WEBSOCKET_TIMEOUT;
+     c->vars->conf.max_buffer_size = SIZE_MAX;
+     c->vars->keepalive_timeout = h2o_socketpool_get_timeout(&conf->proxy.global_socketpool);
+ 
+diff --git a/lib/handler/fastcgi.c b/lib/handler/fastcgi.c
+index 99c6882f89..d09cd69da8 100644
+--- a/lib/handler/fastcgi.c
++++ b/lib/handler/fastcgi.c
+@@ -386,7 +386,7 @@ static void build_request(h2o_req_t *req, iovec_vector_t *vecs, unsigned request
+     /* first entry is FCGI_BEGIN_REQUEST */
+     h2o_vector_reserve(&req->pool, vecs, 5 /* we send at least 5 iovecs */);
+     vecs->entries[0] =
+-        create_begin_request(&req->pool, request_id, FCGI_RESPONDER, config->keepalive_timeout.val != 0 ? FCGI_KEEP_CONN : 0);
++        create_begin_request(&req->pool, request_id, FCGI_RESPONDER, config->keepalive_timeout != 0 ? FCGI_KEEP_CONN : 0);
+     /* second entry is reserved for FCGI_PARAMS header */
+     vecs->entries[1] = h2o_iovec_init(NULL, APPEND_BLOCKSIZE); /* dummy value set to prevent params being appended to the entry */
+     vecs->size = 2;
+@@ -458,7 +458,7 @@ static void do_send(struct st_fcgi_generator_t *generator)
+ 
+ static void send_eos_and_close(struct st_fcgi_generator_t *generator, int can_keepalive)
+ {
+-    if (generator->ctx->handler->config.keepalive_timeout.val != 0 && can_keepalive)
++    if (generator->ctx->handler->config.keepalive_timeout != 0 && can_keepalive)
+         h2o_socketpool_return(&generator->ctx->handler->sockpool, generator->sock);
+     else
+         h2o_socket_close(generator->sock);
+diff --git a/lib/handler/mruby/sleep.c b/lib/handler/mruby/sleep.c
+index eef1c035d0..bc263e36a7 100644
+--- a/lib/handler/mruby/sleep.c
++++ b/lib/handler/mruby/sleep.c
+@@ -82,7 +82,7 @@ mrb_value h2o_mruby_sleep_callback(h2o_mruby_context_t *mctx, mrb_value receiver
+     ctx->ctx = mctx;
+     ctx->receiver = receiver;
+     h2o_timer_init(&ctx->timeout_entry, on_sleep_timeout);
+-    h2o_timer_add(ctx->ctx->shared->ctx->loop, &ctx->timeout_entry, h2o_timer_val_from_uint(msec));
++    h2o_timer_add(ctx->ctx->shared->ctx->loop, &ctx->timeout_entry, msec);
+ 
+     ctx->started_at = h2o_now(ctx->ctx->shared->ctx->loop);
+ 
+diff --git a/lib/handler/proxy.c b/lib/handler/proxy.c
+index e63c477968..45a3332715 100644
+--- a/lib/handler/proxy.c
++++ b/lib/handler/proxy.c
+@@ -59,9 +59,9 @@ static void on_context_init(h2o_handler_t *_self, h2o_context_t *ctx)
+     h2o_socketpool_register_loop(&self->sockpool, ctx->loop);
+ 
+     /* setup a specific client context only if we need to */
+-    if (h2o_timer_val_equal(ctx->globalconf->proxy.io_timeout, self->config.io_timeout) &&
+-        h2o_timer_val_equal(ctx->globalconf->proxy.connect_timeout, self->config.connect_timeout) &&
+-        h2o_timer_val_equal(ctx->globalconf->proxy.first_byte_timeout, self->config.first_byte_timeout) &&
++    if (ctx->globalconf->proxy.io_timeout == self->config.io_timeout &&
++        ctx->globalconf->proxy.connect_timeout == self->config.connect_timeout &&
++        ctx->globalconf->proxy.first_byte_timeout == self->config.first_byte_timeout &&
+         !self->config.websocket.enabled)
+         return;
+ 
+@@ -75,7 +75,7 @@ static void on_context_init(h2o_handler_t *_self, h2o_context_t *ctx)
+     if (self->config.websocket.enabled) {
+         client_ctx->websocket_timeout = self->config.websocket.timeout;
+     } else {
+-        client_ctx->websocket_timeout = H2O_TIMEOUT_VAL_UNSET;
++        client_ctx->websocket_timeout = 0;
+     }
+ 
+     h2o_context_set_handler_context(ctx, &self->super, client_ctx);
+diff --git a/lib/handler/throttle_resp.c b/lib/handler/throttle_resp.c
+index 3e35bd2bca..3eba0e38f7 100644
+--- a/lib/handler/throttle_resp.c
++++ b/lib/handler/throttle_resp.c
+@@ -70,7 +70,7 @@ static void add_token(h2o_timer_t *entry)
+     throttle_resp_t *self = H2O_STRUCT_FROM_MEMBER(throttle_resp_t, timeout_entry, entry);
+ 
+     h2o_timer_del(&self->timeout_entry);
+-    h2o_timer_add(self->ctx->loop, &self->timeout_entry, h2o_timer_val_from_uint(100));
++    h2o_timer_add(self->ctx->loop, &self->timeout_entry, 100);
+     self->tokens += self->token_inc;
+ 
+     if (self->tokens > 0)
+@@ -143,7 +143,7 @@ static void on_setup_ostream(h2o_filter_t *self, h2o_req_t *req, h2o_ostream_t *
+     slot = &throttle->super.next;
+ 
+     h2o_timer_init(&throttle->timeout_entry, add_token);
+-    h2o_timer_add(throttle->ctx->loop, &throttle->timeout_entry, h2o_timer_val_from_uint(100));
++    h2o_timer_add(throttle->ctx->loop, &throttle->timeout_entry, 100);
+ 
+ Next:
+     h2o_setup_next_ostream(req, slot);
+diff --git a/lib/http2/connection.c b/lib/http2/connection.c
+index 4520967506..7dbd7a13f6 100644
+--- a/lib/http2/connection.c
++++ b/lib/http2/connection.c
+@@ -113,8 +113,7 @@ static void graceful_shutdown_resend_goaway(h2o_timer_t *entry)
+ 
+     /* After waiting a second, we still had active connections. If configured, wait one
+      * final timeout before closing the connections */
+-    if (do_close_stragglers && ctx->globalconf->http2.graceful_shutdown_timeout.set &&
+-        ctx->globalconf->http2.graceful_shutdown_timeout.val) {
++    if (do_close_stragglers && ctx->globalconf->http2.graceful_shutdown_timeout) {
+         h2o_timer_del(&ctx->http2._graceful_shutdown_timeout);
+         h2o_timer_init(&ctx->http2._graceful_shutdown_timeout, graceful_shutdown_close_stragglers);
+         h2o_timer_add(ctx->loop, &ctx->http2._graceful_shutdown_timeout,
+@@ -146,7 +145,7 @@ static void initiate_graceful_shutdown(h2o_context_t *ctx)
+             h2o_http2_conn_request_write(conn);
+         }
+     }
+-    h2o_timer_add(ctx->loop, &ctx->http2._graceful_shutdown_timeout, h2o_timer_val_from_uint(1000));
++    h2o_timer_add(ctx->loop, &ctx->http2._graceful_shutdown_timeout, 1000);
+ }
+ 
+ static void on_idle_timeout(h2o_timer_t *entry)
+@@ -354,7 +353,7 @@ static void request_gathered_write(h2o_http2_conn_t *conn)
+ {
+     assert(conn->state < H2O_HTTP2_CONN_STATE_IS_CLOSING);
+     if (conn->sock->_cb.write == NULL && !h2o_timer_is_linked(&conn->_write.timeout_entry)) {
+-        h2o_timer_add(conn->super.ctx->loop, &conn->_write.timeout_entry, h2o_timer_val_from_uint(0));
++        h2o_timer_add(conn->super.ctx->loop, &conn->_write.timeout_entry, 0);
+     }
+ }
+ 
+diff --git a/t/00unit/lib/common/timerwheel.c b/t/00unit/lib/common/timerwheel.c
+index cc385672dc..9451af0693 100644
+--- a/t/00unit/lib/common/timerwheel.c
++++ b/t/00unit/lib/common/timerwheel.c
+@@ -51,7 +51,7 @@ void test_add_fixed_timers()
+     for (i = 0; i < N; i++) {
+         uint64_t exp = abs_wtime + i + 5;
+         timers[i] = h2o_timer_create(my_callback);
+-        h2o_timer_add_(testwheel, timers[i], h2o_timer_abs_from_uint(exp));
++        h2o_timer_add_(testwheel, timers[i], exp);
+     }
+ 
+     /* run the wheel */
+@@ -71,7 +71,7 @@ void test_del_timers()
+     for (i = 0; i < N; i++) {
+         uint64_t exp = abs_wtime + i + 5;
+         timers[i] = h2o_timer_create(my_callback);
+-        h2o_timer_add_(testwheel, timers[i], h2o_timer_abs_from_uint(exp));
++        h2o_timer_add_(testwheel, timers[i], exp);
+     }
+ 
+     /* delete N-1 timers, so there should be 1 timer left */
+@@ -98,7 +98,7 @@ void test_add_rand_timers()
+     for (i = 0; i < N; i++) {
+         uint64_t exp = abs_wtime + lcg_rand() % N;
+         timers[i] = h2o_timer_create(my_callback);
+-        h2o_timer_add_(testwheel, timers[i], h2o_timer_abs_from_uint(exp));
++        h2o_timer_add_(testwheel, timers[i], exp);
+     }
+ 
+     int start = invokes;
+@@ -117,7 +117,7 @@ void test_invalid_timer()
+     h2o_timer_init(&timer, my_callback);
+     testwheel->last_run = 3;
+     uint64_t exp = 0x100000007LL + testwheel->last_run;
+-    ok(h2o_timer_add_(testwheel, &timer, h2o_timer_abs_from_uint(exp)) == -1);
++    ok(h2o_timer_add_(testwheel, &timer, exp) == -1);
+ 
+     /* stress testing with one million outstanding timers */
+ #define NTIMERS 1024 * 16
+@@ -126,7 +126,7 @@ void test_invalid_timer()
+     int i;
+     for (i = 0; i < NTIMERS; i++) {
+         h2o_timer_init(&arr[i], my_callback);
+-        assert(h2o_timer_add_(testwheel, &arr[i], h2o_timer_abs_from_uint(exp)) == 0);
++        assert(h2o_timer_add_(testwheel, &arr[i], exp) == 0);
+         exp++;
+     }
+ 
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/fuzz/driver.cc b/fuzz/driver.cc
+index d9272fd6f4..d3535f7d19 100644
+--- a/fuzz/driver.cc
++++ b/fuzz/driver.cc
+@@ -350,20 +350,20 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size)
+ 
+         /* Create a single h2o host with multiple request handlers */
+         h2o_config_init(&config);
+-        config.http2.idle_timeout = h2o_timer_val_from_uint(10 * 1000);
+-        config.http1.req_timeout = h2o_timer_val_from_uint(10 * 1000);
+-        config.proxy.io_timeout = h2o_timer_val_from_uint(10 * 1000);
+-        config.proxy.connect_timeout = h2o_timer_val_from_uint(0);
+-        config.proxy.first_byte_timeout = h2o_timer_val_from_uint(0);
++        config.http2.idle_timeout = 10 * 1000;
++        config.http1.req_timeout = 10 * 1000;
++        config.proxy.io_timeout = 10 * 1000;
++        config.proxy.connect_timeout = 0;
++        config.proxy.first_byte_timeout = 0;
+         h2o_proxy_config_vars_t proxy_config = {};
+ 
+-        proxy_config.io_timeout = h2o_timer_val_from_uint(10 * 1000);
+-        proxy_config.connect_timeout = h2o_timer_val_from_uint(0);
+-        proxy_config.first_byte_timeout = h2o_timer_val_from_uint(0);
++        proxy_config.io_timeout = 10 * 1000;
++        proxy_config.connect_timeout = 0;
++        proxy_config.first_byte_timeout = 0;
+         hostconf = h2o_config_register_host(&config, h2o_iovec_init(H2O_STRLIT(unix_listener)), 65535);
+         register_handler(hostconf, "/chunked-test", chunked_test);
+         h2o_url_parse(unix_listener, strlen(unix_listener), &upstream);
+-        h2o_proxy_register_reverse_proxy(h2o_config_register_path(hostconf, "/reproxy-test", 0), &upstream, 1, h2o_timer_val_from_uint(2000), NULL,
++        h2o_proxy_register_reverse_proxy(h2o_config_register_path(hostconf, "/reproxy-test", 0), &upstream, 1, 2000, NULL,
+                                          &proxy_config);
+         h2o_file_register(h2o_config_register_path(hostconf, "/", 0), "./examples/doc_root", NULL, NULL, 0);
+ 

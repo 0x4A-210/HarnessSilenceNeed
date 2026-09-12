@@ -1,0 +1,202 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/maintenance-gap_only-C064-3y0ws9g4
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0863f-e5b7-79a0-b9a2-bdfbba86e54f
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C064
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `fuzz/bplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * bplist_fuzzer.cc
+ * binary plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_bin(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+### `fuzz/xplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * xplist_fuzzer.cc
+ * XML plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_xml(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/libplist/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+#
+# Copyright 2016 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+./autogen.sh --without-cython --enable-debug
+make -j$(nproc) clean
+make -j$(nproc) all
+
+for fuzzer in bplist_fuzzer xplist_fuzzer; do
+  $CXX $CXXFLAGS -std=c++11 -Iinclude/ \
+      fuzz/$fuzzer.cc -o $OUT/$fuzzer \
+      $LIB_FUZZING_ENGINE src/.libs/libplist-2.0.a
+done
+
+zip -j $OUT/bplist_fuzzer_seed_corpus.zip test/data/*.bplist
+zip -j $OUT/xplist_fuzzer_seed_corpus.zip test/data/*.plist
+
+cp fuzz/*.dict fuzz/*.options $OUT/
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `src/xplist.c`
+
+~~~~diff
+diff --git a/src/xplist.c b/src/xplist.c
+--- a/src/xplist.c
++++ b/src/xplist.c
+@@ -110,13 +110,13 @@ static size_t dtostr(char *buf, size_t bufsize, double realval)
+         len = snprintf(buf, bufsize, "%cinfinity", (realval > 0.0) ? '+' : '-');
+     } else if (realval == 0.0f) {
+         len = snprintf(buf, bufsize, "0.0");
+     } else {
+         size_t i = 0;
+         len = snprintf(buf, bufsize, "%.*g", 17, realval);
+-        for (i = 0; i < len; i++) {
++        for (i = 0; buf && i < len; i++) {
+             if (buf[i] == ',') {
+                 buf[i] = '.';
+                 break;
+             } else if (buf[i] == '.') {
+                 break;
+             }
+@@ -476,13 +476,13 @@ static void node_estimate_size(node_t *node, uint64_t *size, uint32_t depth)
+             } else {
+                 *size += num_digits_i((int64_t)data->intval);
+             }
+             *size += (XPLIST_INT_LEN << 1) + 6;
+             break;
+         case PLIST_REAL:
+-            *size += num_digits_i((int64_t)data->realval) + 7;
++            *size += dtostr(NULL, 0, data->realval);
+             *size += (XPLIST_REAL_LEN << 1) + 6;
+             break;
+         case PLIST_DATE:
+             *size += 20; /* YYYY-MM-DDThh:mm:ssZ */
+             *size += (XPLIST_DATE_LEN << 1) + 6;
+             break;
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C064","gap_exists":true,"gap_type":["serialization entry point","size-estimation state","floating-point input semantics"],"confidence":98,"affected_functions":["node_estimate_size","dtostr"],"reason":"H0 only parses inputs through plist_from_bin or plist_from_xml and then calls plist_free. It never exercises the serialization-side PLIST_REAL path in node_estimate_size, where S1 now calls dtostr(NULL, 0, data->realval). This size-only null-buffer protocol and its floating-point formatting behavior are therefore materially uncovered.","evidence":["bplist_fuzzer.cc calls only plist_from_bin followed by plist_free.","xplist_fuzzer.cc calls only plist_from_xml followed by plist_free.","The S1 change replaces the PLIST_REAL estimate in node_estimate_size with dtostr(NULL, 0, data->realval).","dtostr was changed to guard buffer access with `buf && i < len`, specifically enabling a NULL output buffer during size calculation.","PLIST_REAL values have distinct dtostr branches for infinity, zero, and general formatted values, none of which H0 drives through node_estimate_size."],"recommended_action":"Add a fuzz target or round-trip phase that sends plist trees containing PLIST_REAL nodes through the XML serialization path that invokes node_estimate_size and dtostr, covering finite values, very small and large values, signed zero, infinities, and size-only versus actual-output behavior."}
+tokens used
+5,275

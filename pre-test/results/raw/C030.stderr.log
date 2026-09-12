@@ -1,0 +1,397 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-blind-run-40ko0e9q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0854f-bba7-79d1-a75a-733d298b457f
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C030
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `c/fuzz/decode_fuzzer.c`
+
+~~~~c
+// Copyright 2015 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#include <brotli/decode.h>
+
+// Entry point for LibFuzzer.
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  size_t addend = 0;
+  if (size > 0)
+    addend = data[size - 1] & 7;
+  const uint8_t* next_in = data;
+
+  const int kBufferSize = 1024;
+  uint8_t* buffer = (uint8_t*) malloc(kBufferSize);
+  if (!buffer) {
+    // OOM is out-of-scope here.
+    return 0;
+  }
+  /* The biggest "magic number" in brotli is 16MiB - 16, so no need to check
+     the cases with much longer output. */
+  const size_t total_out_limit = (addend == 0) ? (1 << 26) : (1 << 24);
+  size_t total_out = 0;
+
+  BrotliDecoderState* state = BrotliDecoderCreateInstance(0, 0, 0);
+
+  if (addend == 0)
+    addend = size;
+  /* Test both fast (addend == size) and slow (addend <= 7) decoding paths. */
+  for (size_t i = 0; i < size;) {
+    size_t next_i = i + addend;
+    if (next_i > size)
+      next_i = size;
+    size_t avail_in = next_i - i;
+    i = next_i;
+    BrotliDecoderResult result = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
+    while (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
+      size_t avail_out = kBufferSize;
+      uint8_t* next_out = buffer;
+      result = BrotliDecoderDecompressStream(
+          state, &avail_in, &next_in, &avail_out, &next_out, &total_out);
+      if (total_out > total_out_limit)
+        break;
+    }
+    if (total_out > total_out_limit)
+      break;
+    if (result != BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT)
+      break;
+  }
+
+  BrotliDecoderDestroyInstance(state);
+  free(buffer);
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/brotli/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+
+cmake . -DBUILD_TESTING=OFF
+make clean
+make -j$(nproc) brotlidec-static
+
+$CC $CFLAGS -c -std=c99 -I. -I./c/include c/fuzz/decode_fuzzer.c 
+
+$CXX $CXXFLAGS ./decode_fuzzer.o  -o $OUT/decode_fuzzer \
+    $LIB_FUZZING_ENGINE ./libbrotlidec-static.a ./libbrotlicommon-static.a
+
+cp java/org/brotli/integration/fuzz_data.zip $OUT/decode_fuzzer_seed_corpus.zip
+chmod a-x $OUT/decode_fuzzer_seed_corpus.zip # we will try to run it otherwise
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `c/common/context.h`
+- `c/common/platform.h`
+- `c/common/transform.c`
+- `c/common/transform.h`
+- `c/dec/decode.c`
+- `c/dec/huffman.h`
+- `c/enc/compress_fragment_two_pass.c`
+- `c/enc/encode.c`
+- `c/enc/encoder_dict.c`
+- `c/enc/encoder_dict.h`
+- `c/enc/fast_log.h`
+- `c/enc/hash_composite_inc.h`
+- `c/enc/hash_longest_match64_inc.h`
+- `c/enc/hash_rolling_inc.h`
+- `c/enc/params.h`
+- `c/enc/utf8_util.c`
+- `research/dictionary_generator.cc`
+- `research/durchschlag.cc`
+- `research/durchschlag.h`
+- `research/sieve.cc`
+- `research/sieve.h`
+
+~~~~diff
+diff --git a/c/common/context.h b/c/common/context.h
+old mode 100755
+new mode 100644
+diff --git a/c/common/platform.h b/c/common/platform.h
+old mode 100755
+new mode 100644
+diff --git a/c/common/transform.c b/c/common/transform.c
+old mode 100755
+new mode 100644
+diff --git a/c/common/transform.h b/c/common/transform.h
+old mode 100755
+new mode 100644
+diff --git a/c/dec/decode.c b/c/dec/decode.c
+--- a/c/dec/decode.c
++++ b/c/dec/decode.c
+@@ -272,13 +272,14 @@ static BrotliDecoderErrorCode BROTLI_NOINLINE DecodeMetaBlockLength(
+         i = s->loop_counter;
+         for (; i < (int)s->size_nibbles; ++i) {
+           if (!BrotliSafeReadBits(br, 4, &bits)) {
+             s->loop_counter = i;
+             return BROTLI_DECODER_NEEDS_MORE_INPUT;
+           }
+-          if (i + 1 == (int)s->size_nibbles && s->size_nibbles > 4 && bits == 0) {
++          if (i + 1 == (int)s->size_nibbles && s->size_nibbles > 4 &&
++              bits == 0) {
+             return BROTLI_FAILURE(BROTLI_DECODER_ERROR_FORMAT_EXUBERANT_NIBBLE);
+           }
+           s->meta_block_remaining_len |= (int)(bits << (i * 4));
+         }
+         s->substate_metablock_header =
+             BROTLI_STATE_METABLOCK_HEADER_UNCOMPRESSED;
+@@ -321,13 +322,14 @@ static BrotliDecoderErrorCode BROTLI_NOINLINE DecodeMetaBlockLength(
+         i = s->loop_counter;
+         for (; i < (int)s->size_nibbles; ++i) {
+           if (!BrotliSafeReadBits(br, 8, &bits)) {
+             s->loop_counter = i;
+             return BROTLI_DECODER_NEEDS_MORE_INPUT;
+           }
+-          if (i + 1 == (int)s->size_nibbles && s->size_nibbles > 1 && bits == 0) {
++          if (i + 1 == (int)s->size_nibbles && s->size_nibbles > 1 &&
++              bits == 0) {
+             return BROTLI_FAILURE(
+                 BROTLI_DECODER_ERROR_FORMAT_EXUBERANT_META_NIBBLE);
+           }
+           s->meta_block_remaining_len |= (int)(bits << (i * 8));
+         }
+         ++s->meta_block_remaining_len;
+diff --git a/c/dec/huffman.h b/c/dec/huffman.h
+--- a/c/dec/huffman.h
++++ b/c/dec/huffman.h
+@@ -80,13 +80,13 @@ static BROTLI_INLINE HuffmanCode ConstructHuffmanCode(const uint8_t bits,
+ #else /* BROTLI_HUFFMAN_CODE_FAST_LOAD */
+ 
+ typedef BROTLI_ALIGNED(4) uint32_t HuffmanCode;
+ 
+ static BROTLI_INLINE HuffmanCode ConstructHuffmanCode(const uint8_t bits,
+     const uint16_t value) {
+-  return ((value & 0xFFFF) << 16) | (bits & 0xFF);
++  return (HuffmanCode) ((value & 0xFFFF) << 16) | (bits & 0xFF);
+ }
+ 
+ #define BROTLI_HC_MARK_TABLE_FOR_FAST_LOAD(H) uint32_t __fastload_##H = (*H)
+ #define BROTLI_HC_ADJUST_TABLE_INDEX(H, V) H += (V); __fastload_##H = (*H)
+ 
+ /* These must be given a HuffmanCode pointer! */
+diff --git a/c/enc/compress_fragment_two_pass.c b/c/enc/compress_fragment_two_pass.c
+--- a/c/enc/compress_fragment_two_pass.c
++++ b/c/enc/compress_fragment_two_pass.c
+@@ -521,13 +521,13 @@ static void StoreCommands(MemoryManager* m,
+ #define MIN_RATIO 0.98
+ #define SAMPLE_RATE 43
+ 
+ static BROTLI_BOOL ShouldCompress(
+     const uint8_t* input, size_t input_size, size_t num_literals) {
+   double corpus_size = (double)input_size;
+-  if (num_literals < MIN_RATIO * corpus_size) {
++  if ((double)num_literals < MIN_RATIO * corpus_size) {
+     return BROTLI_TRUE;
+   } else {
+     uint32_t literal_histo[256] = { 0 };
+     const double max_total_bit_cost = corpus_size * 8 * MIN_RATIO / SAMPLE_RATE;
+     size_t i;
+     for (i = 0; i < input_size; i += SAMPLE_RATE) {
+diff --git a/c/enc/encode.c b/c/enc/encode.c
+--- a/c/enc/encode.c
++++ b/c/enc/encode.c
+@@ -513,13 +513,13 @@ static void DecideOverLiteralContextModeling(const uint8_t* input,
+ static BROTLI_BOOL ShouldCompress(
+     const uint8_t* data, const size_t mask, const uint64_t last_flush_pos,
+     const size_t bytes, const size_t num_literals, const size_t num_commands) {
+   /* TODO: find more precise minimal block overhead. */
+   if (bytes <= 2) return BROTLI_FALSE;
+   if (num_commands < (bytes >> 8) + 2) {
+-    if (num_literals > 0.99 * (double)bytes) {
++    if ((double)num_literals > 0.99 * (double)bytes) {
+       uint32_t literal_histo[256] = { 0 };
+       static const uint32_t kSampleRate = 13;
+       static const double kMinEntropy = 7.92;
+       const double bit_cost_threshold =
+           (double)bytes * kMinEntropy / kSampleRate;
+       size_t t = (bytes + kSampleRate - 1) / kSampleRate;
+@@ -1683,14 +1683,16 @@ static BROTLI_BOOL BrotliEncoderCompressStreamFast(
+       } else {
+         BrotliCompressFragmentTwoPass(m, *next_in, block_size, is_last,
+             command_buf, literal_buf, table, table_size,
+             &storage_ix, storage);
+         if (BROTLI_IS_OOM(m)) return BROTLI_FALSE;
+       }
+-      *next_in += block_size;
+-      *available_in -= block_size;
++      if (block_size != 0) {
++        *next_in += block_size;
++        *available_in -= block_size;
++      }
+       if (inplace) {
+         size_t out_bytes = storage_ix >> 3;
+         BROTLI_DCHECK(out_bytes <= *available_out);
+         BROTLI_DCHECK((storage_ix & 7) == 0 || out_bytes < *available_out);
+         *next_out += out_bytes;
+         *available_out -= out_bytes;
+diff --git a/c/enc/encoder_dict.c b/c/enc/encoder_dict.c
+old mode 100755
+new mode 100644
+diff --git a/c/enc/encoder_dict.h b/c/enc/encoder_dict.h
+old mode 100755
+new mode 100644
+diff --git a/c/enc/fast_log.h b/c/enc/fast_log.h
+--- a/c/enc/fast_log.h
++++ b/c/enc/fast_log.h
+@@ -29,13 +29,13 @@ static BROTLI_INLINE uint32_t Log2FloorNonZero(size_t n) {
+ }
+ 
+ /* A lookup table for small values of log2(int) to be used in entropy
+    computation.
+ 
+    ", ".join(["%.16ff" % x for x in [0.0]+[log2(x) for x in range(1, 256)]]) */
+-static const float kLog2Table[] = {
++static const double kLog2Table[] = {
+   0.0000000000000000f, 0.0000000000000000f, 1.0000000000000000f,
+   1.5849625007211563f, 2.0000000000000000f, 2.3219280948873622f,
+   2.5849625007211561f, 2.8073549220576042f, 3.0000000000000000f,
+   3.1699250014423126f, 3.3219280948873626f, 3.4594316186372978f,
+   3.5849625007211565f, 3.7004397181410922f, 3.8073549220576037f,
+   3.9068905956085187f, 4.0000000000000000f, 4.0874628412503400f,
+@@ -120,14 +120,15 @@ static const float kLog2Table[] = {
+   7.9772799234999168f, 7.9829935746943104f, 7.9886846867721664f,
+   7.9943534368588578f
+ };
+ 
+ /* Visual Studio 2012 and Android API levels < 18 do not have the log2()
+  * function defined, so we use log() and a multiplication instead. */
+-#ifndef BROTLI_HAVE_LOG2
+-#if ((defined(_MSC_VER) && _MSC_VER <= 1700) || (defined(__ANDROID_API__) && __ANDROID_API__ < 18))
++#if !defined(BROTLI_HAVE_LOG2)
++#if ((defined(_MSC_VER) && _MSC_VER <= 1700) || \
++     (defined(__ANDROID_API__) && __ANDROID_API__ < 18))
+ #define BROTLI_HAVE_LOG2 0
+ #else
+ #define BROTLI_HAVE_LOG2 1
+ #endif
+ #endif
+ 
+diff --git a/c/enc/hash_composite_inc.h b/c/enc/hash_composite_inc.h
+old mode 100755
+new mode 100644
+diff --git a/c/enc/hash_longest_match64_inc.h b/c/enc/hash_longest_match64_inc.h
+--- a/c/enc/hash_longest_match64_inc.h
++++ b/c/enc/hash_longest_match64_inc.h
+@@ -112,14 +112,14 @@ static BROTLI_INLINE void FN(Store)(
+   uint16_t* BROTLI_RESTRICT num = self->num_;
+   uint32_t* BROTLI_RESTRICT buckets = self->buckets_;
+   const uint32_t key = FN(HashBytes)(&data[ix & mask], self->hash_mask_,
+                                      self->hash_shift_);
+   const size_t minor_ix = num[key] & self->block_mask_;
+   const size_t offset = minor_ix + (key << self->block_bits_);
+-  buckets[offset] = (uint32_t)ix;
+   ++num[key];
++  buckets[offset] = (uint32_t)ix;
+ }
+ 
+ static BROTLI_INLINE void FN(StoreRange)(HashLongestMatch* BROTLI_RESTRICT self,
+     const uint8_t* BROTLI_RESTRICT data, const size_t mask,
+     const size_t ix_start, const size_t ix_end) {
+   size_t i;
+diff --git a/c/enc/hash_rolling_inc.h b/c/enc/hash_rolling_inc.h
+old mode 100755
+new mode 100644
+diff --git a/c/enc/params.h b/c/enc/params.h
+old mode 100755
+new mode 100644
+diff --git a/c/enc/utf8_util.c b/c/enc/utf8_util.c
+--- a/c/enc/utf8_util.c
++++ b/c/enc/utf8_util.c
+@@ -74,12 +74,12 @@ BROTLI_BOOL BrotliIsMostlyUTF8(
+     int symbol;
+     size_t bytes_read =
+         BrotliParseAsUTF8(&symbol, &data[(pos + i) & mask], length - i);
+     i += bytes_read;
+     if (symbol < 0x110000) size_utf8 += bytes_read;
+   }
+-  return TO_BROTLI_BOOL(size_utf8 > min_fraction * (double)length);
++  return TO_BROTLI_BOOL((double)size_utf8 > min_fraction * (double)length);
+ }
+ 
+ #if defined(__cplusplus) || defined(c_plusplus)
+ }  /* extern "C" */
+ #endif
+diff --git a/research/dictionary_generator.cc b/research/dictionary_generator.cc
+old mode 100755
+new mode 100644
+diff --git a/research/durchschlag.cc b/research/durchschlag.cc
+old mode 100755
+new mode 100644
+diff --git a/research/durchschlag.h b/research/durchschlag.h
+old mode 100755
+new mode 100644
+diff --git a/research/sieve.cc b/research/sieve.cc
+old mode 100755
+new mode 100644
+diff --git a/research/sieve.h b/research/sieve.h
+old mode 100755
+new mode 100644
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C030","maintenance_needed":false,"confidence":99,"change_types":["formatting and file-mode cleanup","type-cast and numeric-type corrections","decoder-internal implementation fix","encoder-internal implementation fixes"],"affected_functions":["DecodeMetaBlockLength","ConstructHuffmanCode","ShouldCompress","BrotliEncoderCompressStreamFast","Log2FloorNonZero","Store","BrotliIsMostlyUTF8"],"reason":"No fuzz-harness maintenance need is introduced. The only decoder changes exercised by this harness are formatting in DecodeMetaBlockLength and an internal cast in ConstructHuffmanCode; neither changes the decoder entry point, protocol, initialization, state requirements, configuration, or input constraints. The remaining behavioral changes are confined to encoder internals, which are outside this decoder-only harness's established scope, and do not constitute a new decoder feature or entry point requiring adaptation.","evidence":["The harness still creates a BrotliDecoderState with BrotliDecoderCreateInstance(0, 0, 0), feeds arbitrary bytes incrementally to BrotliDecoderDecompressStream, and destroys the state with BrotliDecoderDestroyInstance.","The DecodeMetaBlockLength diff only wraps existing exuberant-nibble conditions across lines; its logic is unchanged.","ConstructHuffmanCode adds an explicit HuffmanCode cast without changing its signature, callers, or externally controlled inputs.","Changes in BrotliEncoderCompressStreamFast, encoder ShouldCompress functions, hash storage, logging tables, and UTF-8 detection are encoder-side internals; the existing target and build wiring explicitly fuzz and link the decoder path.","No new public API, decoder option, required initialization, state transition, configuration, or restricted input format appears in the supplied diff."],"recommended_action":"Keep the existing decode harness unchanged; no maintenance is warranted by this commit."}
+tokens used
+18,453

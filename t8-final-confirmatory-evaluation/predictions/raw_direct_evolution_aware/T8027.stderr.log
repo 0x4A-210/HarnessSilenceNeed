@@ -1,0 +1,731 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-direct_evolution_aware-T8027-v6oj9juc
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a09404-227a-78b1-85c6-826de69a1ea4
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8027
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `fuzz/fuzz_implementations.cpp`
+
+~~~~cpp
+/*
+ * For fuzzing all of the implementations (haswell/fallback/westmere),
+ * finding any difference between the output of each which would
+ * indicate inconsistency. Also, it gets the non-default backend
+ * some fuzzing love.
+ *
+ * Copyright Paul Dreik 20200909 for the simdjson project.
+ */
+
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <string>
+#include <array>
+
+
+// store each implementation along with it's intermediate results,
+// which would make things easier to debug in case this fuzzer ever
+// catches anything
+struct Impl {
+    explicit Impl(const simdjson::implementation* im=nullptr) : impl(im),parser(),element(),error(),output(){}
+    //silence -Weffc++
+    Impl(const Impl&)=delete;
+    Impl& operator=(const Impl&)=delete;
+
+    const simdjson::implementation* impl;
+    simdjson::dom::parser parser;
+    simdjson::dom::element element;
+    simdjson::error_code error;
+    std::string output;
+};
+
+template<class Iterator>
+void showErrorAndAbort(Iterator first, Iterator last) {
+    auto it=first;
+    while(it!=last) {
+        std::cerr<<"Implementation: "<<it->impl->name()<<"\tError:"<<it->error<<'\n';
+        it++;
+    }
+    std::cerr.flush();
+    std::abort();
+}
+
+template<class Iterator>
+void showOutputAndAbort(Iterator first, Iterator last) {
+
+    for(auto it=first;it!=last;++it) {
+        std::cerr<<"Implementation: "<<it->impl->name()<<"\tOutput: "<<it->output<<'\n';
+    }
+
+    // show the pairwise results
+    for(auto it1=first; it1!=last; ++it1) {
+        for(auto it2=it1; it2!=last; ++it2) {
+            if(it1!=it2) {
+                const bool matches=(it1->output==it2->output);
+                std::cerr<<"Implementation "<<it1->impl->name()<<" and "<<it2->impl->name()<<(matches?" match.":" do NOT match.")<<'\n';
+            }
+        }
+    }
+    std::cerr.flush();
+    std::abort();
+}
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+
+    // make this dynamic, so it works regardless of how it was compiled
+    // or what hardware it runs on
+    constexpr std::size_t Nimplementations_max=3;
+    const std::size_t Nimplementations=simdjson::available_implementations.size();
+    if(Nimplementations>Nimplementations_max) {
+        //there is another backend added, please bump Nimplementations_max!
+        std::abort();
+    }
+
+    // get pointers to the backend implementation
+    std::array<Impl,Nimplementations_max> implementations;
+    {
+        std::size_t i=0;
+        for(auto& e: simdjson::available_implementations) {
+            implementations[i++].impl=e;
+        }
+    }
+
+    // let each implementation parse and store the result
+    std::size_t nerrors=0;
+    for(std::size_t i=0; i<Nimplementations; ++i) {
+        auto& e=implementations[i];
+        simdjson::active_implementation=e.impl;
+        e.error=e.parser.parse(Data,Size).get(e.element);
+        if(e.error) {
+            ++nerrors;
+        } else {
+            std::ostringstream oss;
+            oss<<e.element;
+            e.output=oss.str();
+        }
+    }
+
+    //we should either have no errors, or all should error
+    if(nerrors!=0) {
+        if(nerrors!=Nimplementations) {
+            showErrorAndAbort(implementations.begin(),
+                              implementations.begin()+Nimplementations);
+        }
+        return 0;
+    }
+
+    //parsing went well for all. compare the output against the first.
+    const std::string& reference=implementations[0].output;
+    for(std::size_t i=1; i<Nimplementations; ++i) {
+        if(implementations[i].output!=reference) {
+            showOutputAndAbort(implementations.begin(),
+                              implementations.begin()+Nimplementations);
+        }
+    }
+
+    //all is well
+    return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_minifyimpl.cpp`
+
+~~~~cpp
+/*
+ * Minifies using the minify() function directly, without parsing.
+ *
+ * For fuzzing all of the implementations (haswell/fallback/westmere),
+ * finding any difference between the output of each which would
+ * indicate inconsistency. Also, it gets the non-default backend
+ * some fuzzing love.
+ *
+ * Copyright Paul Dreik 20200912 for the simdjson project.
+ */
+
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdlib>
+#include <vector>
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+
+    using Buffer=std::vector<uint8_t>;
+    auto minify=[Data,Size](const simdjson::implementation* impl) -> Buffer {
+        Buffer ret(Size);
+        std::size_t retsize=0;
+        auto err=impl->minify(Data,Size,ret.data(),retsize);
+        if(err) {
+            std::string tmp = error_message(err);
+            ret.assign(tmp.begin(),tmp.end());
+        } else {
+            assert(retsize<=Size && "size should not grow by minimize()!");
+            ret.resize(retsize);
+        }
+        return ret;
+    };
+
+
+    auto first=simdjson::available_implementations.begin();
+    auto last=simdjson::available_implementations.end();
+
+    //make sure there is an implementation
+    assert(first!=last);
+
+    const auto reference=minify(*first);
+
+    bool failed=false;
+    for(auto it=first+1;it!=last; ++it) {
+        const auto current=minify(*it);
+        if(current!=reference) {
+            failed=true;
+        }
+    }
+
+    if(failed) {
+        std::cerr<<std::boolalpha<<"Mismatch between implementations of minify() found:\n";
+        for(auto it=first;it!=last; ++it) {
+            const auto current=minify(*it);
+            std::string tmp(current.begin(),current.end());
+            std::cerr<<(*it)->name()<<" returns "<<tmp<<std::endl;
+        }
+        std::abort();
+    }
+
+    //all is well
+    return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_utf8.cpp`
+
+~~~~cpp
+/*
+ * For fuzzing all of the implementations (haswell/fallback/westmere),
+ * finding any difference between the output of each which would
+ * indicate inconsistency. Also, it gets the non-default backend
+ * some fuzzing love.
+ *
+ * Copyright Paul Dreik 20200912 for the simdjson project.
+ */
+
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdlib>
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+
+    auto utf8verify=[Data,Size](const simdjson::implementation* impl) -> bool {
+        return impl->validate_utf8((const char*)Data,Size);
+    };
+
+
+    auto first=simdjson::available_implementations.begin();
+    auto last=simdjson::available_implementations.end();
+
+    //make sure there is an implementation
+    assert(first!=last);
+
+    const bool reference=utf8verify(*first);
+
+    bool failed=false;
+    for(auto it=first+1;it!=last; ++it) {
+        const bool current=utf8verify(*it);
+        if(current!=reference) {
+            failed=true;
+        }
+    }
+
+    if(failed) {
+        std::cerr<<std::boolalpha<<"Mismatch between implementations of validate_utf8() found:\n";
+        for(auto it=first;it!=last; ++it) {
+            const bool current=utf8verify(*it);
+            std::cerr<<(*it)->name()<<" returns "<<current<<std::endl;
+        }
+        std::abort();
+    }
+
+    //all is well
+    return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/include/simdjson/implementation.h b/include/simdjson/implementation.h
+index 380f49de..64d1a47b 100644
+--- a/include/simdjson/implementation.h
++++ b/include/simdjson/implementation.h
+@@ -53,74 +53,84 @@ class implementation {
+ public:
+ 
+   /**
+    * The name of this implementation.
+    *
+    *     const implementation *impl = simdjson::active_implementation;
+    *     cout << "simdjson is optimized for " << impl->name() << "(" << impl->description() << ")" << endl;
+    *
+    * @return the name of the implementation, e.g. "haswell", "westmere", "arm64"
+    */
+   virtual const std::string &name() const { return _name; }
+ 
+   /**
+    * The description of this implementation.
+    *
+    *     const implementation *impl = simdjson::active_implementation;
+    *     cout << "simdjson is optimized for " << impl->name() << "(" << impl->description() << ")" << endl;
+    *
+    * @return the name of the implementation, e.g. "haswell", "westmere", "arm64"
+    */
+   virtual const std::string &description() const { return _description; }
++  
++  /**
++   * The instruction sets this implementation is compiled against
++   * and the current CPU match. This function may poll the current CPU/system
++   * and should therefore not be called too often if performance is a concern.
++   * 
++   *
++   * @return true if the implementation can be safely used on the current system (determined at runtime)
++   */
++  bool supported_by_runtime_system() const;
+ 
+   /**
+    * @private For internal implementation use
+    *
+    * The instruction sets this implementation is compiled against.
+    *
+    * @return a mask of all required `instruction_set` values
+    */
+   virtual uint32_t required_instruction_sets() const { return _required_instruction_sets; };
+ 
+   /**
+    * @private For internal implementation use
+    *
+    *     const implementation *impl = simdjson::active_implementation;
+    *     cout << "simdjson is optimized for " << impl->name() << "(" << impl->description() << ")" << endl;
+    *
+    * @param capacity The largest document that will be passed to the parser.
+    * @param max_depth The maximum JSON object/array nesting this parser is expected to handle.
+    * @param dst The place to put the resulting parser implementation.
+    * @return the name of the implementation, e.g. "haswell", "westmere", "arm64"
+    */
+   virtual error_code create_dom_parser_implementation(
+     size_t capacity,
+     size_t max_depth,
+     std::unique_ptr<internal::dom_parser_implementation> &dst
+   ) const noexcept = 0;
+ 
+   /**
+    * @private For internal implementation use
+    *
+    * Minify the input string assuming that it represents a JSON string, does not parse or validate.
+    *
+    * Overridden by each implementation.
+    *
+    * @param buf the json document to minify.
+    * @param len the length of the json document.
+    * @param dst the buffer to write the minified document to. *MUST* be allocated up to len + SIMDJSON_PADDING bytes.
+    * @param dst_len the number of bytes written. Output only.
+    * @return the error code, or SUCCESS if there was no error.
+    */
+   SIMDJSON_WARN_UNUSED virtual error_code minify(const uint8_t *buf, size_t len, uint8_t *dst, size_t &dst_len) const noexcept = 0;
+   
+   
+   /**   
+    * Validate the UTF-8 string.
+    *
+    * Overridden by each implementation.
+    *
+    * @param buf the string to validate.
+    * @param len the length of the string in bytes.
+    * @return true if and only if the string is valid UTF-8.
+    */
+   SIMDJSON_WARN_UNUSED virtual bool validate_utf8(const char *buf, size_t len) const noexcept = 0;
+@@ -166,43 +176,44 @@ class available_implementation_list {
+ public:
+   /** Get the list of available implementations compiled into simdjson */
+   simdjson_really_inline available_implementation_list() {}
+   /** Number of implementations */
+   size_t size() const noexcept;
+   /** STL const begin() iterator */
+   const implementation * const *begin() const noexcept;
+   /** STL const end() iterator */
+   const implementation * const *end() const noexcept;
+ 
+   /**
+    * Get the implementation with the given name.
+    *
+    * Case sensitive.
+    *
+    *     const implementation *impl = simdjson::available_implementations["westmere"];
+    *     if (!impl) { exit(1); }
++   *     if (!imp->supported_by_runtime_system()) { exit(1); }
+    *     simdjson::active_implementation = impl;
+    *
+    * @param name the implementation to find, e.g. "westmere", "haswell", "arm64"
+    * @return the implementation, or nullptr if the parse failed.
+    */
+   const implementation * operator[](const std::string_view &name) const noexcept {
+     for (const implementation * impl : *this) {
+       if (impl->name() == name) { return impl; }
+     }
+     return nullptr;
+   }
+ 
+   /**
+    * Detect the most advanced implementation supported by the current host.
+    *
+    * This is used to initialize the implementation on startup.
+    *
+    *     const implementation *impl = simdjson::available_implementation::detect_best_supported();
+    *     simdjson::active_implementation = impl;
+    *
+    * @return the most advanced supported implementation for the current host, or an
+    *         implementation that returns UNSUPPORTED_ARCHITECTURE if there is no supported
+    *         implementation. Will never return nullptr.
+    */
+   const implementation *detect_best_supported() const noexcept;
+ };
+diff --git a/src/implementation.cpp b/src/implementation.cpp
+index b3ae9da8..a7819e23 100644
+--- a/src/implementation.cpp
++++ b/src/implementation.cpp
+@@ -30,6 +30,13 @@ namespace simdjson { namespace internal { const fallback::implementation fallbac
+ #endif // SIMDJSON_IMPLEMENTATION_FALLBACK
+ 
+ namespace simdjson {
++
++bool implementation::supported_by_runtime_system() const {
++  uint32_t required_instruction_sets = this->required_instruction_sets();
++  uint32_t supported_instruction_sets = detect_supported_architectures();
++  return ((supported_instruction_sets & required_instruction_sets) == required_instruction_sets);
++}
++
+ namespace internal {
+ 
+ /**
+diff --git a/tools/json2json.cpp b/tools/json2json.cpp
+index 8b62299f..9e96e2b6 100644
+--- a/tools/json2json.cpp
++++ b/tools/json2json.cpp
+@@ -9,65 +9,69 @@ SIMDJSON_PUSH_DISABLE_ALL_WARNINGS
+ #include "cxxopts.hpp"
+ SIMDJSON_POP_DISABLE_WARNINGS
+ 
++#if CXXOPTS__VERSION_MAJOR < 3 
+ int main(int argc, char *argv[]) {
++#else
++int main(int argc, const char *argv[]) {
++#endif
+ #ifdef __cpp_exceptions
+   try {
+ #endif
+   std::string progName = "json2json";
+ 
+   std::string progUsage = "json2json version ";
+   progUsage += STRINGIFY(SIMDJSON_VERSION);
+   progUsage += " (";
+   progUsage += simdjson::active_implementation->name();
+   progUsage += ")\n";
+   progUsage += "Reads json in, out the result of the parsing.\n";
+   progUsage += argv[0];
+   progUsage += " <jsonfile>\n";
+ 
+   cxxopts::Options options(progName, progUsage);
+ 
+   options.add_options()
+   	("d,rawdump", "Dumps the raw content of the tape.", cxxopts::value<bool>()->default_value("false"))
+   	("f,file", "File name.", cxxopts::value<std::string>())
+   	("h,help", "Print usage.")
+   ;
+ 
+   // the first argument without an option name will be parsed into file
+   options.parse_positional({"file"});
+   auto result = options.parse(argc, argv);
+ 
+   if(result.count("help")) {
+   	std::cerr << options.help() << std::endl;
+   	return EXIT_SUCCESS;
+   }
+ 
+   bool rawdump = result["rawdump"].as<bool>();
+ 
+   if(!result.count("file")) {
+     std::cerr << "No filename specified." << std::endl;
+     std::cerr << options.help() << std::endl;
+     return EXIT_FAILURE;
+   }
+ 
+   const char *filename = result["file"].as<std::string>().c_str();
+ 
+   simdjson::dom::parser parser;
+   simdjson::dom::element doc;
+   auto error = parser.load(filename).get(doc); // do the parsing, return false on error
+   if (error) {
+     std::cerr << " Parsing failed. Error is '" << error << "'." << std::endl;
+     return EXIT_FAILURE;
+   }
+   if(rawdump) {
+     doc.dump_raw_tape(std::cout);
+   } else {
+     std::cout << doc;
+   }
+   return EXIT_SUCCESS;
+ #ifdef __cpp_exceptions
+   } catch (const cxxopts::OptionException& e) {
+     std::cout << "error parsing options: " << e.what() << std::endl;
+     return EXIT_FAILURE;
+   }
+ #endif
+ }
+diff --git a/tools/jsonstats.cpp b/tools/jsonstats.cpp
+index b7b27a27..da189a34 100644
+--- a/tools/jsonstats.cpp
++++ b/tools/jsonstats.cpp
+@@ -169,115 +169,118 @@ void recurse(simdjson::dom::element element, stat_t &s, size_t depth) {
+ stat_t simdjson_compute_stats(const simdjson::padded_string &p) {
+   stat_t s{};
+   simdjson::dom::parser parser;
+   simdjson::dom::element doc;
+   auto error = parser.parse(p).get(doc);
+   if (error) {
+     s.valid = false;
+     std::cerr << error << std::endl;
+     return s;
+   }
+   s.valid = true;
+   s.backslash_count =
+       count_backslash(reinterpret_cast<const uint8_t *>(p.data()), p.size());
+   s.non_ascii_byte_count = count_nonasciibytes(
+       reinterpret_cast<const uint8_t *>(p.data()), p.size());
+   s.byte_count = p.size();
+   s.structural_indexes_count = parser.implementation->n_structural_indexes;
+ 
+   //  simdjson::document::iterator iter(doc);
+   recurse(doc, s, 0);
+   return s;
+ }
+-
++#if CXXOPTS__VERSION_MAJOR < 3 
+ int main(int argc, char *argv[]) {
++#else
++int main(int argc, const char *argv[]) {
++#endif
+ #ifdef __cpp_exceptions
+   try {
+ #endif
+   std::string progName = "jsonstat";
+   std::string progUsage = "Reads json, prints stats.\n";
+   progUsage += argv[0];
+   progUsage += " <jsonfile>";
+ 
+   cxxopts::Options options(progName, progUsage);
+ 
+   options.add_options()
+     ("h,help", "Print usage.")
+     ("f,file", "File name.", cxxopts::value<std::string>())
+   ;
+ 
+   options.parse_positional({"file"});
+   auto result = options.parse(argc, argv);
+ 
+   if(result.count("help")) {
+     std::cerr << options.help() << std::endl;
+     return EXIT_SUCCESS;
+   }
+ 
+   if(!result.count("file")) {
+     std::cerr << "No filename specified." << std::endl;
+     std::cerr << options.help() << std::endl;
+     return EXIT_FAILURE;
+   }
+ 
+   const char *filename = result["file"].as<std::string>().c_str();
+ 
+   simdjson::padded_string p;
+   auto error = simdjson::padded_string::load(filename).get(p);
+   if (error) {
+     std::cerr << "Could not load the file " << filename << std::endl;
+     return EXIT_FAILURE;
+   }
+   stat_t s = simdjson_compute_stats(p);
+   if (!s.valid) {
+     std::cerr << "not a valid JSON" << std::endl;
+     return EXIT_FAILURE;
+   }
+   // Future work: the proper way to do the what follows would be to create
+   // a JSON object and then to serialize it.
+ 
+   printf(R"({
+       "integer_count"              = %10zu,
+       "integer32_count"            = %10zu,
+       "unsigned_integer32_count"   = %10zu,
+       "unsigned_integer_count"     = %10zu,
+       "float_count"                = %10zu,
+       "string_count"               = %10zu,
+       "string_byte_count"          = %10zu,
+       "ascii_string_count"         = %10zu,
+       "string_maximum_length"      = %10zu,
+       "backslash_count"            = %10zu,
+       "non_ascii_byte_count"       = %10zu,
+       "object_count"               = %10zu,
+       "maximum_object_size"        = %10zu,
+       "array_count"                = %10zu,
+       "maximum_array_size"         = %10zu,
+       "null_count"                 = %10zu,
+       "true_count"                 = %10zu,
+       "false_count"                = %10zu,
+       "byte_count"                 = %10zu,
+       "structural_indexes_count"   = %10zu,
+       "key_count"                  = %10zu,
+       "ascii_key_count"            = %10zu,
+       "key_maximum_length"         = %10zu,
+       "key_distinct_count"         = %10zu,
+       "repeated_key_distinct_count"= %10zu,
+       "repeated_key_byte_count"    = %10zu;
+       "maximum_depth"              = %10zu
+ }
+ )",
+          s.integer_count,s.integer32_count,s.unsigned_integer32_count,s.unsigned_integer_count,
+          s.float_count, s.string_count, s.string_byte_count, s.ascii_string_count,
+          s.string_maximum_length, s.backslash_count, s.non_ascii_byte_count,
+          s.object_count, s.maximum_object_size, s.array_count,
+          s.maximum_array_size, s.null_count, s.true_count, s.false_count,
+          s.byte_count, s.structural_indexes_count, s.key_count,
+          s.ascii_key_count, s.key_maximum_length, s.all_keys.size(), s.repeated_keys.size(),
+          s.repeated_key_byte_count, s.maximum_depth);
+   return EXIT_SUCCESS;
+ #ifdef __cpp_exceptions
+   } catch (const cxxopts::OptionException& e) {
+     std::cout << "error parsing options: " << e.what() << std::endl;
+     return EXIT_FAILURE;
+   }
+ #endif
+ }
+diff --git a/tools/minify.cpp b/tools/minify.cpp
+index 60698520..00af13dc 100644
+--- a/tools/minify.cpp
++++ b/tools/minify.cpp
+@@ -20,61 +20,71 @@ void usage(std::string message) {
+   std::cerr << options.help() << std::endl;
+ }
+ 
++#if CXXOPTS__VERSION_MAJOR < 3 
+ int main(int argc, char *argv[]) {
++#else
++int main(int argc, const char *argv[]) {
++#endif
+ #ifdef __cpp_exceptions
+   try {
+ #endif
+   std::stringstream ss;
+   ss << "Parser implementation (by default, detects the most advanced implementation supported on the host machine)."  << std::endl;
+   ss << "Available parser implementations:" << std::endl;
+   for (auto impl : simdjson::available_implementations) {
+-    ss << "-a " << std::left << std::setw(9) << impl->name() << " - Use the " << impl->description() << " parser implementation." << std::endl;
++    if(impl->supported_by_runtime_system()) {
++      ss << "-a " << std::left << std::setw(9) << impl->name() << " - Use the " << impl->description() << " parser implementation." << std::endl;
++    }
+   }
+   options.add_options()
+     ("a,arch", ss.str(), cxxopts::value<std::string>())
+     ("f,file", "File name.", cxxopts::value<std::string>())
+     ("h,help", "Print usage.")
+   ;
+ 
+   options.parse_positional({"file"});
+   auto result = options.parse(argc, argv);
+ 
+   if(result.count("help")) {
+     usage("");
+     return EXIT_SUCCESS;
+   }
+ 
+   if(!result.count("file")) {
+     usage("No filename specified.");
+     return EXIT_FAILURE;
+   }
+   if(result.count("arch")) {
+     const simdjson::implementation *impl = simdjson::available_implementations[result["arch"].as<std::string>().c_str()];
+     if(!impl) {
+       usage("Unsupported implementation.");
+       return EXIT_FAILURE;
+     }
++    if(!impl->supported_by_runtime_system()) {
++      usage("The selected implementation does not match your current CPU.");
++      return EXIT_FAILURE;
++    }
+     simdjson::active_implementation = impl;
+   }
+ 
+   std::string filename = result["file"].as<std::string>();
+ 
+   simdjson::padded_string p;
+   auto error = simdjson::padded_string::load(filename).get(p);
+   if (error) {
+     std::cerr << "Could not load the file " << filename << std::endl;
+     return EXIT_FAILURE;
+   }
+   simdjson::padded_string copy(p.length()); // does not need to be padded after all!
+   size_t copy_len;
+   error = simdjson::active_implementation->minify((const uint8_t*)p.data(), p.length(), (uint8_t*)copy.data(), copy_len);
+   if (error) { std::cerr << error << std::endl; return EXIT_FAILURE; }
+   printf("%s", copy.data());
+   return EXIT_SUCCESS;
+ #ifdef __cpp_exceptions
+   } catch (const cxxopts::OptionException& e) {
+     std::cout << "error parsing options: " << e.what() << std::endl;
+     return EXIT_FAILURE;
+   }
+ #endif
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8027","gap_exists":true,"gap_type":["API protocol","state","configuration"],"commit_induced":"NO","maintenance_needed":false,"confidence":93,"affected_functions":["LLVMFuzzerTestOneInput (fuzz/fuzz_implementations.cpp)","LLVMFuzzerTestOneInput (fuzz/fuzz_minifyimpl.cpp)","LLVMFuzzerTestOneInput (fuzz/fuzz_utf8.cpp)","simdjson::implementation::supported_by_runtime_system","main (tools/minify.cpp)"],"reason":"S1 exposes a runtime-support protocol that H0 does not observe: all three harnesses invoke every entry in simdjson::available_implementations without checking supported_by_runtime_system(), and fuzz_implementations.cpp also assigns each entry to simdjson::active_implementation. This can make harness execution depend on host CPU state. However, the gap was already present in S0: H0 already iterated all implementations while S0 already exposed required_instruction_sets() and detect_best_supported(), and the commit does not change parse(), minify(), validate_utf8(), backend availability, or H0's control of byte input. The commit merely adds a public convenience query and uses it for validation in tools/minify.cpp, so it does not introduce or materially aggravate the harness gap.","evidence":["implementation::supported_by_runtime_system() only compares required_instruction_sets() with detect_supported_architectures(); it introduces no fuzz-controlled input.","fuzz/fuzz_implementations.cpp iterates simdjson::available_implementations, sets simdjson::active_implementation=e.impl, and calls e.parser.parse(Data,Size) without a runtime-support check.","fuzz/fuzz_minifyimpl.cpp calls impl->minify(Data,Size,...) for every simdjson::available_implementations entry without a runtime-support check.","fuzz/fuzz_utf8.cpp calls impl->validate_utf8((const char*)Data,Size) for every simdjson::available_implementations entry without a runtime-support check.","S0 already declared required_instruction_sets() and available_implementation_list::detect_best_supported(), showing that runtime implementation suitability existed before this commit.","The production diff makes no changes to parser parsing, implementation::minify(), or implementation::validate_utf8(); H0 retains the same input reachability for those operations."],"recommended_action":"Do not attribute harness maintenance to this commit. Independently consider filtering backend iterations with implementation::supported_by_runtime_system() if the fuzzers must run safely across hosts with unsupported compiled implementations."}
+tokens used
+21,622

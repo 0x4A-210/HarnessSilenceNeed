@@ -1,0 +1,74 @@
+PROJECT simdjson
+COMMIT 85001c55fb678415922960171b27e4bd4cfa4ef5
+PARENT f785f76d983d778befbed3730c3e7d0c3a6983de
+SUBJECT Fixing UTF-8 validation under PPC64 (#1346)
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/include/simdjson/ppc64/simd.h b/include/simdjson/ppc64/simd.h
+index 2dd71341..51a0bd9e 100644
+--- a/include/simdjson/ppc64/simd.h
++++ b/include/simdjson/ppc64/simd.h
+@@ -395,7 +395,7 @@ template <> struct simd8<uint8_t> : base8_numeric<uint8_t> {
+ template <typename T> struct simd8x64 {
+   static constexpr int NUM_CHUNKS = 64 / sizeof(simd8<T>);
+   static_assert(NUM_CHUNKS == 4,
+-                "Westmere kernel should use four registers per 64-byte block.");
++                "PPC64 kernel should use four registers per 64-byte block.");
+   const simd8<T> chunks[NUM_CHUNKS];
+ 
+   simd8x64(const simd8x64<T> &o) = delete; // no copy allowed
+diff --git a/src/ppc64/dom_parser_implementation.cpp b/src/ppc64/dom_parser_implementation.cpp
+index d494ca99..b6118727 100644
+--- a/src/ppc64/dom_parser_implementation.cpp
++++ b/src/ppc64/dom_parser_implementation.cpp
+@@ -49,7 +49,8 @@ simdjson_really_inline json_character_block json_character_block::classify(const
+ }
+ 
+ simdjson_really_inline bool is_ascii(const simd8x64<uint8_t>& input) {
+-  return input.reduce_or().saturating_sub(0b10000000u).bits_not_set_anywhere();
++  // careful: 0x80 is not ascii.
++  return input.reduce_or().saturating_sub(0b01111111u).bits_not_set_anywhere();
+ }
+ 
+ simdjson_unused simdjson_really_inline simd8<bool> must_be_continuation(const simd8<uint8_t> prev1, const simd8<uint8_t> prev2, const simd8<uint8_t> prev3) {
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/fuzz/fuzz_utf8.cpp b/fuzz/fuzz_utf8.cpp
+index aceff250..397b39a1 100644
+--- a/fuzz/fuzz_utf8.cpp
++++ b/fuzz/fuzz_utf8.cpp
+@@ -12,6 +12,24 @@
+ #include <cstdlib>
+ #include "supported_implementations.h"
+ 
++extern "C" int VerboseTestOneInput(const uint8_t *Data, size_t Size) {
++    static const auto supported_implementations=get_runtime_supported_implementations();
++    for(size_t i = 0; i <= Size; i++) {
++        std::cout<<"size: "<<std::dec<<std::setw(8)<<i<<std::endl;
++        std::cout<<"Input: \"";
++        for(size_t j = 0; j < i; j++) {
++            std::cout<<"\\x"<<std::hex<<std::setw(2)<<std::setfill('0')<<uint32_t(Data[j]);
++        }
++        std::cout<<"\""<<std::endl;
++        for(const auto& e: supported_implementations) {
++            if(!e->supported_by_runtime_system()) { continue; }
++            const bool current=e->validate_utf8((const char*)Data,i);
++            std::cout<<e->name()<<" returns "<<current<<std::endl;
++        }
++        std::cout<<std::endl;
++    }
++    return 0;
++}
+ 
+ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+ 
+@@ -51,6 +69,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+         }
+         std::cerr << "\"" <<std::endl;
+ 
++        VerboseTestOneInput(Data, Size);
++
+         std::abort();
+     }
+ 

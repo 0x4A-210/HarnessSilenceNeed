@@ -1,0 +1,261 @@
+# Case ID
+
+C059
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `test/ossfuzz/json_load_dump_fuzzer.cc`
+
+~~~~cpp
+#include <stdint.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <inttypes.h>
+
+#include "jansson.h"
+
+static int enable_diags;
+
+#define FUZZ_DEBUG(FMT, ...)                                                  \
+        if (enable_diags)                                                     \
+        {                                                                     \
+          fprintf(stderr, FMT, ##__VA_ARGS__);                                \
+          fprintf(stderr, "\n");                                              \
+        }
+
+
+static int json_dump_counter(const char *buffer, size_t size, void *data)
+{
+  uint64_t *counter = reinterpret_cast<uint64_t *>(data);
+  *counter += size;
+  return 0;
+}
+
+
+#define NUM_COMMAND_BYTES  (sizeof(size_t) + sizeof(size_t) + 1)
+
+#define FUZZ_DUMP_CALLBACK 0x00
+#define FUZZ_DUMP_STRING   0x01
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+  json_error_t error;
+  unsigned char dump_mode;
+
+  // Enable or disable diagnostics based on the FUZZ_VERBOSE environment flag.
+  enable_diags = (getenv("FUZZ_VERBOSE") != NULL);
+
+  FUZZ_DEBUG("Input data length: %zd", size);
+
+  if (size < NUM_COMMAND_BYTES)
+  {
+    return 0;
+  }
+
+  // Use the first sizeof(size_t) bytes as load flags.
+  size_t load_flags = *(const size_t*)data;
+  data += sizeof(size_t);
+
+  FUZZ_DEBUG("load_flags: 0x%zx\n"
+             "& JSON_REJECT_DUPLICATES =  0x%zx\n"
+             "& JSON_DECODE_ANY =         0x%zx\n"
+             "& JSON_DISABLE_EOF_CHECK =  0x%zx\n"
+             "& JSON_DECODE_INT_AS_REAL = 0x%zx\n"
+             "& JSON_ALLOW_NUL =          0x%zx\n",
+             load_flags,
+             load_flags & JSON_REJECT_DUPLICATES,
+             load_flags & JSON_DECODE_ANY,
+             load_flags & JSON_DISABLE_EOF_CHECK,
+             load_flags & JSON_DECODE_INT_AS_REAL,
+             load_flags & JSON_ALLOW_NUL);
+
+  // Use the next sizeof(size_t) bytes as dump flags.
+  size_t dump_flags = *(const size_t*)data;
+  data += sizeof(size_t);
+
+  FUZZ_DEBUG("dump_flags: 0x%zx\n"
+             "& JSON_MAX_INDENT =     0x%zx\n"
+             "& JSON_COMPACT =        0x%zx\n"
+             "& JSON_ENSURE_ASCII =   0x%zx\n"
+             "& JSON_SORT_KEYS =      0x%zx\n"
+             "& JSON_PRESERVE_ORDER = 0x%zx\n"
+             "& JSON_ENCODE_ANY =     0x%zx\n"
+             "& JSON_ESCAPE_SLASH =   0x%zx\n"
+             "& JSON_REAL_PRECISION = 0x%zx\n"
+             "& JSON_EMBED =          0x%zx\n",
+             dump_flags,
+             dump_flags & JSON_MAX_INDENT,
+             dump_flags & JSON_COMPACT,
+             dump_flags & JSON_ENSURE_ASCII,
+             dump_flags & JSON_SORT_KEYS,
+             dump_flags & JSON_PRESERVE_ORDER,
+             dump_flags & JSON_ENCODE_ANY,
+             dump_flags & JSON_ESCAPE_SLASH,
+             ((dump_flags >> 11) & 0x1F) << 11,
+             dump_flags & JSON_EMBED);
+
+  // Use the next byte as the dump mode.
+  dump_mode = data[0];
+  data++;
+
+  FUZZ_DEBUG("dump_mode: 0x%x", (unsigned int)dump_mode);
+
+  // Remove the command bytes from the size total.
+  size -= NUM_COMMAND_BYTES;
+
+  // Attempt to load the remainder of the data with the given load flags.
+  const char* text = reinterpret_cast<const char *>(data);
+  json_t* jobj = json_loadb(text, size, load_flags, &error);
+
+  if (jobj == NULL)
+  {
+    return 0;
+  }
+
+  if (dump_mode & FUZZ_DUMP_STRING)
+  {
+    // Dump as a string. Remove indents so that we don't run out of memory.
+    char *out = json_dumps(jobj, dump_flags & ~JSON_MAX_INDENT);
+    if (out != NULL)
+    {
+      free(out);
+    }
+  }
+  else
+  {
+    // Default is callback mode.
+    //
+    // Attempt to dump the loaded json object with the given dump flags.
+    uint64_t counter = 0;
+
+    json_dump_callback(jobj, json_dump_counter, &counter, dump_flags);
+    FUZZ_DEBUG("Counter function counted %" PRIu64 " bytes.", counter);
+  }
+
+  if (jobj)
+  {
+    json_decref(jobj);
+  }
+
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/jansson/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2019 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+# Run the OSS-Fuzz script in the project.
+./test/ossfuzz/ossfuzz.sh
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `src/dump.c`
+- `src/jansson_private.h`
+- `src/value.c`
+
+~~~~diff
+diff --git a/src/dump.c b/src/dump.c
+--- a/src/dump.c
++++ b/src/dump.c
+@@ -293,14 +293,13 @@ static int do_dump(const json_t *json, size_t flags, int depth,
+ 
+         case JSON_OBJECT:
+         {
+             void *iter;
+             const char *separator;
+             int separator_length;
+-            /* Space for "0x", double the sizeof a pointer for the hex and a terminator. */
+-            char loop_key[2 + (sizeof(json) * 2) + 1];
++            char loop_key[LOOP_KEY_LEN];
+ 
+             if(flags & JSON_COMPACT) {
+                 separator = ":";
+                 separator_length = 1;
+             }
+             else {
+diff --git a/src/jansson_private.h b/src/jansson_private.h
+--- a/src/jansson_private.h
++++ b/src/jansson_private.h
+@@ -88,12 +88,14 @@ void* jsonp_malloc(size_t size) JANSSON_ATTRS(warn_unused_result);
+ void jsonp_free(void *ptr);
+ char *jsonp_strndup(const char *str, size_t length) JANSSON_ATTRS(warn_unused_result);
+ char *jsonp_strdup(const char *str) JANSSON_ATTRS(warn_unused_result);
+ char *jsonp_strndup(const char *str, size_t len) JANSSON_ATTRS(warn_unused_result);
+ 
+ /* Circular reference check*/
++/* Space for "0x", double the sizeof a pointer for the hex and a terminator. */
++#define LOOP_KEY_LEN (2 + (sizeof(json_t *) * 2) + 1)
+ int jsonp_loop_check(hashtable_t *parents, const json_t *json, char *key, size_t key_size);
+ 
+ 
+ /* Windows compatibility */
+ #if defined(_WIN32) || defined(WIN32)
+ #  if defined(_MSC_VER)  /* MS compiller */
+diff --git a/src/value.c b/src/value.c
+--- a/src/value.c
++++ b/src/value.c
+@@ -319,16 +319,16 @@ static json_t *json_object_copy(json_t *object)
+ }
+ 
+ static json_t *json_object_deep_copy(const json_t *object, hashtable_t *parents)
+ {
+     json_t *result;
+     void *iter;
+-    char loop_key[2 + (sizeof(object) * 2) + 1];
++    char loop_key[LOOP_KEY_LEN];
+ 
+     if (jsonp_loop_check(parents, object, loop_key, sizeof(loop_key)))
+-            return NULL;
++        return NULL;
+ 
+     result = json_object();
+     if(!result)
+         return NULL;
+ 
+     /* Cannot use json_object_foreach because object has to be cast
+@@ -638,13 +638,13 @@ static json_t *json_array_copy(json_t *array)
+ }
+ 
+ static json_t *json_array_deep_copy(const json_t *array, hashtable_t *parents)
+ {
+     json_t *result;
+     size_t i;
+-    char loop_key[2 + (sizeof(array) * 2) + 1];
++    char loop_key[LOOP_KEY_LEN];
+ 
+     if (jsonp_loop_check(parents, array, loop_key, sizeof(loop_key)))
+         return NULL;
+ 
+     result = json_array();
+     if(!result)
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.

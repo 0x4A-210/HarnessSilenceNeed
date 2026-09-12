@@ -1,0 +1,1274 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/n4-gap_only-C015-s8rzr7nq
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08a73-b608-72b3-a3ae-9e3a38aff71e
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+C015
+
+## Existing harness H0
+
+The complete project-owned harness translation unit is shown below. Framework
+main/CLI scaffolding is not expanded; directly included semantic helper files
+are shown separately under the fixed context rule.
+
+Path: `fuzz/c/std/webp_fuzzer.c`
+
+```c
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN webp_fuzzer.c
+./a.out ../../../test/data/*.webp
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__VP8
+#define WUFFS_CONFIG__MODULE__WEBP
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+#include "../fuzzlib/fuzzlib_image_decoder.c"
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_webp__decoder dec;
+  wuffs_base__status status = wuffs_webp__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  hash = wuffs_base__u64__rotate_right(hash, 1);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  return fuzz_image_decoder(
+      src, hash,
+      wuffs_webp__decoder__upcast_as__wuffs_base__image_decoder(&dec));
+}
+```
+
+### Direct H0 helper: `fuzz/c/fuzzlib/fuzzlib_image_decoder.c`
+
+```c
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+#ifndef WUFFS_INCLUDE_GUARD
+#error "Wuffs' .h files need to be included before this file"
+#endif
+
+static const char*  //
+fuzz_image_decoder(wuffs_base__io_buffer* src,
+                   uint64_t hash,
+                   wuffs_base__image_decoder* dec) {
+  const char* ret = NULL;
+  wuffs_base__slice_u8 pixbuf = ((wuffs_base__slice_u8){});
+  wuffs_base__slice_u8 workbuf = ((wuffs_base__slice_u8){});
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    wuffs_base__status status =
+        wuffs_base__image_decoder__decode_image_config(dec, &ic, src);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    // 50% of the time, choose BGRA_PREMUL instead of the native pixel config.
+    if (hash & 1) {
+      wuffs_base__pixel_config__set(
+          &ic.pixcfg, WUFFS_BASE__PIXEL_FORMAT__BGRA_PREMUL,
+          WUFFS_BASE__PIXEL_SUBSAMPLING__NONE,
+          wuffs_base__pixel_config__width(&ic.pixcfg),
+          wuffs_base__pixel_config__height(&ic.pixcfg));
+    }
+    hash >>= 1;
+
+    // Wuffs allows either statically or dynamically allocated work buffers.
+    // This program exercises dynamic allocation.
+    uint64_t n = wuffs_base__image_decoder__workbuf_len(dec).max_incl;
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      workbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!workbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    n = wuffs_base__pixel_config__pixbuf_len(&ic.pixcfg);
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      pixbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!pixbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    status = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, pixbuf);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      wuffs_base__frame_config fc = ((wuffs_base__frame_config){});
+      status = wuffs_base__image_decoder__decode_frame_config(dec, &fc, src);
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+
+      status = wuffs_base__image_decoder__decode_frame(
+          dec, &pb, src, WUFFS_BASE__PIXEL_BLEND__SRC, workbuf, NULL);
+
+      wuffs_base__rect_ie_u32 frame_rect =
+          wuffs_base__frame_config__bounds(&fc);
+      wuffs_base__rect_ie_u32 dirty_rect =
+          wuffs_base__image_decoder__frame_dirty_rect(dec);
+      if (!wuffs_base__rect_ie_u32__contains_rect(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not contain dirty_rect";
+        goto exit;
+      }
+
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+      seen_ok = true;
+
+      if (!wuffs_base__rect_ie_u32__equals(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not equal dirty_rect";
+        goto exit;
+      }
+    }
+  }
+
+exit:
+  free(workbuf.ptr);
+  free(pixbuf.ptr);
+  return ret;
+}
+```
+
+## Complete S0 -> S1 hand-written production-source diff
+
+The fixed rule includes every changed `std/**/*.wuffs` production file. It
+excludes generated release snapshots, tests, docs, examples, and commit text.
+
+```diff
+diff --git a/std/vp8/decode_quirks.wuffs b/std/vp8/decode_quirks.wuffs
+new file mode 100644
+index 00000000..ed13f79d
+--- /dev/null
++++ b/std/vp8/decode_quirks.wuffs
+@@ -0,0 +1,38 @@
++// Copyright 2026 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
++// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
++// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
++// option. This file may not be copied, modified, or distributed
++// except according to those terms.
++//
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++// --------
++
++// Quirks are discussed in (/doc/note/quirks.md).
++//
++// The base38 encoding of "vp8." is 0x1B_5EFE. Left shifting by 10 gives
++// 0x6D7B_F800.
++pri const QUIRKS_BASE : base.u32 = 0x6D7B_F800
++
++// --------
++
++// Gives the image width and height out-of-band, in the u64 quirk value. The
++// low 32 bits are the width and the high 32 bits are the height. Both
++// dimensions should range within 0x0001 ..= 0x3FFF.
++//
++// A simple WebP file could contain one chunk, a VP8 chunk, that gives the
++// image width and height. A complex WebP file could contain three chunks:
++// VP8X, ALPH and VP8. The image dimensions are given in the VP8X chunk and are
++// then repeated in the VP8 chunk.
++//
++// After a webp.decoder decode_image_config call, the caller might next want to
++// query the workbuf length, to know how much memory to dynamically allocate,
++// especially before attempting to decode the ALPH chunk. The outer
++// webp.decoder workbuf_len method can delegate to the inner vp8.decoder
++// workbuf_len method, but the latter needs to know the image dimensions.
++//
++// This quirk mechanism lets the outer webp decoder tell the inner vp8 decoder
++// those dimensions, after parsing the VP8X chunk but before ALPH or VP8.
++pub const QUIRK_WIDTH_AND_HEIGHT : base.u32 = 0x6D7B_F800 | 0x00
+diff --git a/std/vp8/decode_vp8.wuffs b/std/vp8/decode_vp8.wuffs
+index 026010a6..cdc0d1d4 100644
+--- a/std/vp8/decode_vp8.wuffs
++++ b/std/vp8/decode_vp8.wuffs
+@@ -1,24 +1,26 @@
+ // Copyright 2024 The Wuffs Authors.
+ //
+ // Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+ // https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+ // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+ // option. This file may not be copied, modified, or distributed
+ // except according to those terms.
+ //
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
+ pub status "#bad QUIRK_SOURCE_LENGTH"
++pub status "#bad QUIRK_WIDTH_AND_HEIGHT"
+ pub status "#bad header"
++pub status "#inconsistent width and height"
+ pub status "#missing QUIRK_SOURCE_LENGTH"
+ pub status "#truncated input"
+ pub status "#unsupported QUIRK_SOURCE_LENGTH"
+ pub status "#unsupported VP8 file"
+ 
+ pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0x20FF_FFFF
+ 
+ pub struct decoder? implements base.image_decoder(
+         width  : base.u32[..= 0x3FFF],
+         height : base.u32[..= 0x3FFF],
+ 
+         // Width and height again, but this time measured in 16×16 macroblocks.
+@@ -28,24 +30,26 @@ pub struct decoder? implements base.image_decoder(
+         // The call sequence state machine is discussed in
+         // (/doc/std/image-decoders-call-sequence.md).
+         call_sequence : base.u8,
+ 
+         is_key_frame : base.bool,
+ 
+         frame_config_io_position : base.u64,
+ 
+         // This uses the same representation as an wuffs_base__optional_u63:
+         // ((value_as_u63 << 1) | has_value_as_u1).
+         quirk_source_length : base.u64,
+ 
++        quirk_width_and_height : base.u64,
++
+         // Just under 144 MiB, for 9 partitions each up to 0xFF_FFFF bytes.
+         partitioned_data_length : base.u32[..= 0x08FF_FFF7],
+ 
+         // args.workbuf strides and offsets.
+         //
+         // The workbuf holds the YUV buffers (after decoding from the source
+         // bytes but before converting YUV to RGBX) and then also a copy of
+         // most of the source bytes themselves - the "at least 2, up to 9"
+         // partitions after the frame header. Decoding successive rows of
+         // macroblocks alternates between the other (not-first) partitions.
+         // Source bytes are processed with random (not sequential) access.
+         workbuf_yuv_y_stride  : base.u32[..= 0x4000],
+@@ -196,113 +200,149 @@ pub struct decoder? implements base.image_decoder(
+         // The u8 bits are packed like this:
+         //
+         //  -  4 ..=  7 are unused
+         //  -  3        is  decode_one_macroblock's (not skip).
+         //  -  0 ..=  2 are an index into loop_filters.
+         //
+         mb_filters : array[2] array[0x400] base.u8,
+ )
+ 
+ pub func decoder.get_quirk(key: base.u32) base.u64 {
+     if args.key == base.QUIRK_SOURCE_LENGTH {
+         return this.quirk_source_length
++    } else if args.key == QUIRK_WIDTH_AND_HEIGHT {
++        return this.quirk_width_and_height
+     }
+     return 0
+ }
+ 
+ pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
++    var w : base.u32
++    var h : base.u32
++
+     if args.key == base.QUIRK_SOURCE_LENGTH {
+-        this.quirk_source_length = args.value
++        if (args.value & 1) == 0 {
++            if args.value <> 0 {
++                return "#bad QUIRK_SOURCE_LENGTH"
++            }
++            this.quirk_source_length = 0
++            this.partitioned_data_length = 0
++        } else if (args.value >> 1) < 10 {
++            return "#bad QUIRK_SOURCE_LENGTH"
++        } else if (args.value >> 1) > (0x08FF_FFF7 + 10) {
++            return "#unsupported QUIRK_SOURCE_LENGTH"
++        } else {
++            this.quirk_source_length = args.value
++            this.partitioned_data_length = ((args.value >> 1) as base.u32) - 10
++        }
++        return ok
++
++    } else if args.key == QUIRK_WIDTH_AND_HEIGHT {
++        w = (args.value & 0xFFFF_FFFF) as base.u32
++        h = (args.value & 0xFFFF_FFFF) as base.u32
++        if (w < 1) or (0x3FFF < w) or (h < 1) or (0x3FFF < h) {
++            return "#bad QUIRK_WIDTH_AND_HEIGHT"
++        }
++        this.quirk_width_and_height = args.value
++        this.width = w
++        this.height = h
++        this.calculate_mbw_mbh!()
+         return ok
+     }
++
+     return base."#unsupported option"
+ }
+ 
+ pub func decoder.decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+     var status : base.status
+ 
+     while true {
+         status =? this.do_decode_image_config?(dst: args.dst, src: args.src)
+         if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+         yield? status
+     }
+ }
+ 
+ pri func decoder.do_decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+     var c32 : base.u32
+ 
+     if this.call_sequence <> 0x00 {
+         return base."#bad call sequence"
+     }
+ 
+-    if (this.quirk_source_length & 1) == 0 {
++    if this.quirk_source_length == 0 {
+         return "#missing QUIRK_SOURCE_LENGTH"
+-    } else if (this.quirk_source_length >> 1) < 10 {
+-        return "#bad QUIRK_SOURCE_LENGTH"
+-    } else if (this.quirk_source_length >> 1) > (0x08FF_FFF7 + 10) {
+-        return "#unsupported QUIRK_SOURCE_LENGTH"
+     }
+-    this.partitioned_data_length = ((this.quirk_source_length >> 1) as base.u32) - 10
+ 
+     // RFC 6386 Section 9. Frame Header, up to and including 9.1. Uncompressed
+     // Data Chunk. decode_header_partition handles the rest of section 9.
+ 
+     c32 = args.src.read_u24le_as_u32?()
+     this.is_key_frame = ((c32 & 0x01) == 0)
+     if not this.is_key_frame {
+         // TODO: support non-key frames.
+         return "#unsupported VP8 file"
+     }
+     this.part_lens[0] = c32 >> 5
+     if this.part_lens[0] > this.partitioned_data_length {
+         return "#bad header"
+     }
+ 
+     c32 = args.src.read_u24le_as_u32?()
+     if c32 <> '\x9D\x01\x2A'le {
+         return "#bad header"
+     }
+ 
+     c32 = args.src.read_u32le?()
+     this.width = 0x3FFF & (c32 >> 0)
+     this.height = 0x3FFF & (c32 >> 16)
+-    this.mbw = (this.width + 15) / 16
+-    this.mbh = (this.height + 15) / 16
+-
+-    this.workbuf_yuv_y_stride = this.mbw * 16
+-    this.workbuf_yuv_uv_stride = this.mbw * 8
+-    this.workbuf_yuv_y_end =
+-            ((this.workbuf_yuv_y_stride as base.u64) * ((this.mbh * 16) as base.u64))
+-    this.workbuf_yuv_u_end = this.workbuf_yuv_y_end +
+-            ((this.workbuf_yuv_uv_stride as base.u64) * ((this.mbh * 8) as base.u64))
+-    this.workbuf_yuv_v_end = this.workbuf_yuv_u_end +
+-            ((this.workbuf_yuv_uv_stride as base.u64) * ((this.mbh * 8) as base.u64))
++    if (this.width == 0) or (this.height == 0) {
++        return "#bad header"
++    } else if (this.quirk_width_and_height <> 0) and
++            (this.quirk_width_and_height <> ((this.width as base.u64) | ((this.height as base.u64) << 32))) {
++        return "#inconsistent width and height"
++    }
++    this.calculate_mbw_mbh!()
+ 
+     this.frame_config_io_position = args.src.position()
+ 
+     if args.dst <> nullptr {
+         args.dst.set!(
+                 pixfmt: base.PIXEL_FORMAT__BGRX,
+                 pixsub: 0,
+                 width: this.width,
+                 height: this.height,
+                 first_frame_io_position: this.frame_config_io_position,
+                 first_frame_is_opaque: false)
+     }
+ 
+     this.call_sequence = 0x20
+ }
+ 
++pri func decoder.calculate_mbw_mbh!() {
++    this.mbw = (this.width + 15) / 16
++    this.mbh = (this.height + 15) / 16
++
++    this.workbuf_yuv_y_stride = this.mbw * 16
++    this.workbuf_yuv_uv_stride = this.mbw * 8
++    this.workbuf_yuv_y_end =
++            ((this.workbuf_yuv_y_stride as base.u64) * ((this.mbh * 16) as base.u64))
++    this.workbuf_yuv_u_end = this.workbuf_yuv_y_end +
++            ((this.workbuf_yuv_uv_stride as base.u64) * ((this.mbh * 8) as base.u64))
++    this.workbuf_yuv_v_end = this.workbuf_yuv_u_end +
++            ((this.workbuf_yuv_uv_stride as base.u64) * ((this.mbh * 8) as base.u64))
++}
++
+ pub func decoder.decode_frame_config?(dst: nptr base.frame_config, src: base.io_reader) {
+     var status : base.status
+ 
+     while true {
+         status =? this.do_decode_frame_config?(dst: args.dst, src: args.src)
+         if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+         yield? status
+     }
+ }
+ 
+diff --git a/std/webp/decode_webp.wuffs b/std/webp/decode_webp.wuffs
+index 781b773e..187bad3f 100644
+--- a/std/webp/decode_webp.wuffs
++++ b/std/webp/decode_webp.wuffs
+@@ -1,57 +1,146 @@
+ // Copyright 2024 The Wuffs Authors.
+ //
+ // Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+ // https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+ // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+ // option. This file may not be copied, modified, or distributed
+ // except according to those terms.
+ //
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
+ use "std/vp8"
+ 
++pub status "#bad ALPH+VP8L combination"
+ pub status "#bad Huffman code (over-subscribed)"
+ pub status "#bad Huffman code (under-subscribed)"
+ pub status "#bad Huffman code"
++pub status "#bad VP8X chunk"
+ pub status "#bad back-reference"
++pub status "#bad chunk order"
+ pub status "#bad color cache"
+ pub status "#bad header"
+ pub status "#bad transform"
+ pub status "#short chunk"
+ pub status "#truncated input"
+-pub status "#unsupported number of Huffman groups"
++pub status "#unsupported VP8X/VP8 chunk length"
+ pub status "#unsupported WebP file"
++pub status "#unsupported number of Huffman groups"
+ 
+ pri status "#internal error: inconsistent Huffman code"
+ pri status "#internal error: inconsistent dst buffer"
+ pri status "#internal error: inconsistent n_bits"
+ 
+ // TODO: reference vp8.DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE, although the
+ // worst case for VP8L is bigger than for VP8.
+ pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0x4C00_0000
+ 
++// The default value of the largest supported VP8-inside-VP8X chunk length.
++// This limitation is a consequence of combining Wuffs' "decode an image" API
++// with WebP/VP8X/VP8's file format design.
++//
++// Wuffs' API only assumes sequential I/O access, not random I/O access, to the
++// encoded image's bytes. It also is incapable (in the security capability
++// sense) of dynamically allocating memory, so any O(width × height) pixel
++// buffers, or any other buffers that aren't O(1) in terms of width and height,
++// must be allocated by the caller, not the callee (Wuffs code).
++//
++// "How much dynamic memory does the caller need to allocate?" is answered by
++// the decoder.workbuf_len method, which is valid to call as soon as
++// decoder.decode_image_config returns (and decode_image_config, unlike
++// decode_frame, does not take a variable-length slice-of-bytes workbuf
++// argument). workbuf_len must return a worst case estimate, as it has only one
++// shot at answering "how much dynamic memory?"
++//
++// On the other hand, an VP8 image file can have multiple "partitions", which
++// means that a VP8 decoder must support random I/O access. Wuffs supports this
++// by, in the worst case, copying the VP8's chunk payload (the encoded image
++// data) into the workbuf. (Copying into a contiguous buffer is the same as
++// what the libwebp C library's WebPIAppend "incremental API" does.) But doing
++// so requires knowing how large the VP8 chunk is, so that the caller can
++// allocate a sufficiently large workbuf.
++//
++// We cannot answer that question precisely until we parse the VP8 chunk, but
++// in the WebP/VP8X file format, the VP8 chunk must occur after any ALPH chunk.
++// For Wuffs to parse an ALPH chunk, it must have already "allocated" enough
++// memory, more than O(1), by answering "how much dynamic memory?"
++//
++// As we cannot answer that question precisely (whilst still satisfying Wuffs'
++// "decode an image" API, which works across numerous image file formats, not
++// just WebP), we use a made-up upper bound, which is this number.
++//
++// Its value is arbitrary, but there is a trade-off. The larger it is, the more
++// workbuf memory Wuffs will say it needs (and callers will allocate), even if
++// it later discovers that it over-budgeted. The smaller it is, Wuffs will
++// reject (as unsupported) more large-but-valid WebP/VP8X/VP8 files.
++//
++// This default value is 8 MiB.
++pub const VP8X_MAX_INCL_VP8_CHUNK_LENGTH_DEFAULT : base.u64 = 8_388608
++
++// TODO: in the future, regarding VP8X_MAX_INCL_VP8_CHUNK_LENGTH_DEFAULT, we
++// could make this set by a quirk instead of hard-coded.
++//
++// Or, we could change the semantics of the wuffs_base__image_decoder API
++// (which applies to multiple image formats, not just WebP). The API is that
++// you can call workbuf_len as soon as decode_image_config returns. workbuf_len
++// returns a range and any value within that range should be a valid length for
++// the "dynamically allocated, not O(1) in terms of width and height" workbuf
++// memory passed to decode_frame.
++//
++// We could relax this so that decode_frame could return a "$short workbuf"
++// suspension, if the workbuf length is unknown at the time of the first
++// decode_frame call, and the caller is expected to essentially realloc the
++// workbuf, keeping any existing contents when growing it.
++
+ pub struct decoder? implements base.image_decoder(
+         width  : base.u32[..= 0x4000],
+         height : base.u32[..= 0x4000],
+ 
+         // The call sequence state machine is discussed in
+         // (/doc/std/image-decoders-call-sequence.md).
+         call_sequence : base.u8,
+ 
+         code_length_code_lengths : array[19] base.u8[..= 7],
+ 
+         sub_chunk_has_padding : base.bool,
+ 
+-        is_vp8_lossy : base.bool,
++        // 0x01 = VP8  lossy
++        // 0x02 = VP8L lossless
++        // 0x04 = VP8X and seen VP8X  chunks
++        // 0x08 = VP8X and seen VP8X, ICCP   chunks
++        // 0x10 = VP8X and seen VP8X, ICCP†, ANIM   chunks
++        // 0x20 = VP8X and seen VP8X, ICCP†, ANIM†, ANMF   chunks
++        // 0x40 = VP8X and seen VP8X, ICCP†, ANIM†, ANMF†, ALPH   chunks
++        // 0x81 = VP8X and seen VP8X, ICCP†, ANIM†, ANMF†, ALPH†, VP8  chunks
++        // 0x82 = VP8X and seen VP8X, ICCP†, ANIM†, ANMF†, ALPH†, VP8L chunks
++        //
++        // Chunks marked with a † are optional.
++        variant : base.u8,
++
++        // The "Rsv|I|L|E|X|A|R" bits from
++        // https://developers.google.com/speed/webp/docs/riff_container#extended_file_format
++        //
++        // We also re-purpose the otherwise-unused 0x01 bit to mean VP8X-ness,
++        // so that (vp8x_header_flags <> 0) is an easy check for VP8X versus
++        // not-VP8X. Similarly, ((vp8x_header_flags & 0x11) == 0x01) is an easy
++        // check for "VP8X without an ALPH chunk".
++        //
++        // See also libwebp's src/webp/mux_types.h:
++        //
++        // ANIMATION_FLAG = 0x00000002,
++        // XMP_FLAG       = 0x00000004,
++        // EXIF_FLAG      = 0x00000008,
++        // ALPHA_FLAG     = 0x00000010,
++        // ICCP_FLAG      = 0x00000020,
++        vp8x_header_flags : base.u8,
+ 
+         frame_config_io_position : base.u64,
+ 
+         riff_chunk_length : base.u32,
+         sub_chunk_length  : base.u32,
+ 
+         bits   : base.u32,
+         n_bits : base.u32[..= 31],
+ 
+         seen_transform           : array[4] base.bool,
+         transform_type           : array[4] base.u8[..= 3],
+         transform_tile_size_log2 : array[4] base.u8[..= 9],
+@@ -190,78 +279,87 @@ pri func decoder.do_decode_image_config?(dst: nptr base.image_config, src: base.
+         if status.is_ok() {
+             break
+         } else if not status.is_suspension() {
+             return status
+         } else if (status == base."$short read") and (this.riff_chunk_length == 0) {
+             return "#short chunk"
+         }
+         yield? status
+     }
+ 
+     this.frame_config_io_position = args.src.position()
+ 
+-    if (not this.is_vp8_lossy) and (args.dst <> nullptr) {
++    if (this.variant <> 0x01) and (args.dst <> nullptr) {
+         args.dst.set!(
+                 pixfmt: base.PIXEL_FORMAT__BGRA_NONPREMUL,
+                 pixsub: 0,
+                 width: this.width,
+                 height: this.height,
+                 first_frame_io_position: this.frame_config_io_position,
+                 first_frame_is_opaque: false)
+     }
+ 
+     this.call_sequence = 0x20
+ }
+ 
+ pri func decoder.do_decode_image_config_limited?(dst: nptr base.image_config, src: base.io_reader) {
+     var c32    : base.u32
+     var r_mark : base.u64
+     var status : base.status
+ 
+     c32 = args.src.read_u32le?()
+     if c32 <> 'WEBP'le {
+         return "#bad header"
+     }
+ 
+     c32 = args.src.read_u32le?()
+     if c32 == 'VP8 'le {
+-        this.is_vp8_lossy = true
++        this.variant = 0x01
+     } else if c32 == 'VP8L'le {
+-        // No-op.
++        this.variant = 0x02
+     } else if c32 == 'VP8X'le {
+-        return "#unsupported WebP file"
++        this.variant = 0x04
+     } else {
+         return "#bad header"
+     }
+ 
+     this.sub_chunk_length = args.src.read_u32le?()
+     if this.sub_chunk_length < 4 {
+         return "#bad header"
+     }
+     this.sub_chunk_has_padding = (this.sub_chunk_length & 1) <> 0
+ 
+-    if this.is_vp8_lossy {
++    if this.variant == 0x01 {
+         this.vp8.set_quirk!(
+                 key: base.QUIRK_SOURCE_LENGTH,
+                 value: ((this.sub_chunk_length as base.u64) << 1) | 1)
+-
++    } else if this.variant == 0x02 {
++        // No-op.
++    } else if this.sub_chunk_length <> 10 {
++        return "#bad header"
++    } else {
++        this.vp8.set_quirk!(
++                key: base.QUIRK_SOURCE_LENGTH,
++                value: (VP8X_MAX_INCL_VP8_CHUNK_LENGTH_DEFAULT << 1) | 1)
+     }
+ 
+     while true {
+         io_limit (io: args.src, limit: this.sub_chunk_length as base.u64) {
+             r_mark = args.src.mark()
+-            if this.is_vp8_lossy {
++            if this.variant == 0x01 {
+                 status =? this.vp8.decode_image_config?(dst: args.dst, src: args.src)
+-            } else {
++            } else if this.variant == 0x02 {
+                 status =? this.do_decode_image_config_limited_vp8l?(src: args.src)
++            } else {
++                status =? this.do_decode_image_config_limited_vp8x?(src: args.src)
+             }
+             this.sub_chunk_length ~sat-=
+                     (args.src.count_since(mark: r_mark) & 0xFFFF_FFFF) as base.u32
+         }
+ 
+         if status.is_ok() {
+             break
+         } else if not status.is_suspension() {
+             return status
+         } else if (status == base."$short read") and (this.sub_chunk_length == 0) {
+             return "#short chunk"
+         }
+@@ -289,29 +387,83 @@ pri func decoder.do_decode_image_config_limited_vp8l?(src: base.io_reader) {
+     c32 >>= 1
+     if c32 <> 0 {
+         return "#bad header"
+     }
+ 
+     transform_size = 4 * ((this.width + 3) >> 2) * ((this.height + 3) >> 2)
+     this.workbuf_offset_for_transform[0] = (4 * this.width * this.height) + (0 * transform_size)
+     this.workbuf_offset_for_transform[1] = (4 * this.width * this.height) + (1 * transform_size)
+     this.workbuf_offset_for_transform[2] = (4 * this.width * this.height) + (2 * transform_size)
+     this.workbuf_offset_for_transform[3] = (4 * this.width * this.height) + (3 * transform_size)
+ }
+ 
++pri func decoder.do_decode_image_config_limited_vp8x?(src: base.io_reader) {
++    var c32            : base.u32
++    var transform_size : base.u32[..= 0x400_0000]
++    var status         : base.status
++
++    c32 = args.src.read_u32le?()
++    if (c32 & 0xFFFF_FFC1) <> 0 {
++        return "#unsupported WebP file"
++    }
++    this.vp8x_header_flags = ((c32 | 0x01) & 0xFF) as base.u8
++
++    c32 = args.src.read_u24le_as_u32?()
++    if c32 >= 0x3FFF {
++        return "#unsupported WebP file"
++    }
++    this.width = (c32 & 0x3FFF) + 1
++
++    c32 = args.src.read_u24le_as_u32?()
++    if c32 >= 0x3FFF {
++        return "#unsupported WebP file"
++    }
++    this.height = (c32 & 0x3FFF) + 1
++
++    // It's valid to call this.workbuf_len after this.decode_image_config
++    // returns, for the caller to know how much dynamically-sized memory
++    // (called workbuf memory) is needed to decode the image file.
++    //
++    // Unfortunately, having only seen the VP8X chunk, we don't know yet
++    // whether it's ultimately a VP8 or VP8L image, but we wouldn't know until
++    // after we've processed the ALPH chunk (if present), and processing the
++    // ALPH chunk requires workbuf memory (as the amount of memory depends on
++    // this.width and this.height).
++    //
++    // Wuffs' "decode an image" API assumes that the caller, not callee, is
++    // responsible for dynamically allocating memory. But also, it only assumes
++    // sequential access (not random access) to the io_reader.
++    //
++    // So, here, we have to cater for the worst case and set aside workbuf
++    // memory just like plain VP8L, even if it might end up being unused, for
++    // example: VP8X+VP8 instead of VP8X+VP8L or VP8X+ALPH+VP8.
++    transform_size = 4 * ((this.width + 3) >> 2) * ((this.height + 3) >> 2)
++    this.workbuf_offset_for_transform[0] = (4 * this.width * this.height) + (0 * transform_size)
++    this.workbuf_offset_for_transform[1] = (4 * this.width * this.height) + (1 * transform_size)
++    this.workbuf_offset_for_transform[2] = (4 * this.width * this.height) + (2 * transform_size)
++    this.workbuf_offset_for_transform[3] = (4 * this.width * this.height) + (3 * transform_size)
++
++    status = this.vp8.set_quirk!(
++            key: vp8.QUIRK_WIDTH_AND_HEIGHT,
++            value: ((this.width as base.u64) | ((this.height as base.u64) << 32)))
++    if not status.is_ok() {
++        return "#unsupported WebP file"
++    }
++}
++
+ pub func decoder.decode_frame_config?(dst: nptr base.frame_config, src: base.io_reader) {
+     var status : base.status
+ 
+     while true {
+-        if this.is_vp8_lossy {
++        if this.variant == 0x01 {
+             status =? this.vp8.decode_frame_config?(dst: args.dst, src: args.src)
+         } else {
+             status =? this.do_decode_frame_config?(dst: args.dst, src: args.src)
+         }
+         if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+         yield? status
+     }
+ }
+ 
+ pri func decoder.do_decode_frame_config?(dst: nptr base.frame_config, src: base.io_reader) {
+@@ -321,79 +473,158 @@ pri func decoder.do_decode_frame_config?(dst: nptr base.frame_config, src: base.
+         this.do_decode_image_config?(dst: nullptr, src: args.src)
+     } else if this.call_sequence == 0x28 {
+         if this.frame_config_io_position <> args.src.position() {
+             return base."#bad restart"
+         }
+     } else if this.call_sequence == 0x40 {
+         this.call_sequence = 0x60
+         return base."@end of data"
+     } else {
+         return base."@end of data"
+     }
+ 
+-    if args.dst <> nullptr {
++    if (this.variant <> 0x01) and (args.dst <> nullptr) {
+         args.dst.set!(bounds: this.util.make_rect_ie_u32(
+                 min_incl_x: 0,
+                 min_incl_y: 0,
+                 max_excl_x: this.width,
+                 max_excl_y: this.height),
+                 duration: 0,
+                 index: 0,
+                 io_position: this.frame_config_io_position,
+                 disposal: 0,
+                 opaque_within_bounds: false,
+                 overwrite_instead_of_blend: false,
+                 background_color: 0x0000_0000)
+     }
+ 
+     this.call_sequence = 0x40
+ }
+ 
+ pub func decoder.decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
+     var status : base.status
+ 
+     while true {
+-        if this.is_vp8_lossy {
+-            status =? this.vp8.decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
+-        } else {
+-            status =? this.do_decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
+-        }
++        status =? this.do_decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
+         if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+         yield? status
+     }
+ }
+ 
+ pri func decoder.do_decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
++    var chunk_type   : base.u32
++    var chunk_length : base.u32
++
++    if this.call_sequence == 0x40 {
++        // No-op.
++    } else if this.call_sequence < 0x40 {
++        this.do_decode_frame_config?(dst: nullptr, src: args.src)
++    } else {
++        return base."@end of data"
++    }
++
++    while (this.variant & 0x03) == 0 {
++        chunk_type = args.src.read_u32le?()
++        chunk_length = args.src.read_u32le?()
++
++        if chunk_type == 'ICCP'le {
++            if this.variant > 0x04 {
++                return "#bad chunk order"
++            } else if (this.vp8x_header_flags & 0x20) == 0 {
++                return "#bad VP8X chunk"
++            }
++            this.variant = 0x08
++
++        } else if chunk_type == 'ANIM'le {
++            if this.variant > 0x08 {
++                return "#bad chunk order"
++            } else if (this.vp8x_header_flags & 0x02) == 0 {
++                return "#bad VP8X chunk"
++            }
++            this.variant = 0x10
++
++        } else if chunk_type == 'ANMF'le {
++            if this.variant > 0x10 {
++                return "#bad chunk order"
++            } else if (this.vp8x_header_flags & 0x02) == 0 {
++                return "#bad VP8X chunk"
++            }
++            this.variant = 0x20
++
++        } else if chunk_type == 'ALPH'le {
++            if this.variant > 0x20 {
++                return "#bad chunk order"
++            } else if (this.vp8x_header_flags & 0x10) == 0 {
++                return "#bad VP8X chunk"
++            }
++            this.variant = 0x40
++
++        } else if chunk_type == 'VP8 'le {
++            if (chunk_length as base.u64) > VP8X_MAX_INCL_VP8_CHUNK_LENGTH_DEFAULT {
++                return "#unsupported VP8X/VP8 chunk length"
++            }
++            this.vp8.set_quirk!(
++                    key: base.QUIRK_SOURCE_LENGTH,
++                    value: ((chunk_length as base.u64) << 1) | 1)
++            this.variant = 0x81
++            break
++
++        } else if chunk_type == 'VP8L'le {
++            if (this.vp8x_header_flags & 0x10) <> 0 {
++                return "#bad ALPH+VP8L combination"
++            }
++            this.variant = 0x82
++            break
++
++        } else if chunk_type == 'XMP 'le {
++            if (this.vp8x_header_flags & 0x04) == 0 {
++                return "#bad VP8X chunk"
++            }
++
++        } else if chunk_type == 'EXIF'le {
++            if (this.vp8x_header_flags & 0x08) == 0 {
++                return "#bad VP8X chunk"
++            }
++        }
++
++        if chunk_length > 0x7FFF_FFFF {
++            return "#unsupported WebP file"
++        } else if (chunk_length & 1) <> 0 {
++            chunk_length += 1
++        }
++        args.src.skip_u32?(n: chunk_length)
++    }
++
++    if (this.variant & 0x01) <> 0 {
++        this.vp8.decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
++    } else {
++        this.do_decode_frame_vp8l?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
++    }
++}
++
++pri func decoder.do_decode_frame_vp8l?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
+     var c8             : base.u8
+     var has_more       : base.u32[..= 1]
+     var width          : base.u32[..= 0x4000]
+     var dst            : slice base.u8
+     var tile_data      : roslice base.u8
+     var status         : base.status
+     var pix            : slice base.u8
+     var which          : base.u32[..= 4]
+     var transform_type : base.u32[..= 3]
+     var ti             : base.u64
+     var tj             : base.u64
+ 
+-    if this.call_sequence == 0x40 {
+-        // No-op.
+-    } else if this.call_sequence < 0x40 {
+-        this.do_decode_frame_config?(dst: nullptr, src: args.src)
+-    } else {
+-        return base."@end of data"
+-    }
+-
+     this.seen_transform[0] = false
+     this.seen_transform[1] = false
+     this.seen_transform[2] = false
+     this.seen_transform[3] = false
+     this.n_transforms = 0
+ 
+     while true {
+         if this.n_bits < 1 {
+             c8 = args.src.read_u8?()
+             this.bits = (c8 as base.u32)
+             this.n_bits = 8
+             assert this.n_bits >= 1
+@@ -835,90 +1066,103 @@ pri func decoder.swizzle!(dst: ptr base.pixel_buffer, src: roslice base.u8, blen
+                 dst: dst,
+                 dst_palette: dst_palette,
+                 src: args.src[.. src_bytes_per_row])
+ 
+         args.src = args.src[src_bytes_per_row ..]
+         y ~mod+= 1
+     }
+ 
+     return ok
+ }
+ 
+ pub func decoder.frame_dirty_rect() base.rect_ie_u32 {
+-    if this.is_vp8_lossy {
++    if this.variant == 0x01 {
+         return this.vp8.frame_dirty_rect()
+     }
+     return this.util.make_rect_ie_u32(
+             min_incl_x: 0,
+             min_incl_y: 0,
+             max_excl_x: this.width,
+             max_excl_y: this.height)
+ }
+ 
+ pub func decoder.num_animation_loops() base.u32 {
+     return 0
+ }
+ 
+ pub func decoder.num_decoded_frame_configs() base.u64 {
+-    if this.is_vp8_lossy {
++    if this.variant == 0x01 {
+         return this.vp8.num_decoded_frame_configs()
+     }
+     if this.call_sequence > 0x20 {
+         return 1
+     }
+     return 0
+ }
+ 
+ pub func decoder.num_decoded_frames() base.u64 {
+-    if this.is_vp8_lossy {
++    if this.variant == 0x01 {
+         return this.vp8.num_decoded_frames()
+     }
+     if this.call_sequence > 0x40 {
+         return 1
+     }
+     return 0
+ }
+ 
+ pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+     var status : base.status
+ 
+-    if this.is_vp8_lossy {
++    if this.variant == 0x01 {
+         status = this.vp8.restart_frame!(index: args.index, io_position: args.io_position)
+         return status
+     }
+     if this.call_sequence < 0x20 {
+         return base."#bad call sequence"
+     }
+     if (args.index <> 0) or (args.io_position <> this.frame_config_io_position) {
+         return base."#bad argument"
+     }
+     this.call_sequence = 0x28
+     return ok
+ }
+ 
+ pub func decoder.set_report_metadata!(fourcc: base.u32, report: base.bool) {
+     // No-op.
+ }
+ 
+ pub func decoder.tell_me_more?(dst: base.io_writer, minfo: nptr base.more_information, src: base.io_reader) {
+     return base."#no more information"
+ }
+ 
+ pub func decoder.workbuf_len() base.range_ii_u64 {
+-    if this.is_vp8_lossy {
++    var r : base.range_ii_u64
++    var s : base.range_ii_u64
++
++    if this.variant == 0x01 {
+         return this.vp8.workbuf_len()
+     }
+-    return this.util.make_range_ii_u64(
++
++    r = this.util.make_range_ii_u64(
+             min_incl: this.workbuf_offset_for_transform[3] as base.u64,
+             max_incl: this.workbuf_offset_for_transform[3] as base.u64)
++
++    if this.variant <> 0x02 {
++        s = this.vp8.workbuf_len()
++        r = this.util.make_range_ii_u64(
++                min_incl: s.get_min_incl().max(no_less_than: r.get_min_incl()),
++                max_incl: s.get_max_incl().max(no_less_than: r.get_max_incl()))
++    }
++
++    return r
+ }
+ 
+ pri const DISTANCE_MAP : roarray[120] base.u8 = [
+         0x18, 0x07, 0x17, 0x19, 0x28, 0x06, 0x27, 0x29, 0x16, 0x1A,
+         0x26, 0x2A, 0x38, 0x05, 0x37, 0x39, 0x15, 0x1B, 0x36, 0x3A,
+         0x25, 0x2B, 0x48, 0x04, 0x47, 0x49, 0x14, 0x1C, 0x35, 0x3B,
+         0x46, 0x4A, 0x24, 0x2C, 0x58, 0x45, 0x4B, 0x34, 0x3C, 0x03,
+         0x57, 0x59, 0x13, 0x1D, 0x56, 0x5A, 0x23, 0x2D, 0x44, 0x4C,
+         0x55, 0x5B, 0x33, 0x3D, 0x68, 0x02, 0x67, 0x69, 0x12, 0x1E,
+         0x66, 0x6A, 0x22, 0x2E, 0x54, 0x5C, 0x43, 0x4D, 0x65, 0x6B,
+         0x32, 0x3E, 0x78, 0x01, 0x77, 0x79, 0x53, 0x5D, 0x11, 0x1F,
+         0x64, 0x6C, 0x42, 0x4E, 0x76, 0x7A, 0x21, 0x2F, 0x75, 0x7B,
+```
+
+## Uniform selected declaration context
+
+This same mechanically selected S0/S1 context is supplied for every case.
+
+### S0
+
+```text
+lines 180-228
+000180:         //  -  0 ..=  3 are the 0th predictor mode.
+000181:         //
+000182:         // HNZC stands for has-non-zero-coefficients.
+000183:         //
+000184:         // The mb_states_top array is indexed by mbx.
+000185:         mb_states_left : base.u32,
+000186:         mb_states_top  : array[0x400] base.u32,
+000187: 
+000188:         // Macroblock filter parameters.
+000189:         //
+000190:         // The first index is (mby & 1). As we decode rows (and columns) of
+000191:         // macroblocks, the filter parameters are decoded at the time of the
+000192:         // R'th row but are applied (to row R) at the time of the (R+1)'th row.
+000193:         //
+000194:         // The second index is mbx.
+000195:         //
+000196:         // The u8 bits are packed like this:
+000197:         //
+000198:         //  -  4 ..=  7 are unused
+000199:         //  -  3        is  decode_one_macroblock's (not skip).
+000200:         //  -  0 ..=  2 are an index into loop_filters.
+000201:         //
+000202:         mb_filters : array[2] array[0x400] base.u8,
+000203: )
+000204: 
+000205: pub func decoder.get_quirk(key: base.u32) base.u64 {
+000206:     if args.key == base.QUIRK_SOURCE_LENGTH {
+000207:         return this.quirk_source_length
+000208:     }
+000209:     return 0
+000210: }
+000211: 
+000212: pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+000213:     if args.key == base.QUIRK_SOURCE_LENGTH {
+000214:         this.quirk_source_length = args.value
+000215:         return ok
+000216:     }
+000217:     return base."#unsupported option"
+000218: }
+000219: 
+000220: pub func decoder.decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+000221:     var status : base.status
+000222: 
+000223:     while true {
+000224:         status =? this.do_decode_image_config?(dst: args.dst, src: args.src)
+000225:         if (status == base."$short read") and args.src.is_closed() {
+000226:             return "#truncated input"
+000227:         }
+000228:         yield? status
+```
+
+### S1
+
+```text
+lines 184-232
+000184:         //  -  0 ..=  3 are the 0th predictor mode.
+000185:         //
+000186:         // HNZC stands for has-non-zero-coefficients.
+000187:         //
+000188:         // The mb_states_top array is indexed by mbx.
+000189:         mb_states_left : base.u32,
+000190:         mb_states_top  : array[0x400] base.u32,
+000191: 
+000192:         // Macroblock filter parameters.
+000193:         //
+000194:         // The first index is (mby & 1). As we decode rows (and columns) of
+000195:         // macroblocks, the filter parameters are decoded at the time of the
+000196:         // R'th row but are applied (to row R) at the time of the (R+1)'th row.
+000197:         //
+000198:         // The second index is mbx.
+000199:         //
+000200:         // The u8 bits are packed like this:
+000201:         //
+000202:         //  -  4 ..=  7 are unused
+000203:         //  -  3        is  decode_one_macroblock's (not skip).
+000204:         //  -  0 ..=  2 are an index into loop_filters.
+000205:         //
+000206:         mb_filters : array[2] array[0x400] base.u8,
+000207: )
+000208: 
+000209: pub func decoder.get_quirk(key: base.u32) base.u64 {
+000210:     if args.key == base.QUIRK_SOURCE_LENGTH {
+000211:         return this.quirk_source_length
+000212:     } else if args.key == QUIRK_WIDTH_AND_HEIGHT {
+000213:         return this.quirk_width_and_height
+000214:     }
+000215:     return 0
+000216: }
+000217: 
+000218: pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+000219:     var w : base.u32
+000220:     var h : base.u32
+000221: 
+000222:     if args.key == base.QUIRK_SOURCE_LENGTH {
+000223:         if (args.value & 1) == 0 {
+000224:             if args.value <> 0 {
+000225:                 return "#bad QUIRK_SOURCE_LENGTH"
+000226:             }
+000227:             this.quirk_source_length = 0
+000228:             this.partitioned_data_length = 0
+000229:         } else if (args.value >> 1) < 10 {
+000230:             return "#bad QUIRK_SOURCE_LENGTH"
+000231:         } else if (args.value >> 1) > (0x08FF_FFF7 + 10) {
+000232:             return "#unsupported QUIRK_SOURCE_LENGTH"
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C015","gap_exists":true,"gap_type":["API protocol","configuration","input semantics"],"confidence":97,"affected_functions":["wuffs_vp8__decoder__set_quirk","wuffs_vp8__decoder__get_quirk","wuffs_vp8__decoder__decode_image_config","decoder.calculate_mbw_mbh"],"reason":"H0 only instantiates wuffs_webp__decoder and drives the generic image-decoder sequence. It does not directly exercise the changed public VP8 quirk API, including arbitrary QUIRK_SOURCE_LENGTH values, the new QUIRK_WIDTH_AND_HEIGHT value encoding, quirk reset, getter behavior, or sequencing quirks before decode_image_config. WebP internally supplies constrained quirk values, so several validation and state transitions remain unreachable.","evidence":["H0 initializes only wuffs_webp__decoder and upcasts it through wuffs_webp__decoder__upcast_as__wuffs_base__image_decoder.","S1 adds vp8.QUIRK_WIDTH_AND_HEIGHT handling to decoder.set_quirk! and decoder.get_quirk.","decoder.set_quirk! now validates odd/even, zero, minimum, and maximum QUIRK_SOURCE_LENGTH encodings and resets partitioned_data_length when value is zero.","The WebP path constructs QUIRK_SOURCE_LENGTH as ((chunk_length as base.u64) << 1) | 1 and constructs QUIRK_WIDTH_AND_HEIGHT from already-validated VP8X dimensions, excluding arbitrary API inputs.","QUIRK_WIDTH_AND_HEIGHT mutates width, height, and calculate_mbw_mbh-derived work-buffer fields before decode_image_config, creating a stateful protocol not explicitly driven by fuzz_image_decoder."],"recommended_action":"Add a VP8-focused harness that fuzzes set_quirk/get_quirk keys and 64-bit values, including source-length reset and boundary encodings, width/height valid and invalid encodings, repeated or reordered calls, and subsequent decode_image_config/decode_frame operations."}
+tokens used
+28,356

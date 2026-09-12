@@ -1,0 +1,1677 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t5-delta_aware-T5009-p7ud86jx
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08af3-80b0-7c70-93cc-e069853a5859
+--------
+user
+You are evaluating whether one production-source commit creates a fuzz-harness
+maintenance need. Use only the anonymous case below. Do not use tools, files,
+the network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+Follow this order exactly and preserve one principal comparison scope:
+
+1. Identify the smallest fuzz-relevant semantic unit introduced or changed by
+   the diff. Use the mechanically supplied S0/S1 declaration context as the
+   identity anchor when it belongs to the change. Do not combine it with an
+   older sibling API, another module, or a general project-wide omission.
+2. For that exact unit and exposure obligation, decide Gap(S0,H0).
+3. For the identical unit and exposure obligation, decide Gap(S1,H0).
+4. Compare the caller-visible harness obligations, not the amount of internal
+   implementation.
+5. Derive NEW, AGGRAVATED, UNCHANGED, REMOVED, or NONE and apply the fixed
+   maintenance rule.
+
+Identity rules:
+
+- If the anchored public declaration/configuration/module is absent in S0 and
+  introduced in S1, then its own GapBefore is false. Do not turn it into an
+  AGGRAVATED old gap merely because H0 also omitted a related module in S0.
+- If the same public declaration exists in S0 and S1 and unchanged H0 omits
+  that callable/configuration/lifecycle path on both sides, its exposure gap is
+  true before and after. A formerly constant/no-op getter or lifecycle method
+  is still the same callable surface; new behavior inside it does not create a
+  new call obligation. This comparison is UNCHANGED unless the commit changes
+  how H0 must reach or control the API.
+- If H0 already reaches the new behavior through an existing one-hop caller
+  that supplies a new internal argument/configuration automatically, that
+  internal caller-to-callee protocol is not a new H0 obligation. It cannot make
+  an already-omitted direct-API gap AGGRAVATED.
+
+A concrete new harness obligation means H0 itself must add an entry/call,
+caller-supplied value or buffer, call-order transition, runtime/compile-time
+configuration, or special input construction that was unnecessary in S0. More
+LOC, new internal state, a replacement algorithm, validation/error handling,
+CPU fast path, or state reset inside an existing omitted API is not sufficient.
+Do not infer aggravation because a whole subsystem is omitted on both sides.
+
+Use separate evidence and this default truth table:
+
+- before=false, after=true  -> NEW
+- before=true,  after=true  -> UNCHANGED
+- before=true,  after=false -> REMOVED
+- before=false, after=false -> NONE
+
+AGGRAVATED is allowed only with concrete S0-versus-S1 evidence of a new H0
+action or reduced same-scope reachability/control. Set maintenance_needed=true
+only if explicit_failure=true or the delta is NEW/AGGRAVATED. Return exactly
+one JSON object matching the schema, with separate S0 and S1 evidence.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T5009
+
+## Existing harness H0
+
+Every project-owned C/C++ path containing `fuzz` at the pre-change snapshot is shown below. Framework and build-script scaffolding are not expanded.
+
+### H0 path: `test/ares-fuzz.c`
+
+~~~~cpp
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+/*
+ * General driver to allow command-line fuzzer (i.e. afl) to
+ * exercise the libFuzzer entrypoint.
+ */
+
+#include <sys/types.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef WIN32
+#  include <io.h>
+#else
+#  include <unistd.h>
+#endif
+
+#include "ares.h"
+
+#define kMaxAflInputSize (1 << 20)
+static unsigned char afl_buffer[kMaxAflInputSize];
+
+#ifdef __AFL_LOOP
+/* If we are built with afl-clang-fast, use persistent mode */
+#  define KEEP_FUZZING(count) __AFL_LOOP(1000)
+#else
+/* If we are built with afl-clang, execute each input once */
+#  define KEEP_FUZZING(count) ((count) < 1)
+#endif
+
+/* In ares-test-fuzz.c and ares-test-fuzz-name.c: */
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+static void ProcessFile(int fd)
+{
+  ares_ssize_t count = read(fd, afl_buffer, kMaxAflInputSize);
+  /*
+   * Make a copy of the data so that it's not part of a larger
+   * buffer (where buffer overflows would go unnoticed).
+   */
+  if (count > 0) {
+    unsigned char *copied_data = (unsigned char *)malloc((size_t)count);
+    memcpy(copied_data, afl_buffer, (size_t)count);
+    LLVMFuzzerTestOneInput(copied_data, (size_t)count);
+    free(copied_data);
+  }
+}
+
+int main(int argc, char *argv[])
+{
+  if (argc == 1) {
+    int count = 0;
+    while (KEEP_FUZZING(count)) {
+      ProcessFile(fileno(stdin));
+      count++;
+    }
+  } else {
+    int ii;
+    for (ii = 1; ii < argc; ++ii) {
+      int fd = open(argv[ii], O_RDONLY);
+      if (fd < 0) {
+        fprintf(stderr, "Failed to open '%s'\n", argv[ii]);
+        continue;
+      }
+      ProcessFile(fd);
+      close(fd);
+    }
+  }
+  return 0;
+}
+~~~~
+
+### H0 path: `test/ares-test-fuzz-name.c`
+
+~~~~cpp
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "ares.h"
+// Include ares internal file for DNS protocol constants
+#include "ares_nameser.h"
+
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+// Entrypoint for Clang's libfuzzer, exercising query creation.
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+  // Null terminate the data.
+  char          *name   = malloc(size + 1);
+  unsigned char *buf    = NULL;
+  int            buflen = 0;
+  name[size]            = '\0';
+  memcpy(name, data, size);
+
+  ares_create_query(name, C_IN, T_AAAA, 1234, 0, &buf, &buflen, 1024);
+  free(buf);
+  free(name);
+  return 0;
+}
+~~~~
+
+### H0 path: `test/ares-test-fuzz.c`
+
+~~~~cpp
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#include <stddef.h>
+
+#include "ares.h"
+
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+// Entrypoint for Clang's libfuzzer
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+  // Feed the data into each of the ares_parse_*_reply functions.
+  struct hostent          *host = NULL;
+  struct ares_addrttl      info[5];
+  struct ares_addr6ttl     info6[5];
+  unsigned char            addrv4[4] = { 0x10, 0x20, 0x30, 0x40 };
+  struct ares_srv_reply   *srv       = NULL;
+  struct ares_mx_reply    *mx        = NULL;
+  struct ares_txt_reply   *txt       = NULL;
+  struct ares_soa_reply   *soa       = NULL;
+  struct ares_naptr_reply *naptr     = NULL;
+  struct ares_caa_reply   *caa       = NULL;
+  struct ares_uri_reply   *uri       = NULL;
+  int                      count     = 5;
+  ares_parse_a_reply(data, (int)size, &host, info, &count);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  host  = NULL;
+  count = 5;
+  ares_parse_aaaa_reply(data, (int)size, &host, info6, &count);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  host = NULL;
+  ares_parse_ptr_reply(data, (int)size, addrv4, sizeof(addrv4), AF_INET, &host);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  host = NULL;
+  ares_parse_ns_reply(data, (int)size, &host);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  ares_parse_srv_reply(data, (int)size, &srv);
+  if (srv) {
+    ares_free_data(srv);
+  }
+
+  ares_parse_mx_reply(data, (int)size, &mx);
+  if (mx) {
+    ares_free_data(mx);
+  }
+
+  ares_parse_txt_reply(data, (int)size, &txt);
+  if (txt) {
+    ares_free_data(txt);
+  }
+
+  ares_parse_soa_reply(data, (int)size, &soa);
+  if (soa) {
+    ares_free_data(soa);
+  }
+
+  ares_parse_naptr_reply(data, (int)size, &naptr);
+  if (naptr) {
+    ares_free_data(naptr);
+  }
+
+  ares_parse_caa_reply(data, (int)size, &caa);
+  if (caa) {
+    ares_free_data(caa);
+  }
+
+  ares_parse_uri_reply(data, (int)size, &uri);
+  if (uri) {
+    ares_free_data(uri);
+  }
+
+  return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed C/C++ production paths and all hunks are included. Function-context mode expands changed C/C++ function bodies; tests, examples, documentation, build files, and Harness files are excluded by the frozen rule.
+
+~~~~diff
+diff --git a/include/ares.h b/include/ares.h
+index acbd658..770d680 100644
+--- a/include/ares.h
++++ b/include/ares.h
+@@ -352,10 +352,38 @@ typedef struct ares_channeldata *ares_channel;
+ /* Current main channel typedef */
+ typedef struct ares_channeldata  ares_channel_t;
+ 
++/*
++ * NOTE: before c-ares 1.7.0 we would most often use the system in6_addr
++ * struct below when ares itself was built, but many apps would use this
++ * private version since the header checked a HAVE_* define for it. Starting
++ * with 1.7.0 we always declare and use our own to stop relying on the
++ * system's one.
++ */
++struct ares_in6_addr {
++  union {
++    unsigned char _S6_u8[16];
++  } _S6_un;
++};
++
++struct ares_addr {
++  int family;
++
++  union {
++    struct in_addr       addr4;
++    struct ares_in6_addr addr6;
++  } addr;
++};
++
++/* DNS record parser, writer, and helpers */
++#include "ares_dns_record.h"
+ 
+ typedef void     (*ares_callback)(void *arg, int status, int timeouts,
+                               unsigned char *abuf, int alen);
+ 
++typedef void     (*ares_callback_dnsrec)(void *arg, ares_status_t status,
++                                     size_t timeouts,
++                                     const ares_dns_record_t *dnsrec);
++
+ typedef void     (*ares_host_callback)(void *arg, int status, int timeouts,
+                                    struct hostent *hostent);
+ 
+@@ -477,6 +505,18 @@ CARES_EXTERN void ares_search(ares_channel_t *channel, const char *name,
+                               int dnsclass, int type, ares_callback callback,
+                               void *arg);
+ 
++/*! Search for a complete DNS message.
++ *
++ *  \param[in] channel  Pointer to channel on which queries will be sent.
++ *  \param[in] dnsrec   Pointer to initialized and filled DNS record object.
++ *  \param[in] callback Callback function invoked on completion or failure of
++ *                      the query sequence.
++ *  \param[in] arg      Additional argument passed to the callback function.
++ */
++CARES_EXTERN void ares_search_dnsrec(ares_channel_t *channel,
++                                     ares_dns_record_t *dnsrec,
++                                     ares_callback_dnsrec callback, void *arg);
++
+ CARES_EXTERN void ares_gethostbyname(ares_channel_t *channel, const char *name,
+                                      int family, ares_host_callback callback,
+                                      void *arg);
+@@ -527,29 +567,7 @@ CARES_EXTERN int  ares_expand_name(const unsigned char *encoded,
+ CARES_EXTERN int  ares_expand_string(const unsigned char *encoded,
+                                      const unsigned char *abuf, int alen,
+                                      unsigned char **s, long *enclen);
+ 
+-/*
+- * NOTE: before c-ares 1.7.0 we would most often use the system in6_addr
+- * struct below when ares itself was built, but many apps would use this
+- * private version since the header checked a HAVE_* define for it. Starting
+- * with 1.7.0 we always declare and use our own to stop relying on the
+- * system's one.
+- */
+-struct ares_in6_addr {
+-  union {
+-    unsigned char _S6_u8[16];
+-  } _S6_un;
+-};
+-
+-struct ares_addr {
+-  int family;
+-
+-  union {
+-    struct in_addr       addr4;
+-    struct ares_in6_addr addr6;
+-  } addr;
+-};
+-
+ struct ares_addrttl {
+   struct in_addr ipaddr;
+   int            ttl;
+@@ -793,17 +811,14 @@ CARES_EXTERN ares_status_t ares_queue_wait_empty(ares_channel_t *channel,
+ /*! Retrieve the total number of active queries pending answers from servers.
+  *  Some c-ares requests may spawn multiple queries, such as ares_getaddrinfo()
+  *  when using AF_UNSPEC, which will be reflected in this number.
+  *
+  *  \param[in] channel Initialized ares channel
+  *  \return Number of active queries to servers
+  */
+ CARES_EXTERN size_t        ares_queue_active_queries(ares_channel_t *channel);
+ 
+ #ifdef __cplusplus
+ }
+ #endif
+ 
+-/* DNS record parser, writer, and helpers */
+-#include "ares_dns_record.h"
+-
+ #endif /* ARES__H */
+diff --git a/include/ares_dns_record.h b/include/ares_dns_record.h
+index 7ae2d2f..110f629 100644
+--- a/include/ares_dns_record.h
++++ b/include/ares_dns_record.h
+@@ -652,37 +652,47 @@ CARES_EXTERN size_t ares_dns_record_rr_cnt(const ares_dns_record_t *dnsrec,
+ /*! Add a Resource Record to the DNS Record.
+  *
+  *  \param[out] rr_out   Pointer to created resource record.  This pointer
+  *                       is owned by the DNS record itself, this is just made
+  *                       available to facilitate adding RR-specific fields.
+  *  \param[in]  dnsrec   Initialized record object
+  *  \param[in]  sect     Section to add resource record to
+  *  \param[in]  name     Resource Record name/hostname
+  *  \param[in]  type     Record Type
+  *  \param[in]  rclass   Class
+  *  \param[in]  ttl      TTL
+  *  \return ARES_SUCCESS on success
+  */
+ CARES_EXTERN ares_status_t ares_dns_record_rr_add(
+   ares_dns_rr_t **rr_out, ares_dns_record_t *dnsrec, ares_dns_section_t sect,
+   const char *name, ares_dns_rec_type_t type, ares_dns_class_t rclass,
+   unsigned int ttl);
+ 
+-/*! Fetch a resource record based on the section and index.
++/*! Fetch a writable resource record based on the section and index.
+  *
+  *  \param[in]  dnsrec   Initialized record object
+  *  \param[in]  sect     Section for resource record
+  *  \param[in]  idx      Index of resource record in section
+- *  \return NULL on misuse, otherwise a pointer to the resource record
++ *  \return NULL on misuse, otherwise a writable pointer to the resource record
+  */
+ CARES_EXTERN ares_dns_rr_t *ares_dns_record_rr_get(ares_dns_record_t *dnsrec,
+                                                    ares_dns_section_t sect,
+                                                    size_t             idx);
+ 
++/*! Fetch a non-writeable resource record based on the section and index.
++ *
++ *  \param[in]  dnsrec   Initialized record object
++ *  \param[in]  sect     Section for resource record
++ *  \param[in]  idx      Index of resource record in section
++ *  \return NULL on misuse, otherwise a const pointer to the resource record
++ */
++CARES_EXTERN const ares_dns_rr_t *ares_dns_record_rr_get_const(
++  const ares_dns_record_t *dnsrec, ares_dns_section_t sect, size_t idx);
++
+ 
+ /*! Remove the resource record based on the section and index
+  *
+  *  \param[in]  dnsrec   Initialized record object
+  *  \param[in]  sect     Section for resource record
+  *  \param[in]  idx      Index of resource record in section
+  *  \return ARES_SUCCESS on success, otherwise an error code.
+  */
+@@ -954,17 +964,17 @@ CARES_EXTERN ares_status_t ares_dns_parse(const unsigned char *buf,
+ /*! Write a complete DNS message
+  *
+  *  \param[in]  dnsrec   Pointer to initialized and filled DNS record object.
+  *  \param[out] buf      Pointer passed by reference to be filled in with with
+  *                       DNS message.  Must be ares_free()'d by caller.
+  *  \param[out] buf_len  Length of returned buffer containing DNS message.
+  *  \return ARES_SUCCESS on success
+  */
+-CARES_EXTERN ares_status_t ares_dns_write(ares_dns_record_t *dnsrec,
++CARES_EXTERN ares_status_t ares_dns_write(const ares_dns_record_t *dnsrec,
+                                           unsigned char **buf, size_t *buf_len);
+ /*! @} */
+ 
+ #ifdef __cplusplus
+ }
+ #endif
+ 
+ #endif /* __ARES_DNS_RECORD_H */
+diff --git a/src/lib/ares_create_query.c b/src/lib/ares_create_query.c
+index f66b0ff..51470e9 100644
+--- a/src/lib/ares_create_query.c
++++ b/src/lib/ares_create_query.c
+@@ -31,72 +31,31 @@
+ int ares_create_query(const char *name, int dnsclass, int type,
+                       unsigned short id, int rd, unsigned char **bufp,
+                       int *buflenp, int max_udp_size)
+ {
+   ares_status_t      status;
+   ares_dns_record_t *dnsrec = NULL;
+   size_t             len;
++  ares_dns_flags_t   rd_flag = rd ? ARES_FLAG_RD : 0;
+ 
+   if (name == NULL || bufp == NULL || buflenp == NULL) {
+     status = ARES_EFORMERR;
+     goto done;
+   }
+ 
+   *bufp    = NULL;
+   *buflenp = 0;
+ 
+-  /* Per RFC 7686, reject queries for ".onion" domain names with NXDOMAIN. */
+-  if (ares__is_onion_domain(name)) {
+-    status = ARES_ENOTFOUND;
+-    goto done;
+-  }
+-
+-  status = ares_dns_record_create(&dnsrec, id, rd ? ARES_FLAG_RD : 0,
+-                                  ARES_OPCODE_QUERY, ARES_RCODE_NOERROR);
+-  if (status != ARES_SUCCESS) {
+-    goto done;
+-  }
+-
+-  status = ares_dns_record_query_add(dnsrec, name, (ares_dns_rec_type_t)type,
+-                                     (ares_dns_class_t)dnsclass);
++  status = ares_dns_record_create_query(&dnsrec, name,
++                                        (ares_dns_class_t)dnsclass,
++                                        (ares_dns_rec_type_t)type,
++                                        id, rd_flag, (size_t)max_udp_size);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+-  /* max_udp_size > 0 indicates EDNS, so send OPT RR as an additional record */
+-  if (max_udp_size > 0) {
+-    ares_dns_rr_t *rr = NULL;
+-
+-    status = ares_dns_record_rr_add(&rr, dnsrec, ARES_SECTION_ADDITIONAL, "",
+-                                    ARES_REC_TYPE_OPT, ARES_CLASS_IN, 0);
+-    if (status != ARES_SUCCESS) {
+-      goto done;
+-    }
+-
+-    if (max_udp_size > 65535) {
+-      status = ARES_EFORMERR;
+-      goto done;
+-    }
+-
+-    status = ares_dns_rr_set_u16(rr, ARES_RR_OPT_UDP_SIZE,
+-                                 (unsigned short)max_udp_size);
+-    if (status != ARES_SUCCESS) {
+-      goto done;
+-    }
+-
+-    status = ares_dns_rr_set_u8(rr, ARES_RR_OPT_VERSION, 0);
+-    if (status != ARES_SUCCESS) {
+-      goto done;
+-    }
+-
+-    status = ares_dns_rr_set_u16(rr, ARES_RR_OPT_FLAGS, 0);
+-    if (status != ARES_SUCCESS) {
+-      goto done;
+-    }
+-  }
+-
+   status = ares_dns_write(dnsrec, bufp, &len);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+   *buflenp = (int)len;
+diff --git a/src/lib/ares_dns_mapping.c b/src/lib/ares_dns_mapping.c
+index 55f1af7..8f06a44 100644
+--- a/src/lib/ares_dns_mapping.c
++++ b/src/lib/ares_dns_mapping.c
+@@ -883,3 +883,37 @@ const char *ares_dns_rcode_tostr(ares_dns_rcode_t rcode)
+ 
+   return "UNKNOWN";
+ }
++
++/* Convert an rcode and ancount from a query reply into an ares_status_t
++ * value. Used internally by ares_search() and ares_query().
++ */
++ares_status_t ares_dns_query_reply_tostatus(ares_dns_rcode_t rcode,
++                                            size_t ancount)
++{
++  ares_status_t status = ARES_SUCCESS;
++
++  switch (rcode) {
++    case ARES_RCODE_NOERROR:
++      status = (ancount > 0) ? ARES_SUCCESS : ARES_ENODATA;
++      break;
++    case ARES_RCODE_FORMERR:
++      status = ARES_EFORMERR;
++      break;
++    case ARES_RCODE_SERVFAIL:
++      status = ARES_ESERVFAIL;
++      break;
++    case ARES_RCODE_NXDOMAIN:
++      status = ARES_ENOTFOUND;
++      break;
++    case ARES_RCODE_NOTIMP:
++      status = ARES_ENOTIMP;
++      break;
++    case ARES_RCODE_REFUSED:
++      status = ARES_EREFUSED;
++      break;
++    default:
++      break;
++  }
++
++  return status;
++}
+diff --git a/src/lib/ares_dns_private.h b/src/lib/ares_dns_private.h
+index 91635e7..07339d3 100644
+--- a/src/lib/ares_dns_private.h
++++ b/src/lib/ares_dns_private.h
+@@ -49,6 +49,49 @@ ares_bool_t   ares_dns_has_opt_rr(const ares_dns_record_t *rec);
+ void          ares_dns_record_write_ttl_decrement(ares_dns_record_t *dnsrec,
+                                                   unsigned int       ttl_decrement);
+ 
++/*! Create a DNS record object for a query. The arguments are the same as
++ *  those for ares_create_query().
++ *
++ *  \param[out] dnsrec       DNS record object to create.
++ *  \param[in]  name         NUL-terminated name for the query.
++ *  \param[in]  dnsclass     Class for the query.
++ *  \param[in]  type         Type for the query.
++ *  \param[in]  id           Identifier for the query.
++ *  \param[in]  flags        Flags for the query.
++ *  \param[in]  max_udp_size Maximum size of a UDP packet for EDNS.
++ *  \return ARES_SUCCESS on success, otherwise an error code.
++ */
++ares_status_t ares_dns_record_create_query(ares_dns_record_t **dnsrec,
++                                           const char *name,
++                                           ares_dns_class_t dnsclass,
++                                           ares_dns_rec_type_t type,
++                                           unsigned short id,
++                                           ares_dns_flags_t flags,
++                                           size_t max_udp_size);
++
++/*! Convert the RCODE and ANCOUNT from a DNS query reply into a status code.
++ *
++ *  \param[in] rcode   The RCODE from the reply.
++ *  \param[in] ancount The ANCOUNT from the reply.
++ *  \return An appropriate status code.
++ */
++ares_status_t ares_dns_query_reply_tostatus(ares_dns_rcode_t rcode,
++                                            size_t ancount);
++
++/*! Write a DNS record representing a query for a single name into a buffer.
++ *  An alternative name can be specified to temporarily overwrite the name
++ *  in the query. Note that this only affects the name in the question section;
++ *  RRs are not affected.
++ *
++ *  \param[in]  dnsrec  DNS record object to write.
++ *  \param[in]  altname Alternative name to use in the query.
++ *  \param[out] buf     Buffer to write the query into.
++ *  \param[out] buflen  Length of the buffer.
++ *  \return ARES_SUCCESS on success, otherwise an error code.
++ */
++ares_status_t ares_dns_write_query_altname(ares_dns_record_t *dnsrec,
++                                           char *altname, unsigned char **buf,
++                                           size_t *buflen);
+ struct ares_dns_qd {
+   char               *name;
+   ares_dns_rec_type_t qtype;
+diff --git a/src/lib/ares_dns_record.c b/src/lib/ares_dns_record.c
+index 3021900..90e3af8 100644
+--- a/src/lib/ares_dns_record.c
++++ b/src/lib/ares_dns_record.c
+@@ -499,9 +499,9 @@ ares_dns_rr_t *ares_dns_record_rr_get(ares_dns_record_t *dnsrec,
+   return &rr_ptr[idx];
+ }
+ 
+-static const ares_dns_rr_t *
++const ares_dns_rr_t *
+   ares_dns_record_rr_get_const(const ares_dns_record_t *dnsrec,
+                                ares_dns_section_t sect, size_t idx)
+ {
+   return ares_dns_record_rr_get((void *)((size_t)dnsrec), sect, idx);
+ }
+@@ -1314,3 +1314,81 @@ ares_bool_t ares_dns_has_opt_rr(const ares_dns_record_t *rec)
+   }
+   return ARES_FALSE;
+ }
++
++/* Construct a DNS record for a name with given class and type. Used internally
++ * by ares_search() and ares_create_query().
++ */
++ares_status_t ares_dns_record_create_query(ares_dns_record_t **dnsrec,
++                                           const char *name,
++                                           ares_dns_class_t dnsclass,
++                                           ares_dns_rec_type_t type,
++                                           unsigned short id,
++                                           ares_dns_flags_t flags,
++                                           size_t max_udp_size)
++{
++  ares_status_t  status;
++  ares_dns_rr_t *rr = NULL;
++
++  if (dnsrec == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  *dnsrec = NULL;
++
++  /* Per RFC 7686, reject queries for ".onion" domain names with NXDOMAIN */
++  if (ares__is_onion_domain(name)) {
++    status = ARES_ENOTFOUND;
++    goto done;
++  }
++
++  status = ares_dns_record_create(dnsrec, id, (unsigned short)flags,
++                                  ARES_OPCODE_QUERY, ARES_RCODE_NOERROR);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_dns_record_query_add(*dnsrec, name, type, dnsclass);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  /* max_udp_size > 0 indicates EDNS, so send OPT RR as an additional record */
++  if (max_udp_size > 0) {
++    /* max_udp_size must fit into a 16 bit unsigned integer field on the OPT
++     * RR, so check here that it fits
++     */
++    if (max_udp_size > 65535) {
++      status = ARES_EFORMERR;
++      goto done;
++    }
++
++    status = ares_dns_record_rr_add(&rr, *dnsrec, ARES_SECTION_ADDITIONAL, "",
++                                    ARES_REC_TYPE_OPT, ARES_CLASS_IN, 0);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++
++    status = ares_dns_rr_set_u16(rr, ARES_RR_OPT_UDP_SIZE,
++                                 (unsigned short)max_udp_size);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++
++    status = ares_dns_rr_set_u8(rr, ARES_RR_OPT_VERSION, 0);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++
++    status = ares_dns_rr_set_u16(rr, ARES_RR_OPT_FLAGS, 0);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++  }
++
++done:
++  if (status != ARES_SUCCESS) {
++    ares_dns_record_destroy(*dnsrec);
++    *dnsrec = NULL;
++  }
++  return status;
++}
+diff --git a/src/lib/ares_dns_write.c b/src/lib/ares_dns_write.c
+index 2e99c5b..761f2c1 100644
+--- a/src/lib/ares_dns_write.c
++++ b/src/lib/ares_dns_write.c
+@@ -831,203 +831,204 @@ static ares_status_t ares_dns_write_rr_raw_rr(ares__buf_t         *buf,
+   return ares__buf_append(buf, data, data_len);
+ }
+ 
+-static ares_status_t ares_dns_write_rr(ares_dns_record_t *dnsrec,
++static ares_status_t ares_dns_write_rr(const ares_dns_record_t *dnsrec,
+                                        ares__llist_t    **namelist,
+                                        ares_dns_section_t section,
+                                        ares__buf_t       *buf)
+ {
+   size_t i;
+ 
+   for (i = 0; i < ares_dns_record_rr_cnt(dnsrec, section); i++) {
+     const ares_dns_rr_t *rr;
+     ares_dns_rec_type_t  type;
+     ares_bool_t          allow_compress;
+     ares__llist_t      **namelistptr = NULL;
+     size_t               pos_len;
+     ares_status_t        status;
+     size_t               rdlength;
+     size_t               end_length;
+     unsigned int         ttl;
+ 
+-    rr = ares_dns_record_rr_get(dnsrec, section, i);
++    rr = ares_dns_record_rr_get_const(dnsrec, section, i);
+     if (rr == NULL) {
+       return ARES_EFORMERR;
+     }
+ 
+     type           = ares_dns_rr_get_type(rr);
+     allow_compress = ares_dns_rec_type_allow_name_compression(type);
+     if (allow_compress) {
+       namelistptr = namelist;
+     }
+ 
+     /* Name */
+     status =
+       ares__dns_name_write(buf, namelist, ARES_TRUE, ares_dns_rr_get_name(rr));
+     if (status != ARES_SUCCESS) {
+       return status;
+     }
+ 
+     /* Type */
+     status = ares__buf_append_be16(buf, (unsigned short)type);
+     if (status != ARES_SUCCESS) {
+       return status;
+     }
+ 
+     /* Class */
+     status =
+       ares__buf_append_be16(buf, (unsigned short)ares_dns_rr_get_class(rr));
+     if (status != ARES_SUCCESS) {
+       return status;
+     }
+ 
+     /* TTL */
+     ttl = ares_dns_rr_get_ttl(rr);
+     if (rr->parent->ttl_decrement > ttl) {
+       ttl = 0;
+     } else {
+       ttl -= rr->parent->ttl_decrement;
+     }
+     status = ares__buf_append_be32(buf, ttl);
+     if (status != ARES_SUCCESS) {
+       return status;
+     }
+ 
+     /* Length */
+     pos_len = ares__buf_len(buf); /* Save to write real length later */
+     status  = ares__buf_append_be16(buf, 0);
+     if (status != ARES_SUCCESS) {
+       return status;
+     }
+ 
+     /* Data */
+     switch (type) {
+       case ARES_REC_TYPE_A:
+         status = ares_dns_write_rr_a(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_NS:
+         status = ares_dns_write_rr_ns(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_CNAME:
+         status = ares_dns_write_rr_cname(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_SOA:
+         status = ares_dns_write_rr_soa(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_PTR:
+         status = ares_dns_write_rr_ptr(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_HINFO:
+         status = ares_dns_write_rr_hinfo(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_MX:
+         status = ares_dns_write_rr_mx(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_TXT:
+         status = ares_dns_write_rr_txt(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_AAAA:
+         status = ares_dns_write_rr_aaaa(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_SRV:
+         status = ares_dns_write_rr_srv(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_NAPTR:
+         status = ares_dns_write_rr_naptr(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_ANY:
+         status = ARES_EFORMERR;
+         break;
+       case ARES_REC_TYPE_OPT:
+         status = ares_dns_write_rr_opt(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_TLSA:
+         status = ares_dns_write_rr_tlsa(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_SVCB:
+         status = ares_dns_write_rr_svcb(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_HTTPS:
+         status = ares_dns_write_rr_https(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_URI:
+         status = ares_dns_write_rr_uri(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_CAA:
+         status = ares_dns_write_rr_caa(buf, rr, namelistptr);
+         break;
+       case ARES_REC_TYPE_RAW_RR:
+         status = ares_dns_write_rr_raw_rr(buf, rr, namelistptr);
+         break;
+     }
+ 
+     if (status != ARES_SUCCESS) {
+       return status;
+     }
+ 
+     /* Back off write pointer, write real length, then go back to proper
+      * position */
+     end_length = ares__buf_len(buf);
+     rdlength   = end_length - pos_len - 2;
+ 
+     status = ares__buf_set_length(buf, pos_len);
+     if (status != ARES_SUCCESS) {
+       return status;
+     }
+ 
+     status = ares__buf_append_be16(buf, (unsigned short)(rdlength & 0xFFFF));
+     if (status != ARES_SUCCESS) {
+       return status;
+     }
+ 
+     status = ares__buf_set_length(buf, end_length);
+     if (status != ARES_SUCCESS) {
+       return status;
+     }
+   }
+ 
+   return ARES_SUCCESS;
+ }
+ 
+-ares_status_t ares_dns_write(ares_dns_record_t *dnsrec, unsigned char **buf,
++ares_status_t ares_dns_write(const ares_dns_record_t *dnsrec,
++                             unsigned char **buf,
+                              size_t *buf_len)
+ {
+   ares__buf_t   *b = NULL;
+   ares_status_t  status;
+   ares__llist_t *namelist = NULL;
+ 
+   if (buf == NULL || buf_len == NULL || dnsrec == NULL) {
+     return ARES_EFORMERR;
+   }
+ 
+   *buf     = NULL;
+   *buf_len = 0;
+ 
+   b = ares__buf_create();
+   if (b == NULL) {
+     return ARES_ENOMEM;
+   }
+ 
+   status = ares_dns_write_header(dnsrec, b);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+   status = ares_dns_write_questions(dnsrec, &namelist, b);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+   status = ares_dns_write_rr(dnsrec, &namelist, ARES_SECTION_ANSWER, b);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+   status = ares_dns_write_rr(dnsrec, &namelist, ARES_SECTION_AUTHORITY, b);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+   status = ares_dns_write_rr(dnsrec, &namelist, ARES_SECTION_ADDITIONAL, b);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+@@ -1052,3 +1053,29 @@ void ares_dns_record_write_ttl_decrement(ares_dns_record_t *dnsrec,
+   }
+   dnsrec->ttl_decrement = ttl_decrement;
+ }
++
++/* Write a DNS record representing a query for a single name, but temporarily
++ * overwrite the name with an alternative name before doing so. This is used
++ * as a helper function in ares_search(). Note that this only affects the name
++ * in the question section; RRs are not affected.
++ */
++ares_status_t ares_dns_write_query_altname(ares_dns_record_t *dnsrec,
++                                           char *altname, unsigned char **buf,
++                                           size_t *buflen)
++{
++  char         *qname;
++  ares_status_t status;
++
++  if (ares_dns_record_query_cnt(dnsrec) != 1) {
++    return ARES_EBADQUERY;
++  }
++
++  qname = dnsrec->qd[0].name;
++  if (altname != NULL) {
++    dnsrec->qd[0].name = altname;
++  }
++  status = ares_dns_write(dnsrec, buf, buflen);
++  dnsrec->qd[0].name = qname;
++
++  return status;
++}
+diff --git a/src/lib/ares_query.c b/src/lib/ares_query.c
+index 098e678..4c5be94 100644
+--- a/src/lib/ares_query.c
++++ b/src/lib/ares_query.c
+@@ -99,41 +99,27 @@ void ares_query(ares_channel_t *channel, const char *name, int dnsclass,
+ static void qcallback(void *arg, int status, int timeouts, unsigned char *abuf,
+                       int alen)
+ {
+-  struct qquery *qquery = (struct qquery *)arg;
+-  size_t         ancount;
+-  int            rcode;
++  struct qquery     *qquery = (struct qquery *)arg;
++  ares_dns_record_t *dnsrep = NULL;
++  size_t             ancount;
++  ares_dns_rcode_t   rcode;
+ 
+   if (status != ARES_SUCCESS) {
+     qquery->callback(qquery->arg, status, timeouts, abuf, alen);
+   } else {
+-    /* Pull the response code and answer count from the packet. */
+-    rcode   = DNS_HEADER_RCODE(abuf);
+-    ancount = DNS_HEADER_ANCOUNT(abuf);
+-
+-    /* Convert errors. */
+-    switch (rcode) {
+-      case NOERROR:
+-        status = (ancount > 0) ? ARES_SUCCESS : ARES_ENODATA;
+-        break;
+-      case FORMERR:
+-        status = ARES_EFORMERR;
+-        break;
+-      case SERVFAIL:
+-        status = ARES_ESERVFAIL;
+-        break;
+-      case NXDOMAIN:
+-        status = ARES_ENOTFOUND;
+-        break;
+-      case NOTIMP:
+-        status = ARES_ENOTIMP;
+-        break;
+-      case REFUSED:
+-        status = ARES_EREFUSED;
+-        break;
+-      default:
+-        break;
++    /* Pull the response code and answer count from the packet and convert any
++     * errors.
++     */
++    status = (int)ares_dns_parse(abuf, (size_t)alen, 0, &dnsrep);
++    if (status != ARES_SUCCESS) {
++      qquery->callback(qquery->arg, status, timeouts, abuf, alen);
++    } else {
++      rcode = ares_dns_record_get_rcode(dnsrep);
++      ancount = ares_dns_record_rr_cnt(dnsrep, ARES_SECTION_ANSWER);
++      ares_dns_record_destroy(dnsrep);
++      status = (int)ares_dns_query_reply_tostatus(rcode, ancount);
++      qquery->callback(qquery->arg, status, timeouts, abuf, alen);
+     }
+-    qquery->callback(qquery->arg, status, timeouts, abuf, alen);
+   }
+   ares_free(qquery);
+ }
+diff --git a/src/lib/ares_search.c b/src/lib/ares_search.c
+index 34d5258..18d667d 100644
+--- a/src/lib/ares_search.c
++++ b/src/lib/ares_search.c
+@@ -1,241 +1,401 @@
+ /* MIT License
+  *
+  * Copyright (c) 1998 Massachusetts Institute of Technology
+  * Copyright (c) The c-ares project and its contributors
+  *
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to deal
+  * in the Software without restriction, including without limitation the rights
+  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  * copies of the Software, and to permit persons to whom the Software is
+  * furnished to do so, subject to the following conditions:
+  *
+  * The above copyright notice and this permission notice (including the next
+  * paragraph) shall be included in all copies or substantial portions of the
+  * Software.
+  *
+  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  * SOFTWARE.
+  *
+  * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+ 
+ #ifdef HAVE_STRINGS_H
+ #  include <strings.h>
+ #endif
+ 
+ #include "ares.h"
+ #include "ares_private.h"
++#include "ares_dns.h"
+ 
+ struct search_query {
+-  /* Arguments passed to ares_search */
++  /* Arguments passed to ares_search() */
+   ares_channel_t *channel;
+-  char           *name; /* copied into an allocated buffer */
+-  int             dnsclass;
+-  int             type;
+   ares_callback   callback;
+   void           *arg;
+-  char          **domains; /* duplicate for ares_reinit() safety */
++
++  /* DNS record passed to ares_search(), encoded in string format */
++  unsigned char  *buf;
++  size_t          buflen;
++
++  /* Duplicate of channel domains for ares_reinit() safety */
++  char          **domains;
+   size_t          ndomains;
+ 
+-  int             status_as_is; /* error status from trying as-is */
+-  size_t          next_domain;  /* next search domain to try */
+-  ares_bool_t     trying_as_is; /* current query is for name as-is */
+-  size_t          timeouts;     /* number of timeouts we saw for this request */
+-  ares_bool_t ever_got_nodata; /* did we ever get ARES_ENODATA along the way? */
++  /* State tracking progress through the search query */
++  int             status_as_is;    /* error status from trying as-is */
++  size_t          next_domain;     /* next search domain to try */
++  ares_bool_t     trying_as_is;    /* current query is for name as-is */
++  size_t          timeouts;        /* number of timeouts we saw for this request */
++  ares_bool_t     ever_got_nodata; /* did we ever get ARES_ENODATA along the way? */
++};
++
++/* Callback argument structure passed to ares__dnsrec_convert_cb(). */
++struct dnsrec_convert_arg {
++  ares_callback_dnsrec callback;
++  void                *arg;
+ };
+ 
+ static void search_callback(void *arg, int status, int timeouts,
+                             unsigned char *abuf, int alen);
++static ares_status_t ares__write_and_send_query(ares_channel_t *channel,
++                                                ares_dns_record_t *dnsrec,
++                                                char *altname,
++                                                ares_callback callback,
++                                                void *arg);
+ static void end_squery(struct search_query *squery, ares_status_t status,
+                        unsigned char *abuf, size_t alen);
++static void ares__dnsrec_convert_cb(void *arg, int status, int timeouts,
++                                    unsigned char *abuf, int alen);
+ 
+-static void ares_search_int(ares_channel_t *channel, const char *name,
+-                            int dnsclass, int type, ares_callback callback,
+-                            void *arg)
++static void ares_search_int(ares_channel_t *channel, ares_dns_record_t *dnsrec,
++                            ares_callback callback, void *arg)
+ {
+   struct search_query *squery;
+-  char                *s;
++  const char          *name;
++  char                *s = NULL;
+   const char          *p;
+   ares_status_t        status;
+   size_t               ndots;
+ 
++  /* Extract the name for the search. Note that searches are only supported for
++   * DNS records containing a single query.
++   */
++  if (ares_dns_record_query_cnt(dnsrec) != 1) {
++    callback(arg, ARES_EBADQUERY, 0, NULL, 0);
++    return;
++  }
++  status = ares_dns_record_query_get(dnsrec, 0, &name, NULL, NULL);
++  if (status != ARES_SUCCESS) {
++    callback(arg, (int)status, 0, NULL, 0);
++    return;
++  }
++
+   /* Per RFC 7686, reject queries for ".onion" domain names with NXDOMAIN. */
+   if (ares__is_onion_domain(name)) {
+     callback(arg, ARES_ENOTFOUND, 0, NULL, 0);
+     return;
+   }
+ 
+   /* If name only yields one domain to search, then we don't have
+-   * to keep extra state, so just do an ares_query().
++   * to keep extra state, so just do an ares_send().
+    */
+   status = ares__single_domain(channel, name, &s);
+   if (status != ARES_SUCCESS) {
+     callback(arg, (int)status, 0, NULL, 0);
+     return;
+-  }
+-  if (s) {
+-    ares_query(channel, s, dnsclass, type, callback, arg);
++  } else if (s != NULL) {
++    /* We only have a single domain to search, so do it here. */
++    status = ares__write_and_send_query(channel, dnsrec, s, callback, arg);
+     ares_free(s);
++    if (status != ARES_SUCCESS) {
++      callback(arg, (int)status, 0, NULL, 0);
++    }
+     return;
+   }
+ 
+   /* Allocate a search_query structure to hold the state necessary for
+    * doing multiple lookups.
+    */
+   squery = ares_malloc_zero(sizeof(*squery));
+   if (!squery) {
+     callback(arg, ARES_ENOMEM, 0, NULL, 0);
+     return;
+   }
+   squery->channel = channel;
+-  squery->name    = ares_strdup(name);
+-  if (!squery->name) {
++
++  /* We pass the DNS record through the search_query structure by encoding it
++   * into a buffer and then later decoding it back.
++   */
++  status = ares_dns_write(dnsrec, &squery->buf, &squery->buflen);
++  if (status != ARES_SUCCESS) {
+     ares_free(squery);
+-    callback(arg, ARES_ENOMEM, 0, NULL, 0);
++    callback(arg, (int)status, 0, NULL, 0);
+     return;
+   }
+ 
+   /* Duplicate domains for safety during ares_reinit() */
+   if (channel->ndomains) {
+     squery->domains =
+       ares__strsplit_duplicate(channel->domains, channel->ndomains);
+     if (squery->domains == NULL) {
+-      ares_free(squery->name);
++      ares_free(squery->buf);
+       ares_free(squery);
+       callback(arg, ARES_ENOMEM, 0, NULL, 0);
+       return;
+     }
+     squery->ndomains = channel->ndomains;
+   }
+ 
+-  squery->dnsclass        = dnsclass;
+-  squery->type            = type;
+   squery->status_as_is    = -1;
+   squery->callback        = callback;
+   squery->arg             = arg;
+   squery->timeouts        = 0;
+   squery->ever_got_nodata = ARES_FALSE;
+ 
+   /* Count the number of dots in name. */
+   ndots = 0;
+   for (p = name; *p; p++) {
+     if (*p == '.') {
+       ndots++;
+     }
+   }
+ 
+   /* If ndots is at least the channel ndots threshold (usually 1),
+    * then we try the name as-is first.  Otherwise, we try the name
+    * as-is last.
+    */
+   if (ndots >= channel->ndots || squery->ndomains == 0) {
+     /* Try the name as-is first. */
+     squery->next_domain  = 0;
+     squery->trying_as_is = ARES_TRUE;
+-    ares_query(channel, name, dnsclass, type, search_callback, squery);
++    ares_send(channel, squery->buf, (int)squery->buflen, search_callback,
++              squery);
+   } else {
+     /* Try the name as-is last; start with the first search domain. */
+-    squery->next_domain  = 1;
+-    squery->trying_as_is = ARES_FALSE;
+-    status               = ares__cat_domain(name, squery->domains[0], &s);
++    status = ares__cat_domain(name, squery->domains[0], &s);
+     if (status == ARES_SUCCESS) {
+-      ares_query(channel, s, dnsclass, type, search_callback, squery);
++      squery->next_domain  = 1;
++      squery->trying_as_is = ARES_FALSE;
++      status = ares__write_and_send_query(channel, dnsrec, s, search_callback,
++                                          squery);
+       ares_free(s);
+-    } else {
+-      /* failed, free the malloc()ed memory */
+-      ares_free(squery->name);
+-      ares_free(squery);
+-      callback(arg, (int)status, 0, NULL, 0);
++    }
++    /* Handle any errors. */
++    if (status != ARES_SUCCESS) {
++      end_squery(squery, status, NULL, 0);
+     }
+   }
+ }
+ 
++/* Search for a DNS name with given class and type. Wrapper around
++ * ares_search_int() where the DNS record to search is first constructed.
++ */
+ void ares_search(ares_channel_t *channel, const char *name, int dnsclass,
+                  int type, ares_callback callback, void *arg)
+ {
+-  if (channel == NULL) {
++  ares_status_t      status;
++  ares_dns_record_t *dnsrec = NULL;
++  size_t             max_udp_size;
++  ares_dns_flags_t   rd_flag;
++
++  if ((channel == NULL) || (name == NULL)) {
++    return;
++  }
++
++  rd_flag = !(channel->flags & ARES_FLAG_NORECURSE) ? ARES_FLAG_RD: 0;
++  max_udp_size = (channel->flags & ARES_FLAG_EDNS) ? channel->ednspsz : 0;
++  status = ares_dns_record_create_query(&dnsrec, name,
++                                        (ares_dns_class_t)dnsclass,
++                                        (ares_dns_rec_type_t)type,
++                                        0, rd_flag, max_udp_size);
++  if (status != ARES_SUCCESS) {
++    callback(arg, (int)status, 0, NULL, 0);
++    return;
++  }
++
++  ares__channel_lock(channel);
++  ares_search_int(channel, dnsrec, callback, arg);
++  ares__channel_unlock(channel);
++
++  ares_dns_record_destroy(dnsrec);
++}
++
++/* Search for a DNS record. Wrapper around ares_search_int(). */
++void ares_search_dnsrec(ares_channel_t *channel, ares_dns_record_t *dnsrec,
++                        ares_callback_dnsrec callback, void *arg)
++{
++  struct dnsrec_convert_arg *carg;
++
++  if ((channel == NULL) || (dnsrec == NULL)) {
++    return;
++  }
++
++  /* For now, ares_search_int() uses the ares_callback prototype. We need to
++   * wrap the callback passed to this function in ares__dnsrec_convert_cb, to
++   * convert from ares_callback_dnsrec to ares_callback. Allocate the convert
++   * arg structure here.
++   */
++  carg = ares_malloc_zero(sizeof(*carg));
++  if (carg == NULL) {
++    callback(arg, ARES_ENOMEM, 0, NULL);
+     return;
+   }
++  carg->callback = callback;
++  carg->arg = arg;
++
+   ares__channel_lock(channel);
+-  ares_search_int(channel, name, dnsclass, type, callback, arg);
++  ares_search_int(channel, dnsrec, ares__dnsrec_convert_cb, carg);
+   ares__channel_unlock(channel);
+ }
+ 
+ static void search_callback(void *arg, int status, int timeouts,
+                             unsigned char *abuf, int alen)
+ {
+   struct search_query *squery  = (struct search_query *)arg;
+   ares_channel_t      *channel = squery->channel;
+-  char                *s;
++  ares_dns_record_t   *dnsrep = NULL;
++  ares_dns_rcode_t     rcode;
++  size_t               ancount;
++  ares_dns_record_t   *dnsrec = NULL;
++  const char          *name;
++  char                *s = NULL;
++  ares_status_t        mystatus;
+ 
+   squery->timeouts += (size_t)timeouts;
+ 
+-  /* Stop searching unless we got a non-fatal error. */
+-  if (status != ARES_ENODATA && status != ARES_ESERVFAIL &&
+-      status != ARES_ENOTFOUND) {
++  if (status != ARES_SUCCESS) {
+     end_squery(squery, (ares_status_t)status, abuf, (size_t)alen);
++    return;
++  }
++
++  /* Convert the rcode and ancount from the response into an ares_status_t
++   * value. Stop searching unless we got a non-fatal error.
++   */
++  mystatus = ares_dns_parse(abuf, (size_t)alen, 0, &dnsrep);
++  if (mystatus != ARES_SUCCESS) {
++    end_squery(squery, mystatus, abuf, (size_t)alen);
++    return;
++  }
++  rcode = ares_dns_record_get_rcode(dnsrep);
++  ancount = ares_dns_record_rr_cnt(dnsrep, ARES_SECTION_ANSWER);
++  ares_dns_record_destroy(dnsrep);
++  mystatus = ares_dns_query_reply_tostatus(rcode, ancount);
++
++  if ((mystatus != ARES_ENODATA) && (mystatus != ARES_ESERVFAIL) &&
++      (mystatus != ARES_ENOTFOUND)) {
++    end_squery(squery, mystatus, abuf, (size_t)alen);
+   } else {
+     /* Save the status if we were trying as-is. */
+     if (squery->trying_as_is) {
+-      squery->status_as_is = status;
++      squery->status_as_is = (int)mystatus;
+     }
+ 
+-    /*
+-     * If we ever get ARES_ENODATA along the way, record that; if the search
++    /* If we ever get ARES_ENODATA along the way, record that; if the search
+      * should run to the very end and we got at least one ARES_ENODATA,
+      * then callers like ares_gethostbyname() may want to try a T_A search
+      * even if the last domain we queried for T_AAAA resource records
+      * returned ARES_ENOTFOUND.
+      */
+-    if (status == ARES_ENODATA) {
++    if (mystatus == ARES_ENODATA) {
+       squery->ever_got_nodata = ARES_TRUE;
+     }
+ 
+     if (squery->next_domain < squery->ndomains) {
+-      ares_status_t mystatus;
+-      /* Try the next domain. */
+-      mystatus = ares__cat_domain(squery->name,
+-                                  squery->domains[squery->next_domain], &s);
++      /* Try the next domain.
++       *
++       * First parse the encoded DNS record in the search_query structure, so
++       * that we can append the next domain to it.
++       */
++      mystatus = ares_dns_parse(squery->buf, squery->buflen, 0, &dnsrec);
+       if (mystatus != ARES_SUCCESS) {
+         end_squery(squery, mystatus, NULL, 0);
+       } else {
+-        squery->trying_as_is = ARES_FALSE;
+-        squery->next_domain++;
+-        ares_query(channel, s, squery->dnsclass, squery->type, search_callback,
+-                   squery);
+-        ares_free(s);
++        /* Concatenate the name with the search domain and query using that. */
++        if (ares_dns_record_query_cnt(dnsrec) != 1) {
++          mystatus = ARES_EBADQUERY;
++        } else {
++          mystatus = ares_dns_record_query_get(dnsrec, 0, &name, NULL, NULL);
++          if (mystatus == ARES_SUCCESS) {
++            mystatus = ares__cat_domain(name,
++                                        squery->domains[squery->next_domain],
++                                        &s);
++            if (mystatus == ARES_SUCCESS) {
++              squery->trying_as_is = ARES_FALSE;
++              squery->next_domain++;
++              mystatus = ares__write_and_send_query(channel, dnsrec, s,
++                                                    search_callback, arg);
++              ares_free(s);
++            }
++          }
++        }
++        /* Clean up the DNS record object and handle any errors. */
++        ares_dns_record_destroy(dnsrec);
++        if (mystatus != ARES_SUCCESS) {
++          end_squery(squery, mystatus, NULL, 0);
++        }
+       }
+     } else if (squery->status_as_is == -1) {
+       /* Try the name as-is at the end. */
+       squery->trying_as_is = ARES_TRUE;
+-      ares_query(channel, squery->name, squery->dnsclass, squery->type,
+-                 search_callback, squery);
++      ares_send(channel, squery->buf, (int)squery->buflen, search_callback,
++                squery);
+     } else {
++      /* We have no more domains to search, return an appropriate response. */
+       if (squery->status_as_is == ARES_ENOTFOUND && squery->ever_got_nodata) {
+         end_squery(squery, ARES_ENODATA, NULL, 0);
+       } else {
+         end_squery(squery, (ares_status_t)squery->status_as_is, NULL, 0);
+       }
+     }
+   }
+ }
+ 
++/* Write and send a DNS record on a channel. The DNS record must represent a
++ * query for a single name. An alternative name can be specified to temporarily
++ * overwrite the name on the DNS record before doing so. Note that this only
++ * affects the name in the question section; RRs are not affected.
++ * This is used as a helper function in ares_search().
++ */
++static ares_status_t ares__write_and_send_query(ares_channel_t *channel,
++                                                ares_dns_record_t *dnsrec,
++                                                char *altname,
++                                                ares_callback callback,
++                                                void *arg)
++{
++  ares_status_t  status;
++  unsigned char *buf;
++  size_t         buflen;
++
++  status = ares_dns_write_query_altname(dnsrec, altname, &buf, &buflen);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  ares_send(channel, buf, (int)buflen, callback, arg);
++  ares_free(buf);
++  return ARES_SUCCESS;
++}
++
++
++/* End a search query by invoking the user callback and freeing the
++ * search_query structure.
++ */
+ static void end_squery(struct search_query *squery, ares_status_t status,
+                        unsigned char *abuf, size_t alen)
+ {
+   squery->callback(squery->arg, (int)status, (int)squery->timeouts, abuf,
+                    (int)alen);
+   ares__strsplit_free(squery->domains, squery->ndomains);
+-  ares_free(squery->name);
++  ares_free(squery->buf);
+   ares_free(squery);
+ }
+ 
+ /* Concatenate two domains. */
+@@ -391,3 +551,29 @@ ares_status_t ares__single_domain(const ares_channel_t *channel,
+   *s = NULL;
+   return ARES_SUCCESS;
+ }
++
++/* Callback function used to convert from the ares_callback prototype to the
++ * ares_callback_dnsrec prototype, by parsing the result and passing that to
++ * the inner callback.
++ */
++static void ares__dnsrec_convert_cb(void *arg, int status, int timeouts,
++                                    unsigned char *abuf, int alen)
++{
++  struct dnsrec_convert_arg *carg = (struct dnsrec_convert_arg *)arg;
++  ares_dns_record_t         *dnsrec = NULL;
++  ares_status_t              mystatus;
++
++  if (status != ARES_SUCCESS) {
++    carg->callback(carg->arg, (ares_status_t)status, (size_t)timeouts, NULL);
++  } else {
++    /* Parse the result. */
++    mystatus = ares_dns_parse(abuf, (size_t)alen, 0, &dnsrec);
++    if (mystatus != ARES_SUCCESS) {
++      carg->callback(carg->arg, mystatus, (size_t)timeouts, NULL);
++    } else {
++      carg->callback(carg->arg, ARES_SUCCESS, (size_t)timeouts, dnsrec);
++      ares_dns_record_destroy(dnsrec);
++    }
++  }
++  ares_free(carg);
++}
+~~~~
+
+## Uniform selected declaration context
+
+The same mechanical rule is used for every case: in lexicographic changed-production-path order, show +/-24 lines around the first literal identity match in each snapshot.
+
+### S0
+
+~~~~text
+<no matching declaration in the selected production files>
+~~~~
+
+### S1
+
+Path: `include/ares.h`; lines 492-540
+
+~~~~text
+000492: CARES_EXTERN void
+000493:                   ares_set_socket_functions(ares_channel_t                     *channel,
+000494:                                             const struct ares_socket_functions *funcs,
+000495:                                             void                               *user_data);
+000496: 
+000497: CARES_EXTERN void ares_send(ares_channel_t *channel, const unsigned char *qbuf,
+000498:                             int qlen, ares_callback callback, void *arg);
+000499: 
+000500: CARES_EXTERN void ares_query(ares_channel_t *channel, const char *name,
+000501:                              int dnsclass, int type, ares_callback callback,
+000502:                              void *arg);
+000503: 
+000504: CARES_EXTERN void ares_search(ares_channel_t *channel, const char *name,
+000505:                               int dnsclass, int type, ares_callback callback,
+000506:                               void *arg);
+000507: 
+000508: /*! Search for a complete DNS message.
+000509:  *
+000510:  *  \param[in] channel  Pointer to channel on which queries will be sent.
+000511:  *  \param[in] dnsrec   Pointer to initialized and filled DNS record object.
+000512:  *  \param[in] callback Callback function invoked on completion or failure of
+000513:  *                      the query sequence.
+000514:  *  \param[in] arg      Additional argument passed to the callback function.
+000515:  */
+000516: CARES_EXTERN void ares_search_dnsrec(ares_channel_t *channel,
+000517:                                      ares_dns_record_t *dnsrec,
+000518:                                      ares_callback_dnsrec callback, void *arg);
+000519: 
+000520: CARES_EXTERN void ares_gethostbyname(ares_channel_t *channel, const char *name,
+000521:                                      int family, ares_host_callback callback,
+000522:                                      void *arg);
+000523: 
+000524: CARES_EXTERN int  ares_gethostbyname_file(ares_channel_t *channel,
+000525:                                           const char *name, int family,
+000526:                                           struct hostent **host);
+000527: 
+000528: CARES_EXTERN void ares_gethostbyaddr(ares_channel_t *channel, const void *addr,
+000529:                                      int addrlen, int family,
+000530:                                      ares_host_callback callback, void *arg);
+000531: 
+000532: CARES_EXTERN void ares_getnameinfo(ares_channel_t        *channel,
+000533:                                    const struct sockaddr *sa,
+000534:                                    ares_socklen_t salen, int flags,
+000535:                                    ares_nameinfo_callback callback, void *arg);
+000536: 
+000537: CARES_EXTERN int  ares_fds(ares_channel_t *channel, fd_set *read_fds,
+000538:                            fd_set *write_fds);
+000539: 
+000540: CARES_EXTERN int  ares_getsock(ares_channel_t *channel, ares_socket_t *socks,
+~~~~
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T5009","impact_scope":[{"type":"new_entry_point","files":["include/ares.h","src/lib/ares_search.c"],"functions":["ares_search_dnsrec"],"description":"S1 introduces the public ares_search_dnsrec entry point, which accepts a caller-created DNS record and returns a parsed DNS record through a new callback type."}],"gap_before":{"exists":false,"type":"absent_unit","evidence":["S0 has no matching declaration for ares_search_dnsrec in the selected production files.","Because this anchored public API does not exist in S0, its own exposure obligation and gap do not exist in S0."]},"gap_after":{"exists":true,"type":"missing_public_api_exposure","evidence":["S1 declares ares_search_dnsrec in include/ares.h and implements it in src/lib/ares_search.c.","H0 calls ares_create_query and several ares_parse_*_reply functions, but never calls ares_search_dnsrec or supplies its DNS-record callback lifecycle."]},"new_harness_obligation":{"exists":true,"description":"H0 must add a call path that creates or populates an ares_dns_record_t, invokes ares_search_dnsrec with a channel and ares_callback_dnsrec callback, and drives the asynchronous operation sufficiently to exercise its result handling.","evidence":["The new API requires caller-supplied channel, DNS-record object, callback, and callback argument.","No S0 action could expose this exact entry point because it was absent."]},"explicit_failure":false,"delta_attribution":"NEW","maintenance_needed":true,"confidence":99,"reason":"The smallest anchored fuzz-relevant semantic unit is the newly introduced public ares_search_dnsrec API. Its same-scope gap is false in S0 because the declaration is absent, and true in S1 because unchanged H0 does not invoke it. This creates a concrete new harness call and lifecycle obligation, so the delta is NEW and maintenance is needed."}
+tokens used
+30,484

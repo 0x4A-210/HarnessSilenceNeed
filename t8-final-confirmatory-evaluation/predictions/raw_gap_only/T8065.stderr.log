@@ -1,0 +1,212 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8065-tmtdb95a
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fc-28a1-7851-a4a1-e737db44e5db
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8065
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `contrib/oss-fuzz/libarchive_fuzzer.cc`
+
+~~~~cpp
+#include <stddef.h>
+#include <stdint.h>
+#include <vector>
+
+#include "archive.h"
+#include "fuzz_helpers.h"
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *buf, size_t len) {
+  int ret;
+  ssize_t r;
+  struct archive *a = archive_read_new();
+
+  archive_read_support_filter_all(a);
+  archive_read_support_format_all(a);
+
+  Buffer buffer = {buf, len, 0};
+  archive_read_open(a, &buffer, NULL, reader_callback, NULL);
+
+  std::vector<uint8_t> data_buffer(getpagesize(), 0);
+  struct archive_entry *entry;
+  while(1) {
+    ret = archive_read_next_header(a, &entry);
+    if (ret == ARCHIVE_EOF || ret == ARCHIVE_FATAL)
+      break;
+    if (ret == ARCHIVE_RETRY)
+      continue;
+    while ((r = archive_read_data(a, data_buffer.data(),
+            data_buffer.size())) > 0)
+      ;
+    if (r == ARCHIVE_FATAL)
+      break;
+  }
+
+  archive_read_free(a);
+  return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/tar/util.c b/tar/util.c
+index 3fb0f9b0..1dd8e34d 100644
+--- a/tar/util.c
++++ b/tar/util.c
+@@ -684,108 +684,110 @@ void
+ list_item_verbose(struct bsdtar *bsdtar, FILE *out, struct archive_entry *entry)
+ {
+ 	char			 tmp[100];
+ 	size_t			 w;
+ 	size_t			 sw;
+ 	const char		*p;
+ 	const char		*fmt;
++	double			 age;
+ 	time_t			 tim;
+ 	static time_t		 now;
+ 	struct tm		*ltime;
+ #if defined(HAVE_LOCALTIME_R) || defined(HAVE_LOCALTIME_S)
+ 	struct tm		tmbuf;
+ #endif
+ 
+ 	/*
+ 	 * We avoid collecting the entire list in memory at once by
+ 	 * listing things as we see them.  However, that also means we can't
+ 	 * just pre-compute the field widths.  Instead, we start with guesses
+ 	 * and just widen them as necessary.  These numbers are completely
+ 	 * arbitrary.
+ 	 */
+ 	if (!bsdtar->u_width) {
+ 		bsdtar->u_width = 6;
+ 		bsdtar->gs_width = 13;
+ 	}
+ 	if (!now)
+ 		time(&now);
+ 	fprintf(out, "%s %u ",
+ 	    archive_entry_strmode(entry),
+ 	    archive_entry_nlink(entry));
+ 
+ 	/* Use uname if it's present, else uid. */
+ 	p = archive_entry_uname(entry);
+ 	if ((p == NULL) || (*p == '\0')) {
+ 		snprintf(tmp, sizeof(tmp), "%lld ",
+ 		    (long long)archive_entry_uid(entry));
+ 		p = tmp;
+ 	}
+ 	w = strlen(p);
+ 	if (w > bsdtar->u_width)
+ 		bsdtar->u_width = w;
+ 	fprintf(out, "%-*s ", (int)bsdtar->u_width, p);
+ 
+ 	/* Use gname if it's present, else gid. */
+ 	p = archive_entry_gname(entry);
+ 	if (p != NULL && p[0] != '\0') {
+ 		fprintf(out, "%s", p);
+ 		w = strlen(p);
+ 	} else {
+ 		snprintf(tmp, sizeof(tmp), "%lld",
+ 		    (long long)archive_entry_gid(entry));
+ 		w = strlen(tmp);
+ 		fprintf(out, "%s", tmp);
+ 	}
+ 
+ 	/*
+ 	 * Print device number or file size, right-aligned so as to make
+ 	 * total width of group and devnum/filesize fields be gs_width.
+ 	 * If gs_width is too small, grow it.
+ 	 */
+ 	if (archive_entry_filetype(entry) == AE_IFCHR
+ 	    || archive_entry_filetype(entry) == AE_IFBLK) {
+ 		snprintf(tmp, sizeof(tmp), "%lu,%lu",
+ 		    (unsigned long)archive_entry_rdevmajor(entry),
+ 		    (unsigned long)archive_entry_rdevminor(entry));
+ 		p = tmp;
+ 	} else {
+ 		p = tar_i64toa(archive_entry_size(entry));
+ 	}
+ 	if (w + strlen(p) >= bsdtar->gs_width)
+ 		bsdtar->gs_width = w + strlen(p) + 1;
+ 	fprintf(out, "%*s", (int)(bsdtar->gs_width - w), p);
+ 
+ 	/* Format the time using 'ls -l' conventions. */
+ 	tim = archive_entry_mtime(entry);
+-#define	HALF_YEAR (time_t)365 * 86400 / 2
++	age = difftime(tim, now);
++#define	HALF_YEAR (365.0 * 86400 / 2)
+ #if defined(_WIN32) && !defined(__CYGWIN__)
+ #define	DAY_FMT  "%d"  /* Windows' strftime function does not support %e format. */
+ #else
+ #define	DAY_FMT  "%e"  /* Day number without leading zeros */
+ #endif
+-	if (tim < now - HALF_YEAR || tim > now + HALF_YEAR)
++	if (age < -HALF_YEAR || age > HALF_YEAR)
+ 		fmt = bsdtar->day_first ? DAY_FMT " %b  %Y" : "%b " DAY_FMT "  %Y";
+ 	else
+ 		fmt = bsdtar->day_first ? DAY_FMT " %b %H:%M" : "%b " DAY_FMT " %H:%M";
+ #if defined(HAVE_LOCALTIME_S)
+ 	ltime = localtime_s(&tmbuf, &tim) ? NULL : &tmbuf;
+ #elif defined(HAVE_LOCALTIME_R)
+ 	ltime = localtime_r(&tim, &tmbuf);
+ #else
+ 	ltime = localtime(&tim);
+ #endif
+ 	if (ltime) {
+ 		sw = strftime(tmp, sizeof(tmp), fmt, ltime);
+ 		p = tmp;
+ 	}
+ 	if (!ltime || !sw)
+ 		p = "-- -- ----";
+ 	fprintf(out, " %s ", p);
+ 	safe_fprintf(out, "%s", archive_entry_pathname(entry));
+ 
+ 	/* Extra information for links. */
+ 	if (archive_entry_hardlink(entry)) /* Hard link */
+ 		safe_fprintf(out, " link to %s",
+ 		    archive_entry_hardlink(entry));
+ 	else if (archive_entry_symlink(entry)) /* Symbolic link */
+ 		safe_fprintf(out, " -> %s", archive_entry_symlink(entry));
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8065","gap_exists":true,"gap_type":["entry point","input semantics","configuration/state"],"confidence":99,"affected_functions":["list_item_verbose"],"reason":"H0 parses archive entries and consumes their data but never exercises the tar verbose-listing path in list_item_verbose. The changed production logic operates on archive_entry_mtime(entry), computes age with difftime(tim, now), selects a date format using HALF_YEAR and bsdtar->day_first, and passes tim to localtime/localtime_r/localtime_s. Thus attacker-controlled archive timestamp values, including extreme or boundary mtimes, and the associated listing configuration are not covered by H0.","evidence":["H0 calls archive_read_next_header and archive_read_data, then frees the archive; it never calls list_item_verbose or another visible listing/output function.","list_item_verbose obtains tim from archive_entry_mtime(entry), so archive input semantics directly influence the changed code.","The changed lines replace time_t arithmetic with age = difftime(tim, now) and compare age against HALF_YEAR, exposing boundary and extreme-time behavior worth fuzzing.","The affected path also branches on bsdtar->day_first and invokes localtime/localtime_r/localtime_s plus strftime, none of which are exercised by H0."],"recommended_action":"Add a tar verbose-listing harness that constructs or parses entries with fuzz-controlled mtime values and invokes list_item_verbose using initialized bsdtar state and a bounded output stream; cover extreme time_t values, values around now ± HALF_YEAR, both day_first settings, and pathname/link metadata."}
+tokens used
+5,233

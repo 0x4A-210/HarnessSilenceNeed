@@ -1,0 +1,211 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-direct_evolution_aware-T8058-yxdsx63t
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a09407-3f6a-7022-9bb5-2b87f4bc89ca
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8058
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `tools/simplifyfuzz.cpp`
+
+~~~~cpp
+#include "../src/meshoptimizer.h"
+
+#include <float.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* buffer, size_t size)
+{
+	if (size == 0)
+		return 0;
+
+	srand(buffer[0]);
+
+	float vb[100][4];
+
+	for (int i = 0; i < 100; ++i)
+	{
+		vb[i][0] = rand() % 10;
+		vb[i][1] = rand() % 10;
+		vb[i][2] = rand() % 10;
+		vb[i][3] = rand() % 10;
+	}
+
+	unsigned int ib[999];
+	int indices = (size - 1) < 999 ? (size - 1) / 3 * 3 : 999;
+
+	for (int i = 0; i < indices; ++i)
+		ib[i] = buffer[1 + i] % 100;
+
+	unsigned int res[999];
+
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, 1e-1f, 0, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, 0, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifyLockBorder, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifySparse, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifyPrune, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifyPermissive, NULL);
+
+	float aw = 1;
+	meshopt_simplifyWithAttributes(res, ib, indices, vb[0], 100, sizeof(float) * 4, vb[0] + 3, sizeof(float) * 4, &aw, 1, NULL, 0, FLT_MAX, 0, NULL);
+
+	// must be last, as it modifies all inputs in place
+	meshopt_simplifyWithUpdate(ib, indices, vb[0], 100, sizeof(float) * 4, vb[0] + 3, sizeof(float) * 4, &aw, 1, NULL, 0, FLT_MAX, 0, NULL);
+
+	return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/src/meshoptimizer.h b/src/meshoptimizer.h
+index 529e8351..91c87ea1 100644
+--- a/src/meshoptimizer.h
++++ b/src/meshoptimizer.h
+@@ -515,14 +515,13 @@ MESHOPTIMIZER_API size_t meshopt_simplify(unsigned int* destination, const unsig
+ /**
+  * Experimental: Remeshing flags; in high degree of flux
+  */
+ enum
+ {
+ 	meshopt_RemeshThicken = 1 << 0,
+ 	meshopt_RemeshShell = 1 << 1,
+-	meshopt_RemeshDebug = 1 << 2,
+-	meshopt_RemeshSolve = 1 << 3,
++	meshopt_RemeshSolve = 1 << 2,
+ };
+ 
+ /**
+  * Experimental: Voxel remesher
+  */
+diff --git a/src/remesher.cpp b/src/remesher.cpp
+index 404d45b9..1dbbfb0a 100644
+--- a/src/remesher.cpp
++++ b/src/remesher.cpp
+@@ -1,19 +1,25 @@
+ // This file is part of meshoptimizer library; see meshoptimizer.h for version/license details
+ #include "meshoptimizer.h"
+ 
+ #include <assert.h>
+ #include <float.h>
+ #include <math.h>
+ #include <string.h>
+ 
+ #ifndef TRACE
+ #define TRACE 0
+ #endif
+ 
+ #if TRACE
+ #include <stdio.h>
+ #endif
+ 
++// Note: this is only exposed for development purposes; do *not* use
++enum
++{
++	meshopt_RemeshInternalDebug = 1 << 30
++};
++
+ // This work is based on:
+ // Paul Bourke. Polygonising a scalar field. 1994
+ // Michael Garland and Paul S. Heckbert. Surface simplification using quadric error metrics. 1997
+@@ -503,46 +509,47 @@ static void solve(Voxel* voxels, size_t voxel_count, float scale, unsigned int o
+ static size_t emitVertex(float* destination, size_t index, int x, int y, int z, int edge, const unsigned char* grid, const Voxel* voxels, const unsigned int* voxel_rows, int resolution, float scale, const float offset[3], unsigned int options)
+ {
+ 	int a = edge >> 4, b = edge & 0xf;
+ 	int ax = a & 1, ay = (a >> 1) & 1, az = (a >> 2) & 1;
+ 	int bx = b & 1, by = (b >> 1) & 1, bz = (b >> 2) & 1;
+ 
+ 	// our edges are directional and always go from occupied (a) to empty (b) voxel
+ 	assert(grid[(x + ax) + size_t(resolution) * ((y + ay) + size_t(resolution) * (z + az))] != 0);
+ 	assert(grid[(x + bx) + size_t(resolution) * ((y + by) + size_t(resolution) * (z + bz))] == 0);
+ 
+ 	int oc = 0;
+ 	float os = 0.1f / scale;
+ 
+ 	if (options & meshopt_RemeshThicken)
+ 	{
+ 		// look at the opposite voxel to see if we have a thin sheet; the lookup is in bounds by construction since a->b is occupied->empty edge
+ 		int ox = bx - ax, oy = by - ay, oz = bz - az;
+ 		unsigned char og = grid[(x + ax - ox) + size_t(resolution) * ((y + ay - oy) + size_t(resolution) * (z + az - oz))];
+ 
+ 		oc = (ox + oy + oz > 0 && og == 0) ? (ox & 1) | ((oy & 1) << 1) | ((oz & 1) << 2) : 0;
+ 	}
+ 
+ 	size_t row = (y + ay) + size_t(resolution) * (z + az);
+ 	size_t idx = (x + ax) + size_t(resolution) * row;
+ 
+ 	if (destination)
+ 	{
+ 		assert(grid[idx] != 0 && grid[idx] != 0xff);
+ 		const Voxel& vox = voxels[voxel_rows[row] + (grid[idx] - 1)];
+ 
+-		if (options & meshopt_RemeshDebug)
++		if (options & meshopt_RemeshInternalDebug)
+ 		{
+-			destination[index * 3 + 0] = (x + ax) / scale + offset[0];
+-			destination[index * 3 + 1] = (y + ay) / scale + offset[1];
+-			destination[index * 3 + 2] = (z + az) / scale + offset[2];
++			// -0.5 emits voxel center because grid coordinates are padded by 1, so we need to offset by -1+0.5
++			destination[index * 3 + 0] = (x + ax - 0.5f) / scale + offset[0];
++			destination[index * 3 + 1] = (y + ay - 0.5f) / scale + offset[1];
++			destination[index * 3 + 2] = (z + az - 0.5f) / scale + offset[2];
+ 		}
+ 		else
+ 		{
+ 			destination[index * 3 + 0] = vox.px + float((oc >> 0) & 1) * os + offset[0];
+ 			destination[index * 3 + 1] = vox.py + float((oc >> 1) & 1) * os + offset[1];
+ 			destination[index * 3 + 2] = vox.pz + float((oc >> 2) & 1) * os + offset[2];
+ 		}
+ 	}
+ 
+ 	return idx * 8 + oc;
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8058","gap_exists":true,"gap_type":["entry_point","configuration","attack_surface"],"commit_induced":"NO","maintenance_needed":false,"confidence":98,"affected_functions":["emitVertex"],"reason":"H0 exclusively invokes meshopt_simplify, meshopt_simplifyWithAttributes, and meshopt_simplifyWithUpdate, so it does not reach the remesher path containing the changed emitVertex behavior or control its remeshing options. However, this is a historical coverage gap: H0 did not exercise remesher.cpp in S0 either. Removing meshopt_RemeshDebug, changing meshopt_RemeshSolve from 1 << 3 to 1 << 2, and adding meshopt_RemeshInternalDebug therefore did not introduce or materially aggravate H0's already-total absence of remesher coverage.","evidence":["H0 calls only meshopt_simplify, meshopt_simplifyWithAttributes, and meshopt_simplifyWithUpdate.","The changed production function is emitVertex in src/remesher.cpp, which H0 never reaches.","The public option meshopt_RemeshDebug is removed and meshopt_RemeshSolve changes bit position, while meshopt_RemeshInternalDebug is added for the internal branch in emitVertex.","No S0 call in H0 exercised any remesher entry point or remeshing option, so the same gap existed before the commit."],"recommended_action":"No maintenance is required for this commit. Independently, a dedicated remesher harness could cover the remesher entry point and vary meshopt_RemeshThicken, meshopt_RemeshShell, and meshopt_RemeshSolve."}
+tokens used
+5,958

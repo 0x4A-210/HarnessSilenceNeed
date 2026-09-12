@@ -1,0 +1,597 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/delta-dev-C020-x1hkmugk
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08ab4-a3d2-7822-a0b9-9e644dbe1ac4
+--------
+user
+You are evaluating whether one production-source commit creates a fuzz-harness
+maintenance need. Use only the anonymous case below. Do not use tools, files,
+the network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+Follow this order exactly and keep one stable comparison scope throughout:
+
+1. Identify the commit's fuzz-relevant impact scope from the S0-to-S1 source
+   diff. Anchor it in concrete files, functions, states, configurations, input
+   semantics, or entry points. Do not search the rest of the project for an
+   unrelated harness omission.
+2. For that same scope, decide whether S0 + H0 has a material harness gap.
+3. For that identical scope, decide whether S1 + H0 has a material harness gap.
+4. Identify whether the commit creates a concrete new harness obligation: a
+   new entry/call, caller-supplied argument or buffer, call-order transition,
+   configuration action, compile-time enablement, or input construction that
+   H0 did not need in S0.
+5. Derive exactly one delta: NEW, AGGRAVATED, UNCHANGED, REMOVED, or NONE.
+6. Apply the fixed final rule.
+
+A harness gap concerns exposure or controllability, not the mere existence of
+changed lines. More internal code, a replacement algorithm, validation, error
+handling, a CPU fast path, or implementation state is not by itself an
+aggravation. If an existing public entry/API is omitted by the unchanged H0 on
+both sides and its caller-facing exposure requirement is unchanged, then the
+gap existed before and after: classify UNCHANGED even when the commit changes
+behavior inside that entry. Conversely, a genuinely new public entry, format,
+configuration, state protocol, or caller obligation that H0 cannot exercise is
+NEW (or AGGRAVATED when a demonstrably weaker same-scope gap already existed).
+
+AGGRAVATED requires concrete comparative evidence that S1 adds a harness action
+or reachability/control requirement absent in S0. Do not infer AGGRAVATED only
+from added LOC, a changed file, additional internal branches, or the fact that
+H0 omits the whole subsystem on both sides.
+
+Use this truth table unless concrete aggravation/removal evidence is present:
+
+- before=false, after=true  -> NEW
+- before=true,  after=true  -> UNCHANGED
+- before=true,  after=false -> REMOVED
+- before=false, after=false -> NONE
+
+Set maintenance_needed=true only if explicit_failure=true or delta_attribution
+is NEW or AGGRAVATED. Otherwise set it false. Return exactly one JSON object
+matching the schema. Give separate S0 and S1 evidence and do not collapse the
+two judgments into one narrative.
+
+--- BEGIN DEVELOPMENT CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+C020
+
+## Existing harness H0
+
+The complete project-owned harness translation unit is shown below. Framework
+main/CLI scaffolding is not expanded; directly included semantic helper files
+are shown separately under the fixed context rule.
+
+Path: `fuzz/c/std/jpeg_fuzzer.c`
+
+```c
+// Copyright 2023 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN jpeg_fuzzer.c
+./a.out ../../../test/data/*.jpeg
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__JPEG
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+#include "../fuzzlib/fuzzlib_image_decoder.c"
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_jpeg__decoder dec;
+  wuffs_base__status status = wuffs_jpeg__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  hash = wuffs_base__u64__rotate_right(hash, 1);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  return fuzz_image_decoder(
+      src, hash,
+      wuffs_jpeg__decoder__upcast_as__wuffs_base__image_decoder(&dec));
+}
+```
+
+### Direct H0 helper: `fuzz/c/fuzzlib/fuzzlib_image_decoder.c`
+
+```c
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef WUFFS_INCLUDE_GUARD
+#error "Wuffs' .h files need to be included before this file"
+#endif
+
+static const char*  //
+fuzz_image_decoder(wuffs_base__io_buffer* src,
+                   uint64_t hash,
+                   wuffs_base__image_decoder* dec) {
+  const char* ret = NULL;
+  wuffs_base__slice_u8 pixbuf = ((wuffs_base__slice_u8){});
+  wuffs_base__slice_u8 workbuf = ((wuffs_base__slice_u8){});
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    wuffs_base__status status =
+        wuffs_base__image_decoder__decode_image_config(dec, &ic, src);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    // 50% of the time, choose BGRA_PREMUL instead of the native pixel config.
+    if (hash & 1) {
+      wuffs_base__pixel_config__set(
+          &ic.pixcfg, WUFFS_BASE__PIXEL_FORMAT__BGRA_PREMUL,
+          WUFFS_BASE__PIXEL_SUBSAMPLING__NONE,
+          wuffs_base__pixel_config__width(&ic.pixcfg),
+          wuffs_base__pixel_config__height(&ic.pixcfg));
+    }
+    hash >>= 1;
+
+    // Wuffs allows either statically or dynamically allocated work buffers.
+    // This program exercises dynamic allocation.
+    uint64_t n = wuffs_base__image_decoder__workbuf_len(dec).max_incl;
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      workbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!workbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    n = wuffs_base__pixel_config__pixbuf_len(&ic.pixcfg);
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      pixbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!pixbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    status = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, pixbuf);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      wuffs_base__frame_config fc = ((wuffs_base__frame_config){});
+      status = wuffs_base__image_decoder__decode_frame_config(dec, &fc, src);
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+
+      status = wuffs_base__image_decoder__decode_frame(
+          dec, &pb, src, WUFFS_BASE__PIXEL_BLEND__SRC, workbuf, NULL);
+
+      wuffs_base__rect_ie_u32 frame_rect =
+          wuffs_base__frame_config__bounds(&fc);
+      wuffs_base__rect_ie_u32 dirty_rect =
+          wuffs_base__image_decoder__frame_dirty_rect(dec);
+      if (!wuffs_base__rect_ie_u32__contains_rect(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not contain dirty_rect";
+        goto exit;
+      }
+
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+      seen_ok = true;
+
+      if (!wuffs_base__rect_ie_u32__equals(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not equal dirty_rect";
+        goto exit;
+      }
+    }
+  }
+
+exit:
+  free(workbuf.ptr);
+  free(pixbuf.ptr);
+  return ret;
+}
+```
+
+## Complete S0 -> S1 hand-written production-source diff
+
+The fixed rule includes every changed `std/**/*.wuffs` production file. It
+excludes generated release snapshots, tests, docs, examples, and commit text.
+
+```diff
+diff --git a/std/jpeg/decode_jpeg.wuffs b/std/jpeg/decode_jpeg.wuffs
+index 4f8bf3df..ce2c6789 100644
+--- a/std/jpeg/decode_jpeg.wuffs
++++ b/std/jpeg/decode_jpeg.wuffs
+@@ -107,24 +107,25 @@ pub struct decoder? implements base.image_decoder(
+         // the remaining four elements would all be 0x0900. If progressive
+         // encoded, the tail of the components_workbuf_offsets array is:
+         //   5: 0x1500 = 5376 = previous + (48 * 64)
+         //   6: 0x1800 = 6144 = previous + (24 * 32)
+         //   7: 0x1B00 = 6912 = previous + (24 * 32)
+         //   8: 0x1B00 = 6912 = previous + ( 0 *  0)
+         //
+         // The workbuf_len would be 0x0900 (baseline) or 0x1B00 (progressive).
+         components_workbuf_widths  : array[4] base.u32[..= 0x1_0008],
+         components_workbuf_heights : array[4] base.u32[..= 0x1_0008],
+         components_workbuf_offsets : array[9] base.u64[..= 0xC_00C0_0300],  // 12 * 0x1_0008 * 0x1_0008.
+ 
++        scan_count           : base.u32,
+         scan_num_components  : base.u32[..= 4],
+         scan_comps_cselector : array[4] base.u8[..= 3],
+         scan_comps_td        : array[4] base.u8[..= 3],
+         scan_comps_ta        : array[4] base.u8[..= 3],
+ 
+         // Every JPEG has a single SOI (Start Of Image) marker. Hierarchical
+         // JPEG images can have multiple Frames but this decoder does not
+         // support those. We thus expect a single SOF (Start Of Frame) for the
+         // single SOI.
+         //
+         // Sequential JPEGs have a single SOS (Start Of Scan) for the SOF.
+         // Their (Ss, Se, Ah, Al) below are effectively (0, 63, 0, 0).
+@@ -743,32 +744,49 @@ pri func decoder.do_decode_frame_config?(dst: nptr base.frame_config, src: base.
+                 index: 0,
+                 io_position: this.frame_config_io_position,
+                 disposal: 0,
+                 opaque_within_bounds: true,
+                 overwrite_instead_of_blend: false,
+                 background_color: 0xFF00_0000)
+     }
+ 
+     this.call_sequence = 0x40
+ }
+ 
+ pub func decoder.decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
+-    var status : base.status
++    var ddf_status     : base.status
++    var swizzle_status : base.status
++    var scan_count     : base.u32
+ 
+     while true {
+-        status =? this.do_decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
+-        if (status == base."$short read") and args.src.is_closed() {
++        scan_count = this.scan_count
++        ddf_status =? this.do_decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
++        if ddf_status.is_error() {
++            return ddf_status
++
++        } else if scan_count < this.scan_count {
++            if this.num_components == 1 {
++                swizzle_status = this.swizzle_gray!(dst: args.dst, workbuf: args.workbuf)
++            } else {
++                swizzle_status = this.swizzle_colorful!(dst: args.dst, workbuf: args.workbuf)
++            }
++            if swizzle_status.is_error() {
++                return swizzle_status
++            }
++        }
++
++        if (ddf_status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+-        yield? status
++        yield? ddf_status
+     } endwhile
+ }
+ 
+ pri func decoder.do_decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
+     var pixfmt : base.u32
+     var status : base.status
+     var i      : base.u64
+     var i_end  : base.u64
+     var c      : base.u8
+     var marker : base.u8
+ 
+     if this.call_sequence == 0x40 {
+@@ -1116,26 +1134,24 @@ pri func decoder.calculate_huff_tables!(tc4_th: base.u8[..= 7], total_count: bas
+ pri func decoder.decode_sos?(dst: ptr base.pixel_buffer, src: base.io_reader, workbuf: slice base.u8) {
+     var my : base.u32
+     var mx : base.u32
+ 
+     var decode_mcu_result : base.u32
+     var bitstream_length  : base.u32
+ 
+     var b      : base.u32
+     var csel   : base.u8[..= 3]
+     var stride : base.u64[..= 0x1_0008]
+     var offset : base.u64
+ 
+-    var status : base.status
+-
+     this.prepare_scan?(src: args.src)
+ 
+     // Reset.
+     this.next_restart_marker = 0
+     this.mcu_previous_dc_values[0] = 0
+     this.mcu_previous_dc_values[1] = 0
+     this.mcu_previous_dc_values[2] = 0
+     this.mcu_previous_dc_values[3] = 0
+     this.restarts_remaining = this.restart_interval
+     this.eob_run = 0
+     this.bitstream_bits = 0
+     this.bitstream_n_bits = 0
+@@ -1227,30 +1243,25 @@ pri func decoder.decode_sos?(dst: ptr base.pixel_buffer, src: base.io_reader, wo
+                     this.bitstream_bits = 0
+                     this.bitstream_n_bits = 0
+                     this.bitstream_ri = 0
+                     this.bitstream_wi = 0
+                 }
+             }
+ 
+             mx += 1
+         } endwhile
+         my += 1
+     } endwhile
+ 
+-    if this.num_components == 1 {
+-        status = this.swizzle_gray!(dst: args.dst, workbuf: args.workbuf)
+-        return status
+-    }
+-    status = this.swizzle_colorful!(dst: args.dst, workbuf: args.workbuf)
+-    return status
++    this.scan_count ~sat+= 1
+ }
+ 
+ pri func decoder.prepare_scan?(src: base.io_reader) {
+     var c         : base.u8
+     var i         : base.u32
+     var j         : base.u32
+     var h         : base.u32[..= 4]
+     var v         : base.u32[..= 4]
+     var hv        : base.u32[..= 16]
+     var total_hv  : base.u32
+     var b         : base.u32
+     var bx_offset : base.u32
+@@ -1800,24 +1811,25 @@ pub func decoder.num_decoded_frames() base.u64 {
+ pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+     var i : base.u32
+     var j : base.u32
+ 
+     if this.call_sequence < 0x20 {
+         return base."#bad call sequence"
+     }
+     if args.index <> 0 {
+         return base."#bad argument"
+     }
+     this.call_sequence = 0x28
+     this.frame_config_io_position = args.io_position
++    this.scan_count = 0
+     this.restart_interval = this.saved_restart_interval
+     while i < 4 {
+         this.seen_dqt[i] = this.saved_seen_dqt[i]
+         while j < 64,
+                 inv i < 4,
+         {
+             this.quant_tables[i][j] = this.saved_quant_tables[i][j]
+             j += 1
+         } endwhile
+         i += 1
+     } endwhile
+     while i < 8 {
+```
+
+## Uniform selected declaration context
+
+This same mechanically selected S0/S1 context is supplied for every case.
+
+### S0
+
+```text
+lines 1775-1823
+001775:     return this.util.make_rect_ie_u32(
+001776:             min_incl_x: 0,
+001777:             min_incl_y: 0,
+001778:             max_excl_x: this.width,
+001779:             max_excl_y: this.height)
+001780: }
+001781: 
+001782: pub func decoder.num_animation_loops() base.u32 {
+001783:     return 0
+001784: }
+001785: 
+001786: pub func decoder.num_decoded_frame_configs() base.u64 {
+001787:     if this.call_sequence > 0x20 {
+001788:         return 1
+001789:     }
+001790:     return 0
+001791: }
+001792: 
+001793: pub func decoder.num_decoded_frames() base.u64 {
+001794:     if this.call_sequence > 0x40 {
+001795:         return 1
+001796:     }
+001797:     return 0
+001798: }
+001799: 
+001800: pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+001801:     var i : base.u32
+001802:     var j : base.u32
+001803: 
+001804:     if this.call_sequence < 0x20 {
+001805:         return base."#bad call sequence"
+001806:     }
+001807:     if args.index <> 0 {
+001808:         return base."#bad argument"
+001809:     }
+001810:     this.call_sequence = 0x28
+001811:     this.frame_config_io_position = args.io_position
+001812:     this.restart_interval = this.saved_restart_interval
+001813:     while i < 4 {
+001814:         this.seen_dqt[i] = this.saved_seen_dqt[i]
+001815:         while j < 64,
+001816:                 inv i < 4,
+001817:         {
+001818:             this.quant_tables[i][j] = this.saved_quant_tables[i][j]
+001819:             j += 1
+001820:         } endwhile
+001821:         i += 1
+001822:     } endwhile
+001823:     while i < 8 {
+```
+
+### S1
+
+```text
+lines 1786-1834
+001786:     return this.util.make_rect_ie_u32(
+001787:             min_incl_x: 0,
+001788:             min_incl_y: 0,
+001789:             max_excl_x: this.width,
+001790:             max_excl_y: this.height)
+001791: }
+001792: 
+001793: pub func decoder.num_animation_loops() base.u32 {
+001794:     return 0
+001795: }
+001796: 
+001797: pub func decoder.num_decoded_frame_configs() base.u64 {
+001798:     if this.call_sequence > 0x20 {
+001799:         return 1
+001800:     }
+001801:     return 0
+001802: }
+001803: 
+001804: pub func decoder.num_decoded_frames() base.u64 {
+001805:     if this.call_sequence > 0x40 {
+001806:         return 1
+001807:     }
+001808:     return 0
+001809: }
+001810: 
+001811: pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+001812:     var i : base.u32
+001813:     var j : base.u32
+001814: 
+001815:     if this.call_sequence < 0x20 {
+001816:         return base."#bad call sequence"
+001817:     }
+001818:     if args.index <> 0 {
+001819:         return base."#bad argument"
+001820:     }
+001821:     this.call_sequence = 0x28
+001822:     this.frame_config_io_position = args.io_position
+001823:     this.scan_count = 0
+001824:     this.restart_interval = this.saved_restart_interval
+001825:     while i < 4 {
+001826:         this.seen_dqt[i] = this.saved_seen_dqt[i]
+001827:         while j < 64,
+001828:                 inv i < 4,
+001829:         {
+001830:             this.quant_tables[i][j] = this.saved_quant_tables[i][j]
+001831:             j += 1
+001832:         } endwhile
+001833:         i += 1
+001834:     } endwhile
+```
+
+--- END DEVELOPMENT CASE ---
+
+codex
+{"case_id":"C020","impact_scope":[{"type":"state_change","files":["std/jpeg/decode_jpeg.wuffs"],"functions":["decoder.decode_frame","decoder.do_decode_frame","decoder.decode_sos","decoder.restart_frame"],"description":"JPEG scan completion now increments internal scan_count; decode_frame detects completed scans and performs swizzling there, while restart_frame resets scan_count. This changes internal handling of the existing decode-frame/restart-frame protocol without adding a public API, format, configuration, or caller argument."}],"gap_before":{"exists":true,"type":"existing restart-frame protocol exposure gap","evidence":["In S0, decoder.restart_frame already existed with the same caller-supplied index and io_position and call-sequence requirements.","H0 only initializes the decoder and invokes decode_image_config, decode_frame_config, and decode_frame through fuzz_image_decoder; it never invokes restart_frame.","H0 does exercise ordinary decode_frame processing, including input-selected JPEG scan structure, so the relocated scan swizzling does not itself require a new harness action."]},"gap_after":{"exists":true,"type":"unchanged restart-frame protocol exposure gap","evidence":["In S1, H0 still never invokes decoder.restart_frame, so the same existing restart protocol remains unexercised.","The added scan_count reset is internal to restart_frame; its public signature, arguments, and call-order eligibility are unchanged from S0.","H0 continues to exercise decode_frame with caller-controlled JPEG bytes, and scan_count plus the moved swizzling are managed internally by the decoder."]},"new_harness_obligation":{"exists":false,"description":"The commit introduces no new entry point, caller-supplied argument or buffer, configuration action, compile-time enablement, input format, or call-order transition. Exercising restart_frame was already an optional same-scope harness action in S0, and scan_count requires no caller control.","evidence":["decoder.decode_frame and decoder.restart_frame retain their existing public signatures.","scan_count is a private decoder field updated by decode_sos and reset internally by restart_frame.","The swizzle calls move from decode_sos to decode_frame but remain within the existing decode_frame operation invoked by H0."]},"explicit_failure":false,"delta_attribution":"UNCHANGED","maintenance_needed":false,"confidence":97,"reason":"The only harness omission in the commit's stable scope is the pre-existing restart_frame path, which H0 omits in both S0 and S1. The new scan_count bookkeeping and relocated swizzling add internal state and branches but no new caller-facing reachability or control requirement. Under the fixed rule, before=true and after=true with no concrete aggravation is UNCHANGED, so maintenance is not needed."}
+tokens used
+20,731

@@ -1,0 +1,329 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8090-cc8qp4k7
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fe-3d18-79c2-9834-9e8ee9ee7b40
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8090
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `tools/codecfuzz.cpp`
+
+~~~~cpp
+#include "../src/meshoptimizer.h"
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+void fuzzDecoder(const uint8_t* data, size_t size, size_t stride, int (*decode)(void*, size_t, size_t, const unsigned char*, size_t))
+{
+	size_t count = 66; // must be divisible by 3 for decodeIndexBuffer; should be >=64 to cover large vertex blocks
+
+	void* destination = malloc(count * stride);
+	assert(destination);
+
+	int rc = decode(destination, count, stride, reinterpret_cast<const unsigned char*>(data), size);
+	(void)rc;
+
+	free(destination);
+}
+
+void fuzzRoundtrip(const uint8_t* data, size_t size, size_t stride)
+{
+	size_t count = size / stride;
+
+	size_t bound = meshopt_encodeVertexBufferBound(count, stride);
+	void* encoded = malloc(bound);
+	void* decoded = malloc(count * stride);
+	assert(encoded && decoded);
+
+	size_t res = meshopt_encodeVertexBuffer(static_cast<unsigned char*>(encoded), bound, data, count, stride);
+	assert(res <= bound);
+
+	int rc = meshopt_decodeVertexBuffer(decoded, count, stride, static_cast<unsigned char*>(encoded), res);
+	assert(rc == 0);
+
+	assert(memcmp(data, decoded, count * stride) == 0);
+
+	free(decoded);
+	free(encoded);
+}
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+	// decodeIndexBuffer supports 2 and 4-byte indices
+	fuzzDecoder(data, size, 2, meshopt_decodeIndexBuffer);
+	fuzzDecoder(data, size, 4, meshopt_decodeIndexBuffer);
+
+	// decodeIndexSequence supports 2 and 4-byte indices
+	fuzzDecoder(data, size, 2, meshopt_decodeIndexSequence);
+	fuzzDecoder(data, size, 4, meshopt_decodeIndexSequence);
+
+	// decodeVertexBuffer supports any strides divisible by 4 in 4-256 interval
+	// It's a waste of time to check all of them, so we'll just check a few with different alignment mod 16
+	fuzzDecoder(data, size, 4, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 16, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 24, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 32, meshopt_decodeVertexBuffer);
+
+	// encodeVertexBuffer/decodeVertexBuffer should roundtrip for any stride, check a few with different alignment mod 16
+	fuzzRoundtrip(data, size, 4);
+	fuzzRoundtrip(data, size, 16);
+	fuzzRoundtrip(data, size, 24);
+	fuzzRoundtrip(data, size, 32);
+
+	return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/src/vertexcodec.cpp b/src/vertexcodec.cpp
+index a94c6d4c..b5c6f706 100644
+--- a/src/vertexcodec.cpp
++++ b/src/vertexcodec.cpp
+@@ -167,125 +167,123 @@ static bool encodeBytesGroupZero(const unsigned char* buffer)
+ 
+ static size_t encodeBytesGroupMeasure(const unsigned char* buffer, int bits)
+ {
+-	assert(bits >= 1 && bits <= 8);
++	assert(bits >= 0 && bits <= 8);
+ 
+-	if (bits == 1)
++	if (bits == 0)
+ 		return encodeBytesGroupZero(buffer) ? 0 : size_t(-1);
+ 
+ 	if (bits == 8)
+ 		return kByteGroupSize;
+ 
+ 	size_t result = kByteGroupSize * bits / 8;
+ 
+ 	unsigned char sentinel = (1 << bits) - 1;
+ 
+ 	for (size_t i = 0; i < kByteGroupSize; ++i)
+ 		result += buffer[i] >= sentinel;
+ 
+ 	return result;
+ }
+ 
+ static unsigned char* encodeBytesGroup(unsigned char* data, const unsigned char* buffer, int bits)
+ {
+-	assert(bits >= 1 && bits <= 8);
++	assert(bits >= 0 && bits <= 8);
++	assert(kByteGroupSize % 8 == 0);
+ 
+-	if (bits == 1)
++	if (bits == 0)
+ 		return data;
+ 
+ 	if (bits == 8)
+ 	{
+ 		memcpy(data, buffer, kByteGroupSize);
+ 		return data + kByteGroupSize;
+ 	}
+ 
+ 	size_t byte_size = 8 / bits;
+ 	assert(kByteGroupSize % byte_size == 0);
+ 
+ 	// fixed portion: bits bits for each value
+ 	// variable portion: full byte for each out-of-range value (using 1...1 as sentinel)
+ 	unsigned char sentinel = (1 << bits) - 1;
+ 
+ 	for (size_t i = 0; i < kByteGroupSize; i += byte_size)
+ 	{
+ 		unsigned char byte = 0;
+ 
+ 		for (size_t k = 0; k < byte_size; ++k)
+ 		{
+ 			unsigned char enc = (buffer[i + k] >= sentinel) ? sentinel : buffer[i + k];
+ 
+ 			byte <<= bits;
+ 			byte |= enc;
+ 		}
+ 
+ 		*data++ = byte;
+ 	}
+ 
+ 	for (size_t i = 0; i < kByteGroupSize; ++i)
+ 	{
+ 		if (buffer[i] >= sentinel)
+ 		{
+ 			*data++ = buffer[i];
+ 		}
+ 	}
+ 
+ 	return data;
+ }
+ 
+-static unsigned char* encodeBytes(unsigned char* data, unsigned char* data_end, const unsigned char* buffer, size_t buffer_size)
++static unsigned char* encodeBytes(unsigned char* data, unsigned char* data_end, const unsigned char* buffer, size_t buffer_size, const int bits[4])
+ {
+ 	assert(buffer_size % kByteGroupSize == 0);
+ 
+ 	unsigned char* header = data;
+ 
+ 	// round number of groups to 4 to get number of header bytes
+ 	size_t header_size = (buffer_size / kByteGroupSize + 3) / 4;
+ 
+ 	if (size_t(data_end - data) < header_size)
+ 		return NULL;
+ 
+ 	data += header_size;
+ 
+ 	memset(header, 0, header_size);
+ 
+ 	for (size_t i = 0; i < buffer_size; i += kByteGroupSize)
+ 	{
+ 		if (size_t(data_end - data) < kByteGroupDecodeLimit)
+ 			return NULL;
+ 
+-		int best_bits = 8;
+-		size_t best_size = encodeBytesGroupMeasure(buffer + i, 8);
++		int best_bitk = 3;
++		size_t best_size = encodeBytesGroupMeasure(buffer + i, bits[best_bitk]);
+ 
+-		for (int bits = 1; bits < 8; bits *= 2)
++		for (int bitk = 0; bitk < 3; ++bitk)
+ 		{
+-			size_t size = encodeBytesGroupMeasure(buffer + i, bits);
++			size_t size = encodeBytesGroupMeasure(buffer + i, bits[bitk]);
+ 
+ 			if (size < best_size)
+ 			{
+-				best_bits = bits;
++				best_bitk = bitk;
+ 				best_size = size;
+ 			}
+ 		}
+ 
+-		int bitslog2 = (best_bits == 1) ? 0 : (best_bits == 2 ? 1 : (best_bits == 4 ? 2 : 3));
+-		assert((1 << bitslog2) == best_bits);
+-
+ 		size_t header_offset = i / kByteGroupSize;
++		header[header_offset / 4] |= best_bitk << ((header_offset % 4) * 2);
+ 
+-		header[header_offset / 4] |= bitslog2 << ((header_offset % 4) * 2);
+-
++		int best_bits = bits[best_bitk];
+ 		unsigned char* next = encodeBytesGroup(data, buffer + i, best_bits);
+ 
+ 		assert(data + best_size == next);
+ 		data = next;
+ 
+ #if TRACE
+ 		bytestats->bitg[bitslog2] += best_size;
+ #endif
+ 	}
+ 
+ #if TRACE
+ 	bytestats->header += header_size;
+ #endif
+ 
+ 	return data;
+ }
+@@ -293,58 +291,60 @@ static unsigned char* encodeBytes(unsigned char* data, unsigned char* data_end,
+ static unsigned char* encodeVertexBlock(unsigned char* data, unsigned char* data_end, const unsigned char* vertex_data, size_t vertex_count, size_t vertex_size, unsigned char last_vertex[256])
+ {
+ 	assert(vertex_count > 0 && vertex_count <= kVertexBlockMaxSize);
+ 
+ 	unsigned char buffer[kVertexBlockMaxSize];
+ 	assert(sizeof(buffer) % kByteGroupSize == 0);
+ 
+ 	// we sometimes encode elements we didn't fill when rounding to kByteGroupSize
+ 	memset(buffer, 0, sizeof(buffer));
+ 
+ 	for (size_t k = 0; k < vertex_size; ++k)
+ 	{
+ 		size_t vertex_offset = k;
+ 
+ 		unsigned char p = last_vertex[k];
+ 
+ 		for (size_t i = 0; i < vertex_count; ++i)
+ 		{
+ 			buffer[i] = zigzag8(vertex_data[vertex_offset] - p);
+ 
+ 			p = vertex_data[vertex_offset];
+ 
+ 			vertex_offset += vertex_size;
+ 		}
+ 
+ #if TRACE
+ 		const unsigned char* olddata = data;
+ 		bytestats = &vertexstats[k];
+ 
+ 		for (size_t ig = 0; ig < vertex_count; ig += kByteGroupSize)
+ 		{
+ 			unsigned char last = (ig == 0) ? last_vertex[k] : vertex_data[vertex_size * (ig - 1) + k];
+ 			unsigned char delta = 0xff;
+ 
+ 			for (size_t i = ig; i < ig + kByteGroupSize && i < vertex_count; ++i)
+ 				delta &= ~(vertex_data[vertex_size * i + k] ^ last);
+ 
+ 			for (int j = 0; j < 8; ++j)
+ 				bytestats->bitc[j] += (vertex_count - ig < kByteGroupSize ? vertex_count - ig : kByteGroupSize) * ((delta >> j) & 1);
+ 		}
+ #endif
+ 
+-		data = encodeBytes(data, data_end, buffer, (vertex_count + kByteGroupSize - 1) & ~(kByteGroupSize - 1));
++		static const int kBitsV0[4] = {0, 2, 4, 8};
++
++		data = encodeBytes(data, data_end, buffer, (vertex_count + kByteGroupSize - 1) & ~(kByteGroupSize - 1), kBitsV0);
+ 		if (!data)
+ 			return NULL;
+ 
+ #if TRACE
+ 		bytestats = NULL;
+ 		vertexstats[k].size += data - olddata;
+ #endif
+ 	}
+ 
+ 	memcpy(last_vertex, &vertex_data[vertex_size * (vertex_count - 1)], vertex_size);
+ 
+ 	return data;
+ }
+ 
+ #if defined(SIMD_FALLBACK) || (!defined(SIMD_SSE) && !defined(SIMD_NEON) && !defined(SIMD_AVX) && !defined(SIMD_WASM))
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8090","gap_exists":true,"gap_type":["input_semantics","compression_mode"],"confidence":90,"affected_functions":["encodeBytesGroupMeasure","encodeBytesGroup","encodeBytes","encodeVertexBlock","fuzzRoundtrip"],"reason":"H0 reaches vertex encoding through fuzzRoundtrip, but it supplies unstructured fuzzer bytes directly as vertex records and does not deliberately construct repeated or constant per-component vertex streams. In encodeVertexBlock, such streams are what produce an all-zero zigzag8 delta group, allowing encodeBytesGroupZero to select the new bits[0] == 0 mode. That mode has distinct measurement and emission behavior—encodeBytesGroupMeasure returns zero bytes and encodeBytesGroup advances no output—so it is a fuzz-worthy input semantic not reliably exercised by H0.","evidence":["encodeVertexBlock computes buffer[i] = zigzag8(vertex_data[vertex_offset] - p), so identical consecutive values for a component create zero deltas.","kBitsV0 is changed to {0, 2, 4, 8}, introducing a zero-bit candidate passed to encodeBytes.","encodeBytesGroupMeasure handles bits == 0 by requiring encodeBytesGroupZero(buffer) and returning 0 only for an all-zero group.","encodeBytesGroup handles bits == 0 by returning data without emitting payload bytes.","fuzzRoundtrip passes data directly to meshopt_encodeVertexBuffer and contains no construction of repeated vertices or constant component lanes."],"recommended_action":"Add targeted roundtrip cases that build vertex buffers with at least one complete kByteGroupSize delta group of identical values, including all-zero vertices and repeated nonzero vertices, across the exercised strides and across vertex-block/group boundaries; retain the existing arbitrary-stream decoder calls."}
+tokens used
+6,829

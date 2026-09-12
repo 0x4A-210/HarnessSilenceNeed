@@ -1,0 +1,1416 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-direct_evolution_aware-T8012-ktieg_8c
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a09402-757b-7e53-afef-09c55a94ae79
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8012
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `libarchive/test/test_fuzz.c`
+
+~~~~cpp
+/*-
+ * Copyright (c) 2003-2007 Tim Kientzle
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR(S) ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR(S) BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+#include "test.h"
+__FBSDID("$FreeBSD: head/lib/libarchive/test/test_fuzz.c 201247 2009-12-30 05:59:21Z kientzle $");
+
+/*
+ * This was inspired by an ISO fuzz tester written by Michal Zalewski
+ * and posted to the "vulnwatch" mailing list on March 17, 2005:
+ *    http://seclists.org/vulnwatch/2005/q1/0088.html
+ *
+ * This test simply reads each archive image into memory, pokes
+ * random values into it and runs it through libarchive.  It tries
+ * to damage about 1% of each file and repeats the exercise 100 times
+ * with each file.
+ *
+ * Unlike most other tests, this test does not verify libarchive's
+ * responses other than to ensure that libarchive doesn't crash.
+ *
+ * Due to the deliberately random nature of this test, it may be hard
+ * to reproduce failures.  Because this test deliberately attempts to
+ * induce crashes, there's little that can be done in the way of
+ * post-failure diagnostics.
+ */
+
+/* Because this works for any archive, we can just re-use the archives
+ * developed for other tests. */
+static struct {
+	int uncompress; /* If 1, decompress the file before fuzzing. */
+	const char *name;
+} files[] = {
+	{0, "test_fuzz_1.iso.Z"}, /* Exercise compress decompressor. */
+	{1, "test_fuzz_1.iso.Z"},
+	{0, "test_compat_bzip2_1.tbz"}, /* Exercise bzip2 decompressor. */
+	{1, "test_compat_bzip2_1.tbz"},
+	{0, "test_compat_gtar_1.tar"},
+	{0, "test_compat_gzip_1.tgz"}, /* Exercise gzip decompressor. */
+	{0, "test_compat_gzip_2.tgz"}, /* Exercise gzip decompressor. */
+	{0, "test_compat_tar_hardlink_1.tar"},
+	{0, "test_compat_xz_1.txz"}, /* Exercise xz decompressor. */
+	{0, "test_compat_zip_1.zip"},
+	{0, "test_read_format_ar.ar"},
+	{0, "test_read_format_cpio_bin_be.cpio"},
+	{0, "test_read_format_cpio_svr4_gzip_rpm.rpm"}, /* Test RPM unwrapper */
+	{0, "test_read_format_gtar_sparse_1_17_posix10_modified.tar"},
+	{0, "test_read_format_mtree.mtree"},
+	{0, "test_read_format_tar_empty_filename.tar"},
+	{0, "test_read_format_zip.zip"},
+	{1, NULL}
+};
+
+DEFINE_TEST(test_fuzz)
+{
+	const void *blk;
+	size_t blk_size;
+	off_t blk_offset;
+	int n;
+
+	for (n = 0; files[n].name != NULL; ++n) {
+		const size_t buffsize = 30000000;
+		const char *filename = files[n].name;
+		struct archive_entry *ae;
+		struct archive *a;
+		char *rawimage, *image;
+		size_t size;
+		int i;
+
+		extract_reference_file(filename);
+		if (files[n].uncompress) {
+			int r;
+			/* Use format_raw to decompress the data. */
+			assert((a = archive_read_new()) != NULL);
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_support_compression_all(a));
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_support_format_raw(a));
+			r = archive_read_open_filename(a, filename, 16384);
+			if (r != ARCHIVE_OK) {
+				archive_read_finish(a);
+				skipping("Cannot uncompress %s", filename);
+				continue;
+			}
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_next_header(a, &ae));
+			rawimage = malloc(buffsize);
+			size = archive_read_data(a, rawimage, buffsize);
+			assertEqualIntA(a, ARCHIVE_EOF,
+			    archive_read_next_header(a, &ae));
+			assertEqualInt(ARCHIVE_OK,
+			    archive_read_finish(a));
+			assert(size > 0);
+			failure("Internal buffer is not big enough for "
+			    "uncompressed test file: %s", filename);
+			if (!assert(size < buffsize)) {
+				free(rawimage);
+				continue;
+			}
+		} else {
+			rawimage = slurpfile(&size, filename);
+			if (!assert(rawimage != NULL))
+				continue;
+		}
+		image = malloc(size);
+		assert(image != NULL);
+		srand((unsigned)time(NULL));
+
+		for (i = 0; i < 100; ++i) {
+			FILE *f;
+			int j, numbytes;
+
+			/* Fuzz < 1% of the bytes in the archive. */
+			memcpy(image, rawimage, size);
+			numbytes = (int)(rand() % (size / 100));
+			for (j = 0; j < numbytes; ++j)
+				image[rand() % size] = (char)rand();
+
+			/* Save the messed-up image to a file.
+			 * If we crash, that file will be useful. */
+			f = fopen("after.test.failure.send.this.file."
+			    "to.libarchive.maintainers.with.system.details", "wb");
+			fwrite(image, 1, (size_t)size, f);
+			fclose(f);
+
+			assert((a = archive_read_new()) != NULL);
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_support_compression_all(a));
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_support_format_all(a));
+
+			if (0 == archive_read_open_memory(a, image, size)) {
+				while(0 == archive_read_next_header(a, &ae)) {
+					while (0 == archive_read_data_block(a,
+						&blk, &blk_size, &blk_offset))
+						continue;
+				}
+				archive_read_close(a);
+			}
+			archive_read_finish(a);
+		}
+		free(image);
+		free(rawimage);
+	}
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/contrib/shar/shar.c b/contrib/shar/shar.c
+index 12c84255..6d5c206e 100644
+--- a/contrib/shar/shar.c
++++ b/contrib/shar/shar.c
+@@ -251,29 +251,29 @@ static int
+ shar_write(char **fn, size_t nfn)
+ {
+ 	struct archive *a;
+ 	size_t i;
+ 	int error = 0;
+ 
+ 	assert(fn != NULL);
+ 	assert(nfn > 0);
+ 
+ 	a = shar_create();
+ 
+ 	for (i = 0; i < nfn; i++) {
+ 		if (r_opt) {
+ 			if (shar_write_tree(a, fn[i]) !=  ARCHIVE_OK)
+ 				error = 1;
+ 		} else {
+ 			if (shar_write_path(a, fn[i]) != ARCHIVE_OK)
+ 				error = 1;
+ 		}
+ 	}
+ 
+-	if (archive_write_finish(a) != ARCHIVE_OK)
++	if (archive_write_free(a) != ARCHIVE_OK)
+ 		errx(EXIT_FAILURE, "%s", archive_error_string(a));
+ 
+ 	if (error != 0)
+ 		warnx("Error exit delayed from previous errors.");
+ 
+ 	return (error);
+ }
+diff --git a/cpio/cpio.c b/cpio/cpio.c
+index cab7f01d..616b2ea1 100644
+--- a/cpio/cpio.c
++++ b/cpio/cpio.c
+@@ -459,97 +459,97 @@ static void
+ mode_out(struct cpio *cpio)
+ {
+ 	struct archive_entry *entry, *spare;
+ 	struct lafe_line_reader *lr;
+ 	const char *p;
+ 	int r;
+ 
+ 	if (cpio->option_append)
+ 		lafe_errc(1, 0, "Append mode not yet supported.");
+ 
+ 	cpio->archive_read_disk = archive_read_disk_new();
+ 	if (cpio->archive_read_disk == NULL)
+ 		lafe_errc(1, 0, "Failed to allocate archive object");
+ 	if (cpio->option_follow_links)
+ 		archive_read_disk_set_symlink_logical(cpio->archive_read_disk);
+ 	else
+ 		archive_read_disk_set_symlink_physical(cpio->archive_read_disk);
+ 	archive_read_disk_set_standard_lookup(cpio->archive_read_disk);
+ 
+ 	cpio->archive = archive_write_new();
+ 	if (cpio->archive == NULL)
+ 		lafe_errc(1, 0, "Failed to allocate archive object");
+ 	switch (cpio->compress) {
+ 	case 'J':
+ 		r = archive_write_set_compression_xz(cpio->archive);
+ 		break;
+ 	case OPTION_LZMA:
+ 		r = archive_write_set_compression_lzma(cpio->archive);
+ 		break;
+ 	case 'j': case 'y':
+ 		r = archive_write_set_compression_bzip2(cpio->archive);
+ 		break;
+ 	case 'z':
+ 		r = archive_write_set_compression_gzip(cpio->archive);
+ 		break;
+ 	case 'Z':
+ 		r = archive_write_set_compression_compress(cpio->archive);
+ 		break;
+ 	default:
+ 		r = archive_write_set_compression_none(cpio->archive);
+ 		break;
+ 	}
+ 	if (r < ARCHIVE_WARN)
+ 		lafe_errc(1, 0, "Requested compression not available");
+ 	r = archive_write_set_format_by_name(cpio->archive, cpio->format);
+ 	if (r != ARCHIVE_OK)
+ 		lafe_errc(1, 0, "%s", archive_error_string(cpio->archive));
+ 	archive_write_set_bytes_per_block(cpio->archive, cpio->bytes_per_block);
+ 	cpio->linkresolver = archive_entry_linkresolver_new();
+ 	archive_entry_linkresolver_set_strategy(cpio->linkresolver,
+ 	    archive_format(cpio->archive));
+ 
+ 	/*
+ 	 * The main loop:  Copy each file into the output archive.
+ 	 */
+ 	r = archive_write_open_file(cpio->archive, cpio->filename);
+ 	if (r != ARCHIVE_OK)
+ 		lafe_errc(1, 0, "%s", archive_error_string(cpio->archive));
+ 	lr = lafe_line_reader("-", cpio->option_null);
+ 	while ((p = lafe_line_reader_next(lr)) != NULL)
+ 		file_to_archive(cpio, p);
+ 	lafe_line_reader_free(lr);
+ 
+ 	/*
+ 	 * The hardlink detection may have queued up a couple of entries
+ 	 * that can now be flushed.
+ 	 */
+ 	entry = NULL;
+ 	archive_entry_linkify(cpio->linkresolver, &entry, &spare);
+ 	while (entry != NULL) {
+ 		entry_to_archive(cpio, entry);
+ 		archive_entry_free(entry);
+ 		entry = NULL;
+ 		archive_entry_linkify(cpio->linkresolver, &entry, &spare);
+ 	}
+ 
+ 	r = archive_write_close(cpio->archive);
+ 	if (cpio->dot)
+ 		fprintf(stderr, "\n");
+ 	if (r != ARCHIVE_OK)
+ 		lafe_errc(1, 0, "%s", archive_error_string(cpio->archive));
+ 
+ 	if (!cpio->quiet) {
+ 		int64_t blocks =
+ 			(archive_position_uncompressed(cpio->archive) + 511)
+ 			/ 512;
+ 		fprintf(stderr, "%lu %s\n", (unsigned long)blocks,
+ 		    blocks == 1 ? "block" : "blocks");
+ 	}
+-	archive_write_finish(cpio->archive);
++	archive_write_free(cpio->archive);
+ }
+ 
+ /*
+  * This is used by both out mode (to copy objects from disk into
+  * an archive) and pass mode (to copy objects from disk to
+  * an archive_write_disk "archive").
+  */
+@@ -811,82 +811,82 @@ static void
+ mode_in(struct cpio *cpio)
+ {
+ 	struct archive *a;
+ 	struct archive_entry *entry;
+ 	struct archive *ext;
+ 	const char *destpath;
+ 	int r;
+ 
+ 	ext = archive_write_disk_new();
+ 	if (ext == NULL)
+ 		lafe_errc(1, 0, "Couldn't allocate restore object");
+ 	r = archive_write_disk_set_options(ext, cpio->extract_flags);
+ 	if (r != ARCHIVE_OK)
+ 		lafe_errc(1, 0, "%s", archive_error_string(ext));
+ 	a = archive_read_new();
+ 	if (a == NULL)
+ 		lafe_errc(1, 0, "Couldn't allocate archive object");
+ 	archive_read_support_compression_all(a);
+ 	archive_read_support_format_all(a);
+ 
+ 	if (archive_read_open_file(a, cpio->filename, cpio->bytes_per_block))
+ 		lafe_errc(1, archive_errno(a),
+ 		    "%s", archive_error_string(a));
+ 	for (;;) {
+ 		r = archive_read_next_header(a, &entry);
+ 		if (r == ARCHIVE_EOF)
+ 			break;
+ 		if (r != ARCHIVE_OK) {
+ 			lafe_errc(1, archive_errno(a),
+ 			    "%s", archive_error_string(a));
+ 		}
+ 		if (lafe_excluded(cpio->matching, archive_entry_pathname(entry)))
+ 			continue;
+ 		if (cpio->option_rename) {
+ 			destpath = cpio_rename(archive_entry_pathname(entry));
+ 			archive_entry_set_pathname(entry, destpath);
+ 		} else
+ 			destpath = archive_entry_pathname(entry);
+ 		if (destpath == NULL)
+ 			continue;
+ 		if (cpio->verbose)
+ 			fprintf(stderr, "%s\n", destpath);
+ 		if (cpio->dot)
+ 			fprintf(stderr, ".");
+ 		if (cpio->uid_override >= 0)
+ 			archive_entry_set_uid(entry, cpio->uid_override);
+ 		if (cpio->gid_override >= 0)
+ 			archive_entry_set_gid(entry, cpio->gid_override);
+ 		r = archive_write_header(ext, entry);
+ 		if (r != ARCHIVE_OK) {
+ 			fprintf(stderr, "%s: %s\n",
+ 			    archive_entry_pathname(entry),
+ 			    archive_error_string(ext));
+ 		} else if (archive_entry_size(entry) > 0) {
+ 			r = extract_data(a, ext);
+ 			if (r != ARCHIVE_OK)
+ 				cpio->return_value = 1;
+ 		}
+ 	}
+ 	r = archive_read_close(a);
+ 	if (cpio->dot)
+ 		fprintf(stderr, "\n");
+ 	if (r != ARCHIVE_OK)
+ 		lafe_errc(1, 0, "%s", archive_error_string(a));
+ 	r = archive_write_close(ext);
+ 	if (r != ARCHIVE_OK)
+ 		lafe_errc(1, 0, "%s", archive_error_string(ext));
+ 	if (!cpio->quiet) {
+ 		int64_t blocks = (archive_position_uncompressed(a) + 511)
+ 			      / 512;
+ 		fprintf(stderr, "%lu %s\n", (unsigned long)blocks,
+ 		    blocks == 1 ? "block" : "blocks");
+ 	}
+-	archive_read_finish(a);
+-	archive_write_finish(ext);
++	archive_read_free(a);
++	archive_write_free(ext);
+ 	exit(cpio->return_value);
+ }
+ 
+ /*
+  * Exits if there's a fatal error.  Returns ARCHIVE_OK
+  * if everything is kosher.
+  */
+@@ -920,51 +920,51 @@ static void
+ mode_list(struct cpio *cpio)
+ {
+ 	struct archive *a;
+ 	struct archive_entry *entry;
+ 	int r;
+ 
+ 	a = archive_read_new();
+ 	if (a == NULL)
+ 		lafe_errc(1, 0, "Couldn't allocate archive object");
+ 	archive_read_support_compression_all(a);
+ 	archive_read_support_format_all(a);
+ 
+ 	if (archive_read_open_file(a, cpio->filename, cpio->bytes_per_block))
+ 		lafe_errc(1, archive_errno(a),
+ 		    "%s", archive_error_string(a));
+ 	for (;;) {
+ 		r = archive_read_next_header(a, &entry);
+ 		if (r == ARCHIVE_EOF)
+ 			break;
+ 		if (r != ARCHIVE_OK) {
+ 			lafe_errc(1, archive_errno(a),
+ 			    "%s", archive_error_string(a));
+ 		}
+ 		if (lafe_excluded(cpio->matching, archive_entry_pathname(entry)))
+ 			continue;
+ 		if (cpio->verbose)
+ 			list_item_verbose(cpio, entry);
+ 		else
+ 			fprintf(stdout, "%s\n", archive_entry_pathname(entry));
+ 	}
+ 	r = archive_read_close(a);
+ 	if (r != ARCHIVE_OK)
+ 		lafe_errc(1, 0, "%s", archive_error_string(a));
+ 	if (!cpio->quiet) {
+ 		int64_t blocks = (archive_position_uncompressed(a) + 511)
+ 			      / 512;
+ 		fprintf(stderr, "%lu %s\n", (unsigned long)blocks,
+ 		    blocks == 1 ? "block" : "blocks");
+ 	}
+-	archive_read_finish(a);
++	archive_read_free(a);
+ 	exit(0);
+ }
+ 
+ /*
+  * Display information about the current file.
+  *
+  * The format here roughly duplicates the output of 'ls -l'.
+  * This is based on SUSv2, where 'tar tv' is documented as
+  * listing additional information in an "unspecified format,"
+  * and 'pax -l' is documented as using the same format as 'ls -l'.
+  */
+@@ -1045,60 +1045,60 @@ static void
+ mode_pass(struct cpio *cpio, const char *destdir)
+ {
+ 	struct lafe_line_reader *lr;
+ 	const char *p;
+ 	int r;
+ 
+ 	/* Ensure target dir has a trailing '/' to simplify path surgery. */
+ 	cpio->destdir = malloc(strlen(destdir) + 8);
+ 	strcpy(cpio->destdir, destdir);
+ 	if (destdir[strlen(destdir) - 1] != '/')
+ 		strcat(cpio->destdir, "/");
+ 
+ 	cpio->archive = archive_write_disk_new();
+ 	if (cpio->archive == NULL)
+ 		lafe_errc(1, 0, "Failed to allocate archive object");
+ 	r = archive_write_disk_set_options(cpio->archive, cpio->extract_flags);
+ 	if (r != ARCHIVE_OK)
+ 		lafe_errc(1, 0, "%s", archive_error_string(cpio->archive));
+ 	cpio->linkresolver = archive_entry_linkresolver_new();
+ 	archive_write_disk_set_standard_lookup(cpio->archive);
+ 
+ 	cpio->archive_read_disk = archive_read_disk_new();
+ 	if (cpio->archive_read_disk == NULL)
+ 		lafe_errc(1, 0, "Failed to allocate archive object");
+ 	if (cpio->option_follow_links)
+ 		archive_read_disk_set_symlink_logical(cpio->archive_read_disk);
+ 	else
+ 		archive_read_disk_set_symlink_physical(cpio->archive_read_disk);
+ 	archive_read_disk_set_standard_lookup(cpio->archive_read_disk);
+ 
+ 	lr = lafe_line_reader("-", cpio->option_null);
+ 	while ((p = lafe_line_reader_next(lr)) != NULL)
+ 		file_to_archive(cpio, p);
+ 	lafe_line_reader_free(lr);
+ 
+ 	archive_entry_linkresolver_free(cpio->linkresolver);
+ 	r = archive_write_close(cpio->archive);
+ 	if (cpio->dot)
+ 		fprintf(stderr, "\n");
+ 	if (r != ARCHIVE_OK)
+ 		lafe_errc(1, 0, "%s", archive_error_string(cpio->archive));
+ 
+ 	if (!cpio->quiet) {
+ 		int64_t blocks =
+ 			(archive_position_uncompressed(cpio->archive) + 511)
+ 			/ 512;
+ 		fprintf(stderr, "%lu %s\n", (unsigned long)blocks,
+ 		    blocks == 1 ? "block" : "blocks");
+ 	}
+ 
+-	archive_write_finish(cpio->archive);
++	archive_write_free(cpio->archive);
+ }
+ 
+ /*
+  * Prompt for a new name for this entry.  Returns a pointer to the
+  * new name or NULL if the entry should not be copied.  This
+  * implements the semantics defined in POSIX.1-1996, which specifies
+  * that an input of '.' means the name should be unchanged.  GNU cpio
+  * treats '.' as a literal new name.
+  */
+diff --git a/libarchive/archive.h b/libarchive/archive.h
+index 8ff934a2..e2c8b8c1 100644
+--- a/libarchive/archive.h
++++ b/libarchive/archive.h
+@@ -482,23 +482,27 @@ __LA_DECL void		archive_read_extract_set_skip_file(struct archive *,
+ /* Close the file and release most resources. */
+ __LA_DECL int		 archive_read_close(struct archive *);
+ /* Release all resources and destroy the object. */
+-/* Note that archive_read_finish will call archive_read_close for you. */
++/* Note that archive_read_free will call archive_read_close for you. */
++__LA_DECL int		 archive_read_free(struct archive *);
++#if ARCHIVE_VERSION_NUMBER < 4000000
++/* Synonym for archive_read_free() for backwards compatibility. */
+ __LA_DECL int		 archive_read_finish(struct archive *);
++#endif
+ 
+ /*-
+  * To create an archive:
+  *   1) Ask archive_write_new for a archive writer object.
+  *   2) Set any global properties.  In particular, you should set
+  *      the compression and format to use.
+  *   3) Call archive_write_open to open the file (most people
+  *       will use archive_write_open_file or archive_write_open_fd,
+  *       which provide convenient canned I/O callbacks for you).
+  *   4) For each entry:
+  *      - construct an appropriate struct archive_entry structure
+  *      - archive_write_header to write the header
+  *      - archive_write_data to write the entry data
+  *   5) archive_write_close to close the output
+- *   6) archive_write_finish to cleanup the writer and release resources
++ *   6) archive_write_free to cleanup the writer and release resources
+  */
+ __LA_DECL struct archive	*archive_write_new(void);
+ __LA_DECL int		 archive_write_set_bytes_per_block(struct archive *,
+@@ -573,12 +577,15 @@ __LA_DECL __LA_SSIZE_T	 archive_write_data_block(struct archive *,
+ #endif
+ __LA_DECL int		 archive_write_finish_entry(struct archive *);
+ __LA_DECL int		 archive_write_close(struct archive *);
+-/* Libarchive 2.x and later returns an error if this fails. */
+-/* It can fail if the archive wasn't already closed, in which case
+- * archive_write_finish() will implicitly call archive_write_close(). */
++/* This can fail if the archive wasn't already closed, in which case
++ * archive_write_free() will implicitly call archive_write_close(). */
++__LA_DECL int		 archive_write_free(struct archive *);
++#if ARCHIVE_VERSION_NUMBER < 4000000
++/* Synonym for archive_write_free() for backwards compatibility. */
+ __LA_DECL int		 archive_write_finish(struct archive *);
++#endif
+ 
+ /*
+  * Set write options.
+  */
+ /* Apply option string to the format only. */
+@@ -589,22 +596,22 @@ __LA_DECL int		archive_write_set_compressor_options(struct archive *_a,
+ 			    const char *s);
+ /* Apply option string to both the format and the compressor. */
+ __LA_DECL int		archive_write_set_options(struct archive *_a,
+ 			    const char *s);
+ 
+ 
+ /*-
+  * ARCHIVE_WRITE_DISK API
+  *
+  * To create objects on disk:
+  *   1) Ask archive_write_disk_new for a new archive_write_disk object.
+  *   2) Set any global properties.  In particular, you probably
+  *      want to set the options.
+  *   3) For each entry:
+  *      - construct an appropriate struct archive_entry structure
+  *      - archive_write_header to create the file/dir/etc on disk
+  *      - archive_write_data to write the entry data
+- *   4) archive_write_finish to cleanup the writer and release resources
++ *   4) archive_write_free to cleanup the writer and release resources
+  *
+  * In particular, you can use this in conjunction with archive_read()
+  * to pull entries out of an archive and create them on disk.
+  */
+diff --git a/libarchive/archive_private.h b/libarchive/archive_private.h
+index 63384b82..fba3d62a 100644
+--- a/libarchive/archive_private.h
++++ b/libarchive/archive_private.h
+@@ -58,12 +58,12 @@
+ 
+ struct archive_vtable {
+ 	int	(*archive_close)(struct archive *);
+-	int	(*archive_finish)(struct archive *);
++	int	(*archive_free)(struct archive *);
+ 	int	(*archive_write_header)(struct archive *,
+ 	    struct archive_entry *);
+ 	int	(*archive_write_finish_entry)(struct archive *);
+ 	ssize_t	(*archive_write_data)(struct archive *,
+ 	    const void *, size_t);
+ 	ssize_t	(*archive_write_data_block)(struct archive *,
+ 	    const void *, size_t, off_t);
+ };
+diff --git a/libarchive/archive_read.c b/libarchive/archive_read.c
+index abb419ee..9ed61efb 100644
+--- a/libarchive/archive_read.c
++++ b/libarchive/archive_read.c
+@@ -60,21 +60,21 @@ static int	choose_format(struct archive_read *);
+ static int	cleanup_filters(struct archive_read *);
+ static struct archive_vtable *archive_read_vtable(void);
+ static int	_archive_read_close(struct archive *);
+-static int	_archive_read_finish(struct archive *);
++static int	_archive_read_free(struct archive *);
+ 
+ static struct archive_vtable *
+ archive_read_vtable(void)
+ {
+ 	static struct archive_vtable av;
+ 	static int inited = 0;
+ 
+ 	if (!inited) {
+-		av.archive_finish = _archive_read_finish;
++		av.archive_free = _archive_read_free;
+ 		av.archive_close = _archive_read_close;
+ 	}
+ 	return (&av);
+ }
+ 
+ /*
+  * Allocate, initialize and return a struct archive object.
+  */
+@@ -779,35 +779,35 @@ cleanup_filters(struct archive_read *a)
+  * Release memory and other resources.
+  */
+ static int
+-_archive_read_finish(struct archive *_a)
++_archive_read_free(struct archive *_a)
+ {
+ 	struct archive_read *a = (struct archive_read *)_a;
+ 	int i;
+ 	int slots;
+ 	int r = ARCHIVE_OK;
+ 
+ 	__archive_check_magic(_a, ARCHIVE_READ_MAGIC, ARCHIVE_STATE_ANY,
+-	    "archive_read_finish");
++	    "archive_read_free");
+ 	if (a->archive.state != ARCHIVE_STATE_CLOSED)
+ 		r = archive_read_close(&a->archive);
+ 
+ 	/* Cleanup format-specific data. */
+ 	slots = sizeof(a->formats) / sizeof(a->formats[0]);
+ 	for (i = 0; i < slots; i++) {
+ 		a->format = &(a->formats[i]);
+ 		if (a->formats[i].cleanup)
+ 			(a->formats[i].cleanup)(a);
+ 	}
+ 
+ 	archive_string_free(&a->archive.error_string);
+ 	if (a->entry)
+ 		archive_entry_free(a->entry);
+ 	a->archive.magic = 0;
+ 	free(a);
+ 	return (r);
+ }
+ 
+ /*
+  * Used internally by read format handlers to register their bid and
+  * initialization functions.
+  */
+diff --git a/libarchive/archive_read_disk.c b/libarchive/archive_read_disk.c
+index 8fad7f13..dc43e179 100644
+--- a/libarchive/archive_read_disk.c
++++ b/libarchive/archive_read_disk.c
+@@ -33,7 +33,7 @@ __FBSDID("$FreeBSD: head/lib/libarchive/archive_read_disk.c 189429 2009-03-06 04
+ #include "archive_private.h"
+ #include "archive_read_disk_private.h"
+ 
+-static int	_archive_read_finish(struct archive *);
++static int	_archive_read_free(struct archive *);
+ static int	_archive_read_close(struct archive *);
+ static const char *trivial_lookup_gname(void *, gid_t gid);
+ static const char *trivial_lookup_uname(void *, uid_t uid);
+@@ -42,11 +42,11 @@ static struct archive_vtable *
+ archive_read_disk_vtable(void)
+ {
+ 	static struct archive_vtable av;
+ 	static int inited = 0;
+ 
+ 	if (!inited) {
+-		av.archive_finish = _archive_read_finish;
++		av.archive_free = _archive_read_free;
+ 		av.archive_close = _archive_read_close;
+ 	}
+ 	return (&av);
+ }
+@@ -129,15 +129,15 @@ archive_read_disk_new(void)
+ }
+ 
+ static int
+-_archive_read_finish(struct archive *_a)
++_archive_read_free(struct archive *_a)
+ {
+ 	struct archive_read_disk *a = (struct archive_read_disk *)_a;
+ 
+ 	if (a->cleanup_gname != NULL && a->lookup_gname_data != NULL)
+ 		(a->cleanup_gname)(a->lookup_gname_data);
+ 	if (a->cleanup_uname != NULL && a->lookup_uname_data != NULL)
+ 		(a->cleanup_uname)(a->lookup_uname_data);
+ 	archive_string_free(&a->archive.error_string);
+ 	free(a);
+ 	return (ARCHIVE_OK);
+ }
+diff --git a/libarchive/archive_read_extract.c b/libarchive/archive_read_extract.c
+index c2f40c54..b698916f 100644
+--- a/libarchive/archive_read_extract.c
++++ b/libarchive/archive_read_extract.c
+@@ -171,9 +171,9 @@ static int
+ archive_read_extract_cleanup(struct archive_read *a)
+ {
+ 	int ret = ARCHIVE_OK;
+ 
+-	ret = archive_write_finish(a->extract->ad);
++	ret = archive_write_free(a->extract->ad);
+ 	free(a->extract);
+ 	a->extract = NULL;
+ 	return (ret);
+ }
+diff --git a/libarchive/archive_virtual.c b/libarchive/archive_virtual.c
+index 0bd2d5bc..83688627 100644
+--- a/libarchive/archive_virtual.c
++++ b/libarchive/archive_virtual.c
+@@ -42,17 +42,35 @@ archive_read_close(struct archive *a)
+ 	return ((a->vtable->archive_close)(a));
+ }
+ 
++int
++archive_write_free(struct archive *a)
++{
++	return ((a->vtable->archive_free)(a));
++}
++
++#if ARCHIVE_VERSION_NUMBER < 4000000
++/* For backwards compatibility; will be removed with libarchive 4.0. */
+ int
+ archive_write_finish(struct archive *a)
+ {
+-	return ((a->vtable->archive_finish)(a));
++	return ((a->vtable->archive_free)(a));
++}
++#endif
++
++int
++archive_read_free(struct archive *a)
++{
++	return ((a->vtable->archive_free)(a));
+ }
+ 
++#if ARCHIVE_VERSION_NUMBER < 4000000
++/* For backwards compatibility; will be removed with libarchive 4.0. */
+ int
+ archive_read_finish(struct archive *a)
+ {
+-	return ((a->vtable->archive_finish)(a));
++	return ((a->vtable->archive_free)(a));
+ }
++#endif
+ 
+ int
+ archive_write_header(struct archive *a, struct archive_entry *entry)
+diff --git a/libarchive/archive_write.c b/libarchive/archive_write.c
+index e0d942b0..eba72272 100644
+--- a/libarchive/archive_write.c
++++ b/libarchive/archive_write.c
+@@ -60,7 +60,7 @@ __FBSDID("$FreeBSD: head/lib/libarchive/archive_write.c 201099 2009-12-28 03:03:
+ static struct archive_vtable *archive_write_vtable(void);
+ 
+ static int	_archive_write_close(struct archive *);
+-static int	_archive_write_finish(struct archive *);
++static int	_archive_write_free(struct archive *);
+ static int	_archive_write_header(struct archive *, struct archive_entry *);
+ static int	_archive_write_finish_entry(struct archive *);
+ static ssize_t	_archive_write_data(struct archive *, const void *, size_t);
+@@ -69,18 +69,18 @@ static struct archive_vtable *
+ archive_write_vtable(void)
+ {
+ 	static struct archive_vtable av;
+ 	static int inited = 0;
+ 
+ 	if (!inited) {
+ 		av.archive_close = _archive_write_close;
+-		av.archive_finish = _archive_write_finish;
++		av.archive_free = _archive_write_free;
+ 		av.archive_write_header = _archive_write_header;
+ 		av.archive_write_finish_entry = _archive_write_finish_entry;
+ 		av.archive_write_data = _archive_write_data;
+ 	}
+ 	return (&av);
+ }
+ 
+ /*
+  * Allocate, initialize and return an archive object.
+  */
+@@ -383,24 +383,24 @@ _archive_write_close(struct archive *_a)
+  * Destroy the archive structure.
+  */
+ static int
+-_archive_write_finish(struct archive *_a)
++_archive_write_free(struct archive *_a)
+ {
+ 	struct archive_write *a = (struct archive_write *)_a;
+ 	int r = ARCHIVE_OK;
+ 
+ 	__archive_check_magic(&a->archive, ARCHIVE_WRITE_MAGIC,
+-	    ARCHIVE_STATE_ANY, "archive_write_finish");
++	    ARCHIVE_STATE_ANY, "archive_write_free");
+ 	if (a->archive.state != ARCHIVE_STATE_CLOSED)
+ 		r = archive_write_close(&a->archive);
+ 
+ 	/* Release various dynamic buffers. */
+ 	free((void *)(uintptr_t)(const void *)a->nulls);
+ 	archive_string_free(&a->archive.error_string);
+ 	a->archive.magic = 0;
+ 	free(a);
+ 	return (r);
+ }
+ 
+ /*
+  * Write the appropriate header.
+  */
+diff --git a/libarchive/archive_write_disk.c b/libarchive/archive_write_disk.c
+index 88575510..f734037c 100644
+--- a/libarchive/archive_write_disk.c
++++ b/libarchive/archive_write_disk.c
+@@ -255,7 +255,7 @@ static ssize_t	write_data_block(struct archive_write_disk *,
+ static struct archive_vtable *archive_write_disk_vtable(void);
+ 
+ static int	_archive_write_close(struct archive *);
+-static int	_archive_write_finish(struct archive *);
++static int	_archive_write_free(struct archive *);
+ static int	_archive_write_header(struct archive *, struct archive_entry *);
+ static int	_archive_write_finish_entry(struct archive *);
+ static ssize_t	_archive_write_data(struct archive *, const void *, size_t);
+@@ -290,15 +290,15 @@ static struct archive_vtable *
+ archive_write_disk_vtable(void)
+ {
+ 	static struct archive_vtable av;
+ 	static int inited = 0;
+ 
+ 	if (!inited) {
+ 		av.archive_close = _archive_write_close;
+-		av.archive_finish = _archive_write_finish;
++		av.archive_free = _archive_write_free;
+ 		av.archive_write_header = _archive_write_header;
+ 		av.archive_write_finish_entry = _archive_write_finish_entry;
+ 		av.archive_write_data = _archive_write_data;
+ 		av.archive_write_data_block = _archive_write_data_block;
+ 	}
+ 	return (&av);
+ }
+@@ -1325,25 +1325,25 @@ _archive_write_close(struct archive *_a)
+ }
+ 
+ static int
+-_archive_write_finish(struct archive *_a)
++_archive_write_free(struct archive *_a)
+ {
+ 	struct archive_write_disk *a = (struct archive_write_disk *)_a;
+ 	int ret;
+ 	ret = _archive_write_close(&a->archive);
+ 	if (a->cleanup_gid != NULL && a->lookup_gid_data != NULL)
+ 		(a->cleanup_gid)(a->lookup_gid_data);
+ 	if (a->cleanup_uid != NULL && a->lookup_uid_data != NULL)
+ 		(a->cleanup_uid)(a->lookup_uid_data);
+ 	if (a->entry)
+ 		archive_entry_free(a->entry);
+ 	archive_string_free(&a->_name_data);
+ 	archive_string_free(&a->archive.error_string);
+ 	archive_string_free(&a->path_safe);
+ 	free(a);
+ 	return (ret);
+ }
+ 
+ /*
+  * Simple O(n log n) merge sort to order the fixup list.  In
+  * particular, we want to restore dir timestamps depth-first.
+  */
+diff --git a/tar/read.c b/tar/read.c
+index aaaacac0..3d8b347d 100644
+--- a/tar/read.c
++++ b/tar/read.c
+@@ -133,214 +133,214 @@ static void
+ read_archive(struct bsdtar *bsdtar, char mode)
+ {
+ 	struct progress_data	progress_data;
+ 	FILE			 *out;
+ 	struct archive		 *a;
+ 	struct archive_entry	 *entry;
+ 	const struct stat	 *st;
+ 	int			  r;
+ 
+ 	while (*bsdtar->argv) {
+ 		lafe_include(&bsdtar->matching, *bsdtar->argv);
+ 		bsdtar->argv++;
+ 	}
+ 
+ 	if (bsdtar->names_from_file != NULL)
+ 		lafe_include_from_file(&bsdtar->matching,
+ 		    bsdtar->names_from_file, bsdtar->option_null);
+ 
+ 	a = archive_read_new();
+ 	if (bsdtar->compress_program != NULL)
+ 		archive_read_support_compression_program(a, bsdtar->compress_program);
+ 	else
+ 		archive_read_support_compression_all(a);
+ 	archive_read_support_format_all(a);
+ 	if (ARCHIVE_OK != archive_read_set_options(a, bsdtar->option_options))
+ 		lafe_errc(1, 0, "%s", archive_error_string(a));
+ 	if (archive_read_open_file(a, bsdtar->filename,
+ 	    bsdtar->bytes_per_block != 0 ? bsdtar->bytes_per_block :
+ 	    DEFAULT_BYTES_PER_BLOCK))
+ 		lafe_errc(1, 0, "Error opening archive: %s",
+ 		    archive_error_string(a));
+ 
+ 	do_chdir(bsdtar);
+ 
+ 	if (mode == 'x') {
+ 		/* Set an extract callback so that we can handle SIGINFO. */
+ 		progress_data.bsdtar = bsdtar;
+ 		progress_data.archive = a;
+ 		archive_read_extract_set_progress_callback(a, progress_func,
+ 		    &progress_data);
+ 	}
+ 
+ 	if (mode == 'x' && bsdtar->option_chroot) {
+ #if HAVE_CHROOT
+ 		if (chroot(".") != 0)
+ 			lafe_errc(1, errno, "Can't chroot to \".\"");
+ #else
+ 		lafe_errc(1, 0,
+ 		    "chroot isn't supported on this platform");
+ #endif
+ 	}
+ 
+ 	for (;;) {
+ 		/* Support --fast-read option */
+ 		if (bsdtar->option_fast_read &&
+ 		    lafe_unmatched_inclusions(bsdtar->matching) == 0)
+ 			break;
+ 
+ 		r = archive_read_next_header(a, &entry);
+ 		progress_data.entry = entry;
+ 		if (r == ARCHIVE_EOF)
+ 			break;
+ 		if (r < ARCHIVE_OK)
+ 			lafe_warnc(0, "%s", archive_error_string(a));
+ 		if (r <= ARCHIVE_WARN)
+ 			bsdtar->return_value = 1;
+ 		if (r == ARCHIVE_RETRY) {
+ 			/* Retryable error: try again */
+ 			lafe_warnc(0, "Retrying...");
+ 			continue;
+ 		}
+ 		if (r == ARCHIVE_FATAL)
+ 			break;
+ 
+ 		if (bsdtar->option_numeric_owner) {
+ 			archive_entry_set_uname(entry, NULL);
+ 			archive_entry_set_gname(entry, NULL);
+ 		}
+ 
+ 		/*
+ 		 * Exclude entries that are too old.
+ 		 */
+ 		st = archive_entry_stat(entry);
+ 		if (bsdtar->newer_ctime_sec > 0) {
+ 			if (st->st_ctime < bsdtar->newer_ctime_sec)
+ 				continue; /* Too old, skip it. */
+ 			if (st->st_ctime == bsdtar->newer_ctime_sec
+ 			    && ARCHIVE_STAT_CTIME_NANOS(st)
+ 			    <= bsdtar->newer_ctime_nsec)
+ 				continue; /* Too old, skip it. */
+ 		}
+ 		if (bsdtar->newer_mtime_sec > 0) {
+ 			if (st->st_mtime < bsdtar->newer_mtime_sec)
+ 				continue; /* Too old, skip it. */
+ 			if (st->st_mtime == bsdtar->newer_mtime_sec
+ 			    && ARCHIVE_STAT_MTIME_NANOS(st)
+ 			    <= bsdtar->newer_mtime_nsec)
+ 				continue; /* Too old, skip it. */
+ 		}
+ 
+ 		/*
+ 		 * Note that pattern exclusions are checked before
+ 		 * pathname rewrites are handled.  This gives more
+ 		 * control over exclusions, since rewrites always lose
+ 		 * information.  (For example, consider a rewrite
+ 		 * s/foo[0-9]/foo/.  If we check exclusions after the
+ 		 * rewrite, there would be no way to exclude foo1/bar
+ 		 * while allowing foo2/bar.)
+ 		 */
+ 		if (lafe_excluded(bsdtar->matching, archive_entry_pathname(entry)))
+ 			continue; /* Excluded by a pattern test. */
+ 
+ 		if (mode == 't') {
+ 			/* Perversely, gtar uses -O to mean "send to stderr"
+ 			 * when used with -t. */
+ 			out = bsdtar->option_stdout ? stderr : stdout;
+ 
+ 			/*
+ 			 * TODO: Provide some reasonable way to
+ 			 * preview rewrites.  gtar always displays
+ 			 * the unedited path in -t output, which means
+ 			 * you cannot easily preview rewrites.
+ 			 */
+ 			if (bsdtar->verbose < 2)
+ 				safe_fprintf(out, "%s",
+ 				    archive_entry_pathname(entry));
+ 			else
+ 				list_item_verbose(bsdtar, out, entry);
+ 			fflush(out);
+ 			r = archive_read_data_skip(a);
+ 			if (r == ARCHIVE_WARN) {
+ 				fprintf(out, "\n");
+ 				lafe_warnc(0, "%s",
+ 				    archive_error_string(a));
+ 			}
+ 			if (r == ARCHIVE_RETRY) {
+ 				fprintf(out, "\n");
+ 				lafe_warnc(0, "%s",
+ 				    archive_error_string(a));
+ 			}
+ 			if (r == ARCHIVE_FATAL) {
+ 				fprintf(out, "\n");
+ 				lafe_warnc(0, "%s",
+ 				    archive_error_string(a));
+ 				bsdtar->return_value = 1;
+ 				break;
+ 			}
+ 			fprintf(out, "\n");
+ 		} else {
+ 			/* Note: some rewrite failures prevent extraction. */
+ 			if (edit_pathname(bsdtar, entry))
+ 				continue; /* Excluded by a rewrite failure. */
+ 
+ 			if (bsdtar->option_interactive &&
+ 			    !yes("extract '%s'", archive_entry_pathname(entry)))
+ 				continue;
+ 
+ 			/*
+ 			 * Format here is from SUSv2, including the
+ 			 * deferred '\n'.
+ 			 */
+ 			if (bsdtar->verbose) {
+ 				safe_fprintf(stderr, "x %s",
+ 				    archive_entry_pathname(entry));
+ 				fflush(stderr);
+ 			}
+ 
+ 			// TODO siginfo_printinfo(bsdtar, 0);
+ 
+ 			if (bsdtar->option_stdout)
+ 				r = archive_read_data_into_fd(a, 1);
+ 			else
+ 				r = archive_read_extract(a, entry,
+ 				    bsdtar->extract_flags);
+ 			if (r != ARCHIVE_OK) {
+ 				if (!bsdtar->verbose)
+ 					safe_fprintf(stderr, "%s",
+ 					    archive_entry_pathname(entry));
+ 				safe_fprintf(stderr, ": %s",
+ 				    archive_error_string(a));
+ 				if (!bsdtar->verbose)
+ 					fprintf(stderr, "\n");
+ 				bsdtar->return_value = 1;
+ 			}
+ 			if (bsdtar->verbose)
+ 				fprintf(stderr, "\n");
+ 			if (r == ARCHIVE_FATAL)
+ 				break;
+ 		}
+ 	}
+ 
+ 
+ 	r = archive_read_close(a);
+ 	if (r != ARCHIVE_OK)
+ 		lafe_warnc(0, "%s", archive_error_string(a));
+ 	if (r <= ARCHIVE_WARN)
+ 		bsdtar->return_value = 1;
+ 
+ 	if (bsdtar->verbose > 2)
+ 		fprintf(stdout, "Archive Format: %s,  Compression: %s\n",
+ 		    archive_format_name(a), archive_compression_name(a));
+ 
+-	archive_read_finish(a);
++	archive_read_free(a);
+ }
+ 
+ 
+ /*
+  * Display information about the current file.
+  *
+  * The format here roughly duplicates the output of 'ls -l'.
+  * This is based on SUSv2, where 'tar tv' is documented as
+  * listing additional information in an "unspecified format,"
+  * and 'pax -l' is documented as using the same format as 'ls -l'.
+  */
+diff --git a/tar/write.c b/tar/write.c
+index 0d5c65c9..35bb3983 100644
+--- a/tar/write.c
++++ b/tar/write.c
+@@ -256,92 +256,92 @@ void
+ tar_mode_r(struct bsdtar *bsdtar)
+ {
+ 	int64_t	end_offset;
+ 	int	format;
+ 	struct archive *a;
+ 	struct archive_entry *entry;
+ 	int	r;
+ 
+ 	/* Sanity-test some arguments and the file. */
+ 	test_for_append(bsdtar);
+ 
+ 	format = ARCHIVE_FORMAT_TAR_PAX_RESTRICTED;
+ 
+ #if defined(__BORLANDC__)
+ 	bsdtar->fd = open(bsdtar->filename, O_RDWR | O_CREAT);
+ #else
+ 	bsdtar->fd = open(bsdtar->filename, O_RDWR | O_CREAT, 0666);
+ #endif
+ 	if (bsdtar->fd < 0)
+ 		lafe_errc(1, errno,
+ 		    "Cannot open %s", bsdtar->filename);
+ 
+ 	a = archive_read_new();
+ 	archive_read_support_compression_all(a);
+ 	archive_read_support_format_tar(a);
+ 	archive_read_support_format_gnutar(a);
+ 	r = archive_read_open_fd(a, bsdtar->fd, 10240);
+ 	if (r != ARCHIVE_OK)
+ 		lafe_errc(1, archive_errno(a),
+ 		    "Can't read archive %s: %s", bsdtar->filename,
+ 		    archive_error_string(a));
+ 	while (0 == archive_read_next_header(a, &entry)) {
+ 		if (archive_compression(a) != ARCHIVE_COMPRESSION_NONE) {
+-			archive_read_finish(a);
++			archive_read_free(a);
+ 			close(bsdtar->fd);
+ 			lafe_errc(1, 0,
+ 			    "Cannot append to compressed archive.");
+ 		}
+ 		/* Keep going until we hit end-of-archive */
+ 		format = archive_format(a);
+ 	}
+ 
+ 	end_offset = archive_read_header_position(a);
+-	archive_read_finish(a);
++	archive_read_free(a);
+ 
+ 	/* Re-open archive for writing */
+ 	a = archive_write_new();
+ 	archive_write_set_compression_none(a);
+ 	/*
+ 	 * Set the format to be used for writing.  To allow people to
+ 	 * extend empty files, we need to allow them to specify the format,
+ 	 * which opens the possibility that they will specify a format that
+ 	 * doesn't match the existing format.  Hence, the following bit
+ 	 * of arcane ugliness.
+ 	 */
+ 
+ 	if (bsdtar->create_format != NULL) {
+ 		/* If the user requested a format, use that, but ... */
+ 		archive_write_set_format_by_name(a,
+ 		    bsdtar->create_format);
+ 		/* ... complain if it's not compatible. */
+ 		format &= ARCHIVE_FORMAT_BASE_MASK;
+ 		if (format != (int)(archive_format(a) & ARCHIVE_FORMAT_BASE_MASK)
+ 		    && format != ARCHIVE_FORMAT_EMPTY) {
+ 			lafe_errc(1, 0,
+ 			    "Format %s is incompatible with the archive %s.",
+ 			    bsdtar->create_format, bsdtar->filename);
+ 		}
+ 	} else {
+ 		/*
+ 		 * Just preserve the current format, with a little care
+ 		 * for formats that libarchive can't write.
+ 		 */
+ 		if (format == ARCHIVE_FORMAT_TAR_GNUTAR)
+ 			/* TODO: When gtar supports pax, use pax restricted. */
+ 			format = ARCHIVE_FORMAT_TAR_USTAR;
+ 		if (format == ARCHIVE_FORMAT_EMPTY)
+ 			format = ARCHIVE_FORMAT_TAR_PAX_RESTRICTED;
+ 		archive_write_set_format(a, format);
+ 	}
+ 	if (lseek(bsdtar->fd, end_offset, SEEK_SET) < 0)
+ 		lafe_errc(1, errno, "Could not seek to archive end");
+ 	if (ARCHIVE_OK != archive_write_set_options(a, bsdtar->option_options))
+ 		lafe_errc(1, 0, "%s", archive_error_string(a));
+ 	if (ARCHIVE_OK != archive_write_open_fd(a, bsdtar->fd))
+ 		lafe_errc(1, 0, "%s", archive_error_string(a));
+ 
+ 	write_archive(a, bsdtar); /* XXX check return val XXX */
+ 
+ 	close(bsdtar->fd);
+ 	bsdtar->fd = -1;
+ }
+@@ -350,94 +350,94 @@ void
+ tar_mode_u(struct bsdtar *bsdtar)
+ {
+ 	int64_t			 end_offset;
+ 	struct archive		*a;
+ 	struct archive_entry	*entry;
+ 	int			 format;
+ 	struct archive_dir_entry	*p;
+ 	struct archive_dir	 archive_dir;
+ 
+ 	bsdtar->archive_dir = &archive_dir;
+ 	memset(&archive_dir, 0, sizeof(archive_dir));
+ 
+ 	format = ARCHIVE_FORMAT_TAR_PAX_RESTRICTED;
+ 
+ 	/* Sanity-test some arguments and the file. */
+ 	test_for_append(bsdtar);
+ 
+ 	bsdtar->fd = open(bsdtar->filename, O_RDWR);
+ 	if (bsdtar->fd < 0)
+ 		lafe_errc(1, errno,
+ 		    "Cannot open %s", bsdtar->filename);
+ 
+ 	a = archive_read_new();
+ 	archive_read_support_compression_all(a);
+ 	archive_read_support_format_tar(a);
+ 	archive_read_support_format_gnutar(a);
+ 	if (archive_read_open_fd(a, bsdtar->fd,
+ 	    bsdtar->bytes_per_block != 0 ? bsdtar->bytes_per_block :
+ 		DEFAULT_BYTES_PER_BLOCK) != ARCHIVE_OK) {
+ 		lafe_errc(1, 0,
+ 		    "Can't open %s: %s", bsdtar->filename,
+ 		    archive_error_string(a));
+ 	}
+ 
+ 	/* Build a list of all entries and their recorded mod times. */
+ 	while (0 == archive_read_next_header(a, &entry)) {
+ 		if (archive_compression(a) != ARCHIVE_COMPRESSION_NONE) {
+-			archive_read_finish(a);
++			archive_read_free(a);
+ 			close(bsdtar->fd);
+ 			lafe_errc(1, 0,
+ 			    "Cannot append to compressed archive.");
+ 		}
+ 		add_dir_list(bsdtar, archive_entry_pathname(entry),
+ 		    archive_entry_mtime(entry),
+ 		    archive_entry_mtime_nsec(entry));
+ 		/* Record the last format determination we see */
+ 		format = archive_format(a);
+ 		/* Keep going until we hit end-of-archive */
+ 	}
+ 
+ 	end_offset = archive_read_header_position(a);
+-	archive_read_finish(a);
++	archive_read_free(a);
+ 
+ 	/* Re-open archive for writing. */
+ 	a = archive_write_new();
+ 	archive_write_set_compression_none(a);
+ 	/*
+ 	 * Set format to same one auto-detected above, except that
+ 	 * we don't write GNU tar format, so use ustar instead.
+ 	 */
+ 	if (format == ARCHIVE_FORMAT_TAR_GNUTAR)
+ 		format = ARCHIVE_FORMAT_TAR_USTAR;
+ 	archive_write_set_format(a, format);
+ 	if (bsdtar->bytes_per_block != 0) {
+ 		archive_write_set_bytes_per_block(a, bsdtar->bytes_per_block);
+ 		archive_write_set_bytes_in_last_block(a,
+ 		    bsdtar->bytes_per_block);
+ 	} else
+ 		archive_write_set_bytes_per_block(a, DEFAULT_BYTES_PER_BLOCK);
+ 	if (lseek(bsdtar->fd, end_offset, SEEK_SET) < 0)
+ 		lafe_errc(1, errno, "Could not seek to archive end");
+ 	if (ARCHIVE_OK != archive_write_set_options(a, bsdtar->option_options))
+ 		lafe_errc(1, 0, "%s", archive_error_string(a));
+ 	if (ARCHIVE_OK != archive_write_open_fd(a, bsdtar->fd))
+ 		lafe_errc(1, 0, "%s", archive_error_string(a));
+ 
+ 	write_archive(a, bsdtar);
+ 
+ 	close(bsdtar->fd);
+ 	bsdtar->fd = -1;
+ 
+ 	while (bsdtar->archive_dir->head != NULL) {
+ 		p = bsdtar->archive_dir->head->next;
+ 		free(bsdtar->archive_dir->head->name);
+ 		free(bsdtar->archive_dir->head);
+ 		bsdtar->archive_dir->head = p;
+ 	}
+ 	bsdtar->archive_dir->tail = NULL;
+ }
+ 
+ 
+ /*
+  * Write user-specified files/dirs to opened archive.
+  */
+@@ -507,23 +507,23 @@ write_archive(struct archive *a, struct bsdtar *bsdtar)
+ cleanup:
+ 	/* Free file data buffer. */
+ 	free(bsdtar->buff);
+ 	archive_entry_linkresolver_free(bsdtar->resolver);
+ 	bsdtar->resolver = NULL;
+-	archive_read_finish(bsdtar->diskreader);
++	archive_read_free(bsdtar->diskreader);
+ 	bsdtar->diskreader = NULL;
+ 
+ 	if (bsdtar->option_totals) {
+ 		fprintf(stderr, "Total bytes written: %s\n",
+ 		    tar_i64toa(archive_position_compressed(a)));
+ 	}
+ 
+-	archive_write_finish(a);
++	archive_write_free(a);
+ }
+ 
+ /*
+  * Archive names specified in file.
+  *
+  * Unless --null was specified, a line containing exactly "-C" will
+  * cause the next line to be a directory to pass to chdir().  If
+  * --null is specified, then a line "-C" is just another filename.
+  */
+@@ -566,29 +566,29 @@ static int
+ append_archive_filename(struct bsdtar *bsdtar, struct archive *a,
+     const char *filename)
+ {
+ 	struct archive *ina;
+ 	int rc;
+ 
+ 	if (strcmp(filename, "-") == 0)
+ 		filename = NULL; /* Library uses NULL for stdio. */
+ 
+ 	ina = archive_read_new();
+ 	archive_read_support_format_all(ina);
+ 	archive_read_support_compression_all(ina);
+ 	if (archive_read_open_file(ina, filename, 10240)) {
+ 		lafe_warnc(0, "%s", archive_error_string(ina));
+ 		bsdtar->return_value = 1;
+ 		return (0);
+ 	}
+ 
+ 	rc = append_archive(bsdtar, a, ina);
+ 
+ 	if (rc != ARCHIVE_OK) {
+ 		lafe_warnc(0, "Error reading archive %s: %s",
+ 		    filename, archive_error_string(ina));
+ 		bsdtar->return_value = 1;
+ 	}
+-	archive_read_finish(ina);
++	archive_read_free(ina);
+ 
+ 	return (rc);
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8012","gap_exists":false,"gap_type":[],"commit_induced":"NO","maintenance_needed":false,"confidence":98,"affected_functions":["archive_read_free","archive_read_finish","_archive_read_free","archive_write_free","archive_write_finish","_archive_write_free"],"reason":"The commit renames the cleanup protocol from finish to free without materially changing lifecycle behavior. H0 still creates, opens, reads, closes, and destroys a read archive; its archive_read_finish(a) call remains available under ARCHIVE_VERSION_NUMBER < 4000000 and dispatches through archive_free to the same renamed _archive_read_free implementation. The write-side changes are likewise finish-to-free aliases and internal call-site migrations, not a new input-driven attack surface or state protocol requiring this read harness to expand.","evidence":["archive_read_finish in archive_virtual.c now returns (a->vtable->archive_free)(a), exactly as archive_read_free does.","archive_read_vtable assigns av.archive_free = _archive_read_free, so H0's archive_read_finish(a) reaches the changed cleanup implementation.","_archive_read_free retains the prior _archive_read_finish behavior: it checks ARCHIVE_STATE_ANY, calls archive_read_close when needed, cleans formats and strings, frees a->entry, clears magic, and frees a.","H0 exercises both cleanup states: its decompression path calls archive_read_finish after reading, while its fuzz loop may call archive_read_close before archive_read_finish or invoke archive_read_finish after an open failure.","archive_write_free and archive_write_finish both dispatch to archive_free; the production call-site edits replace the legacy synonym without introducing new write semantics."],"recommended_action":"No harness maintenance is needed for this commit; retain H0."}
+tokens used
+27,387

@@ -1,0 +1,237 @@
+PROJECT simdjson
+COMMIT 9865bb69040a67e692d00a284ce93f9ce3480445
+PARENT e06ddea784940dfc3af01669bf920d8afb5479bc
+SUBJECT Make it possible to check that an implementation is supported at runtime (#1197)
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/include/simdjson/implementation.h b/include/simdjson/implementation.h
+index 380f49de..64d1a47b 100644
+--- a/include/simdjson/implementation.h
++++ b/include/simdjson/implementation.h
+@@ -71,6 +71,16 @@ public:
+    * @return the name of the implementation, e.g. "haswell", "westmere", "arm64"
+    */
+   virtual const std::string &description() const { return _description; }
++  
++  /**
++   * The instruction sets this implementation is compiled against
++   * and the current CPU match. This function may poll the current CPU/system
++   * and should therefore not be called too often if performance is a concern.
++   * 
++   *
++   * @return true if the implementation can be safely used on the current system (determined at runtime)
++   */
++  bool supported_by_runtime_system() const;
+ 
+   /**
+    * @private For internal implementation use
+@@ -180,6 +190,7 @@ public:
+    *
+    *     const implementation *impl = simdjson::available_implementations["westmere"];
+    *     if (!impl) { exit(1); }
++   *     if (!imp->supported_by_runtime_system()) { exit(1); }
+    *     simdjson::active_implementation = impl;
+    *
+    * @param name the implementation to find, e.g. "westmere", "haswell", "arm64"
+diff --git a/src/implementation.cpp b/src/implementation.cpp
+index b3ae9da8..a7819e23 100644
+--- a/src/implementation.cpp
++++ b/src/implementation.cpp
+@@ -30,6 +30,13 @@ namespace simdjson { namespace internal { const fallback::implementation fallbac
+ #endif // SIMDJSON_IMPLEMENTATION_FALLBACK
+ 
+ namespace simdjson {
++
++bool implementation::supported_by_runtime_system() const {
++  uint32_t required_instruction_sets = this->required_instruction_sets();
++  uint32_t supported_instruction_sets = detect_supported_architectures();
++  return ((supported_instruction_sets & required_instruction_sets) == required_instruction_sets);
++}
++
+ namespace internal {
+ 
+ /**
+diff --git a/tools/json2json.cpp b/tools/json2json.cpp
+index 8b62299f..9e96e2b6 100644
+--- a/tools/json2json.cpp
++++ b/tools/json2json.cpp
+@@ -9,7 +9,11 @@ SIMDJSON_PUSH_DISABLE_ALL_WARNINGS
+ #include "cxxopts.hpp"
+ SIMDJSON_POP_DISABLE_WARNINGS
+ 
++#if CXXOPTS__VERSION_MAJOR < 3 
+ int main(int argc, char *argv[]) {
++#else
++int main(int argc, const char *argv[]) {
++#endif
+ #ifdef __cpp_exceptions
+   try {
+ #endif
+diff --git a/tools/jsonstats.cpp b/tools/jsonstats.cpp
+index b7b27a27..da189a34 100644
+--- a/tools/jsonstats.cpp
++++ b/tools/jsonstats.cpp
+@@ -188,8 +188,11 @@ stat_t simdjson_compute_stats(const simdjson::padded_string &p) {
+   recurse(doc, s, 0);
+   return s;
+ }
+-
++#if CXXOPTS__VERSION_MAJOR < 3 
+ int main(int argc, char *argv[]) {
++#else
++int main(int argc, const char *argv[]) {
++#endif
+ #ifdef __cpp_exceptions
+   try {
+ #endif
+diff --git a/tools/minify.cpp b/tools/minify.cpp
+index 60698520..00af13dc 100644
+--- a/tools/minify.cpp
++++ b/tools/minify.cpp
+@@ -20,7 +20,11 @@ void usage(std::string message) {
+   std::cerr << options.help() << std::endl;
+ }
+ 
++#if CXXOPTS__VERSION_MAJOR < 3 
+ int main(int argc, char *argv[]) {
++#else
++int main(int argc, const char *argv[]) {
++#endif
+ #ifdef __cpp_exceptions
+   try {
+ #endif
+@@ -28,7 +32,9 @@ int main(int argc, char *argv[]) {
+   ss << "Parser implementation (by default, detects the most advanced implementation supported on the host machine)."  << std::endl;
+   ss << "Available parser implementations:" << std::endl;
+   for (auto impl : simdjson::available_implementations) {
+-    ss << "-a " << std::left << std::setw(9) << impl->name() << " - Use the " << impl->description() << " parser implementation." << std::endl;
++    if(impl->supported_by_runtime_system()) {
++      ss << "-a " << std::left << std::setw(9) << impl->name() << " - Use the " << impl->description() << " parser implementation." << std::endl;
++    }
+   }
+   options.add_options()
+     ("a,arch", ss.str(), cxxopts::value<std::string>())
+@@ -54,6 +60,10 @@ int main(int argc, char *argv[]) {
+       usage("Unsupported implementation.");
+       return EXIT_FAILURE;
+     }
++    if(!impl->supported_by_runtime_system()) {
++      usage("The selected implementation does not match your current CPU.");
++      return EXIT_FAILURE;
++    }
+     simdjson::active_implementation = impl;
+   }
+ 
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/fuzz/fuzz_implementations.cpp b/fuzz/fuzz_implementations.cpp
+index aad9760a..3e6a8b04 100644
+--- a/fuzz/fuzz_implementations.cpp
++++ b/fuzz/fuzz_implementations.cpp
+@@ -67,7 +67,13 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+     // make this dynamic, so it works regardless of how it was compiled
+     // or what hardware it runs on
+     constexpr std::size_t Nimplementations_max=3;
+-    const std::size_t Nimplementations=simdjson::available_implementations.size();
++    std::size_t Nimplementations = 0;
++    
++    for(auto impl : simdjson::available_implementations) {
++        if(impl->supported_by_runtime_system()) {
++              Nimplementations++;
++        }
++    }
+     if(Nimplementations>Nimplementations_max) {
+         //there is another backend added, please bump Nimplementations_max!
+         std::abort();
+@@ -78,7 +84,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+     {
+         std::size_t i=0;
+         for(auto& e: simdjson::available_implementations) {
+-            implementations[i++].impl=e;
++            if(e->supported_by_runtime_system()) {
++              implementations[i++].impl=e;
++            }
+         }
+     }
+ 
+diff --git a/fuzz/fuzz_minifyimpl.cpp b/fuzz/fuzz_minifyimpl.cpp
+index 827e960c..3421be16 100644
+--- a/fuzz/fuzz_minifyimpl.cpp
++++ b/fuzz/fuzz_minifyimpl.cpp
+@@ -32,16 +32,19 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+     };
+ 
+ 
+-    auto first=simdjson::available_implementations.begin();
+-    auto last=simdjson::available_implementations.end();
++    auto const first = simdjson::available_implementations.begin();
++    auto const last = simdjson::available_implementations.end();
+ 
+-    //make sure there is an implementation
+-    assert(first!=last);
++
++    auto it = first;
++    while((it != last) && (!(*it)->supported_by_runtime_system())) { it++; }
++    assert(it != last);
+ 
+     const auto reference=minify(*first);
+ 
+     bool failed=false;
+-    for(auto it=first+1;it!=last; ++it) {
++    for(;it != last; ++it) {
++        if(!(*it)->supported_by_runtime_system()) { continue; }
+         const auto current=minify(*it);
+         if(current!=reference) {
+             failed=true;
+@@ -50,7 +53,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+ 
+     if(failed) {
+         std::cerr<<std::boolalpha<<"Mismatch between implementations of minify() found:\n";
+-        for(auto it=first;it!=last; ++it) {
++        for(it = first;it != last; ++it) {
++            if(!(*it)->supported_by_runtime_system()) { continue; }
+             const auto current=minify(*it);
+             std::string tmp(current.begin(),current.end());
+             std::cerr<<(*it)->name()<<" returns "<<tmp<<std::endl;
+diff --git a/fuzz/fuzz_utf8.cpp b/fuzz/fuzz_utf8.cpp
+index 0fe13459..7ef246a6 100644
+--- a/fuzz/fuzz_utf8.cpp
++++ b/fuzz/fuzz_utf8.cpp
+@@ -18,16 +18,20 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+     };
+ 
+ 
+-    auto first=simdjson::available_implementations.begin();
+-    auto last=simdjson::available_implementations.end();
++    auto first = simdjson::available_implementations.begin();
++    auto last = simdjson::available_implementations.end();
+ 
+-    //make sure there is an implementation
+-    assert(first!=last);
+ 
+-    const bool reference=utf8verify(*first);
++    auto it = first;
++    while((it != last) && (!(*it)->supported_by_runtime_system())) { it++; }
++    assert(it != last);
++
++
++    const bool reference=utf8verify(*it);
+ 
+     bool failed=false;
+-    for(auto it=first+1;it!=last; ++it) {
++    for(; it != last; ++it) {
++        if(!(*it)->supported_by_runtime_system()) { continue; }
+         const bool current=utf8verify(*it);
+         if(current!=reference) {
+             failed=true;
+@@ -36,7 +40,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+ 
+     if(failed) {
+         std::cerr<<std::boolalpha<<"Mismatch between implementations of validate_utf8() found:\n";
+-        for(auto it=first;it!=last; ++it) {
++        for(it = first;it != last; ++it) {
++            if(!(*it)->supported_by_runtime_system()) { continue; }
+             const bool current=utf8verify(*it);
+             std::cerr<<(*it)->name()<<" returns "<<current<<std::endl;
+         }

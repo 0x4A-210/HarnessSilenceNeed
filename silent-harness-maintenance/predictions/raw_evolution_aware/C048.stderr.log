@@ -1,0 +1,1397 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/silent-maintenance-evolution_aware-C048-ti2qe07s
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a089a3-7c7c-7f21-9f09-d58f326d12dd
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous Fuzz-Harness Maintenance Case
+
+Case ID
+
+C048
+
+## Evidence boundary
+
+The material below contains only the complete existing harness H0 and the complete production source diff from S0 to S1. No developer-updated harness, commit message, build result, coverage result, reachability result, or label is supplied.
+
+## Existing Harness H0
+
+### `fuzz/c/fuzzlib/fuzzlib.c`
+
+```text
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifndef WUFFS_INCLUDE_GUARD
+#error "Wuffs' .h files need to be included before this file"
+#endif
+
+void  //
+intentional_segfault() {
+  static volatile int* ptr = NULL;
+  *ptr = 0;
+}
+
+// jenkins_hash_u32 implements
+// https://en.wikipedia.org/wiki/Jenkins_hash_function
+static uint32_t  //
+jenkins_hash_u32(const uint8_t* data, size_t size) {
+  uint32_t hash = 0;
+  size_t i = 0;
+  while (i != size) {
+    hash += data[i++];
+    hash += hash << 10;
+    hash ^= hash >> 6;
+  }
+  hash += hash << 3;
+  hash ^= hash >> 11;
+  hash += hash << 15;
+  return hash;
+}
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash);
+
+static const char*  //
+llvmFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  // Make a 64-bit hash out of two 32-bit hashes, each on half of the data.
+  size_t s2 = size / 2;
+  uint32_t hash0 = jenkins_hash_u32(data, s2);
+  uint32_t hash1 = jenkins_hash_u32(data + s2, size - s2);
+  uint64_t hash = (((uint64_t)hash0) << 32) | ((uint64_t)hash1);
+
+  wuffs_base__io_buffer src = ((wuffs_base__io_buffer){
+      .data = ((wuffs_base__slice_u8){
+          .ptr = (uint8_t*)(data),
+          .len = size,
+      }),
+      .meta = ((wuffs_base__io_buffer_meta){
+          .wi = size,
+          .ri = 0,
+          .pos = 0,
+          .closed = true,
+      }),
+  });
+
+  const char* msg = fuzz(&src, hash);
+  if (msg) {
+    if (strnlen(msg, 2047) >= 2047) {
+      msg = "fuzzlib: internal error: error message is too long";
+    }
+    if (strstr(msg, "internal error:")) {
+      fprintf(stderr, "internal errors shouldn't occur: \"%s\"\n", msg);
+      intentional_segfault();
+    }
+  }
+  return msg;
+}
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int  //
+LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  llvmFuzzerTestOneInput(data, size);
+  return 0;
+}
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif
+
+static wuffs_base__io_buffer  //
+make_limited_reader(wuffs_base__io_buffer b, uint64_t limit) {
+  uint64_t n = b.meta.wi - b.meta.ri;
+  bool closed = b.meta.closed;
+  if (n > limit) {
+    n = limit;
+    closed = false;
+  }
+
+  wuffs_base__io_buffer ret;
+  ret.data.ptr = b.data.ptr + b.meta.ri;
+  ret.data.len = n;
+  ret.meta.wi = n;
+  ret.meta.ri = 0;
+  ret.meta.pos = wuffs_base__u64__sat_add(b.meta.pos, b.meta.ri);
+  ret.meta.closed = closed;
+  return ret;
+}
+
+#ifdef WUFFS_CONFIG__FUZZLIB_MAIN
+
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdbool.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+struct {
+  int remaining_argc;
+  char** remaining_argv;
+
+  bool color;
+} g_flags = {0};
+
+const char*  //
+parse_flags(int argc, char** argv) {
+  int c = (argc > 0) ? 1 : 0;  // Skip argv[0], the program name.
+  for (; c < argc; c++) {
+    char* arg = argv[c];
+    if (*arg++ != '-') {
+      break;
+    }
+
+    // A double-dash "--foo" is equivalent to a single-dash "-foo". As special
+    // cases, a bare "-" is not a flag (some programs may interpret it as
+    // stdin) and a bare "--" means to stop parsing flags.
+    if (*arg == '\x00') {
+      break;
+    } else if (*arg == '-') {
+      arg++;
+      if (*arg == '\x00') {
+        c++;
+        break;
+      }
+    }
+
+    if (!strcmp(arg, "c") || !strcmp(arg, "color")) {
+      g_flags.color = true;
+      continue;
+    }
+
+    return "main: unrecognized flag argument";
+  }
+
+  g_flags.remaining_argc = argc - c;
+  g_flags.remaining_argv = argv + c;
+  return NULL;
+}
+
+static int g_num_files_processed;
+
+static struct {
+  char buf[PATH_MAX];
+  size_t len;
+} g_relative_cwd;
+
+void  //
+errorf(const char* msg) {
+  if (g_flags.color) {
+    printf("\e[31m%s\e[0m\n", msg);
+  } else {
+    printf("%s\n", msg);
+  }
+}
+
+static int  //
+visit(char* filename);
+
+static int  //
+visit_dir(int fd) {
+  int cwd_fd = open(".", O_RDONLY, 0);
+  if (fchdir(fd)) {
+    errorf("failed");
+    fprintf(stderr, "FAIL: fchdir: %s\n", strerror(errno));
+    return 1;
+  }
+
+  DIR* d = fdopendir(fd);
+  if (!d) {
+    errorf("failed");
+    fprintf(stderr, "FAIL: fdopendir: %s\n", strerror(errno));
+    return 1;
+  }
+
+  printf("dir\n");
+  while (true) {
+    struct dirent* e = readdir(d);
+    if (!e) {
+      break;
+    }
+    if ((e->d_name[0] == '\x00') || (e->d_name[0] == '.')) {
+      continue;
+    }
+    int v = visit(e->d_name);
+    if (v) {
+      return v;
+    }
+  }
+
+  if (closedir(d)) {
+    fprintf(stderr, "FAIL: closedir: %s\n", strerror(errno));
+    return 1;
+  }
+  if (fchdir(cwd_fd)) {
+    fprintf(stderr, "FAIL: fchdir: %s\n", strerror(errno));
+    return 1;
+  }
+  if (close(cwd_fd)) {
+    fprintf(stderr, "FAIL: close: %s\n", strerror(errno));
+    return 1;
+  }
+  return 0;
+}
+
+static int  //
+visit_reg(int fd, off_t size) {
+  if ((size < 0) || (0x7FFFFFFF < size)) {
+    errorf("failed");
+    fprintf(stderr, "FAIL: file size out of bounds");
+    return 1;
+  }
+
+  void* data = NULL;
+  if (size > 0) {
+    data = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+    if (data == MAP_FAILED) {
+      errorf("failed");
+      fprintf(stderr, "FAIL: mmap: %s\n", strerror(errno));
+      return 1;
+    }
+  }
+
+  const char* msg = llvmFuzzerTestOneInput((const uint8_t*)(data), size);
+  if (msg) {
+    errorf(msg);
+  } else if (g_flags.color) {
+    printf("\e[32mok\e[0m\n");
+  } else {
+    printf("ok\n");
+  }
+
+  if ((size > 0) && munmap(data, size)) {
+    fprintf(stderr, "FAIL: mmap: %s\n", strerror(errno));
+    return 1;
+  }
+  if (close(fd)) {
+    fprintf(stderr, "FAIL: close: %s\n", strerror(errno));
+    return 1;
+  }
+  return 0;
+}
+
+static int  //
+visit(char* filename) {
+  g_num_files_processed++;
+  if (!filename || (filename[0] == '\x00')) {
+    fprintf(stderr, "FAIL: invalid filename\n");
+    return 1;
+  }
+  int n = printf("- %s%s", g_relative_cwd.buf, filename);
+  printf("%*s", (60 > n) ? (60 - n) : 1, "");
+  fflush(stdout);
+
+  struct stat z;
+  int fd = open(filename, O_RDONLY, 0);
+  if (fd == -1) {
+    errorf("failed");
+    fprintf(stderr, "FAIL: open: %s\n", strerror(errno));
+    return 1;
+  }
+  if (fstat(fd, &z)) {
+    errorf("failed");
+    fprintf(stderr, "FAIL: fstat: %s\n", strerror(errno));
+    return 1;
+  }
+
+  if (S_ISREG(z.st_mode)) {
+    return visit_reg(fd, z.st_size);
+  } else if (!S_ISDIR(z.st_mode)) {
+    printf("skipped\n");
+    return 0;
+  }
+
+  size_t old_len = g_relative_cwd.len;
+  size_t filename_len = strlen(filename);
+  size_t new_len = old_len + strlen(filename);
+  bool slash = filename[filename_len - 1] != '/';
+  if (slash) {
+    new_len++;
+  }
+  if ((filename_len >= PATH_MAX) || (new_len >= PATH_MAX)) {
+    errorf("failed");
+    fprintf(stderr, "FAIL: path is too long\n");
+    return 1;
+  }
+  memcpy(g_relative_cwd.buf + old_len, filename, filename_len);
+
+  if (slash) {
+    g_relative_cwd.buf[new_len - 1] = '/';
+  }
+  g_relative_cwd.buf[new_len] = '\x00';
+  g_relative_cwd.len = new_len;
+
+  int v = visit_dir(fd);
+
+  g_relative_cwd.buf[old_len] = '\x00';
+  g_relative_cwd.len = old_len;
+  return v;
+}
+
+int  //
+main(int argc, char** argv) {
+  g_num_files_processed = 0;
+  g_relative_cwd.len = 0;
+
+  const char* z = parse_flags(argc, argv);
+  if (z) {
+    fprintf(stderr, "FAIL: %s\n", z);
+    return 1;
+  }
+  int i;
+  for (i = 0; i < g_flags.remaining_argc; i++) {
+    int v = visit(g_flags.remaining_argv[i]);
+    if (v) {
+      return v;
+    }
+  }
+
+  printf("PASS: %d files processed\n", g_num_files_processed);
+  return 0;
+}
+
+#endif  // WUFFS_CONFIG__FUZZLIB_MAIN
+
+```
+
+### `fuzz/c/std/gif_fuzzer.c`
+
+```text
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN gif_fuzzer.c
+./a.out ../../../test/data/*.gif
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__GIF
+#define WUFFS_CONFIG__MODULE__LZW
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+#include "../fuzzlib/fuzzlib_image_decoder.c"
+
+void set_quirks(wuffs_gif__decoder* dec, uint64_t hash) {
+  uint32_t quirks[] = {
+      WUFFS_GIF__QUIRK_DELAY_NUM_DECODED_FRAMES,
+      WUFFS_GIF__QUIRK_FIRST_FRAME_LOCAL_PALETTE_MEANS_BLACK_BACKGROUND,
+      WUFFS_GIF__QUIRK_HONOR_BACKGROUND_COLOR,
+      WUFFS_GIF__QUIRK_IGNORE_TOO_MUCH_PIXEL_DATA,
+      WUFFS_GIF__QUIRK_IMAGE_BOUNDS_ARE_STRICT,
+      WUFFS_GIF__QUIRK_REJECT_EMPTY_FRAME,
+      WUFFS_GIF__QUIRK_REJECT_EMPTY_PALETTE,
+      0,
+  };
+
+  uint32_t i;
+  for (i = 0; quirks[i]; i++) {
+    uint64_t bit = 1 << (i & 63);
+    if (hash & bit) {
+      wuffs_gif__decoder__set_quirk_enabled(dec, quirks[i], true);
+    }
+  }
+}
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_gif__decoder dec;
+  wuffs_base__status status = wuffs_gif__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  hash = wuffs_base__u64__rotate_right(hash, 1);
+  uint64_t hash_8_bits = hash & 0xFF;
+  hash = wuffs_base__u64__rotate_right(hash, 8);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  set_quirks(&dec, hash);
+  return fuzz_image_decoder(
+      src, hash_8_bits,
+      wuffs_gif__decoder__upcast_as__wuffs_base__image_decoder(&dec));
+}
+
+```
+
+### `fuzz/c/std/json_fuzzer.cc`
+
+```text
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN json_fuzzer.c
+./a.out ../../../test/data/*.json
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__AUX__BASE
+#define WUFFS_CONFIG__MODULE__AUX__JSON
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__JSON
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+
+#define TOK_BUFFER_ARRAY_SIZE 4096
+#define STACK_SIZE (WUFFS_JSON__DECODER_DEPTH_MAX_INCL + 1)
+
+// Wuffs allows either statically or dynamically allocated work buffers. This
+// program exercises static allocation.
+#define WORK_BUFFER_ARRAY_SIZE \
+  WUFFS_JSON__DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE
+#if WORK_BUFFER_ARRAY_SIZE > 0
+uint8_t g_work_buffer_array[WORK_BUFFER_ARRAY_SIZE];
+#else
+// Not all C/C++ compilers support 0-length arrays.
+uint8_t g_work_buffer_array[1];
+#endif
+
+// Each stack element is 1 byte. The low 7 bits denote the container:
+//  - 0x01 means no container: we are at the top level.
+//  - 0x02 means a [] list.
+//  - 0x04 means a {} dictionary.
+//
+// The high 0x80 bit holds the even/odd-ness of the number of elements in that
+// container. A valid dictionary contains key-value pairs and should therefore
+// contain an even number of elements.
+typedef uint8_t stack_element;
+
+const char*  //
+fuzz_one_token(wuffs_base__token t,
+               wuffs_base__token prev_token,
+               wuffs_base__io_buffer* src,
+               size_t* ti,
+               stack_element* stack,
+               size_t* depth) {
+  uint64_t len = wuffs_base__token__length(&t);
+  if (len > 0xFFFF) {
+    return "fuzz: internal error: length too long (vs 0xFFFF)";
+  } else if (len > (src->meta.wi - *ti)) {
+    return "fuzz: internal error: length too long (vs wi - ti)";
+  }
+  *ti += len;
+
+  if ((wuffs_base__token__value_extension(&t) >= 0) &&
+      !wuffs_base__token__continued(&prev_token)) {
+    return "fuzz: internal error: extended token not after continued token";
+  }
+
+  int64_t vbc = wuffs_base__token__value_base_category(&t);
+  uint64_t vbd = wuffs_base__token__value_base_detail(&t);
+
+  switch (vbc) {
+    case WUFFS_BASE__TOKEN__VBC__STRUCTURE: {
+      bool from_consistent = false;
+      if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_NONE) {
+        from_consistent = stack[*depth] & 0x01;
+      } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_LIST) {
+        from_consistent = stack[*depth] & 0x02;
+      } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_DICT) {
+        from_consistent = stack[*depth] & 0x04;
+      }
+      if (!from_consistent) {
+        return "fuzz: internal error: inconsistent VBD__STRUCTURE__FROM_ETC";
+      }
+
+      if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__PUSH) {
+        (*depth)++;
+        if ((*depth >= STACK_SIZE) || (*depth == 0)) {
+          return "fuzz: internal error: depth too large";
+        }
+
+        if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_NONE) {
+          return "fuzz: internal error: push to the 'none' container";
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_LIST) {
+          stack[*depth] = 0x02;
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_DICT) {
+          stack[*depth] = 0x04;
+        } else {
+          return "fuzz: internal error: unrecognized VBD__STRUCTURE__TO_ETC";
+        }
+
+      } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__POP) {
+        if ((vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_DICT) &&
+            (0 != (0x80 & stack[*depth]))) {
+          return "fuzz: internal error: dictionary had an incomplete key/value "
+                 "pair";
+        }
+
+        if (*depth <= 0) {
+          return "fuzz: internal error: depth too small";
+        }
+        (*depth)--;
+
+        bool to_consistent = false;
+        if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_NONE) {
+          to_consistent = stack[*depth] & 0x01;
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_LIST) {
+          to_consistent = stack[*depth] & 0x02;
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_DICT) {
+          to_consistent = stack[*depth] & 0x04;
+        }
+        if (!to_consistent) {
+          return "fuzz: internal error: inconsistent VBD__STRUCTURE__TO_ETC";
+        }
+
+      } else {
+        return "fuzz: internal error: unrecognized VBC__STRUCTURE";
+      }
+      break;
+    }
+
+    case WUFFS_BASE__TOKEN__VBC__STRING: {
+      if (vbd & WUFFS_BASE__TOKEN__VBD__STRING__CONVERT_1_DST_1_SRC_COPY) {
+        wuffs_base__slice_u8 s =
+            wuffs_base__make_slice_u8(src->data.ptr + *ti - len, len);
+        if ((vbd & WUFFS_BASE__TOKEN__VBD__STRING__DEFINITELY_UTF_8) &&
+            (s.len != wuffs_base__utf_8__longest_valid_prefix(s.ptr, s.len))) {
+          return "fuzz: internal error: invalid UTF-8";
+        }
+        if ((vbd & WUFFS_BASE__TOKEN__VBD__STRING__DEFINITELY_ASCII) &&
+            (s.len != wuffs_base__ascii__longest_valid_prefix(s.ptr, s.len))) {
+          return "fuzz: internal error: invalid ASCII";
+        }
+      }
+      break;
+    }
+
+    case WUFFS_BASE__TOKEN__VBC__UNICODE_CODE_POINT: {
+      if ((WUFFS_BASE__UNICODE_SURROGATE__MIN_INCL <= vbd) &&
+          (vbd <= WUFFS_BASE__UNICODE_SURROGATE__MAX_INCL)) {
+        return "fuzz: internal error: invalid Unicode surrogate";
+      } else if (WUFFS_BASE__UNICODE_CODE_POINT__MAX_INCL < vbd) {
+        return "fuzz: internal error: invalid Unicode code point";
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+
+  // After a complete JSON value, update the parity (even/odd count) of the
+  // container.
+  if (!wuffs_base__token__continued(&t) &&
+      (vbc != WUFFS_BASE__TOKEN__VBC__FILLER) &&
+      ((vbc != WUFFS_BASE__TOKEN__VBC__STRUCTURE) ||
+       (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__POP))) {
+    stack[*depth] ^= 0x80;
+  }
+
+  return NULL;
+}
+
+uint64_t  //
+buffer_limit(uint64_t hash, uint64_t min, uint64_t max) {
+  hash &= 0x3F;
+  uint64_t n;
+  if (hash < 0x20) {
+    n = min + hash;
+  } else {
+    n = max - (0x3F - hash);
+  }
+  if (n < min) {
+    return min;
+  } else if (n > max) {
+    return max;
+  }
+  return n;
+}
+
+uint32_t g_quirks[] = {
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_A,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_CAPITAL_U,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_E,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_QUESTION_MARK,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_SINGLE_QUOTE,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_V,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_X_AS_CODE_POINTS,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_ZERO,
+    WUFFS_JSON__QUIRK_ALLOW_COMMENT_BLOCK,
+    WUFFS_JSON__QUIRK_ALLOW_COMMENT_LINE,
+    WUFFS_JSON__QUIRK_ALLOW_EXTRA_COMMA,
+    WUFFS_JSON__QUIRK_ALLOW_INF_NAN_NUMBERS,
+    WUFFS_JSON__QUIRK_ALLOW_LEADING_ASCII_RECORD_SEPARATOR,
+    WUFFS_JSON__QUIRK_ALLOW_LEADING_UNICODE_BYTE_ORDER_MARK,
+    WUFFS_JSON__QUIRK_ALLOW_TRAILING_FILLER,
+    WUFFS_JSON__QUIRK_JSON_POINTER_ALLOW_TILDE_N_TILDE_R_TILDE_T,
+    WUFFS_JSON__QUIRK_REPLACE_INVALID_UNICODE,
+    0,
+};
+
+void set_quirks(wuffs_json__decoder* dec, uint64_t hash) {
+  uint32_t i;
+  for (i = 0; g_quirks[i]; i++) {
+    uint64_t bit = 1 << (i & 63);
+    if (hash & bit) {
+      wuffs_json__decoder__set_quirk_enabled(dec, g_quirks[i], true);
+    }
+  }
+}
+
+const char*  //
+fuzz_complex(wuffs_base__io_buffer* full_src, uint64_t hash) {
+  uint64_t tok_limit = buffer_limit(
+      hash & 0x3F, WUFFS_JSON__DECODER_DST_TOKEN_BUFFER_LENGTH_MIN_INCL,
+      TOK_BUFFER_ARRAY_SIZE);
+  hash = wuffs_base__u64__rotate_right(hash, 6);
+
+  uint64_t src_limit = buffer_limit(
+      hash & 0x3F, WUFFS_JSON__DECODER_SRC_IO_BUFFER_LENGTH_MIN_INCL, 4096);
+  hash = wuffs_base__u64__rotate_right(hash, 6);
+
+  // ----
+
+  wuffs_json__decoder dec;
+  wuffs_base__status status = wuffs_json__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  set_quirks(&dec, hash);
+
+  wuffs_base__token tok_array[TOK_BUFFER_ARRAY_SIZE];
+  wuffs_base__token_buffer tok = ((wuffs_base__token_buffer){
+      .data = ((wuffs_base__slice_token){
+          .ptr = tok_array,
+          .len = (size_t)((tok_limit < TOK_BUFFER_ARRAY_SIZE)
+                              ? tok_limit
+                              : TOK_BUFFER_ARRAY_SIZE),
+      }),
+  });
+
+  wuffs_base__token prev_token = wuffs_base__make_token(0);
+  uint32_t no_progress_count = 0;
+
+  stack_element stack[STACK_SIZE];
+  stack[0] = 0x01;  // We start in the 'none' container.
+  size_t depth = 0;
+
+  // ----
+
+  while (true) {  // Outer loop.
+    wuffs_base__io_buffer src = make_limited_reader(*full_src, src_limit);
+
+    size_t old_tok_wi = tok.meta.wi;
+    size_t old_tok_ri = tok.meta.ri;
+    size_t old_src_wi = src.meta.wi;
+    size_t old_src_ri = src.meta.ri;
+    size_t ti = old_src_ri;
+
+    status = wuffs_json__decoder__decode_tokens(
+        &dec, &tok, &src,
+        wuffs_base__make_slice_u8(g_work_buffer_array, WORK_BUFFER_ARRAY_SIZE));
+    if ((tok.data.len < tok.meta.wi) ||  //
+        (tok.meta.wi < tok.meta.ri) ||   //
+        (tok.meta.ri != old_tok_ri)) {
+      return "fuzz: internal error: inconsistent tok indexes";
+    } else if ((src.data.len < src.meta.wi) ||  //
+               (src.meta.wi < src.meta.ri) ||   //
+               (src.meta.wi != old_src_wi)) {
+      return "fuzz: internal error: inconsistent src indexes";
+    }
+    full_src->meta.ri += src.meta.ri - old_src_ri;
+
+    if ((tok.meta.wi > old_tok_wi) || (src.meta.ri > old_src_ri) ||
+        !wuffs_base__status__is_suspension(&status)) {
+      no_progress_count = 0;
+    } else if (no_progress_count < 999) {
+      no_progress_count++;
+    } else {
+      return "fuzz: internal error: no progress";
+    }
+
+    // ----
+
+    while (tok.meta.ri < tok.meta.wi) {  // Inner loop.
+      wuffs_base__token t = tok.data.ptr[tok.meta.ri++];
+      const char* z =
+          fuzz_one_token(t, prev_token, &src, &ti, &stack[0], &depth);
+      if (z != NULL) {
+        return z;
+      }
+      prev_token = t;
+    }  // Inner loop.
+
+    // ----
+
+    // Check that, starting from old_src_ri, summing the token lengths brings
+    // us to the new src.meta.ri.
+    if (ti != src.meta.ri) {
+      return "fuzz: internal error: ti != ri";
+    }
+
+    if (status.repr == NULL) {
+      break;
+
+    } else if (status.repr == wuffs_base__suspension__short_read) {
+      // Some Wuffs packages can yield "$short read" for a closed io_reader,
+      // but Wuffs' json package does not.
+      if (src.meta.closed) {
+        return "fuzz: internal error: short read on a closed io_reader";
+      }
+      // We don't compact full_src as it may be mmap'ed read-only.
+      continue;
+
+    } else if (status.repr == wuffs_base__suspension__short_write) {
+      wuffs_base__token_buffer__compact(&tok);
+      continue;
+    }
+
+    return wuffs_base__status__message(&status);
+  }  // Outer loop.
+
+  // ----
+
+  if (depth != 0) {
+    return "fuzz: internal error: decoded OK but final depth was not zero";
+  } else if (wuffs_base__token__continued(&prev_token)) {
+    return "fuzz: internal error: decoded OK but final token was continued";
+  }
+  return NULL;
+}
+
+const char*  //
+fuzz_simple(wuffs_base__io_buffer* full_src) {
+  wuffs_json__decoder dec;
+  wuffs_base__status status =
+      wuffs_json__decoder__initialize(&dec, sizeof dec, WUFFS_VERSION, 0);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+
+  wuffs_base__token tok_array[TOK_BUFFER_ARRAY_SIZE];
+  wuffs_base__token_buffer tok = ((wuffs_base__token_buffer){
+      .data = ((wuffs_base__slice_token){
+          .ptr = tok_array,
+          .len = TOK_BUFFER_ARRAY_SIZE,
+      }),
+  });
+
+  while (true) {
+    status = wuffs_json__decoder__decode_tokens(
+        &dec, &tok, full_src,
+        wuffs_base__make_slice_u8(g_work_buffer_array, WORK_BUFFER_ARRAY_SIZE));
+    if (status.repr == NULL) {
+      break;
+
+    } else if (status.repr == wuffs_base__suspension__short_write) {
+      tok.meta.ri = tok.meta.wi;
+      wuffs_base__token_buffer__compact(&tok);
+      continue;
+    }
+
+    return wuffs_base__status__message(&status);
+  }
+
+  return NULL;
+}
+
+#if defined(__cplusplus)
+#include <vector>
+
+class Callbacks : public wuffs_aux::DecodeJsonCallbacks {
+ public:
+  Callbacks() : m_depth(0) {}
+
+  std::string AppendNull() override { return ""; }
+
+  std::string AppendBool(bool val) override { return ""; }
+
+  std::string AppendI64(int64_t val) override { return ""; }
+
+  std::string AppendF64(double val) override { return ""; }
+
+  std::string AppendTextString(std::string&& val) override { return ""; }
+
+  std::string Push(uint32_t flags) override {
+    m_depth++;
+    return "";
+  }
+
+  std::string Pop(uint32_t flags) override {
+    m_depth--;
+    if (m_depth < 0) {
+      fprintf(stderr, "negative depth\n");
+      intentional_segfault();
+    }
+    return "";
+  }
+
+  void Done(wuffs_aux::DecodeJsonResult& result,
+            wuffs_aux::sync_io::Input& input,
+            wuffs_aux::IOBuffer& buffer) override {
+    if (result.error_message.empty()) {
+      if (m_depth != 0) {
+        fprintf(stderr, "no error message but final depth is non-zero\n");
+        intentional_segfault();
+      }
+    } else if (result.error_message.find("internal error:") !=
+               std::string::npos) {
+      fprintf(stderr, "internal errors shouldn't occur: \"%s\"\n",
+              result.error_message.c_str());
+      intentional_segfault();
+    }
+  }
+
+ private:
+  int64_t m_depth;
+};
+
+void  //
+fuzz_cpp(const uint8_t* in_ptr, size_t in_len, uint64_t hash) {
+  static const char* json_pointers[16] = {
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "/",          //
+      "/2/3/4/5",   //
+      "/k0",        //
+      "/k0/1",      //
+      "/x/y",       //
+      "/~0/~1/~n",  //
+  };
+  const char* json_pointer = json_pointers[hash & 15];
+  hash = wuffs_base__u64__rotate_right(hash, 4);
+
+  std::vector<uint32_t> quirks;
+  for (uint32_t i = 0; g_quirks[i]; i++) {
+    uint64_t bit = 1 << (i & 63);
+    if (hash & bit) {
+      quirks.push_back(g_quirks[i]);
+    }
+  }
+
+  Callbacks callbacks;
+  wuffs_aux::sync_io::MemoryInput input(in_ptr, in_len);
+  wuffs_aux::DecodeJson(
+      callbacks, input,
+      wuffs_aux::DecodeJsonArgQuirks(quirks.data(), quirks.size()),
+      wuffs_aux::DecodeJsonArgJsonPointer(json_pointer));
+}
+#endif  // defined(__cplusplus)
+
+const char*  //
+fuzz(wuffs_base__io_buffer* full_src, uint64_t hash) {
+#if defined(__cplusplus)
+  fuzz_cpp(full_src->reader_pointer(), full_src->reader_length(),
+           wuffs_base__u64__rotate_right(hash, 32));
+#endif  // defined(__cplusplus)
+
+  // Send 99.6% of inputs to fuzz_complex and the remainder to fuzz_simple. The
+  // 0xA5 constant is arbitrary but non-zero. If the hash function maps the
+  // empty input to 0, this still sends the empty input to fuzz_complex.
+  //
+  // The fuzz_simple implementation shows how easy decoding with Wuffs is when
+  // all you want is to run LLVMFuzzerTestOneInput's built-in (Wuffs API
+  // independent) checks (e.g. the ASan address sanitizer) and you don't really
+  // care what the output is, just that it doesn't crash.
+  //
+  // The fuzz_complex implementation adds many more Wuffs API specific checks
+  // (e.g. that the sum of the tokens' lengths do not exceed the input length).
+  if ((hash & 0xFF) != 0xA5) {
+    return fuzz_complex(full_src, wuffs_base__u64__rotate_right(hash, 8));
+  }
+  return fuzz_simple(full_src);
+}
+
+```
+
+## Complete production source diff S0 -> S1
+
+The fixed `--function-context` rule includes the complete diff and expanded changed-function bodies where Git recognizes them.
+
+```diff
+diff --git a/script/adler32-standalone.c b/script/adler32-standalone.c
+index 805b2121096de92c0adc2414a5bd91353770d9cc..a2e22b963c52eb47c9ec52b5183b6f449ade63eb 100644
+--- a/script/adler32-standalone.c
++++ b/script/adler32-standalone.c
+@@ -162,42 +162,41 @@ int  //
+ main(int argc, char** argv) {
+   const char* err_msg = parse_flags(argc, argv);
+   if (err_msg) {
+     fprintf(stderr, "%s\n", err_msg);
+     return 1;
+   }
+ 
+   struct timeval bench_start_tv;
+   gettimeofday(&bench_start_tv, NULL);
+ 
+   const int num_reps = 1000;
+ 
+   // If changing BUFFER_SIZE, re-calculate this expected value with
+   // https://play.golang.org/p/IU2T58P00C
+   const uint32_t expected_hash_of_1mib_of_zeroes = 0x00f00001UL;
+ 
+-  int i;
+   int num_bad = 0;
+-  for (i = 0; i < num_reps; i++) {
++  for (int i = 0; i < num_reps; i++) {
+     uint32_t actual_hash = calculate_hash(g_buffer, BUFFER_SIZE);
+     if (!g_flags.no_check && (actual_hash != expected_hash_of_1mib_of_zeroes)) {
+       num_bad++;
+     }
+   }
+   if (num_bad) {
+     printf("num_bad: %d\n", num_bad);
+     return 1;
+   }
+ 
+   struct timeval bench_finish_tv;
+   gettimeofday(&bench_finish_tv, NULL);
+ 
+   int64_t micros =
+       (int64_t)(bench_finish_tv.tv_sec - bench_start_tv.tv_sec) * 1000000 +
+       (int64_t)(bench_finish_tv.tv_usec - bench_start_tv.tv_usec);
+   int64_t numer = ((int64_t)num_reps) * BUFFER_SIZE * 1000000;
+   int64_t denom = micros * ONE_MIBIBYTE;
+   int64_t mib_per_s = denom ? numer / denom : 0;
+ 
+   printf("%8d MiB/s, %s %s\n", (int)mib_per_s, g_cc, g_cc_version);
+   return 0;
+ }
+diff --git a/script/bench-c-deflate-fragmentation.c b/script/bench-c-deflate-fragmentation.c
+index ba7e2733f3b9eb056997fc50096318d9b8fd57b1..73734d318415ee62ec470929ef3e36c6757c1959 100644
+--- a/script/bench-c-deflate-fragmentation.c
++++ b/script/bench-c-deflate-fragmentation.c
+@@ -318,40 +318,39 @@ const char*  //
+ decode(bool frag_dst, bool frag_idat) {
+   int reps;
+   if (g_bytes_per_frame < 100000) {
+     reps = 1000;
+   } else if (g_bytes_per_frame < 1000000) {
+     reps = 100;
+   } else if (g_bytes_per_frame < 10000000) {
+     reps = 10;
+   } else {
+     reps = 1;
+   }
+ 
+   struct timeval bench_start_tv;
+   gettimeofday(&bench_start_tv, NULL);
+ 
+-  int i;
+-  for (i = 0; i < reps; i++) {
++  for (int i = 0; i < reps; i++) {
+     const char* msg = decode_once(frag_dst, frag_idat);
+     if (msg) {
+       return msg;
+     }
+   }
+ 
+   struct timeval bench_finish_tv;
+   gettimeofday(&bench_finish_tv, NULL);
+   int64_t micros =
+       (int64_t)(bench_finish_tv.tv_sec - bench_start_tv.tv_sec) * 1000000 +
+       (int64_t)(bench_finish_tv.tv_usec - bench_start_tv.tv_usec);
+   uint64_t nanos = 1;
+   if (micros > 0) {
+     nanos = (uint64_t)(micros)*1000;
+   }
+ 
+   printf("Benchmark%sDst%sIDAT/%s\t%8d\t%8" PRIu64 " ns/op\n",
+          frag_dst ? "Frag" : "Full",   //
+          frag_idat ? "Frag" : "Full",  //
+          g_cc, reps, nanos / reps);
+ 
+   return NULL;
+ }
+@@ -368,56 +367,55 @@ int  //
+ main(int argc, char** argv) {
+   const char* msg = read_stdin();
+   if (msg) {
+     return fail(msg);
+   }
+   if ((g_src_len < 8) || strncmp((const char*)(g_src_buffer_array),
+                                  "\x89PNG\x0D\x0A\x1A\x0A", 8)) {
+     return fail("invalid PNG");
+   }
+   msg = process_png_chunks(g_src_buffer_array + 8, g_src_len - 8);
+   if (msg) {
+     return fail(msg);
+   }
+   if (g_bytes_per_pixel == 0) {
+     return fail("missing PNG IHDR chunk");
+   }
+   if (g_num_idat_chunks == 0) {
+     return fail("missing PNG IDAT chunk");
+   }
+   // The +1 here is for the per-row filter byte.
+   g_bytes_per_row = (uint64_t)g_width * g_bytes_per_pixel + 1;
+   g_bytes_per_frame = (uint64_t)g_height * g_bytes_per_row;
+   if (g_bytes_per_frame > DST_BUFFER_ARRAY_SIZE) {
+     return fail("decompressed data is too large");
+   }
+ 
+   printf("# %s version %s\n#\n", g_cc, g_cc_version);
+   printf(
+       "# The output format, including the \"Benchmark\" prefixes, is "
+       "compatible with the\n"
+       "# https://godoc.org/golang.org/x/perf/cmd/benchstat tool. To install "
+       "it, first\n"
+       "# install Go, then run \"go get golang.org/x/perf/cmd/benchstat\".\n");
+ 
+-  int i;
+-  for (i = 0; i < 5; i++) {
++  for (int i = 0; i < 5; i++) {
+     msg = decode(true, true);
+     if (msg) {
+       return fail(msg);
+     }
+     msg = decode(true, false);
+     if (msg) {
+       return fail(msg);
+     }
+     msg = decode(false, true);
+     if (msg) {
+       return fail(msg);
+     }
+     msg = decode(false, false);
+     if (msg) {
+       return fail(msg);
+     }
+   }
+ 
+   return 0;
+ }
+diff --git a/script/print-json-token-debug-format.c b/script/print-json-token-debug-format.c
+index 866723b63ba8b953ebb6ff479bec3f45d5f73e37..e8dabd427ac51f11e4a70b2eea0824706ff16743 100644
+--- a/script/print-json-token-debug-format.c
++++ b/script/print-json-token-debug-format.c
+@@ -263,154 +263,153 @@ const char*  //
+ main1(int argc, char** argv) {
+   TRY(parse_flags(argc, argv));
+   if (g_flags.remaining_argc > 0) {
+     return "main: bad argument: use \"program < input\", not \"program input\"";
+   }
+ 
+   g_src = wuffs_base__make_io_buffer(
+       wuffs_base__make_slice_u8(g_src_buffer_array, SRC_BUFFER_ARRAY_SIZE),
+       wuffs_base__empty_io_buffer_meta());
+ 
+   g_tok = wuffs_base__make_token_buffer(
+       wuffs_base__make_slice_token(g_tok_buffer_array, TOKEN_BUFFER_ARRAY_SIZE),
+       wuffs_base__empty_token_buffer_meta());
+ 
+   if (g_flags.input_format == FILE_FORMAT_JSON) {
+     wuffs_base__status init_status = wuffs_json__decoder__initialize(
+         &g_json_decoder, sizeof__wuffs_json__decoder(), WUFFS_VERSION, 0);
+     if (!wuffs_base__status__is_ok(&init_status)) {
+       return wuffs_base__status__message(&init_status);
+     }
+     g_dec = wuffs_json__decoder__upcast_as__wuffs_base__token_decoder(
+         &g_json_decoder);
+   } else {
+     wuffs_base__status init_status = wuffs_cbor__decoder__initialize(
+         &g_cbor_decoder, sizeof__wuffs_cbor__decoder(), WUFFS_VERSION, 0);
+     if (!wuffs_base__status__is_ok(&init_status)) {
+       return wuffs_base__status__message(&init_status);
+     }
+     g_dec = wuffs_cbor__decoder__upcast_as__wuffs_base__token_decoder(
+         &g_cbor_decoder);
+   }
+ 
+   if (g_flags.quirks) {
+     uint32_t quirks[] = {
+         WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_A,
+         WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_CAPITAL_U,
+         WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_E,
+         WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_QUESTION_MARK,
+         WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_SINGLE_QUOTE,
+         WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_V,
+         WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_X_AS_CODE_POINTS,
+         WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_ZERO,
+         WUFFS_JSON__QUIRK_ALLOW_COMMENT_BLOCK,
+         WUFFS_JSON__QUIRK_ALLOW_COMMENT_LINE,
+         WUFFS_JSON__QUIRK_ALLOW_EXTRA_COMMA,
+         WUFFS_JSON__QUIRK_ALLOW_INF_NAN_NUMBERS,
+         WUFFS_JSON__QUIRK_ALLOW_LEADING_ASCII_RECORD_SEPARATOR,
+         WUFFS_JSON__QUIRK_ALLOW_LEADING_UNICODE_BYTE_ORDER_MARK,
+         WUFFS_JSON__QUIRK_ALLOW_TRAILING_FILLER,
+         WUFFS_JSON__QUIRK_REPLACE_INVALID_UNICODE,
+         0,
+     };
+-    uint32_t i;
+-    for (i = 0; quirks[i]; i++) {
++    for (uint32_t i = 0; quirks[i]; i++) {
+       wuffs_base__token_decoder__set_quirk_enabled(g_dec, quirks[i], true);
+     }
+   }
+ 
+   uint64_t pos = 0;
+   while (true) {
+     wuffs_base__status status = wuffs_base__token_decoder__decode_tokens(
+         g_dec, &g_tok, &g_src,
+         wuffs_base__make_slice_u8(g_work_buffer_array, WORK_BUFFER_ARRAY_SIZE));
+ 
+     while (g_tok.meta.ri < g_tok.meta.wi) {
+       wuffs_base__token* t = &g_tok.data.ptr[g_tok.meta.ri++];
+       uint16_t len = wuffs_base__token__length(t);
+ 
+       if (g_flags.all_tokens || (wuffs_base__token__value(t) != 0)) {
+         uint16_t con = wuffs_base__token__continued(t) ? 1 : 0;
+         int32_t vmajor = wuffs_base__token__value_major(t);
+         uint32_t vminor = wuffs_base__token__value_minor(t);
+         uint8_t vbc = wuffs_base__token__value_base_category(t);
+         uint32_t vbd = wuffs_base__token__value_base_detail(t);
+ 
+         if (g_flags.human_readable) {
+           printf("pos=0x%08" PRIX32 "  len=0x%04" PRIX16 "  con=%" PRId16 "  ",
+                  (uint32_t)(pos), len, con);
+ 
+           if (vmajor > 0) {
+             char vmajor_name[5];
+             vmajor_name[0] = '*';
+             vmajor_name[1] = '*';
+             vmajor_name[2] = '*';
+             vmajor_name[3] = '*';
+             vmajor_name[4] = '\x00';
+             uint32_t m = vmajor;
+             if (m < 38 * 38 * 38 * 38) {
+               uint32_t m0 = m / (38 * 38 * 38);
+               m -= m0 * (38 * 38 * 38);
+               vmajor_name[0] = g_base38_decode[m0];
+ 
+               uint32_t m1 = m / (38 * 38);
+               m -= m1 * (38 * 38);
+               vmajor_name[1] = g_base38_decode[m1];
+ 
+               uint32_t m2 = m / (38);
+               m -= m2 * (38);
+               vmajor_name[2] = g_base38_decode[m2];
+ 
+               uint32_t m3 = m;
+               vmajor_name[3] = g_base38_decode[m3];
+             }
+ 
+             printf("vmajor=0x%06" PRIX32 ":%s vminor=0x%07" PRIX32 "\n", vmajor,
+                    vmajor_name, vminor);
+           } else if (vmajor == 0) {
+             printf("vbc=%s  vbd=0x%06" PRIX32 "\n", g_vbc_names[vbc & 15], vbd);
+           } else {
+             printf("extended... vextension=0x%012" PRIX64 "\n",
+                    wuffs_base__token__value_extension(t));
+           }
+ 
+         } else {
+           uint8_t buf[16];
+           wuffs_base__poke_u32be__no_bounds_check(&buf[0x0], (uint32_t)(pos));
+           wuffs_base__poke_u16be__no_bounds_check(&buf[0x4], len);
+           wuffs_base__poke_u16be__no_bounds_check(&buf[0x6], con);
+           if (vmajor > 0) {
+             wuffs_base__poke_u32be__no_bounds_check(&buf[0x8], vmajor);
+             wuffs_base__poke_u32be__no_bounds_check(&buf[0xC], vminor);
+           } else if (vmajor == 0) {
+             wuffs_base__poke_u32be__no_bounds_check(&buf[0x8], 0);
+             wuffs_base__poke_u8__no_bounds_check(&buf[0x000C], vbc);
+             wuffs_base__poke_u24be__no_bounds_check(&buf[0xD], vbd);
+           } else {
+             wuffs_base__poke_u8__no_bounds_check(&buf[0x0008], 0x01);
+             wuffs_base__poke_u56be__no_bounds_check(
+                 &buf[0x9], wuffs_base__token__value_extension(t));
+           }
+           const int stdout_fd = 1;
+           ignore_return_value(write(stdout_fd, &buf[0], 16));
+         }
+       }
+ 
+       pos += len;
+       if (pos > 0xFFFFFFFF) {
+         return "main: input is too long";
+       }
+     }
+ 
+     if (status.repr == NULL) {
+       return NULL;
+     } else if (status.repr == wuffs_base__suspension__short_read) {
+       TRY(read_src());
+     } else if (status.repr == wuffs_base__suspension__short_write) {
+       wuffs_base__token_buffer__compact(&g_tok);
+     } else {
+       return wuffs_base__status__message(&status);
+     }
+   }
+ }
+ 
+ // ----
+
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C048","gap_exists":false,"gap_type":[],"commit_induced":"NO","maintenance_needed":false,"confidence":99,"affected_functions":["script/adler32-standalone.c:main","script/bench-c-deflate-fragmentation.c:decode","script/bench-c-deflate-fragmentation.c:main","script/print-json-token-debug-format.c:main1"],"reason":"The S0-to-S1 changes only move existing loop-variable declarations into their respective for initializers. They do not change any entry point, API protocol, persistent state, configuration, input semantics, attack surface, loop bounds, or called operations. H0 therefore needs no adaptation to exercise behavior affected by this commit.","evidence":["In adler32-standalone.c main, `int i; for (i = 0; i < num_reps; i++)` becomes `for (int i = 0; i < num_reps; i++)`; `calculate_hash(g_buffer, BUFFER_SIZE)` and the bounds remain unchanged.","In bench-c-deflate-fragmentation.c decode, only the declaration scope of `i` changes; the loop still runs `i < reps` and calls `decode_once(frag_dst, frag_idat)`.","In bench-c-deflate-fragmentation.c main, only the declaration scope of `i` changes; the five iterations and all four `decode` calls remain unchanged.","In print-json-token-debug-format.c main1, only the declaration scope of `i` changes; the loop still traverses `quirks` until zero and calls `wuffs_base__token_decoder__set_quirk_enabled` identically.","H0 already exercises GIF and JSON decoding through `fuzz`, but the commit introduces no changed decoding behavior or new control dimension for those harnesses to cover."],"recommended_action":"No fuzz-harness maintenance is needed for this commit."}
+tokens used
+26,906

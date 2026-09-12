@@ -1,0 +1,223 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-blind-run-40ko0e9q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08556-47af-7490-bd72-1c2682d62b3c
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C099
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `fuzz/bplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * bplist_fuzzer.cc
+ * binary plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_bin(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+### `fuzz/xplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * xplist_fuzzer.cc
+ * XML plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_xml(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/libplist/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+#
+# Copyright 2016 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+./autogen.sh --without-cython --enable-debug
+make -j$(nproc) clean
+make -j$(nproc) all
+
+for fuzzer in bplist_fuzzer xplist_fuzzer jplist_fuzzer; do
+  $CXX $CXXFLAGS -std=c++11 -Iinclude/ \
+      fuzz/$fuzzer.cc -o $OUT/$fuzzer \
+      $LIB_FUZZING_ENGINE src/.libs/libplist-2.0.a
+done
+
+zip -j $OUT/bplist_fuzzer_seed_corpus.zip test/data/*.bplist
+zip -j $OUT/xplist_fuzzer_seed_corpus.zip test/data/*.plist
+zip -j $OUT/jplist_fuzzer_seed_corpus.zip test/data/*.json
+
+cp fuzz/*.dict fuzz/*.options $OUT/
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `src/bplist.c`
+
+~~~~diff
+diff --git a/src/bplist.c b/src/bplist.c
+--- a/src/bplist.c
++++ b/src/bplist.c
+@@ -995,24 +995,30 @@ static void write_real(bytearray_t * bplist, double val)
+ {
+     int size = get_real_bytes(val);	//cheat to know used space
+     uint8_t buff[16];
+     buff[7] = BPLIST_REAL | Log2(size);
+     if (size == sizeof(float)) {
+         float floatval = (float)val;
+-        *(uint32_t*)(buff+8) = float_bswap32(*(uint32_t*)&floatval);
++        uint32_t intval;
++        memcpy(&intval, &floatval, sizeof(float));
++        *(uint32_t*)(buff+8) = float_bswap32(intval);
+     } else {
+-        *(uint64_t*)(buff+8) = float_bswap64(*(uint64_t*)&val);
++        uint64_t intval;
++        memcpy(&intval, &val, sizeof(double));
++        *(uint64_t*)(buff+8) = float_bswap64(intval);
+     }
+     byte_array_append(bplist, buff+7, size+1);
+ }
+ 
+ static void write_date(bytearray_t * bplist, double val)
+ {
++    uint64_t intval;
++    memcpy(&intval, &val, sizeof(double));
+     uint8_t buff[16];
+     buff[7] = BPLIST_DATE | 3;
+-    *(uint64_t*)(buff+8) = float_bswap64(*(uint64_t*)&val);
++    *(uint64_t*)(buff+8) = float_bswap64(intval);
+     byte_array_append(bplist, buff+7, 9);
+ }
+ 
+ static void write_raw_data(bytearray_t * bplist, uint8_t mark, uint8_t * val, uint64_t size)
+ {
+     uint8_t marker = mark | (size < 15 ? size : 0xf);
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C099","maintenance_needed":false,"confidence":99,"change_types":["internal implementation fix","type-punning safety refactor"],"affected_functions":["write_real","write_date"],"reason":"The commit only replaces pointer-based floating-point type punning with memcpy before byte swapping in two existing binary-plist serialization helpers. It does not add an entry point, alter an API protocol, introduce initialization or configuration requirements, change accepted input constraints, or expand the attack surface. The existing parser harnesses remain unchanged in adequacy; the fact that they do not directly exercise serialization is pre-existing and was not created by this commit.","evidence":["write_real now copies float or double bits into uint32_t or uint64_t using memcpy, then calls the same float_bswap32 or float_bswap64 logic.","write_date likewise replaces *(uint64_t*)&val with memcpy into a uint64_t before the existing byte swap.","The public harness calls plist_from_bin or plist_from_xml and frees the resulting node; no signatures or usage requirements for those APIs changed.","No new functionality, state, configuration, or input format is present in the production-source diff."],"recommended_action":"Keep the existing fuzz harnesses unchanged for this commit."}
+tokens used
+5,130

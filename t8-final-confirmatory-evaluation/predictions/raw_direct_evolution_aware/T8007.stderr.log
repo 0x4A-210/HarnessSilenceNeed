@@ -1,0 +1,2858 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-direct_evolution_aware-T8007-ndsm4otb
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a09401-f946-7791-9287-6b3f450ef25d
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8007
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `libarchive/test/test_fuzz.c`
+
+~~~~cpp
+/*-
+ * Copyright (c) 2003-2007 Tim Kientzle
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR(S) ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR(S) BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+#include "test.h"
+__FBSDID("$FreeBSD: head/lib/libarchive/test/test_fuzz.c 201247 2009-12-30 05:59:21Z kientzle $");
+
+/*
+ * This was inspired by an ISO fuzz tester written by Michal Zalewski
+ * and posted to the "vulnwatch" mailing list on March 17, 2005:
+ *    http://seclists.org/vulnwatch/2005/q1/0088.html
+ *
+ * This test simply reads each archive image into memory, pokes
+ * random values into it and runs it through libarchive.  It tries
+ * to damage about 1% of each file and repeats the exercise 100 times
+ * with each file.
+ *
+ * Unlike most other tests, this test does not verify libarchive's
+ * responses other than to ensure that libarchive doesn't crash.
+ *
+ * Due to the deliberately random nature of this test, it may be hard
+ * to reproduce failures.  Because this test deliberately attempts to
+ * induce crashes, there's little that can be done in the way of
+ * post-failure diagnostics.
+ */
+
+/* Because this works for any archive, we can just re-use the archives
+ * developed for other tests. */
+static struct {
+	int uncompress; /* If 1, decompress the file before fuzzing. */
+	const char *name;
+} files[] = {
+	{0, "test_fuzz_1.iso.Z"}, /* Exercise compress decompressor. */
+	{1, "test_fuzz_1.iso.Z"},
+	{0, "test_fuzz.cab"},
+	{0, "test_fuzz.lzh"},
+	{0, "test_compat_bzip2_1.tbz"}, /* Exercise bzip2 decompressor. */
+	{1, "test_compat_bzip2_1.tbz"},
+	{0, "test_compat_gtar_1.tar"},
+	{0, "test_compat_gzip_1.tgz"}, /* Exercise gzip decompressor. */
+	{0, "test_compat_gzip_2.tgz"}, /* Exercise gzip decompressor. */
+	{0, "test_compat_tar_hardlink_1.tar"},
+	{0, "test_compat_xz_1.txz"}, /* Exercise xz decompressor. */
+	{0, "test_compat_zip_1.zip"},
+	{0, "test_read_format_ar.ar"},
+	{0, "test_read_format_cpio_bin_be.cpio"},
+	{0, "test_read_format_cpio_svr4_gzip_rpm.rpm"}, /* Test RPM unwrapper */
+	{0, "test_read_format_rar.rar"}, /* Uncompressed RAR test */
+	{0, "test_read_format_rar_compress_normal.rar"}, /* Normal Compressed RAR
+	                                                  * test */
+	{0, "test_read_format_rar_multi_lzss_blocks.rar"}, /* Normal Compressed Multi
+	                                                    * LZSS blocks RAR test */
+	{0, "test_read_format_rar_noeof.rar"}, /* RAR with no EOF header */
+	{0, "test_read_format_rar_subblock.rar"}, /* RAR with subblocks */
+	{0, "test_read_format_rar_unicode.rar"}, /* RAR with Unicode filenames */
+	{0, "test_read_format_gtar_sparse_1_17_posix10_modified.tar"},
+	{0, "test_read_format_mtree.mtree"},
+	{0, "test_read_format_tar_empty_filename.tar"},
+	{0, "test_read_format_zip.zip"},
+	{1, NULL}
+};
+
+DEFINE_TEST(test_fuzz)
+{
+	const void *blk;
+	size_t blk_size;
+	int64_t blk_offset;
+	int n;
+
+	for (n = 0; files[n].name != NULL; ++n) {
+		const size_t buffsize = 30000000;
+		const char *filename = files[n].name;
+		struct archive_entry *ae;
+		struct archive *a;
+		char *rawimage, *image;
+		size_t size;
+		int i, q;
+
+		extract_reference_file(filename);
+		if (files[n].uncompress) {
+			int r;
+			/* Use format_raw to decompress the data. */
+			assert((a = archive_read_new()) != NULL);
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_support_filter_all(a));
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_support_format_raw(a));
+			r = archive_read_open_filename(a, filename, 16384);
+			if (r != ARCHIVE_OK) {
+				archive_read_free(a);
+				skipping("Cannot uncompress %s", filename);
+				continue;
+			}
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_next_header(a, &ae));
+			rawimage = malloc(buffsize);
+			size = archive_read_data(a, rawimage, buffsize);
+			assertEqualIntA(a, ARCHIVE_EOF,
+			    archive_read_next_header(a, &ae));
+			assertEqualInt(ARCHIVE_OK,
+			    archive_read_free(a));
+			assert(size > 0);
+			failure("Internal buffer is not big enough for "
+			    "uncompressed test file: %s", filename);
+			if (!assert(size < buffsize)) {
+				free(rawimage);
+				continue;
+			}
+		} else {
+			rawimage = slurpfile(&size, filename);
+			if (!assert(rawimage != NULL))
+				continue;
+		}
+		image = malloc(size);
+		assert(image != NULL);
+		srand((unsigned)time(NULL));
+
+		for (i = 0; i < 100; ++i) {
+			FILE *f;
+			int j, numbytes, trycnt;
+
+			/* Fuzz < 1% of the bytes in the archive. */
+			memcpy(image, rawimage, size);
+			q = size / 100;
+			if (!q) q = 1;
+			numbytes = (int)(rand() % q);
+			for (j = 0; j < numbytes; ++j)
+				image[rand() % size] = (char)rand();
+
+			/* Save the messed-up image to a file.
+			 * If we crash, that file will be useful. */
+			for (trycnt = 0; trycnt < 3; trycnt++) {
+				f = fopen("after.test.failure.send.this.file."
+				    "to.libarchive.maintainers.with.system.details", "wb");
+				if (f != NULL)
+					break;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+				/*
+				 * Sometimes previous close operation does not completely
+				 * end at this time. So we should take a wait while
+				 * the operation running.
+				 */
+				Sleep(100);
+#endif
+			}
+			assertEqualInt((size_t)size, fwrite(image, 1, (size_t)size, f));
+			fclose(f);
+
+			assert((a = archive_read_new()) != NULL);
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_support_filter_all(a));
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_support_format_all(a));
+
+			if (0 == archive_read_open_memory(a, image, size)) {
+				while(0 == archive_read_next_header(a, &ae)) {
+					while (0 == archive_read_data_block(a,
+						&blk, &blk_size, &blk_offset))
+						continue;
+				}
+				archive_read_close(a);
+			}
+			archive_read_free(a);
+		}
+		free(image);
+		free(rawimage);
+	}
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/libarchive/archive_ppmd.h b/libarchive/archive_ppmd.h
+new file mode 100644
+index 00000000..fb17b94c
+--- /dev/null
++++ b/libarchive/archive_ppmd.h
+@@ -0,0 +1,160 @@
++/* Ppmd.h -- PPMD codec common code
++2010-03-12 : Igor Pavlov : Public domain
++This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
++
++#ifndef __LIBARCHIVE_BUILD
++#error This header is only to be used internally to libarchive.
++#endif
++
++#ifndef ARCHIVE_PPMD_H_INCLUDED
++#define ARCHIVE_PPMD_H_INCLUDED
++
++#include <stddef.h>
++
++#include "archive_read_private.h"
++
++/*** Begin defined in Types.h ***/
++
++typedef unsigned char Byte;
++typedef short Int16;
++typedef unsigned short UInt16;
++
++#ifdef _LZMA_UINT32_IS_ULONG
++typedef long Int32;
++typedef unsigned long UInt32;
++#else
++typedef int Int32;
++typedef unsigned int UInt32;
++#endif
++
++#ifdef _SZ_NO_INT_64
++
++/* define _SZ_NO_INT_64, if your compiler doesn't support 64-bit integers.
++   NOTES: Some code will work incorrectly in that case! */
++
++typedef long Int64;
++typedef unsigned long UInt64;
++
++#else
++
++#if defined(_MSC_VER) || defined(__BORLANDC__)
++typedef __int64 Int64;
++typedef unsigned __int64 UInt64;
++#define UINT64_CONST(n) n
++#else
++typedef long long int Int64;
++typedef unsigned long long int UInt64;
++#define UINT64_CONST(n) n ## ULL
++#endif
++
++#endif
++
++typedef int Bool;
++#define True 1
++#define False 0
++
++/* The following interfaces use first parameter as pointer to structure */
++
++typedef struct
++{
++  struct archive_read *a;
++  Byte (*Read)(void *p); /* reads one byte, returns 0 in case of EOF or error */
++} IByteIn;
++
++typedef struct
++{
++  struct archive_read *a;
++  void (*Write)(void *p, Byte b);
++} IByteOut;
++
++
++typedef struct
++{
++  void *(*Alloc)(void *p, size_t size);
++  void (*Free)(void *p, void *address); /* address can be 0 */
++} ISzAlloc;
++
++/*** End defined in Types.h ***/
++/*** Begin defined in CpuArch.h ***/
++
++#if defined(_M_IX86) || defined(__i386__)
++#define MY_CPU_X86
++#endif
++
++#if defined(MY_CPU_X86) || defined(_M_ARM)
++#define MY_CPU_32BIT
++#endif
++
++#ifdef MY_CPU_32BIT
++#define PPMD_32BIT
++#endif
++
++/*** End defined in CpuArch.h ***/
++
++#define PPMD_INT_BITS 7
++#define PPMD_PERIOD_BITS 7
++#define PPMD_BIN_SCALE (1 << (PPMD_INT_BITS + PPMD_PERIOD_BITS))
++
++#define PPMD_GET_MEAN_SPEC(summ, shift, round) (((summ) + (1 << ((shift) - (round)))) >> (shift))
++#define PPMD_GET_MEAN(summ) PPMD_GET_MEAN_SPEC((summ), PPMD_PERIOD_BITS, 2)
++#define PPMD_UPDATE_PROB_0(prob) ((prob) + (1 << PPMD_INT_BITS) - PPMD_GET_MEAN(prob))
++#define PPMD_UPDATE_PROB_1(prob) ((prob) - PPMD_GET_MEAN(prob))
++
++#define PPMD_N1 4
++#define PPMD_N2 4
++#define PPMD_N3 4
++#define PPMD_N4 ((128 + 3 - 1 * PPMD_N1 - 2 * PPMD_N2 - 3 * PPMD_N3) / 4)
++#define PPMD_NUM_INDEXES (PPMD_N1 + PPMD_N2 + PPMD_N3 + PPMD_N4)
++
++#pragma pack(push,1)
++
++/* SEE-contexts for PPM-contexts with masked symbols */
++typedef struct
++{
++  UInt16 Summ; /* Freq */
++  Byte Shift;  /* Speed of Freq change; low Shift is for fast change */
++  Byte Count;  /* Count to next change of Shift */
++} CPpmd_See;
++
++#define Ppmd_See_Update(p)  if ((p)->Shift < PPMD_PERIOD_BITS && --(p)->Count == 0) \
++    { (p)->Summ <<= 1; (p)->Count = (Byte)(3 << (p)->Shift++); }
++
++typedef struct
++{
++  Byte Symbol;
++  Byte Freq;
++  UInt16 SuccessorLow;
++  UInt16 SuccessorHigh;
++} CPpmd_State;
++
++#pragma pack(pop)
++
++typedef
++  #ifdef PPMD_32BIT
++    CPpmd_State *
++  #else
++    UInt32
++  #endif
++  CPpmd_State_Ref;
++
++typedef
++  #ifdef PPMD_32BIT
++    void *
++  #else
++    UInt32
++  #endif
++  CPpmd_Void_Ref;
++
++typedef
++  #ifdef PPMD_32BIT
++    Byte *
++  #else
++    UInt32
++  #endif
++  CPpmd_Byte_Ref;
++
++#define PPMD_SetAllBitsIn256Bytes(p) \
++  { unsigned i; for (i = 0; i < 256 / sizeof(p[0]); i += 8) { \
++  p[i+7] = p[i+6] = p[i+5] = p[i+4] = p[i+3] = p[i+2] = p[i+1] = p[i+0] = ~(size_t)0; }}
++
++#endif
+diff --git a/libarchive/archive_ppmd7.c b/libarchive/archive_ppmd7.c
+new file mode 100644
+index 00000000..af9928ad
+--- /dev/null
++++ b/libarchive/archive_ppmd7.c
+@@ -0,0 +1,710 @@
++/* Ppmd7.c -- PPMdH codec
++2010-03-12 : Igor Pavlov : Public domain
++This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
++
++#include "archive_platform.h"
++
++#include <memory.h>
++
++#include "archive_ppmd7.h"
++
++const Byte PPMD7_kExpEscape[16] = { 25, 14, 9, 7, 5, 5, 4, 4, 4, 3, 3, 3, 2, 2, 2, 2 };
++static const UInt16 kInitBinEsc[] = { 0x3CDD, 0x1F3F, 0x59BF, 0x48F3, 0x64A1, 0x5ABC, 0x6632, 0x6051};
++
++#define MAX_FREQ 124
++#define UNIT_SIZE 12
++
++#define U2B(nu) ((UInt32)(nu) * UNIT_SIZE)
++#define U2I(nu) (p->Units2Indx[(nu) - 1])
++#define I2U(indx) (p->Indx2Units[indx])
++
++#ifdef PPMD_32BIT
++  #define REF(ptr) (ptr)
++#else
++  #define REF(ptr) ((UInt32)((Byte *)(ptr) - (p)->Base))
++#endif
++
++#define STATS_REF(ptr) ((CPpmd_State_Ref)REF(ptr))
++
++#define CTX(ref) ((CPpmd7_Context *)Ppmd7_GetContext(p, ref))
++#define STATS(ctx) Ppmd7_GetStats(p, ctx)
++#define ONE_STATE(ctx) Ppmd7Context_OneState(ctx)
++#define SUFFIX(ctx) CTX((ctx)->Suffix)
++
++typedef CPpmd7_Context * CTX_PTR;
++
++struct CPpmd7_Node_;
++
++typedef
++  #ifdef PPMD_32BIT
++    struct CPpmd7_Node_ *
++  #else
++    UInt32
++  #endif
++  CPpmd7_Node_Ref;
++
++typedef struct CPpmd7_Node_
++{
++  UInt16 Stamp; /* must be at offset 0 as CPpmd7_Context::NumStats. Stamp=0 means free */
++  UInt16 NU;
++  CPpmd7_Node_Ref Next; /* must be at offset >= 4 */
++  CPpmd7_Node_Ref Prev;
++} CPpmd7_Node;
++
++#ifdef PPMD_32BIT
++  #define NODE(ptr) (ptr)
++#else
++  #define NODE(offs) ((CPpmd7_Node *)(p->Base + (offs)))
++#endif
++
++void Ppmd7_Construct(CPpmd7 *p)
++{
++  unsigned i, k, m;
++
++  p->Base = 0;
++
++  for (i = 0, k = 0; i < PPMD_NUM_INDEXES; i++)
++  {
++    unsigned step = (i >= 12 ? 4 : (i >> 2) + 1);
++    do { p->Units2Indx[k++] = (Byte)i; } while(--step);
++    p->Indx2Units[i] = (Byte)k;
++  }
++
++  p->NS2BSIndx[0] = (0 << 1);
++  p->NS2BSIndx[1] = (1 << 1);
++  memset(p->NS2BSIndx + 2, (2 << 1), 9);
++  memset(p->NS2BSIndx + 11, (3 << 1), 256 - 11);
++
++  for (i = 0; i < 3; i++)
++    p->NS2Indx[i] = (Byte)i;
++  for (m = i, k = 1; i < 256; i++)
++  {
++    p->NS2Indx[i] = (Byte)m;
++    if (--k == 0)
++      k = (++m) - 2;
++  }
++
++  memset(p->HB2Flag, 0, 0x40);
++  memset(p->HB2Flag + 0x40, 8, 0x100 - 0x40);
++}
++
++void Ppmd7_Free(CPpmd7 *p, ISzAlloc *alloc)
++{
++  alloc->Free(alloc, p->Base);
++  p->Size = 0;
++  p->Base = 0;
++}
++
++Bool Ppmd7_Alloc(CPpmd7 *p, UInt32 size, ISzAlloc *alloc)
++{
++  if (p->Base == 0 || p->Size != size)
++  {
++    Ppmd7_Free(p, alloc);
++    p->AlignOffset =
++      #ifdef PPMD_32BIT
++        (4 - size) & 3;
++      #else
++        4 - (size & 3);
++      #endif
++    if ((p->Base = (Byte *)alloc->Alloc(alloc, p->AlignOffset + size
++        #ifndef PPMD_32BIT
++        + UNIT_SIZE
++        #endif
++        )) == 0)
++      return False;
++    p->Size = size;
++  }
++  return True;
++}
++
++static void InsertNode(CPpmd7 *p, void *node, unsigned indx)
++{
++  *((CPpmd_Void_Ref *)node) = p->FreeList[indx];
++  p->FreeList[indx] = REF(node);
++}
++
++static void *RemoveNode(CPpmd7 *p, unsigned indx)
++{
++  CPpmd_Void_Ref *node = (CPpmd_Void_Ref *)Ppmd7_GetPtr(p, p->FreeList[indx]);
++  p->FreeList[indx] = *node;
++  return node;
++}
++
++static void SplitBlock(CPpmd7 *p, void *ptr, unsigned oldIndx, unsigned newIndx)
++{
++  unsigned i, nu = I2U(oldIndx) - I2U(newIndx);
++  ptr = (Byte *)ptr + U2B(I2U(newIndx));
++  if (I2U(i = U2I(nu)) != nu)
++  {
++    unsigned k = I2U(--i);
++    InsertNode(p, ((Byte *)ptr) + U2B(k), nu - k - 1);
++  }
++  InsertNode(p, ptr, i);
++}
++
++static void GlueFreeBlocks(CPpmd7 *p)
++{
++  #ifdef PPMD_32BIT
++  CPpmd7_Node headItem;
++  CPpmd7_Node_Ref head = &headItem;
++  #else
++  CPpmd7_Node_Ref head = p->AlignOffset + p->Size;
++  #endif
++  
++  CPpmd7_Node_Ref n = head;
++  unsigned i;
++
++  p->GlueCount = 255;
++
++  /* create doubly-linked list of free blocks */
++  for (i = 0; i < PPMD_NUM_INDEXES; i++)
++  {
++    UInt16 nu = I2U(i);
++    CPpmd7_Node_Ref next = (CPpmd7_Node_Ref)p->FreeList[i];
++    p->FreeList[i] = 0;
++    while (next != 0)
++    {
++      CPpmd7_Node *node = NODE(next);
++      node->Next = n;
++      n = NODE(n)->Prev = next;
++      next = *(const CPpmd7_Node_Ref *)node;
++      node->Stamp = 0;
++      node->NU = (UInt16)nu;
++    }
++  }
++  NODE(head)->Stamp = 1;
++  NODE(head)->Next = n;
++  NODE(n)->Prev = head;
++  if (p->LoUnit != p->HiUnit)
++    ((CPpmd7_Node *)p->LoUnit)->Stamp = 1;
++  
++  /* Glue free blocks */
++  while (n != head)
++  {
++    CPpmd7_Node *node = NODE(n);
++    UInt32 nu = (UInt32)node->NU;
++    for (;;)
++    {
++      CPpmd7_Node *node2 = NODE(n) + nu;
++      nu += node2->NU;
++      if (node2->Stamp != 0 || nu >= 0x10000)
++        break;
++      NODE(node2->Prev)->Next = node2->Next;
++      NODE(node2->Next)->Prev = node2->Prev;
++      node->NU = (UInt16)nu;
++    }
++    n = node->Next;
++  }
++  
++  /* Fill lists of free blocks */
++  for (n = NODE(head)->Next; n != head;)
++  {
++    CPpmd7_Node *node = NODE(n);
++    unsigned nu;
++    CPpmd7_Node_Ref next = node->Next;
++    for (nu = node->NU; nu > 128; nu -= 128, node += 128)
++      InsertNode(p, node, PPMD_NUM_INDEXES - 1);
++    if (I2U(i = U2I(nu)) != nu)
++    {
++      unsigned k = I2U(--i);
++      InsertNode(p, node + k, nu - k - 1);
++    }
++    InsertNode(p, node, i);
++    n = next;
++  }
++}
++
++static void *AllocUnitsRare(CPpmd7 *p, unsigned indx)
++{
++  unsigned i;
++  void *retVal;
++  if (p->GlueCount == 0)
++  {
++    GlueFreeBlocks(p);
++    if (p->FreeList[indx] != 0)
++      return RemoveNode(p, indx);
++  }
++  i = indx;
++  do
++  {
++    if (++i == PPMD_NUM_INDEXES)
++    {
++      UInt32 numBytes = U2B(I2U(indx));
++      p->GlueCount--;
++      return ((UInt32)(p->UnitsStart - p->Text) > numBytes) ? (p->UnitsStart -= numBytes) : (NULL);
++    }
++  }
++  while (p->FreeList[i] == 0);
++  retVal = RemoveNode(p, i);
++  SplitBlock(p, retVal, i, indx);
++  return retVal;
++}
++
++static void *AllocUnits(CPpmd7 *p, unsigned indx)
++{
++  UInt32 numBytes;
++  if (p->FreeList[indx] != 0)
++    return RemoveNode(p, indx);
++  numBytes = U2B(I2U(indx));
++  if (numBytes <= (UInt32)(p->HiUnit - p->LoUnit))
++  {
++    void *retVal = p->LoUnit;
++    p->LoUnit += numBytes;
++    return retVal;
++  }
++  return AllocUnitsRare(p, indx);
++}
++
++#define MyMem12Cpy(dest, src, num) \
++  { UInt32 *d = (UInt32 *)dest; const UInt32 *s = (const UInt32 *)src; UInt32 n = num; \
++    do { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; s += 3; d += 3; } while(--n); }
++
++static void *ShrinkUnits(CPpmd7 *p, void *oldPtr, unsigned oldNU, unsigned newNU)
++{
++  unsigned i0 = U2I(oldNU);
++  unsigned i1 = U2I(newNU);
++  if (i0 == i1)
++    return oldPtr;
++  if (p->FreeList[i1] != 0)
++  {
++    void *ptr = RemoveNode(p, i1);
++    MyMem12Cpy(ptr, oldPtr, newNU);
++    InsertNode(p, oldPtr, i0);
++    return ptr;
++  }
++  SplitBlock(p, oldPtr, i0, i1);
++  return oldPtr;
++}
++
++#define SUCCESSOR(p) ((CPpmd_Void_Ref)((p)->SuccessorLow | ((UInt32)(p)->SuccessorHigh << 16)))
++
++static void SetSuccessor(CPpmd_State *p, CPpmd_Void_Ref v)
++{
++  (p)->SuccessorLow = (UInt16)((UInt32)(v) & 0xFFFF);
++  (p)->SuccessorHigh = (UInt16)(((UInt32)(v) >> 16) & 0xFFFF);
++}
++
++static void RestartModel(CPpmd7 *p)
++{
++  unsigned i, k, m;
++
++  memset(p->FreeList, 0, sizeof(p->FreeList));
++  p->Text = p->Base + p->AlignOffset;
++  p->HiUnit = p->Text + p->Size;
++  p->LoUnit = p->UnitsStart = p->HiUnit - p->Size / 8 / UNIT_SIZE * 7 * UNIT_SIZE;
++  p->GlueCount = 0;
++
++  p->OrderFall = p->MaxOrder;
++  p->RunLength = p->InitRL = -(Int32)((p->MaxOrder < 12) ? p->MaxOrder : 12) - 1;
++  p->PrevSuccess = 0;
++
++  p->MinContext = p->MaxContext = (CTX_PTR)(p->HiUnit -= UNIT_SIZE); /* AllocContext(p); */
++  p->MinContext->Suffix = 0;
++  p->MinContext->NumStats = 256;
++  p->MinContext->SummFreq = 256 + 1;
++  p->FoundState = (CPpmd_State *)p->LoUnit; /* AllocUnits(p, PPMD_NUM_INDEXES - 1); */
++  p->LoUnit += U2B(256 / 2);
++  p->MinContext->Stats = REF(p->FoundState);
++  for (i = 0; i < 256; i++)
++  {
++    CPpmd_State *s = &p->FoundState[i];
++    s->Symbol = (Byte)i;
++    s->Freq = 1;
++    SetSuccessor(s, 0);
++  }
++
++  for (i = 0; i < 128; i++)
++    for (k = 0; k < 8; k++)
++    {
++      UInt16 *dest = p->BinSumm[i] + k;
++      UInt16 val = (UInt16)(PPMD_BIN_SCALE - kInitBinEsc[k] / (i + 2));
++      for (m = 0; m < 64; m += 8)
++        dest[m] = val;
++    }
++  
++  for (i = 0; i < 25; i++)
++    for (k = 0; k < 16; k++)
++    {
++      CPpmd_See *s = &p->See[i][k];
++      s->Summ = (UInt16)((5 * i + 10) << (s->Shift = PPMD_PERIOD_BITS - 4));
++      s->Count = 4;
++    }
++}
++
++void Ppmd7_Init(CPpmd7 *p, unsigned maxOrder)
++{
++  p->MaxOrder = maxOrder;
++  RestartModel(p);
++  p->DummySee.Shift = PPMD_PERIOD_BITS;
++  p->DummySee.Summ = 0; /* unused */
++  p->DummySee.Count = 64; /* unused */
++}
++
++static CTX_PTR CreateSuccessors(CPpmd7 *p, Bool skip)
++{
++  CPpmd_State upState;
++  CTX_PTR c = p->MinContext;
++  CPpmd_Byte_Ref upBranch = (CPpmd_Byte_Ref)SUCCESSOR(p->FoundState);
++  CPpmd_State *ps[PPMD7_MAX_ORDER];
++  unsigned numPs = 0;
++  
++  if (!skip)
++    ps[numPs++] = p->FoundState;
++  
++  while (c->Suffix)
++  {
++    CPpmd_Void_Ref successor;
++    CPpmd_State *s;
++    c = SUFFIX(c);
++    if (c->NumStats != 1)
++    {
++      for (s = STATS(c); s->Symbol != p->FoundState->Symbol; s++);
++    }
++    else
++      s = ONE_STATE(c);
++    successor = SUCCESSOR(s);
++    if (successor != upBranch)
++    {
++      c = CTX(successor);
++      if (numPs == 0)
++        return c;
++      break;
++    }
++    ps[numPs++] = s;
++  }
++  
++  upState.Symbol = *(const Byte *)Ppmd7_GetPtr(p, upBranch);
++  SetSuccessor(&upState, upBranch + 1);
++  
++  if (c->NumStats == 1)
++    upState.Freq = ONE_STATE(c)->Freq;
++  else
++  {
++    UInt32 cf, s0;
++    CPpmd_State *s;
++    for (s = STATS(c); s->Symbol != upState.Symbol; s++);
++    cf = s->Freq - 1;
++    s0 = c->SummFreq - c->NumStats - cf;
++    upState.Freq = (Byte)(1 + ((2 * cf <= s0) ? (5 * cf > s0) : ((2 * cf + 3 * s0 - 1) / (2 * s0))));
++  }
++
++  do
++  {
++    /* Create Child */
++    CTX_PTR c1; /* = AllocContext(p); */
++    if (p->HiUnit != p->LoUnit)
++      c1 = (CTX_PTR)(p->HiUnit -= UNIT_SIZE);
++    else if (p->FreeList[0] != 0)
++      c1 = (CTX_PTR)RemoveNode(p, 0);
++    else
++    {
++      c1 = (CTX_PTR)AllocUnitsRare(p, 0);
++      if (!c1)
++        return NULL;
++    }
++    c1->NumStats = 1;
++    *ONE_STATE(c1) = upState;
++    c1->Suffix = REF(c);
++    SetSuccessor(ps[--numPs], REF(c1));
++    c = c1;
++  }
++  while (numPs != 0);
++  
++  return c;
++}
++
++static void SwapStates(CPpmd_State *t1, CPpmd_State *t2)
++{
++  CPpmd_State tmp = *t1;
++  *t1 = *t2;
++  *t2 = tmp;
++}
++
++static void UpdateModel(CPpmd7 *p)
++{
++  CPpmd_Void_Ref successor, fSuccessor = SUCCESSOR(p->FoundState);
++  CTX_PTR c;
++  unsigned s0, ns;
++  
++  if (p->FoundState->Freq < MAX_FREQ / 4 && p->MinContext->Suffix != 0)
++  {
++    c = SUFFIX(p->MinContext);
++    
++    if (c->NumStats == 1)
++    {
++      CPpmd_State *s = ONE_STATE(c);
++      if (s->Freq < 32)
++        s->Freq++;
++    }
++    else
++    {
++      CPpmd_State *s = STATS(c);
++      if (s->Symbol != p->FoundState->Symbol)
++      {
++        do { s++; } while (s->Symbol != p->FoundState->Symbol);
++        if (s[0].Freq >= s[-1].Freq)
++        {
++          SwapStates(&s[0], &s[-1]);
++          s--;
++        }
++      }
++      if (s->Freq < MAX_FREQ - 9)
++      {
++        s->Freq += 2;
++        c->SummFreq += 2;
++      }
++    }
++  }
++
++  if (p->OrderFall == 0)
++  {
++    p->MinContext = p->MaxContext = CreateSuccessors(p, True);
++    if (p->MinContext == 0)
++    {
++      RestartModel(p);
++      return;
++    }
++    SetSuccessor(p->FoundState, REF(p->MinContext));
++    return;
++  }
++  
++  *p->Text++ = p->FoundState->Symbol;
++  successor = REF(p->Text);
++  if (p->Text >= p->UnitsStart)
++  {
++    RestartModel(p);
++    return;
++  }
++  
++  if (fSuccessor)
++  {
++    if (fSuccessor <= successor)
++    {
++      CTX_PTR cs = CreateSuccessors(p, False);
++      if (cs == NULL)
++      {
++        RestartModel(p);
++        return;
++      }
++      fSuccessor = REF(cs);
++    }
++    if (--p->OrderFall == 0)
++    {
++      successor = fSuccessor;
++      p->Text -= (p->MaxContext != p->MinContext);
++    }
++  }
++  else
++  {
++    SetSuccessor(p->FoundState, successor);
++    fSuccessor = REF(p->MinContext);
++  }
++  
++  s0 = p->MinContext->SummFreq - (ns = p->MinContext->NumStats) - (p->FoundState->Freq - 1);
++  
++  for (c = p->MaxContext; c != p->MinContext; c = SUFFIX(c))
++  {
++    unsigned ns1;
++    UInt32 cf, sf;
++    if ((ns1 = c->NumStats) != 1)
++    {
++      if ((ns1 & 1) == 0)
++      {
++        /* Expand for one UNIT */
++        unsigned oldNU = ns1 >> 1;
++        unsigned i = U2I(oldNU);
++        if (i != U2I(oldNU + 1))
++        {
++          void *ptr = AllocUnits(p, i + 1);
++          void *oldPtr;
++          if (!ptr)
++          {
++            RestartModel(p);
++            return;
++          }
++          oldPtr = STATS(c);
++          MyMem12Cpy(ptr, oldPtr, oldNU);
++          InsertNode(p, oldPtr, i);
++          c->Stats = STATS_REF(ptr);
++        }
++      }
++      c->SummFreq = (UInt16)(c->SummFreq + (2 * ns1 < ns) + 2 * ((4 * ns1 <= ns) & (c->SummFreq <= 8 * ns1)));
++    }
++    else
++    {
++      CPpmd_State *s = (CPpmd_State*)AllocUnits(p, 0);
++      if (!s)
++      {
++        RestartModel(p);
++        return;
++      }
++      *s = *ONE_STATE(c);
++      c->Stats = REF(s);
++      if (s->Freq < MAX_FREQ / 4 - 1)
++        s->Freq <<= 1;
++      else
++        s->Freq = MAX_FREQ - 4;
++      c->SummFreq = (UInt16)(s->Freq + p->InitEsc + (ns > 3));
++    }
++    cf = 2 * (UInt32)p->FoundState->Freq * (c->SummFreq + 6);
++    sf = (UInt32)s0 + c->SummFreq;
++    if (cf < 6 * sf)
++    {
++      cf = 1 + (cf > sf) + (cf >= 4 * sf);
++      c->SummFreq += 3;
++    }
++    else
++    {
++      cf = 4 + (cf >= 9 * sf) + (cf >= 12 * sf) + (cf >= 15 * sf);
++      c->SummFreq = (UInt16)(c->SummFreq + cf);
++    }
++    {
++      CPpmd_State *s = STATS(c) + ns1;
++      SetSuccessor(s, successor);
++      s->Symbol = p->FoundState->Symbol;
++      s->Freq = (Byte)cf;
++      c->NumStats = (UInt16)(ns1 + 1);
++    }
++  }
++  p->MaxContext = p->MinContext = CTX(fSuccessor);
++}
++  
++static void Rescale(CPpmd7 *p)
++{
++  unsigned i, adder, sumFreq, escFreq;
++  CPpmd_State *stats = STATS(p->MinContext);
++  CPpmd_State *s = p->FoundState;
++  {
++    CPpmd_State tmp = *s;
++    for (; s != stats; s--)
++      s[0] = s[-1];
++    *s = tmp;
++  }
++  escFreq = p->MinContext->SummFreq - s->Freq;
++  s->Freq += 4;
++  adder = (p->OrderFall != 0);
++  s->Freq = (Byte)((s->Freq + adder) >> 1);
++  sumFreq = s->Freq;
++  
++  i = p->MinContext->NumStats - 1;
++  do
++  {
++    escFreq -= (++s)->Freq;
++    s->Freq = (Byte)((s->Freq + adder) >> 1);
++    sumFreq += s->Freq;
++    if (s[0].Freq > s[-1].Freq)
++    {
++      CPpmd_State *s1 = s;
++      CPpmd_State tmp = *s1;
++      do
++        s1[0] = s1[-1];
++      while (--s1 != stats && tmp.Freq > s1[-1].Freq);
++      *s1 = tmp;
++    }
++  }
++  while (--i);
++  
++  if (s->Freq == 0)
++  {
++    unsigned numStats = p->MinContext->NumStats;
++    unsigned n0, n1;
++    do { i++; } while ((--s)->Freq == 0);
++    escFreq += i;
++    p->MinContext->NumStats = (UInt16)(p->MinContext->NumStats - i);
++    if (p->MinContext->NumStats == 1)
++    {
++      CPpmd_State tmp = *stats;
++      do
++      {
++        tmp.Freq = (Byte)(tmp.Freq - (tmp.Freq >> 1));
++        escFreq >>= 1;
++      }
++      while (escFreq > 1);
++      InsertNode(p, stats, U2I(((numStats + 1) >> 1)));
++      *(p->FoundState = ONE_STATE(p->MinContext)) = tmp;
++      return;
++    }
++    n0 = (numStats + 1) >> 1;
++    n1 = (p->MinContext->NumStats + 1) >> 1;
++    if (n0 != n1)
++      p->MinContext->Stats = STATS_REF(ShrinkUnits(p, stats, n0, n1));
++  }
++  p->MinContext->SummFreq = (UInt16)(sumFreq + escFreq - (escFreq >> 1));
++  p->FoundState = STATS(p->MinContext);
++}
++
++CPpmd_See *Ppmd7_MakeEscFreq(CPpmd7 *p, unsigned numMasked, UInt32 *escFreq)
++{
++  CPpmd_See *see;
++  unsigned nonMasked = p->MinContext->NumStats - numMasked;
++  if (p->MinContext->NumStats != 256)
++  {
++    see = p->See[p->NS2Indx[nonMasked - 1]] +
++        (nonMasked < (unsigned)SUFFIX(p->MinContext)->NumStats - p->MinContext->NumStats) +
++        2 * (p->MinContext->SummFreq < 11 * p->MinContext->NumStats) +
++        4 * (numMasked > nonMasked) +
++        p->HiBitsFlag;
++    {
++      unsigned r = (see->Summ >> see->Shift);
++      see->Summ = (UInt16)(see->Summ - r);
++      *escFreq = r + (r == 0);
++    }
++  }
++  else
++  {
++    see = &p->DummySee;
++    *escFreq = 1;
++  }
++  return see;
++}
++
++static void NextContext(CPpmd7 *p)
++{
++  CTX_PTR c = CTX(SUCCESSOR(p->FoundState));
++  if (p->OrderFall == 0 && (Byte *)c > p->Text)
++    p->MinContext = p->MaxContext = c;
++  else
++    UpdateModel(p);
++}
++
++void Ppmd7_Update1(CPpmd7 *p)
++{
++  CPpmd_State *s = p->FoundState;
++  s->Freq += 4;
++  p->MinContext->SummFreq += 4;
++  if (s[0].Freq > s[-1].Freq)
++  {
++    SwapStates(&s[0], &s[-1]);
++    p->FoundState = --s;
++    if (s->Freq > MAX_FREQ)
++      Rescale(p);
++  }
++  NextContext(p);
++}
++
++void Ppmd7_Update1_0(CPpmd7 *p)
++{
++  p->PrevSuccess = (2 * p->FoundState->Freq > p->MinContext->SummFreq);
++  p->RunLength += p->PrevSuccess;
++  p->MinContext->SummFreq += 4;
++  if ((p->FoundState->Freq += 4) > MAX_FREQ)
++    Rescale(p);
++  NextContext(p);
++}
++
++void Ppmd7_UpdateBin(CPpmd7 *p)
++{
++  p->FoundState->Freq = (Byte)(p->FoundState->Freq + (p->FoundState->Freq < 128 ? 1: 0));
++  p->PrevSuccess = 1;
++  p->RunLength++;
++  NextContext(p);
++}
++
++void Ppmd7_Update2(CPpmd7 *p)
++{
++  p->MinContext->SummFreq += 4;
++  if ((p->FoundState->Freq += 4) > MAX_FREQ)
++    Rescale(p);
++  p->RunLength = p->InitRL;
++  UpdateModel(p);
++}
+diff --git a/libarchive/archive_ppmd7.h b/libarchive/archive_ppmd7.h
+new file mode 100644
+index 00000000..1e7c77a3
+--- /dev/null
++++ b/libarchive/archive_ppmd7.h
+@@ -0,0 +1,144 @@
++/* Ppmd7.h -- PPMdH compression codec
++2010-03-12 : Igor Pavlov : Public domain
++This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
++
++/* This code supports virtual RangeDecoder and includes the implementation
++of RangeCoder from 7z, instead of RangeCoder from original PPMd var.H.
++If you need the compatibility with original PPMd var.H, you can use external RangeDecoder */
++
++#ifndef __LIBARCHIVE_BUILD
++#error This header is only to be used internally to libarchive.
++#endif
++
++#ifndef ARCHIVE_PPMD7_H_INCLUDED
++#define ARCHIVE_PPMD7_H_INCLUDED
++
++#include "archive_ppmd.h"
++
++#define PPMD7_MIN_ORDER 2
++#define PPMD7_MAX_ORDER 64
++
++#define PPMD7_MIN_MEM_SIZE (1 << 11)
++#define PPMD7_MAX_MEM_SIZE (0xFFFFFFFF - 12 * 3)
++
++struct CPpmd7_Context_;
++
++typedef
++  #ifdef PPMD_32BIT
++    struct CPpmd7_Context_ *
++  #else
++    UInt32
++  #endif
++  CPpmd7_Context_Ref;
++
++typedef struct CPpmd7_Context_
++{
++  UInt16 NumStats;
++  UInt16 SummFreq;
++  CPpmd_State_Ref Stats;
++  CPpmd7_Context_Ref Suffix;
++} CPpmd7_Context;
++
++#define Ppmd7Context_OneState(p) ((CPpmd_State *)&(p)->SummFreq)
++
++typedef struct
++{
++  CPpmd7_Context *MinContext, *MaxContext;
++  CPpmd_State *FoundState;
++  unsigned OrderFall, InitEsc, PrevSuccess, MaxOrder, HiBitsFlag;
++  Int32 RunLength, InitRL; /* must be 32-bit at least */
++
++  UInt32 Size;
++  UInt32 GlueCount;
++  Byte *Base, *LoUnit, *HiUnit, *Text, *UnitsStart;
++  UInt32 AlignOffset;
++
++  Byte Indx2Units[PPMD_NUM_INDEXES];
++  Byte Units2Indx[128];
++  CPpmd_Void_Ref FreeList[PPMD_NUM_INDEXES];
++  Byte NS2Indx[256], NS2BSIndx[256], HB2Flag[256];
++  CPpmd_See DummySee, See[25][16];
++  UInt16 BinSumm[128][64];
++} CPpmd7;
++
++void Ppmd7_Construct(CPpmd7 *p);
++Bool Ppmd7_Alloc(CPpmd7 *p, UInt32 size, ISzAlloc *alloc);
++void Ppmd7_Free(CPpmd7 *p, ISzAlloc *alloc);
++void Ppmd7_Init(CPpmd7 *p, unsigned maxOrder);
++#define Ppmd7_WasAllocated(p) ((p)->Base != NULL)
++
++
++/* ---------- Internal Functions ---------- */
++
++extern const Byte PPMD7_kExpEscape[16];
++
++#ifdef PPMD_32BIT
++  #define Ppmd7_GetPtr(p, ptr) (ptr)
++  #define Ppmd7_GetContext(p, ptr) (ptr)
++  #define Ppmd7_GetStats(p, ctx) ((ctx)->Stats)
++#else
++  #define Ppmd7_GetPtr(p, offs) ((void *)((p)->Base + (offs)))
++  #define Ppmd7_GetContext(p, offs) ((CPpmd7_Context *)Ppmd7_GetPtr((p), (offs)))
++  #define Ppmd7_GetStats(p, ctx) ((CPpmd_State *)Ppmd7_GetPtr((p), ((ctx)->Stats)))
++#endif
++
++void Ppmd7_Update1(CPpmd7 *p);
++void Ppmd7_Update1_0(CPpmd7 *p);
++void Ppmd7_Update2(CPpmd7 *p);
++void Ppmd7_UpdateBin(CPpmd7 *p);
++
++#define Ppmd7_GetBinSumm(p) \
++    &p->BinSumm[Ppmd7Context_OneState(p->MinContext)->Freq - 1][p->PrevSuccess + \
++    p->NS2BSIndx[Ppmd7_GetContext(p, p->MinContext->Suffix)->NumStats - 1] + \
++    (p->HiBitsFlag = p->HB2Flag[p->FoundState->Symbol]) + \
++    2 * p->HB2Flag[Ppmd7Context_OneState(p->MinContext)->Symbol] + \
++    ((p->RunLength >> 26) & 0x20)]
++
++CPpmd_See *Ppmd7_MakeEscFreq(CPpmd7 *p, unsigned numMasked, UInt32 *scale);
++
++
++/* ---------- Decode ---------- */
++
++typedef struct
++{
++  UInt32 (*GetThreshold)(void *p, UInt32 total);
++  void (*Decode)(void *p, UInt32 start, UInt32 size);
++  UInt32 (*DecodeBit)(void *p, UInt32 size0);
++} IPpmd7_RangeDec;
++
++typedef struct
++{
++  IPpmd7_RangeDec p;
++  UInt32 Range;
++  UInt32 Code;
++  UInt32 Low;
++  UInt32 Bottom;
++  IByteIn *Stream;
++} CPpmd7z_RangeDec;
++
++void Ppmd7z_RangeDec_CreateVTable(CPpmd7z_RangeDec *p);
++void PpmdRAR_RangeDec_CreateVTable(CPpmd7z_RangeDec *p);
++Bool Ppmd7z_RangeDec_Init(CPpmd7z_RangeDec *p);
++Bool PpmdRAR_RangeDec_Init(CPpmd7z_RangeDec *p);
++#define Ppmd7z_RangeDec_IsFinishedOK(p) ((p)->Code == 0)
++
++int Ppmd7_DecodeSymbol(CPpmd7 *p, IPpmd7_RangeDec *rc);
++
++
++/* ---------- Encode ---------- */
++
++/*typedef struct
++{
++  UInt64 Low;
++  UInt32 Range;
++  Byte Cache;
++  UInt64 CacheSize;
++  IByteOut *Stream;
++} CPpmd7z_RangeEnc;
++
++void Ppmd7z_RangeEnc_Init(CPpmd7z_RangeEnc *p);
++void Ppmd7z_RangeEnc_FlushData(CPpmd7z_RangeEnc *p);
++
++void Ppmd7_EncodeSymbol(CPpmd7 *p, CPpmd7z_RangeEnc *rc, int symbol);
++*/
++#endif
+diff --git a/libarchive/archive_ppmd7dec.c b/libarchive/archive_ppmd7dec.c
+new file mode 100644
+index 00000000..6aa8a275
+--- /dev/null
++++ b/libarchive/archive_ppmd7dec.c
+@@ -0,0 +1,236 @@
++/* Ppmd7Dec.c -- PPMdH Decoder
++2010-03-12 : Igor Pavlov : Public domain
++This code is based on PPMd var.H (2001): Dmitry Shkarin : Public domain */
++
++#include "archive_platform.h"
++
++#include "archive_ppmd7.h"
++
++#define kTopValue (1 << 24)
++
++static Bool Ppmd_RangeDec_Init(CPpmd7z_RangeDec *p)
++{
++  unsigned i;
++  p->Low = p->Bottom = 0;
++  p->Range = 0xFFFFFFFF;
++  for (i = 0; i < 4; i++)
++    p->Code = (p->Code << 8) | p->Stream->Read((void *)p->Stream);
++  return (p->Code < 0xFFFFFFFF);
++}
++
++Bool Ppmd7z_RangeDec_Init(CPpmd7z_RangeDec *p)
++{
++  if (p->Stream->Read((void *)p->Stream) != 0)
++    return False;
++  return Ppmd_RangeDec_Init(p);
++}
++
++Bool PpmdRAR_RangeDec_Init(CPpmd7z_RangeDec *p)
++{
++  if (!Ppmd_RangeDec_Init(p))
++    return False;
++  p->Bottom = 0x8000;
++  return True;
++}
++
++static UInt32 Range_GetThreshold(void *pp, UInt32 total)
++{
++  CPpmd7z_RangeDec *p = (CPpmd7z_RangeDec *)pp;
++  return (p->Code - p->Low) / (p->Range /= total);
++}
++
++static void Range_Normalize(CPpmd7z_RangeDec *p)
++{
++  while (1)
++  {
++    if((p->Low ^ (p->Low + p->Range)) >= kTopValue)
++    {
++      if(p->Range >= p->Bottom)
++        break;
++      else
++        p->Range = -p->Low & (p->Bottom - 1);
++    }
++    p->Code = (p->Code << 8) | p->Stream->Read((void *)p->Stream);
++    p->Range <<= 8;
++    p->Low <<= 8;
++  }
++}
++
++static void Range_Decode_7z(void *pp, UInt32 start, UInt32 size)
++{
++  CPpmd7z_RangeDec *p = (CPpmd7z_RangeDec *)pp;
++  p->Code -= start * p->Range;
++  p->Range *= size;
++  Range_Normalize(p);
++}
++
++static void Range_Decode_RAR(void *pp, UInt32 start, UInt32 size)
++{
++  CPpmd7z_RangeDec *p = (CPpmd7z_RangeDec *)pp;
++  p->Low += start * p->Range;
++  p->Range *= size;
++  Range_Normalize(p);
++}
++
++static UInt32 Range_DecodeBit_7z(void *pp, UInt32 size0)
++{
++  CPpmd7z_RangeDec *p = (CPpmd7z_RangeDec *)pp;
++  UInt32 newBound = (p->Range >> 14) * size0;
++  UInt32 symbol;
++  if (p->Code < newBound)
++  {
++    symbol = 0;
++    p->Range = newBound;
++  }
++  else
++  {
++    symbol = 1;
++    p->Code -= newBound;
++    p->Range -= newBound;
++  }
++  Range_Normalize(p);
++  return symbol;
++}
++
++static UInt32 Range_DecodeBit_RAR(void *pp, UInt32 size0)
++{
++  CPpmd7z_RangeDec *p = (CPpmd7z_RangeDec *)pp;
++  UInt32 bit, value = p->p.GetThreshold(p, PPMD_BIN_SCALE);
++  if(value < size0)
++  {
++    bit = 0;
++    p->p.Decode(p, 0, size0);
++  }
++  else
++  {
++    bit = 1;
++    p->p.Decode(p, size0, PPMD_BIN_SCALE - size0);
++  }
++  return bit;
++}
++
++void Ppmd7z_RangeDec_CreateVTable(CPpmd7z_RangeDec *p)
++{
++  p->p.GetThreshold = Range_GetThreshold;
++  p->p.Decode = Range_Decode_7z;
++  p->p.DecodeBit = Range_DecodeBit_7z;
++}
++
++void PpmdRAR_RangeDec_CreateVTable(CPpmd7z_RangeDec *p)
++{
++  p->p.GetThreshold = Range_GetThreshold;
++  p->p.Decode = Range_Decode_RAR;
++  p->p.DecodeBit = Range_DecodeBit_RAR;
++}
++
++#define MASK(sym) ((signed char *)charMask)[sym]
++
++int Ppmd7_DecodeSymbol(CPpmd7 *p, IPpmd7_RangeDec *rc)
++{
++  size_t charMask[256 / sizeof(size_t)];
++  if (p->MinContext->NumStats != 1)
++  {
++    CPpmd_State *s = Ppmd7_GetStats(p, p->MinContext);
++    unsigned i;
++    UInt32 count, hiCnt;
++    if ((count = rc->GetThreshold(rc, p->MinContext->SummFreq)) < (hiCnt = s->Freq))
++    {
++      Byte symbol;
++      rc->Decode(rc, 0, s->Freq);
++      p->FoundState = s;
++      symbol = s->Symbol;
++      Ppmd7_Update1_0(p);
++      return symbol;
++    }
++    p->PrevSuccess = 0;
++    i = p->MinContext->NumStats - 1;
++    do
++    {
++      if ((hiCnt += (++s)->Freq) > count)
++      {
++        Byte symbol;
++        rc->Decode(rc, hiCnt - s->Freq, s->Freq);
++        p->FoundState = s;
++        symbol = s->Symbol;
++        Ppmd7_Update1(p);
++        return symbol;
++      }
++    }
++    while (--i);
++    if (count >= p->MinContext->SummFreq)
++      return -2;
++    p->HiBitsFlag = p->HB2Flag[p->FoundState->Symbol];
++    rc->Decode(rc, hiCnt, p->MinContext->SummFreq - hiCnt);
++    PPMD_SetAllBitsIn256Bytes(charMask);
++    MASK(s->Symbol) = 0;
++    i = p->MinContext->NumStats - 1;
++    do { MASK((--s)->Symbol) = 0; } while (--i);
++  }
++  else
++  {
++    UInt16 *prob = Ppmd7_GetBinSumm(p);
++    if (rc->DecodeBit(rc, *prob) == 0)
++    {
++      Byte symbol;
++      *prob = (UInt16)PPMD_UPDATE_PROB_0(*prob);
++      symbol = (p->FoundState = Ppmd7Context_OneState(p->MinContext))->Symbol;
++      Ppmd7_UpdateBin(p);
++      return symbol;
++    }
++    *prob = (UInt16)PPMD_UPDATE_PROB_1(*prob);
++    p->InitEsc = PPMD7_kExpEscape[*prob >> 10];
++    PPMD_SetAllBitsIn256Bytes(charMask);
++    MASK(Ppmd7Context_OneState(p->MinContext)->Symbol) = 0;
++    p->PrevSuccess = 0;
++  }
++  for (;;)
++  {
++    CPpmd_State *ps[256], *s;
++    UInt32 freqSum, count, hiCnt;
++    CPpmd_See *see;
++    unsigned i, num, numMasked = p->MinContext->NumStats;
++    do
++    {
++      p->OrderFall++;
++      if (!p->MinContext->Suffix)
++        return -1;
++      p->MinContext = Ppmd7_GetContext(p, p->MinContext->Suffix);
++    }
++    while (p->MinContext->NumStats == numMasked);
++    hiCnt = 0;
++    s = Ppmd7_GetStats(p, p->MinContext);
++    i = 0;
++    num = p->MinContext->NumStats - numMasked;
++    do
++    {
++      int k = (int)(MASK(s->Symbol));
++      hiCnt += (s->Freq & k);
++      ps[i] = s++;
++      i -= k;
++    }
++    while (i != num);
++    
++    see = Ppmd7_MakeEscFreq(p, numMasked, &freqSum);
++    freqSum += hiCnt;
++    count = rc->GetThreshold(rc, freqSum);
++    
++    if (count < hiCnt)
++    {
++      Byte symbol;
++      CPpmd_State **pps = ps;
++      for (hiCnt = 0; (hiCnt += (*pps)->Freq) <= count; pps++);
++      s = *pps;
++      rc->Decode(rc, hiCnt - s->Freq, s->Freq);
++      Ppmd_See_Update(see);
++      p->FoundState = s;
++      symbol = s->Symbol;
++      Ppmd7_Update2(p);
++      return symbol;
++    }
++    if (count >= freqSum)
++      return -2;
++    rc->Decode(rc, hiCnt, freqSum - hiCnt);
++    see->Summ = (UInt16)(see->Summ + freqSum);
++    do { MASK(ps[--i]->Symbol) = 0; } while (i != 0);
++  }
++}
+diff --git a/libarchive/archive_read_support_format_rar.c b/libarchive/archive_read_support_format_rar.c
+index efc9e828..2b2238af 100644
+--- a/libarchive/archive_read_support_format_rar.c
++++ b/libarchive/archive_read_support_format_rar.c
+@@ -1,136 +1,137 @@
+ /*-
+ * Copyright (c) 2003-2007 Tim Kientzle
+ * Copyright (c) 2011 Andres Mejia
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR(S) ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR(S) BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+ #include "archive_platform.h"
+ 
+ #ifdef HAVE_ERRNO_H
+ #include <errno.h>
+ #endif
+ #include <time.h>
+ #include <limits.h>
+ 
+ #include "archive.h"
+ #include "archive_endian.h"
+ #include "archive_entry.h"
+ #include "archive_entry_locale.h"
++#include "archive_ppmd7.h"
+ #include "archive_private.h"
+ #include "archive_read_private.h"
+ 
+ /* RAR signature, also known as the mark header */
+ #define RAR_SIGNATURE "\x52\x61\x72\x21\x1A\x07\x00"
+ 
+ /* Header types */
+ #define MARK_HEAD    0x72
+ #define MAIN_HEAD    0x73
+ #define FILE_HEAD    0x74
+ #define COMM_HEAD    0x75
+ #define AV_HEAD      0x76
+ #define SUB_HEAD     0x77
+ #define PROTECT_HEAD 0x78
+ #define SIGN_HEAD    0x79
+ #define NEWSUB_HEAD  0x7a
+ #define ENDARC_HEAD  0x7b
+ 
+ /* Main Header Flags */
+ #define MHD_VOLUME       0x0001
+ #define MHD_COMMENT      0x0002
+ #define MHD_LOCK         0x0004
+ #define MHD_SOLID        0x0008
+ #define MHD_NEWNUMBERING 0x0010
+ #define MHD_AV           0x0020
+ #define MHD_PROTECT      0x0040
+ #define MHD_PASSWORD     0x0080
+ #define MHD_FIRSTVOLUME  0x0100
+ #define MHD_ENCRYPTVER   0x0200
+ 
+ /* Flags common to all headers */
+ #define HD_MARKDELETION     0x4000
+ #define HD_ADD_SIZE_PRESENT 0x8000
+ 
+ /* File Header Flags */
+ #define FHD_SPLIT_BEFORE 0x0001
+ #define FHD_SPLIT_AFTER  0x0002
+ #define FHD_PASSWORD     0x0004
+ #define FHD_COMMENT      0x0008
+ #define FHD_SOLID        0x0010
+ #define FHD_LARGE        0x0100
+ #define FHD_UNICODE      0x0200
+ #define FHD_SALT         0x0400
+ #define FHD_VERSION      0x0800
+ #define FHD_EXTTIME      0x1000
+ #define FHD_EXTFLAGS     0x2000
+ 
+ /* File dictionary sizes */
+ #define DICTIONARY_SIZE_64   0x00
+ #define DICTIONARY_SIZE_128  0x20
+ #define DICTIONARY_SIZE_256  0x40
+ #define DICTIONARY_SIZE_512  0x60
+ #define DICTIONARY_SIZE_1024 0x80
+ #define DICTIONARY_SIZE_2048 0xA0
+ #define DICTIONARY_SIZE_4096 0xC0
+ #define FILE_IS_DIRECTORY    0xE0
+ #define DICTIONARY_MASK      FILE_IS_DIRECTORY
+ 
+ /* OS Flags */
+ #define OS_MSDOS  0
+ #define OS_OS2    1
+ #define OS_WIN32  2
+ #define OS_UNIX   3
+ #define OS_MAC_OS 4
+ #define OS_BEOS   5
+ 
+ /* Compression Methods */
+ #define COMPRESS_METHOD_STORE   0x30
+ /* LZSS */
+ #define COMPRESS_METHOD_FASTEST 0x31
+ #define COMPRESS_METHOD_FAST    0x32
+ #define COMPRESS_METHOD_NORMAL  0x33
+ /* PPMd Variant H */
+ #define COMPRESS_METHOD_GOOD    0x34
+ #define COMPRESS_METHOD_BEST    0x35
+ 
+ #define CRC_POLYNOMIAL 0xEDB88320
+ 
+ #define NS_UNIT 10000000
+ 
+ #define DICTIONARY_MAX_SIZE 0x400000
+ 
+ #define MAINCODE_SIZE      299
+ #define OFFSETCODE_SIZE    60
+ #define LOWOFFSETCODE_SIZE 17
+ #define LENGTHCODE_SIZE    28
+ #define HUFFMAN_TABLE_SIZE \
+   MAINCODE_SIZE + OFFSETCODE_SIZE + LOWOFFSETCODE_SIZE + LENGTHCODE_SIZE
+ 
+ #define MAX_SYMBOL_LENGTH 0xF
+ #define MAX_SYMBOLS       20
+ 
+ /* Define this here for non-Windows platforms */
+ #if !((defined(__WIN32__) || defined(_WIN32) || defined(__WIN32)) && !defined(__CYGWIN__))
+ #define FILE_ATTRIBUTE_DIRECTORY 0x10
+ #endif
+ 
+ /* Fields common to all headers */
+@@ -187,64 +188,72 @@ struct lzss
+ struct rar
+ {
+   /* Entries from main RAR header */
+   unsigned main_flags;
+   char reserved1[2];
+   char reserved2[4];
+   char encryptver;
+ 
+   /* File header entries */
+   char compression_method;
+   unsigned file_flags;
+   int64_t packed_size;
+   int64_t unp_size;
+   time_t mtime;
+   long mnsec;
+   mode_t mode;
+ 
+   /* File header optional entries */
+   char salt[8];
+   time_t atime;
+   long ansec;
+   time_t ctime;
+   long cnsec;
+   time_t arctime;
+   long arcnsec;
+ 
+   /* Fields to help with tracking decompression of files. */
+   int64_t bytes_unconsumed;
+   int64_t bytes_remaining;
+   int64_t bytes_uncopied;
+   int64_t offset;
+   char valid;
++  unsigned char *unp_buffer;
++  unsigned int dictionary_size;
++  char start_new_block;
++
++  /* LZSS members */
+   struct huffman_code maincode;
+   struct huffman_code offsetcode;
+   struct huffman_code lowoffsetcode;
+   struct huffman_code lengthcode;
+   unsigned char lengthtable[HUFFMAN_TABLE_SIZE];
+-  unsigned char *unp_buffer;
+   struct lzss lzss;
+-  unsigned int dictionary_size;
+   char output_last_match;
+   unsigned int lastlength;
+   unsigned int lastoffset;
+   unsigned int oldoffset[4];
+   unsigned int lastlowoffset;
+   unsigned int numlowoffsetrepeats;
+   int64_t filterstart;
+-  char start_new_block;
+   char start_new_table;
+ 
++  /* PPMd Variant H members */
++  char is_ppmd_block;
++  CPpmd7 ppmd7_context;
++  CPpmd7z_RangeDec range_dec;
++  IByteIn bytein;
++
+   /*
+    * Bit stream reader.
+    */
+   struct rar_br {
+ #define CACHE_TYPE	uint64_t
+ #define CACHE_BITS	(8 * sizeof(CACHE_TYPE))
+     /* Cache buffer. */
+     CACHE_TYPE		 cache_buffer;
+     /* Indicates how many bits avail in cache_buffer. */
+     int			 cache_avail;
+     ssize_t		 avail_in;
+     const unsigned char *next_in;
+   } br;
+ };
+@@ -265,7 +274,7 @@ static int read_symlink_stored(struct archive_read *, struct archive_entry *,
+                                struct archive_string_conv *);
+ static int read_data_stored(struct archive_read *, const void **, size_t *,
+                             int64_t *);
+-static int read_data_lzss(struct archive_read *, const void **, size_t *,
++static int read_data_compressed(struct archive_read *, const void **, size_t *,
+                           int64_t *);
+ static int rar_br_preparation(struct archive_read *, struct rar_br *);
+ static int parse_codes(struct archive_read *);
+@@ -283,6 +292,188 @@ static int64_t expand(struct archive_read *, int64_t);
+ static int copy_from_lzss_window(struct archive_read *, const void **,
+                                    int64_t, int);
+ 
++/*
++ * Bit stream reader.
++ */
++/* Check that the cache buffer has enough bits. */
++#define rar_br_has(br, n) ((br)->cache_avail >= n)
++/* Get compressed data by bit. */
++#define rar_br_bits(br, n)        \
++  (((uint32_t)((br)->cache_buffer >>    \
++    ((br)->cache_avail - (n)))) & cache_masks[n])
++#define rar_br_bits_forced(br, n)     \
++  (((uint32_t)((br)->cache_buffer <<    \
++    ((n) - (br)->cache_avail))) & cache_masks[n])
++/* Read ahead to make sure the cache buffer has enough compressed data we
++ * will use.
++ *  True  : completed, there is enough data in the cache buffer.
++ *  False : there is no data in the stream. */
++#define rar_br_read_ahead(a, br, n) \
++  ((rar_br_has(br, (n)) || rar_br_fillup(a, br)) || rar_br_has(br, (n)))
++/* Notify how man bits we consumed. */
++#define rar_br_consume(br, n) ((br)->cache_avail -= (n))
++#define rar_br_consume_unalined_bits(br) ((br)->cache_avail &= ~7)
++
++static const uint32_t cache_masks[] = {
++  0x00000000, 0x00000001, 0x00000003, 0x00000007,
++  0x0000000F, 0x0000001F, 0x0000003F, 0x0000007F,
++  0x000000FF, 0x000001FF, 0x000003FF, 0x000007FF,
++  0x00000FFF, 0x00001FFF, 0x00003FFF, 0x00007FFF,
++  0x0000FFFF, 0x0001FFFF, 0x0003FFFF, 0x0007FFFF,
++  0x000FFFFF, 0x001FFFFF, 0x003FFFFF, 0x007FFFFF,
++  0x00FFFFFF, 0x01FFFFFF, 0x03FFFFFF, 0x07FFFFFF,
++  0x0FFFFFFF, 0x1FFFFFFF, 0x3FFFFFFF, 0x7FFFFFFF,
++  0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
++};
++
++/*
++ * Shift away used bits in the cache data and fill it up with following bits.
++ * Call this when cache buffer does not have enough bits you need.
++ *
++ * Returns 1 if the cache buffer is full.
++ * Returns 0 if the cache buffer is not full; input buffer is empty.
++ */
++static int
++rar_br_fillup(struct archive_read *a, struct rar_br *br)
++{
++/*
++ * x86 proccessor family can read misaligned data without an access error.
++ */
++#if defined(__i386__) || (defined(_MSC_VER) && defined(_M_IX86))
++#  if defined(_WIN32) && !defined(__CYGWIN__)
++#    define rar_be16dec(p) _byteswap_ushort(*(const uint16_t *)(p))
++#  elif defined(be16toh)
++#    define rar_be16dec(p) be16toh(*(const uint16_t *)(p))
++#  elif defined(betoh16)
++#    define rar_be16dec(p) betoh16(*(const uint16_t *)(p))
++#  else
++#    define rar_be16dec archive_be16dec
++#  endif
++#  if defined(_WIN32) && !defined(__CYGWIN__)
++#    define rar_be32dec(p) _byteswap_ulong(*(const uint32_t *)(p))
++#  elif defined(be32toh)
++#    define rar_be32dec(p) be32toh(*(const uint32_t *)(p))
++#  elif defined(betoh32)
++#    define rar_be32dec(p) betoh32(*(const uint32_t *)(p))
++#  else
++#    define rar_be32dec archive_be32dec
++#  endif
++#  if defined(_WIN32) && !defined(__CYGWIN__)
++#    define rar_be64dec(p) _byteswap_uint64(*(const uint64_t *)(p))
++#  elif defined(be64toh)
++#    define rar_be64dec(p) be64toh(*(const uint64_t *)(p))
++#  elif defined(betoh64)
++#    define rar_be64dec(p) betoh64(*(const uint64_t *)(p))
++#  else
++#    define rar_be64dec archive_be64dec
++#  endif
++#else
++#  define rar_be16dec archive_be16dec
++#  define rar_be32dec archive_be32dec
++#  define rar_be64dec archive_be64dec
++#endif
++  struct rar *rar = (struct rar *)(a->format->data);
++  int n = CACHE_BITS - br->cache_avail;
++
++  for (;;) {
++    switch (n >> 3) {
++    case 8:
++      if (br->avail_in >= 8) {
++        br->cache_buffer =
++            rar_be64dec(br->next_in);
++        br->next_in += 8;
++        br->avail_in -= 8;
++        br->cache_avail += 8 * 8;
++        rar->bytes_unconsumed += 8;
++        rar->bytes_remaining -= 8;
++        return (1);
++      }
++      break;
++    case 7:
++      if (br->avail_in >= 8) {/* Read extra one. */
++        br->cache_buffer =
++           (br->cache_buffer << 56) |
++            rar_be64dec(br->next_in) >> 8;
++        br->next_in += 7;
++        br->avail_in -= 7;
++        br->cache_avail += 7 * 8;
++        rar->bytes_unconsumed += 7;
++        rar->bytes_remaining -= 7;
++        return (1);
++      }
++      break;
++    case 6:
++      if (br->avail_in >= 6) {
++        br->cache_buffer =
++           (br->cache_buffer << 48) |
++           (((uint64_t)rar_be32dec(
++               br->next_in)) << 16) |
++            rar_be16dec(&br->next_in[4]);
++        br->next_in += 6;
++        br->avail_in -= 6;
++        br->cache_avail += 6 * 8;
++        rar->bytes_unconsumed += 6;
++        rar->bytes_remaining -= 6;
++        return (1);
++      }
++      break;
++    case 0:
++      /* We have enough compressed data in
++       * the cache buffer.*/
++      return (1);
++    default:
++      break;
++    }
++    if (br->avail_in <= 0) {
++
++      if (rar->bytes_unconsumed > 0) {
++        /* Consume as much as the decompressor
++         * actually used. */
++        __archive_read_consume(a, rar->bytes_unconsumed);
++        rar->bytes_unconsumed = 0;
++      }
++      br->next_in = __archive_read_ahead(a, 1, &(br->avail_in));
++      if (br->next_in == NULL)
++        return (0);
++      if (br->avail_in > rar->bytes_remaining)
++        br->avail_in = rar->bytes_remaining;
++      if (br->avail_in == 0)
++        return (0);
++    }
++    br->cache_buffer =
++       (br->cache_buffer << 8) | *br->next_in++;
++    br->avail_in--;
++    br->cache_avail += 8;
++    n -= 8;
++    rar->bytes_unconsumed++;
++    rar->bytes_remaining--;
++  }
++#undef rar_be16dec
++#undef rar_be32dec
++#undef rar_be64dec
++}
++
++static int
++rar_br_preparation(struct archive_read *a, struct rar_br *br)
++{
++  struct rar *rar = (struct rar *)(a->format->data);
++
++  if (rar->bytes_remaining > 0) {
++    br->next_in = __archive_read_ahead(a, 1, &(br->avail_in));
++    if (br->next_in == NULL) {
++      archive_set_error(&a->archive,
++          ARCHIVE_ERRNO_FILE_FORMAT,
++          "Truncated RAR file data");
++      return (ARCHIVE_FATAL);
++    }
++    if (br->avail_in > rar->bytes_remaining)
++      br->avail_in = rar->bytes_remaining;
++    if (br->cache_avail == 0)
++      (void)rar_br_fillup(a, br);
++  }
++  return (ARCHIVE_OK);
++}
++
+ /* Find last bit set */
+ static inline int
+ rar_fls(unsigned int word)
+@@ -357,6 +548,39 @@ lzss_emit_match(struct rar *rar, int offset, int length)
+   rar->lzss.position += length;
+ }
+ 
++static void *
++ppmd_alloc(void *p, size_t size)
++{
++  (void)p;
++  return malloc(size);
++}
++static void
++ppmd_free(void *p, void *address)
++{
++  (void)p;
++  free(address);
++}
++static ISzAlloc g_szalloc = { ppmd_alloc, ppmd_free };
++
++static Byte
++ppmd_read(void *p)
++{
++  struct archive_read *a = ((IByteIn*)p)->a;
++  struct rar *rar = (struct rar *)(a->format->data);
++  struct rar_br *br = &(rar->br);
++  Byte b;
++  if (!rar_br_read_ahead(a, br, 1))
++  {
++    archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
++                      "Truncated RAR file data");
++    rar->valid = 0;
++    return 0;
++  }
++  b = rar_br_bits(br, 8);
++  rar_br_consume(br, 8);
++  return b;
++}
++
+ int
+ archive_read_support_format_rar(struct archive *_a)
+ {
+@@ -544,28 +768,28 @@ static int
+ archive_read_format_rar_read_data(struct archive_read *a, const void **buff,
+                                   size_t *size, int64_t *offset)
+ {
+   struct rar *rar = (struct rar *)(a->format->data);
+ 
+   if (rar->bytes_unconsumed > 0) {
+       /* Consume as much as the decompressor actually used. */
+       __archive_read_consume(a, rar->bytes_unconsumed);
+       rar->bytes_unconsumed = 0;
+   }
+   switch (rar->compression_method)
+   {
+   case COMPRESS_METHOD_STORE:
+     return read_data_stored(a, buff, size, offset);
+ 
+   case COMPRESS_METHOD_FASTEST:
+   case COMPRESS_METHOD_FAST:
+   case COMPRESS_METHOD_NORMAL:
+-    return read_data_lzss(a, buff, size, offset);
+-
+   case COMPRESS_METHOD_GOOD:
+   case COMPRESS_METHOD_BEST:
++    return read_data_compressed(a, buff, size, offset);
++
+   default:
+     archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+                       "Unsupported compression method for RAR file.");
+   }
+   return (ARCHIVE_FATAL);
+ }
+@@ -596,12 +820,13 @@ static int
+ archive_read_format_rar_cleanup(struct archive_read *a)
+ {
+   struct rar *rar;
+ 
+   rar = (struct rar *)(a->format->data);
+   free_codes(a);
+   free(rar->unp_buffer);
+   free(rar->lzss.window);
++  Ppmd7_Free(&rar->ppmd7_context, &g_szalloc);
+   free(rar);
+   (a->format->data) = NULL;
+   return (ARCHIVE_OK);
+ }
+@@ -610,312 +835,314 @@ static int
+ read_header(struct archive_read *a, struct archive_entry *entry,
+             char head_type)
+ {
+   const void *h;
+   const char *p, *endp;
+   struct rar *rar;
+   struct rar_header rar_header;
+   struct rar_file_header file_header;
+   int64_t header_size;
+   unsigned filename_size, end;
+   char *filename;
+   char *strp;
+   char packed_size[8];
+   char unp_size[8];
+   int time;
+   struct archive_string_conv *sconv;
+   int ret = (ARCHIVE_OK), ret2;
+ 
+   rar = (struct rar *)(a->format->data);
+ 
+   if ((h = __archive_read_ahead(a, 7, NULL)) == NULL)
+     return (ARCHIVE_FATAL);
+   p = h;
+   memcpy(&rar_header, p, sizeof(rar_header));
+   rar->file_flags = archive_le16dec(rar_header.flags);
+   header_size = archive_le16dec(rar_header.size);
+   if (header_size < sizeof(file_header) + 7) {
+     archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+       "Invalid header size");
+     return (ARCHIVE_FATAL);
+   }
+   __archive_read_consume(a, 7);
+ 
+   if (!(rar->file_flags & FHD_SOLID))
+   {
+     rar->compression_method = 0;
+     rar->packed_size = 0;
+     rar->unp_size = 0;
+     rar->mtime = 0;
+     rar->ctime = 0;
+     rar->atime = 0;
+     rar->arctime = 0;
+     rar->mode = 0;
+     memset(&rar->salt, 0, sizeof(rar->salt));
+     rar->atime = 0;
+     rar->ansec = 0;
+     rar->ctime = 0;
+     rar->cnsec = 0;
+     rar->mtime = 0;
+     rar->mnsec = 0;
+     rar->arctime = 0;
+     rar->arcnsec = 0;
+   }
+   else
+   {
+     archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+                       "RAR solid archive support unavailable.");
+     return (ARCHIVE_FATAL);
+   }
+ 
+   if ((h = __archive_read_ahead(a, header_size - 7, NULL)) == NULL)
+     return (ARCHIVE_FATAL);
+   p = h;
+   endp = p + header_size - 7;
+   memcpy(&file_header, p, sizeof(file_header));
+   p += sizeof(file_header);
+ 
+   rar->compression_method = file_header.method;
+ 
+   time = archive_le32dec(file_header.file_time);
+   rar->mtime = get_time(time);
+ 
+   if (rar->file_flags & FHD_PASSWORD)
+   {
+     archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+                       "RAR encryption support unavailable.");
+     return (ARCHIVE_FATAL);
+   }
+ 
+   if (rar->file_flags & FHD_LARGE)
+   {
+     memcpy(packed_size, file_header.pack_size, 4);
+     memcpy(packed_size + 4, p, 4); /* High pack size */
+     p += 4;
+     memcpy(unp_size, file_header.unp_size, 4);
+     memcpy(unp_size + 4, p, 4); /* High unpack size */
+     p += 4;
+     rar->packed_size = archive_le64dec(&packed_size);
+     rar->unp_size = archive_le64dec(&unp_size);
+   }
+   else
+   {
+     rar->packed_size = archive_le32dec(file_header.pack_size);
+     rar->unp_size = archive_le32dec(file_header.unp_size);
+   }
+ 
+   /* TODO: Need to use CRC check for these kind of cases.
+    * For now, check if sizes are not < 0.
+    */
+   if (rar->packed_size < 0 || rar->unp_size < 0)
+   {
+     archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+                       "Invalid sizes specified.");
+     return (ARCHIVE_FATAL);
+   }
+ 
+   /* TODO: RARv3 subblocks contain comments. For now the complete block is
+    * consumed at the end.
+    */
+   if (head_type == NEWSUB_HEAD) {
+     size_t distance = p - (const char *)h;
+     header_size += rar->packed_size;
+     /* Make sure we have the extended data. */
+     if ((h = __archive_read_ahead(a, header_size - 7, NULL)) == NULL)
+         return (ARCHIVE_FATAL);
+     p = h;
+     endp = p + header_size - 7;
+     p += distance;
+   }
+ 
+   filename_size = archive_le16dec(file_header.name_size);
+   if (p + filename_size > endp) {
+     archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+       "Invalid filename size");
+     return (ARCHIVE_FATAL);
+   }
+   if ((filename = malloc(filename_size+2)) == NULL) {
+     archive_set_error(&a->archive, ENOMEM,
+                       "Couldn't allocate memory.");
+     return (ARCHIVE_FATAL);
+   }
+   memcpy(filename, p, filename_size);
+   filename[filename_size] = '\0';
+   if (rar->file_flags & FHD_UNICODE)
+   {
+     unsigned offset;
+ 
+     if (filename_size != strlen(filename))
+     {
+       unsigned char highbyte, flagbits, flagbyte, length;
+ 
+       end = filename_size;
+       filename_size = 0;
+       offset = strlen(filename) + 1;
+       highbyte = *(p + offset++);
+       flagbits = 0;
+       flagbyte = 0;
+       while (offset < end && filename_size < end)
+       {
+         if (!flagbits)
+         {
+           flagbyte = *(p + offset++);
+           flagbits = 8;
+         }
+ 	
+         flagbits -= 2;
+         switch((flagbyte >> flagbits) & 3)
+         {
+           case 0:
+             filename[filename_size++] = '\0';
+             filename[filename_size++] = *(p + offset++);
+             break;
+           case 1:
+             filename[filename_size++] = highbyte;
+             filename[filename_size++] = *(p + offset++);
+             break;
+           case 2:
+             filename[filename_size++] = *(p + offset + 1);
+             filename[filename_size++] = *(p + offset);
+             offset += 2;
+             break;
+           case 3:
+           {
+             length = *(p + offset++);
+             while (length)
+             {
+ 	          if (filename_size >= end)
+ 			    break;
+               filename[filename_size++] = *(p + offset);
+               length--;
+             }
+           }
+           break;
+         }
+       }
+       if (filename_size >= end) {
+         free(filename);
+         archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+           "Invalid filename");
+         return (ARCHIVE_FAILED);
+       }
+       filename[filename_size++] = '\0';
+       filename[filename_size++] = '\0';
+     } else
+       offset = 0;
+ 
+     sconv = archive_string_conversion_from_charset(&a->archive, "UTF-16BE", 1);
+     if (sconv == NULL)
+     {
+       free(filename);
+       return (ARCHIVE_FATAL);
+     }
+     strp = filename;
+     while (memcmp(strp, "\x00\x00", 2))
+     {
+       if (!memcmp(strp, "\x00\\", 2))
+         *(strp + 1) = '/';
+       strp += 2;
+     }
+     p += offset;
+   }
+   else
+   {
+     sconv = archive_string_default_conversion_for_read(&(a->archive));
+     while ((strp = strchr(filename, '\\')) != NULL)
+       *strp = '/';
+     p += filename_size;
+   }
+ 
+   if (rar->file_flags & FHD_SALT)
+   {
+     if (p + 8 > endp) {
+       archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+         "Invalid header size");
+       return (ARCHIVE_FATAL);
+     }
+     memcpy(rar->salt, p, 8);
+     p += 8;
+   }
+ 
+   if (rar->file_flags & FHD_EXTTIME) {
+     if (read_exttime(p, rar, endp) < 0) {
+       archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+         "Invalid header size");
+       return (ARCHIVE_FATAL);
+     }
+   }
+ 
+   __archive_read_consume(a, header_size - 7);
+ 
+   switch(file_header.host_os)
+   {
+   case OS_WIN32:
+     rar->mode = archive_le32dec(file_header.file_attr);
+     if (rar->mode & FILE_ATTRIBUTE_DIRECTORY)
+       rar->mode = AE_IFDIR | S_IXUSR | S_IXGRP | S_IXOTH;
+     else
+       rar->mode = AE_IFREG;
+     rar->mode |= S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+     break;
+ 
+   case OS_UNIX:
+     rar->mode = archive_le32dec(file_header.file_attr);
+     break;
+ 
+   case OS_MSDOS:
+   case OS_OS2:
+   case OS_MAC_OS:
+   case OS_BEOS:
+   default:
+     archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+                       "Unknown file attributes from RAR file's host OS");
+     free(filename);
+     return (ARCHIVE_FATAL);
+   }
+ 
+   rar->bytes_remaining = rar->packed_size;
+   rar->bytes_uncopied = rar->bytes_unconsumed = 0;
+   rar->lzss.position = rar->dictionary_size = rar->offset = 0;
+   rar->br.cache_avail = 0;
+   rar->br.avail_in = 0;
+   rar->valid = 1;
++  rar->is_ppmd_block = 0;
+   rar->start_new_table = 1;
+   free(rar->unp_buffer);
+   rar->unp_buffer = NULL;
+   memset(rar->lengthtable, 0, sizeof(rar->lengthtable));
++  Ppmd7_Free(&rar->ppmd7_context, &g_szalloc);
+ 
+   /* Don't set any archive entries for non-file header types */
+   if (head_type == NEWSUB_HEAD)
+     return ret;
+ 
+   archive_entry_set_mtime(entry, rar->mtime, rar->mnsec);
+   archive_entry_set_ctime(entry, rar->ctime, rar->cnsec);
+   archive_entry_set_atime(entry, rar->atime, rar->ansec);
+   archive_entry_set_size(entry, rar->unp_size);
+   archive_entry_set_mode(entry, rar->mode);
+ 
+   if (archive_entry_copy_pathname_l(entry, filename, filename_size, sconv))
+   {
+     if (errno == ENOMEM)
+     {
+       archive_set_error(&a->archive, ENOMEM,
+                         "Can't allocate memory for Pathname");
+       return (ARCHIVE_FATAL);
+     }
+     archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+                       "Pathname cannot be converted from %s to current locale.",
+                       archive_string_conversion_charset_name(sconv));
+     ret = (ARCHIVE_WARN);
+   }
+   free(filename);
+ 
+   if (((rar->mode) & AE_IFMT) == AE_IFLNK)
+   {
+     if ((ret2 = read_symlink_stored(a, entry, sconv)) < (ARCHIVE_WARN))
+       return ret2;
+     if (ret > ret2)
+       ret = ret2;
+   }
+ 
+   return ret;
+ }
+@@ -1076,401 +1303,304 @@ read_data_stored(struct archive_read *a, const void **buff, size_t *size,
+ }
+ 
+ static int
+-read_data_lzss(struct archive_read *a, const void **buff, size_t *size,
++read_data_compressed(struct archive_read *a, const void **buff, size_t *size,
+                int64_t *offset)
+ {
+   struct rar *rar;
+   int64_t start, end, actualend;
+-  int ret = (ARCHIVE_OK);
++  int ret = (ARCHIVE_OK), sym;
+ 
+   rar = (struct rar *)(a->format->data);
+   if (!rar->valid)
+     return (ARCHIVE_FAILED);
+ 
+   if (rar->dictionary_size && rar->offset >= rar->unp_size)
+   {
+     *buff = NULL;
+     *size = 0;
+     *offset = rar->offset;
++    Ppmd7_Free(&rar->ppmd7_context, &g_szalloc);
+     return (ARCHIVE_EOF);
+   }
+ 
+-  if (rar->dictionary_size && rar->bytes_uncopied > 0)
++  if (!rar->is_ppmd_block && rar->dictionary_size && rar->bytes_uncopied > 0)
+   {
+     *offset = rar->offset;
+     if (rar->offset + rar->bytes_uncopied > rar->unp_size)
+       *size = rar->unp_size - rar->offset;
+     else
+       *size = rar->bytes_uncopied;
+     ret = copy_from_lzss_window(a, buff, *offset, *size);
+     rar->offset += *size;
+     rar->bytes_uncopied -= *size;
+     return ret;
+   }
+ 
+   if ((ret = rar_br_preparation(a, &(rar->br))) < ARCHIVE_WARN)
+     return (ret);
+   if (rar->start_new_table && ((ret = parse_codes(a)) < (ARCHIVE_WARN)))
+     return (ret);
+ 
+-  start = rar->offset;
+-  end = start + rar->dictionary_size;
+-  rar->filterstart = INT64_MAX;
+-
+-  if ((actualend = expand(a, end)) < 0)
+-    return ((int)actualend);
+-
+-  rar->bytes_uncopied = actualend - start;
+-  if (rar->bytes_uncopied == 0) {
+-      /* Broken RAR files cause this case.
+-       * NOTE: If this case were possible on a normal RAR file
+-       * we would find out where it was actually bad and
+-       * what we would do to solve it. */
++  if (rar->is_ppmd_block)
++  {
++    if (!rar->unp_buffer)
++    {
++      if ((rar->unp_buffer = malloc(1)) == NULL)
++      {
++        archive_set_error(&a->archive, ENOMEM,
++                          "Unable to allocate memory for uncompressed data.");
++        return (ARCHIVE_FATAL);
++      }
++    }
++    if ((sym = Ppmd7_DecodeSymbol(&rar->ppmd7_context, &rar->range_dec.p)) < 0)
++    {
+       archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+-                        "Internal error extracting RAR file.");
+-      return (ARCHIVE_FAILED);
++                        "Invalid symbol");
++      return (ARCHIVE_FATAL);
++    }
++    *offset = rar->offset++;
++    *size = 1;
++    *rar->unp_buffer = sym;
++    *buff = rar->unp_buffer;
++    return (ret);
+   }
+-  *offset = rar->offset;
+-  if (rar->offset + rar->bytes_uncopied > rar->unp_size)
+-    *size = rar->unp_size - rar->offset;
+   else
+-    *size = rar->bytes_uncopied;
+-  ret = copy_from_lzss_window(a, buff, *offset, *size);
+-  rar->offset += *size;
+-  rar->bytes_uncopied -= *size;
++  {
++    start = rar->offset;
++    end = start + rar->dictionary_size;
++    rar->filterstart = INT64_MAX;
++
++    if ((actualend = expand(a, end)) < 0)
++      return ((int)actualend);
++
++    rar->bytes_uncopied = actualend - start;
++    if (rar->bytes_uncopied == 0) {
++        /* Broken RAR files cause this case.
++        * NOTE: If this case were possible on a normal RAR file
++        * we would find out where it was actually bad and
++        * what we would do to solve it. */
++        archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
++                          "Internal error extracting RAR file.");
++        return (ARCHIVE_FAILED);
++    }
++    *offset = rar->offset;
++    if (rar->offset + rar->bytes_uncopied > rar->unp_size)
++      *size = rar->unp_size - rar->offset;
++    else
++      *size = rar->bytes_uncopied;
++    ret = copy_from_lzss_window(a, buff, *offset, *size);
++    rar->offset += *size;
++    rar->bytes_uncopied -= *size;
++  }
+   return ret;
+ }
+ 
+-/*
+- * Bit stream reader.
+- */
+-/* Check that the cache buffer has enough bits. */
+-#define rar_br_has(br, n)	((br)->cache_avail >= n)
+-/* Get compressed data by bit. */
+-#define rar_br_bits(br, n)				\
+-	(((uint32_t)((br)->cache_buffer >>		\
+-		((br)->cache_avail - (n)))) & cache_masks[n])
+-#define rar_br_bits_forced(br, n)			\
+-	(((uint32_t)((br)->cache_buffer <<		\
+-		((n) - (br)->cache_avail))) & cache_masks[n])
+-/* Read ahead to make sure the cache buffer has enough compressed data we
+- * will use.
+- *  True  : completed, there is enough data in the cache buffer.
+- *  False : there is no data in the stream. */
+-#define rar_br_read_ahead(a, br, n)	\
+-	((rar_br_has(br, (n)) || rar_br_fillup(a, br)) || rar_br_has(br, (n)))
+-/* Notify how man bits we consumed. */
+-#define rar_br_consume(br, n)	((br)->cache_avail -= (n))
+-#define rar_br_consume_unalined_bits(br) ((br)->cache_avail &= ~7)
+-
+-static const uint32_t cache_masks[] = {
+-	0x00000000, 0x00000001, 0x00000003, 0x00000007,
+-	0x0000000F, 0x0000001F, 0x0000003F, 0x0000007F,
+-	0x000000FF, 0x000001FF, 0x000003FF, 0x000007FF,
+-	0x00000FFF, 0x00001FFF, 0x00003FFF, 0x00007FFF,
+-	0x0000FFFF, 0x0001FFFF, 0x0003FFFF, 0x0007FFFF,
+-	0x000FFFFF, 0x001FFFFF, 0x003FFFFF, 0x007FFFFF,
+-	0x00FFFFFF, 0x01FFFFFF, 0x03FFFFFF, 0x07FFFFFF,
+-	0x0FFFFFFF, 0x1FFFFFFF, 0x3FFFFFFF, 0x7FFFFFFF,
+-	0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+-};
+-
+-/*
+- * Shift away used bits in the cache data and fill it up with following bits.
+- * Call this when cache buffer does not have enough bits you need.
+- *
+- * Returns 1 if the cache buffer is full.
+- * Returns 0 if the cache buffer is not full; input buffer is empty.
+- */
+-static int
+-rar_br_fillup(struct archive_read *a, struct rar_br *br)
+-{
+-/*
+- * x86 proccessor family can read misaligned data without an access error.
+- */
+-#if defined(__i386__) || (defined(_MSC_VER) && defined(_M_IX86))
+-#  if defined(_WIN32) && !defined(__CYGWIN__)
+-#    define rar_be16dec(p) _byteswap_ushort(*(const uint16_t *)(p))
+-#  elif defined(be16toh)
+-#    define rar_be16dec(p) be16toh(*(const uint16_t *)(p))
+-#  elif defined(betoh16)
+-#    define rar_be16dec(p) betoh16(*(const uint16_t *)(p))
+-#  else
+-#    define rar_be16dec	archive_be16dec
+-#  endif
+-#  if defined(_WIN32) && !defined(__CYGWIN__)
+-#    define rar_be32dec(p) _byteswap_ulong(*(const uint32_t *)(p))
+-#  elif defined(be32toh)
+-#    define rar_be32dec(p) be32toh(*(const uint32_t *)(p))
+-#  elif defined(betoh32)
+-#    define rar_be32dec(p) betoh32(*(const uint32_t *)(p))
+-#  else
+-#    define rar_be32dec	archive_be32dec
+-#  endif
+-#  if defined(_WIN32) && !defined(__CYGWIN__)
+-#    define rar_be64dec(p) _byteswap_uint64(*(const uint64_t *)(p))
+-#  elif defined(be64toh)
+-#    define rar_be64dec(p) be64toh(*(const uint64_t *)(p))
+-#  elif defined(betoh64)
+-#    define rar_be64dec(p) betoh64(*(const uint64_t *)(p))
+-#  else
+-#    define rar_be64dec	archive_be64dec
+-#  endif
+-#else
+-#  define rar_be16dec	archive_be16dec
+-#  define rar_be32dec	archive_be32dec
+-#  define rar_be64dec	archive_be64dec
+-#endif
+- 	struct rar *rar = (struct rar *)(a->format->data);
+-	int n = CACHE_BITS - br->cache_avail;
+-
+-	for (;;) {
+-		switch (n >> 3) {
+-		case 8:
+-			if (br->avail_in >= 8) {
+-				br->cache_buffer =
+-				    rar_be64dec(br->next_in);
+-				br->next_in += 8;
+-				br->avail_in -= 8;
+-				br->cache_avail += 8 * 8;
+-				rar->bytes_unconsumed += 8;
+-				rar->bytes_remaining -= 8;
+-				return (1);
+-			}
+-			break;
+-		case 7:
+-			if (br->avail_in >= 8) {/* Read extra one. */
+-				br->cache_buffer =
+-		 		   (br->cache_buffer << 56) |
+-				    rar_be64dec(br->next_in) >> 8;
+-				br->next_in += 7;
+-				br->avail_in -= 7;
+-				br->cache_avail += 7 * 8;
+-				rar->bytes_unconsumed += 7;
+-				rar->bytes_remaining -= 7;
+-				return (1);
+-			}
+-			break;
+-		case 6:
+-			if (br->avail_in >= 6) {
+-				br->cache_buffer =
+-		 		   (br->cache_buffer << 48) |
+-				   (((uint64_t)rar_be32dec(
+-				       br->next_in)) << 16) |
+-				    rar_be16dec(&br->next_in[4]);
+-				br->next_in += 6;
+-				br->avail_in -= 6;
+-				br->cache_avail += 6 * 8;
+-				rar->bytes_unconsumed += 6;
+-				rar->bytes_remaining -= 6;
+-				return (1);
+-			}
+-			break;
+-		case 0:
+-			/* We have enough compressed data in
+-			 * the cache buffer.*/ 
+-			return (1);
+-		default:
+-			break;
+-		}
+-		if (br->avail_in <= 0) {
+-
+-			if (rar->bytes_unconsumed > 0) {
+-				/* Consume as much as the decompressor
+-				 * actually used. */
+-				__archive_read_consume(a, rar->bytes_unconsumed);
+-				rar->bytes_unconsumed = 0;
+-			}
+-			br->next_in = __archive_read_ahead(a, 1, &(br->avail_in));
+-			if (br->next_in == NULL)
+-				return (0);
+-			if (br->avail_in > rar->bytes_remaining)
+-				br->avail_in = rar->bytes_remaining;
+-			if (br->avail_in == 0)
+-				return (0);
+-		}
+-		br->cache_buffer =
+-		   (br->cache_buffer << 8) | *br->next_in++;
+-		br->avail_in--;
+-		br->cache_avail += 8;
+-		n -= 8;
+-		rar->bytes_unconsumed++;
+-		rar->bytes_remaining--;
+-	}
+-#undef rar_be16dec
+-#undef rar_be32dec
+-#undef rar_be64dec
+-}
+-
+-static int
+-rar_br_preparation(struct archive_read *a, struct rar_br *br)
+-{
+- 	struct rar *rar = (struct rar *)(a->format->data);
+-
+-	if (rar->bytes_remaining > 0) {
+-		br->next_in = __archive_read_ahead(a, 1, &(br->avail_in));
+-		if (br->next_in == NULL) {
+-			archive_set_error(&a->archive,
+-			    ARCHIVE_ERRNO_FILE_FORMAT,
+-			    "Truncated RAR file data");
+-			return (ARCHIVE_FATAL);
+-		}
+-		if (br->avail_in > rar->bytes_remaining)
+-			br->avail_in = rar->bytes_remaining;
+-		if (br->cache_avail == 0)
+-			(void)rar_br_fillup(a, br);
+-	}
+-	return (ARCHIVE_OK);
+-}
+-
+ static int
+ parse_codes(struct archive_read *a)
+ {
+   int i, j, val, n, r;
+-  unsigned char bitlengths[MAX_SYMBOLS], zerocount;
++  unsigned char bitlengths[MAX_SYMBOLS], zerocount, ppmd_flags;
++  unsigned int maxorder;
+   struct huffman_code precode;
+   struct rar *rar = (struct rar *)(a->format->data);
+   struct rar_br *br = &(rar->br);
+ 
+   free_codes(a);
+ 
+   /* Skip to the next byte */
+   rar_br_consume_unalined_bits(br);
+ 
+   /* PPMd block flag */
+   if (!rar_br_read_ahead(a, br, 1))
+     goto truncated_data;
+-  if (rar_br_bits(br, 1))
++  if ((rar->is_ppmd_block = rar_br_bits(br, 1)) != 0)
+   {
+     rar_br_consume(br, 1);
+-    archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+-                      "Unsupported compression method for RAR file.");
+-    return (ARCHIVE_FAILED);
++    ppmd_flags = rar_br_bits(br, 7);
++    rar_br_consume(br, 7);
++
++    /* Memory is allocated in MB */
++    if (ppmd_flags & 0x20)
++    {
++      rar->dictionary_size = (rar_br_bits(br, 8) + 1) << 20;
++      rar_br_consume(br, 8);
++    }
++
++    if (ppmd_flags & 0x40)
++    {
++      rar->ppmd7_context.InitEsc = rar_br_bits(br, 8);
++      rar_br_consume(br, 8);
++    }
++
++    if (ppmd_flags & 0x20)
++    {
++      maxorder = (ppmd_flags & 0x1F) + 1;
++      if(maxorder > 16)
++        maxorder = 16 + (maxorder - 16) * 3;
++
++      if (maxorder == 1)
++      {
++        archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
++                          "Truncated RAR file data");
++        return (ARCHIVE_FATAL);
++      }
++
++      rar->bytein.a = a;
++      rar->bytein.Read = &ppmd_read;
++      PpmdRAR_RangeDec_CreateVTable(&rar->range_dec);
++      rar->range_dec.Stream = &rar->bytein;
++      Ppmd7_Construct(&rar->ppmd7_context);
++
++      if (!Ppmd7_Alloc(&rar->ppmd7_context, rar->dictionary_size, &g_szalloc))
++      {
++        archive_set_error(&a->archive, ENOMEM,
++                          "Out of memory");
++        return (ARCHIVE_FATAL);
++      }
++      if (!PpmdRAR_RangeDec_Init(&rar->range_dec))
++      {
++        archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
++                          "Unable to initialize PPMd range decoder");
++        return (ARCHIVE_FATAL);
++      }
++      Ppmd7_Init(&rar->ppmd7_context, maxorder);
++    }
++    else
++    {
++      if (!PpmdRAR_RangeDec_Init(&rar->range_dec))
++      {
++        archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
++                          "Unable to initialize PPMd range decoder");
++        return (ARCHIVE_FATAL);
++      }
++    }
++    rar->start_new_table = 0;
++    return (ARCHIVE_OK);
+   }
+   rar_br_consume(br, 1);
+ 
+   /* Keep existing table flag */
+   if (!rar_br_read_ahead(a, br, 1))
+     goto truncated_data;
+   if (!rar_br_bits(br, 1))
+     memset(rar->lengthtable, 0, sizeof(rar->lengthtable));
+   rar_br_consume(br, 1);
+ 
+   memset(&bitlengths, 0, sizeof(bitlengths));
+   for (i = 0; i < MAX_SYMBOLS;)
+   {
+     if (!rar_br_read_ahead(a, br, 4))
+       goto truncated_data;
+     bitlengths[i++] = rar_br_bits(br, 4);
+     rar_br_consume(br, 4);
+     if (bitlengths[i-1] == 0xF)
+     {
+       if (!rar_br_read_ahead(a, br, 4))
+         goto truncated_data;
+       zerocount = rar_br_bits(br, 4);
+       rar_br_consume(br, 4);
+       if (zerocount)
+       {
+         i--;
+         for (j = 0; j < zerocount + 2 && i < MAX_SYMBOLS; j++)
+           bitlengths[i++] = 0;
+       }
+     }
+   }
+ 
+   memset(&precode, 0, sizeof(precode));
+   r = create_code(a, &precode, bitlengths, MAX_SYMBOLS, MAX_SYMBOL_LENGTH);
+   if (r != ARCHIVE_OK)
+     return (r);
+ 
+   for (i = 0; i < HUFFMAN_TABLE_SIZE;)
+   {
+     if ((val = read_next_symbol(a, &precode)) < 0)
+       return (ARCHIVE_FAILED);
+     if (val < 16)
+     {
+       rar->lengthtable[i] = (rar->lengthtable[i] + val) & 0xF;
+       i++;
+     }
+     else if (val < 18)
+     {
+       if (i == 0)
+       {
+         archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+                           "Internal error extracting RAR file.");
+         return (ARCHIVE_FAILED);
+       }
+ 
+       if(val == 16) {
+         if (!rar_br_read_ahead(a, br, 3))
+           goto truncated_data;
+         n = rar_br_bits(br, 3) + 3;
+         rar_br_consume(br, 3);
+       } else {
+         if (!rar_br_read_ahead(a, br, 7))
+           goto truncated_data;
+         n = rar_br_bits(br, 7) + 11;
+         rar_br_consume(br, 7);
+       }
+ 
+       for (j = 0; j < n && i < HUFFMAN_TABLE_SIZE; j++)
+       {
+         rar->lengthtable[i] = rar->lengthtable[i-1];
+         i++;
+       }
+     }
+     else
+     {
+       if(val == 18) {
+         if (!rar_br_read_ahead(a, br, 3))
+           goto truncated_data;
+         n = rar_br_bits(br, 3) + 3;
+         rar_br_consume(br, 3);
+       } else {
+         if (!rar_br_read_ahead(a, br, 7))
+           goto truncated_data;
+         n = rar_br_bits(br, 7) + 11;
+         rar_br_consume(br, 7);
+       }
+ 
+       for(j = 0; j < n && i < HUFFMAN_TABLE_SIZE; j++)
+         rar->lengthtable[i++] = 0;
+     }
+   }
+ 
+   r = create_code(a, &rar->maincode, &rar->lengthtable[0], MAINCODE_SIZE,
+               MAX_SYMBOL_LENGTH);
+   if (r != ARCHIVE_OK)
+     return (r);
+   r = create_code(a, &rar->offsetcode, &rar->lengthtable[MAINCODE_SIZE],
+               OFFSETCODE_SIZE, MAX_SYMBOL_LENGTH);
+   if (r != ARCHIVE_OK)
+     return (r);
+   r = create_code(a, &rar->lowoffsetcode,
+               &rar->lengthtable[MAINCODE_SIZE + OFFSETCODE_SIZE],
+               LOWOFFSETCODE_SIZE, MAX_SYMBOL_LENGTH);
+   if (r != ARCHIVE_OK)
+     return (r);
+   r = create_code(a, &rar->lengthcode,
+               &rar->lengthtable[MAINCODE_SIZE + OFFSETCODE_SIZE +
+               LOWOFFSETCODE_SIZE], LENGTHCODE_SIZE, MAX_SYMBOL_LENGTH);
+   if (r != ARCHIVE_OK)
+     return (r);
+ 
+   if (!rar->dictionary_size || !rar->lzss.window)
+   {
+     /* Seems as though dictionary sizes are not used. Even so, minimize
+      * memory usage as much as possible.
+      */
+     if (rar->unp_size >= DICTIONARY_MAX_SIZE)
+       rar->dictionary_size = DICTIONARY_MAX_SIZE;
+     else
+       rar->dictionary_size = rar_fls(rar->unp_size) << 1;
+     rar->lzss.window = (unsigned char *)realloc(rar->lzss.window,
+                                                 rar->dictionary_size);
+     memset(rar->lzss.window, 0, rar->dictionary_size);
+     rar->lzss.mask = rar->dictionary_size - 1;
+   }
+ 
+   rar->start_new_table = 0;
+   return (ARCHIVE_OK);
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8007","gap_exists":true,"gap_type":["input semantics","state","attack surface"],"commit_induced":"YES","maintenance_needed":true,"confidence":97,"affected_functions":["archive_read_format_rar_read_data","read_data_compressed","parse_codes","ppmd_read","PpmdRAR_RangeDec_Init","Ppmd7_DecodeSymbol","Ppmd7_Alloc","Ppmd7_Init"],"reason":"S1 adds a substantial PPMd Variant H decoding path for RAR methods COMPRESS_METHOD_GOOD and COMPRESS_METHOD_BEST, including allocator/model state and range-decoder logic. H0 reaches the general RAR reader through archive_read_support_format_all and archive_read_data_block, but its fixed RAR inputs are named as uncompressed, normal-compressed, multi-LZSS, subblock, Unicode, or truncated archives; none identifies a PPMd archive. Sparse mutation of fewer than 1% of those existing images does not provide adequate structured control over the coordinated compression method, PPMd block flag, ppmd_flags, dictionary size, maxorder, range-decoder bytes, and encoded symbol stream needed to exercise the new decoder beyond shallow rejection or initialization. This material coverage gap did not exist in S0 because the PPMd implementation and the GOOD/BEST dispatch were introduced by S1.","evidence":["archive_read_format_rar_read_data newly routes COMPRESS_METHOD_GOOD and COMPRESS_METHOD_BEST to read_data_compressed; S0 reported those methods as unsupported.","parse_codes changes the PPMd block-bit branch from an unsupported-format failure into initialization driven by ppmd_flags, dictionary_size, InitEsc, and maxorder.","S1 adds CPpmd7 and CPpmd7z_RangeDec state to struct rar and invokes Ppmd7_DecodeSymbol when rar->is_ppmd_block is set.","The new files archive_ppmd7.c and archive_ppmd7dec.c add model allocation/update and range-decoding attack surface, including Ppmd7_Alloc, Ppmd7_Init, Ppmd7_Update1, Ppmd7_Update2, and Ppmd7_DecodeSymbol.","H0 calls archive_read_support_format_all and drains archive_read_data_block, so the public API protocol is suitable, but its files[] list contains no PPMd-designated RAR seed.","H0 only corrupts numbytes selected below size/100 in existing images, which does not adequately control the multiple correlated RAR and PPMd fields introduced in parse_codes."],"recommended_action":"Add at least one valid RAR input using COMPRESS_METHOD_GOOD or COMPRESS_METHOD_BEST with a PPMd block, and preferably corpus variants controlling ppmd_flags, dictionary_size, InitEsc, maxorder, truncation, and repeated-block decoder state; retain the existing archive_read_open_memory and archive_read_data_block protocol."}
+tokens used
+41,807

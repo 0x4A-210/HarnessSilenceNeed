@@ -1,0 +1,494 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8094-knjsepu6
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fe-f38a-71d3-a98a-8e48f88a8525
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8094
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `checkpolicy/fuzz/checkpolicy-fuzzer.c`
+
+~~~~cpp
+#include <assert.h>
+#include <setjmp.h>
+#include <unistd.h>
+#include <sys/mman.h>
+
+#include <sepol/debug.h>
+#include <sepol/kernel_to_cil.h>
+#include <sepol/kernel_to_conf.h>
+#include <sepol/module_to_cil.h>
+#include <sepol/policydb/policydb.h>
+#include <sepol/policydb/hierarchy.h>
+#include <sepol/policydb/expand.h>
+#include <sepol/policydb/link.h>
+
+#include "module_compiler.h"
+#include "queue.h"
+
+extern int policydb_validate(sepol_handle_t *handle, const policydb_t *p);
+extern int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
+
+extern int mlspol;
+extern policydb_t *policydbp;
+extern queue_t id_queue;
+extern unsigned int policydb_errors;
+
+extern int yynerrs;
+extern FILE *yyin;
+extern void init_parser(int pass, const char *input_name);
+extern int yyparse(void);
+extern void yyrestart(FILE *);
+extern int yylex_destroy(void);
+
+jmp_buf fuzzing_pre_parse_stack_state;
+
+// Set to 1 for verbose libsepol logging
+#define VERBOSE 0
+
+static ssize_t full_write(int fd, const void *buf, size_t count)
+{
+	ssize_t written = 0;
+
+	while (count > 0) {
+		ssize_t ret = write(fd, buf, count);
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+
+			return ret;
+		}
+
+		if (ret == 0)
+			break;
+
+		written += ret;
+		buf = (const unsigned char *)buf + (size_t)ret;
+		count -= (size_t)ret;
+	}
+
+	return written;
+}
+
+static int read_source_policy(policydb_t *p, const uint8_t *data, size_t size)
+{
+	int fd, rc;
+	ssize_t wr;
+
+	fd = memfd_create("fuzz-input", MFD_CLOEXEC);
+	if (fd < 0)
+		return -1;
+
+	wr = full_write(fd, data, size);
+	if (wr < 0 || (size_t)wr != size) {
+		close(fd);
+		return -1;
+	}
+
+	fsync(fd);
+
+	yynerrs = 0;
+
+	yyin = fdopen(fd, "r");
+	if (!yyin) {
+		close(fd);
+		return -1;
+	}
+
+	rewind(yyin);
+
+	id_queue = queue_create();
+	if (id_queue == NULL) {
+		fclose(yyin);
+		yylex_destroy();
+		return -1;
+	}
+
+	policydbp = p;
+	mlspol = p->mls;
+
+	init_parser(1, "fuzz-input-1");
+
+	if (setjmp(fuzzing_pre_parse_stack_state) != 0) {
+		queue_destroy(id_queue);
+		fclose(yyin);
+		yylex_destroy();
+		return -1;
+	}
+
+	rc = yyparse();
+	// TODO: drop global variable policydb_errors if proven to be redundant
+	assert(rc || !policydb_errors);
+	if (rc || policydb_errors) {
+		queue_destroy(id_queue);
+		fclose(yyin);
+		yylex_destroy();
+		return -1;
+	}
+
+	rewind(yyin);
+	init_parser(2, "fuzz-input-2");
+	yyrestart(yyin);
+
+	rc = yyparse();
+	assert(rc || !policydb_errors);
+	if (rc || policydb_errors) {
+		queue_destroy(id_queue);
+		fclose(yyin);
+		yylex_destroy();
+		return -1;
+	}
+
+	queue_destroy(id_queue);
+	fclose(yyin);
+	yylex_destroy();
+
+	return 0;
+}
+
+static int write_binary_policy(FILE *outfp, policydb_t *p)
+{
+	struct policy_file pf;
+
+	policy_file_init(&pf);
+	pf.type = PF_USE_STDIO;
+	pf.fp = outfp;
+	return policydb_write(p, &pf);
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+	policydb_t parsepolicydb = {};
+	policydb_t kernpolicydb = {};
+	policydb_t *finalpolicydb;
+	sidtab_t sidtab = {};
+	FILE *devnull = NULL;
+	int mls, platform, policyvers;
+
+	sepol_debug(VERBOSE);
+
+	/*
+	 * Take the first byte whether to generate a SELinux or Xen policy,
+	 * the second byte whether to parse as MLS policy,
+	 * and the second byte as policy version.
+	 */
+	if (size < 3)
+		return 0;
+	switch (data[0]) {
+	case 'S':
+		platform = SEPOL_TARGET_SELINUX;
+		break;
+	case 'X':
+		platform = SEPOL_TARGET_XEN;
+		break;
+	default:
+		return 0;
+	}
+	switch (data[1]) {
+	case '0':
+		mls = 0;
+		break;
+	case '1':
+		mls = 1;
+		break;
+	default:
+		return 0;
+	}
+	static_assert(0x7F - 'A' >= POLICYDB_VERSION_MAX,
+		      "Max policy version should be representable");
+	policyvers = data[2] - 'A';
+	if (policyvers < POLICYDB_VERSION_MIN ||
+	    policyvers > POLICYDB_VERSION_MAX)
+		return 0;
+	data += 3;
+	size -= 3;
+
+	if (policydb_init(&parsepolicydb))
+		goto exit;
+
+	parsepolicydb.policy_type = POLICY_BASE;
+	parsepolicydb.mls = mls;
+	parsepolicydb.handle_unknown = DENY_UNKNOWN;
+	parsepolicydb.policyvers = policyvers;
+	policydb_set_target_platform(&parsepolicydb, platform);
+
+	if (read_source_policy(&parsepolicydb, data, size))
+		goto exit;
+
+	if (parsepolicydb.policy_type == POLICY_BASE) {
+		if (link_modules(NULL, &parsepolicydb, NULL, 0, VERBOSE))
+			goto exit;
+
+		if (policydb_init(&kernpolicydb))
+			goto exit;
+
+		if (expand_module(NULL, &parsepolicydb, &kernpolicydb, VERBOSE,
+				  /*check_assertions=*/0))
+			goto exit;
+
+		(void)check_assertions(
+			NULL, &kernpolicydb,
+			kernpolicydb.global->branch_list->avrules);
+		(void)hierarchy_check_constraints(NULL, &kernpolicydb);
+
+		kernpolicydb.policyvers = policyvers;
+
+		assert(kernpolicydb.policy_type == POLICY_KERN);
+		assert(kernpolicydb.handle_unknown == SEPOL_DENY_UNKNOWN);
+		assert(kernpolicydb.mls == mls);
+		assert(kernpolicydb.target_platform == platform);
+
+		finalpolicydb = &kernpolicydb;
+	} else {
+		assert(parsepolicydb.policy_type == POLICY_MOD);
+		assert(parsepolicydb.handle_unknown == SEPOL_DENY_UNKNOWN);
+		assert(parsepolicydb.mls == mls);
+		assert(parsepolicydb.target_platform == platform);
+
+		finalpolicydb = &parsepolicydb;
+	}
+
+	if (policydb_load_isids(finalpolicydb, &sidtab))
+		goto exit;
+
+	if (finalpolicydb->policy_type == POLICY_KERN &&
+	    policydb_optimize(finalpolicydb))
+		goto exit;
+
+	if (policydb_sort_ocontexts(finalpolicydb))
+		goto exit;
+
+	if (policydb_validate(NULL, finalpolicydb))
+		/* never generate an invalid policy */
+		abort();
+
+	devnull = fopen("/dev/null", "we");
+	if (devnull == NULL)
+		goto exit;
+
+	if (write_binary_policy(devnull, finalpolicydb))
+		abort();
+
+	if (finalpolicydb->policy_type == POLICY_KERN &&
+	    sepol_kernel_policydb_to_conf(devnull, finalpolicydb))
+		abort();
+
+	if (finalpolicydb->policy_type == POLICY_KERN &&
+	    sepol_kernel_policydb_to_cil(devnull, finalpolicydb))
+		abort();
+
+	if (finalpolicydb->policy_type == POLICY_MOD &&
+	    sepol_module_policydb_to_cil(devnull, finalpolicydb, /*linked=*/0))
+		abort();
+
+exit:
+	if (devnull != NULL)
+		fclose(devnull);
+
+	sepol_sidtab_destroy(&sidtab);
+	policydb_destroy(&kernpolicydb);
+	policydb_destroy(&parsepolicydb);
+
+	id_queue = NULL;
+	policydbp = NULL;
+	module_compiler_reset();
+
+	/* Non-zero return values are reserved for future use. */
+	return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/checkpolicy/policy_define.c b/checkpolicy/policy_define.c
+index 982de3f6..30157826 100644
+--- a/checkpolicy/policy_define.c
++++ b/checkpolicy/policy_define.c
+@@ -6019,141 +6019,143 @@ int define_fs_use(int behavior)
+ static int define_genfs_context_helper(char *fstype, int has_type)
+ {
+ 	struct genfs *genfs_p, *genfs, *newgenfs;
+ 	ocontext_t *newc, *c, *head, *p;
+ 	class_datum_t *cladatum;
+ 	char *type = NULL;
+ 	const char *sclass;
+ 	size_t len, len2;
+ 	int wildcard = ebitmap_get_bit(&policydbp->policycaps,
+ 				       POLICYDB_CAP_GENFS_SECLABEL_WILDCARD);
+ 
+ 	if (policydbp->target_platform != SEPOL_TARGET_SELINUX) {
+ 		yyerror("genfs not supported for target");
+ 		return -1;
+ 	}
+ 
+ 	if (pass == 1) {
+ 		free(fstype);
+ 		free(queue_remove(id_queue));
+ 		if (has_type)
+ 			free(queue_remove(id_queue));
+ 		parse_security_context(NULL);
+ 		return 0;
+ 	}
+ 
+ 	for (genfs_p = NULL, genfs = policydbp->genfs; genfs;
+ 	     genfs_p = genfs, genfs = genfs->next) {
+ 		if (strcmp(fstype, genfs->fstype) <= 0)
+ 			break;
+ 	}
+ 
+ 	if (!genfs || strcmp(fstype, genfs->fstype)) {
+ 		newgenfs = calloc(1, sizeof(struct genfs));
+ 		if (!newgenfs) {
+ 			yyerror("out of memory");
+ 			return -1;
+ 		}
+ 		newgenfs->fstype = fstype;
++		/* ownership transferred into the genfs list; do not free on error */
++		fstype = NULL;
+ 		newgenfs->next = genfs;
+ 		if (genfs_p)
+ 			genfs_p->next = newgenfs;
+ 		else
+ 			policydbp->genfs = newgenfs;
+ 		genfs = newgenfs;
+ 	} else {
+ 		free(fstype);
+ 		fstype = NULL;
+ 	}
+ 
+ 	newc = calloc(1, sizeof(ocontext_t));
+ 	if (!newc) {
+ 		yyerror("out of memory");
+ 		return -1;
+ 	}
+ 
+ 	newc->u.name = (char *)queue_remove(id_queue);
+ 	if (!newc->u.name)
+ 		goto fail;
+ 
+ 	if (wildcard) {
+ 		size_t name_len = strlen(newc->u.name);
+ 		newc->u.name = realloc(newc->u.name, name_len + 2);
+ 		if (newc->u.name == NULL) {
+ 			yyerror("out of memory");
+ 			return -1;
+ 		}
+ 
+ 		newc->u.name[name_len] = '*';
+ 		newc->u.name[name_len + 1] = '\0';
+ 	}
+ 
+ 	if (has_type) {
+ 		type = (char *)queue_remove(id_queue);
+ 		if (!type)
+ 			goto fail;
+ 		if (type[1] != 0) {
+ 			yyerror2("invalid type %s", type);
+ 			goto fail;
+ 		}
+ 		switch (type[0]) {
+ 		case 'b':
+ 			sclass = "blk_file";
+ 			break;
+ 		case 'c':
+ 			sclass = "chr_file";
+ 			break;
+ 		case 'd':
+ 			sclass = "dir";
+ 			break;
+ 		case 'p':
+ 			sclass = "fifo_file";
+ 			break;
+ 		case 'l':
+ 			sclass = "lnk_file";
+ 			break;
+ 		case 's':
+ 			sclass = "sock_file";
+ 			break;
+ 		case '-':
+ 			sclass = "file";
+ 			break;
+ 		default:
+ 			yyerror2("invalid type %s", type);
+ 			goto fail;
+ 		}
+ 
+ 		cladatum = hashtab_search(policydbp->p_classes.table, sclass);
+ 		if (!cladatum) {
+ 			yyerror2("could not find class %s for "
+ 				 "genfscon statement",
+ 				 sclass);
+ 			goto fail;
+ 		}
+ 		newc->v.sclass = cladatum->s.value;
+ 	}
+ 	if (parse_security_context(&newc->context[0]))
+ 		goto fail;
+ 
+ 	head = genfs->head;
+ 
+ 	for (p = NULL, c = head; c; p = c, c = c->next) {
+ 		if (!strcmp(newc->u.name, c->u.name) &&
+ 		    (!newc->v.sclass || !c->v.sclass ||
+ 		     newc->v.sclass == c->v.sclass)) {
+ 			yyerror2("duplicate entry for genfs entry (%s, %s)",
+ 				 genfs->fstype, newc->u.name);
+ 			goto fail;
+ 		}
+ 		len = strlen(newc->u.name);
+ 		len2 = strlen(c->u.name);
+ 		if (len > len2)
+ 			break;
+ 	}
+ 
+ 	newc->next = c;
+ 	if (p)
+ 		p->next = newc;
+ 	else
+ 		genfs->head = newc;
+ 	free(type);
+ 	return 0;
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8094","gap_exists":false,"gap_type":[],"confidence":98,"affected_functions":["define_genfs_context_helper","read_source_policy","LLVMFuzzerTestOneInput"],"reason":"H0 directly fuzzes the source-policy parser that invokes define_genfs_context_helper and preserves parser-failure cleanup behavior. Arbitrary policy text can exercise SELinux genfscon statements, including failures after a new struct genfs receives ownership of fstype; H0 then destroys parsepolicydb on the exit path, covering the ownership and cleanup interaction changed in S1. No distinct entry point, protocol, configuration, input semantics, state, or attack surface implicated by the change is visibly omitted.","evidence":["H0 selects SEPOL_TARGET_SELINUX when data[0] is 'S', satisfying define_genfs_context_helper's target_platform requirement.","read_source_policy feeds all bytes after the three-byte configuration prefix to yyparse in both parser passes.","The changed function handles genfs policy syntax through policydbp and id_queue, both of which H0 initializes before parsing.","On any yyparse or policydb_errors failure, H0 returns to LLVMFuzzerTestOneInput, which calls policydb_destroy(&parsepolicydb), exercising cleanup of a partially populated genfs list.","H0 permits arbitrary malformed source-policy input, so paths after insertion of newgenfs—including missing names, invalid types, missing classes, invalid security contexts, and duplicate entries—are within its input surface."],"recommended_action":"Retain H0; add corpus seeds containing valid and malformed SELinux genfscon statements to improve reachability, but no new harness entry point is required."}
+tokens used
+6,886

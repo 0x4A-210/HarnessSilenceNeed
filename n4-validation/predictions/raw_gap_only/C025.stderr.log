@@ -1,0 +1,940 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/n4-gap_only-C025-18p54cew
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08a74-d4c5-78e0-bf42-4850f099cf0b
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+C025
+
+## Existing harness H0
+
+The complete project-owned harness translation unit is shown below. Framework
+main/CLI scaffolding is not expanded; directly included semantic helper files
+are shown separately under the fixed context rule.
+
+Path: `fuzz/c/std/json_fuzzer.cc`
+
+```cpp
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN json_fuzzer.c
+./a.out ../../../test/data/*.json
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__AUX__BASE
+#define WUFFS_CONFIG__MODULE__AUX__JSON
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__JSON
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+
+#define TOK_BUFFER_ARRAY_SIZE 4096
+#define STACK_SIZE (WUFFS_JSON__DECODER_DEPTH_MAX_INCL + 1)
+
+// Wuffs allows either statically or dynamically allocated work buffers. This
+// program exercises static allocation.
+#define WORK_BUFFER_ARRAY_SIZE \
+  WUFFS_JSON__DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE
+#if WORK_BUFFER_ARRAY_SIZE > 0
+uint8_t g_work_buffer_array[WORK_BUFFER_ARRAY_SIZE];
+#else
+// Not all C/C++ compilers support 0-length arrays.
+uint8_t g_work_buffer_array[1];
+#endif
+
+// Each stack element is 1 byte. The low 7 bits denote the container:
+//  - 0x01 means no container: we are at the top level.
+//  - 0x02 means a [] list.
+//  - 0x04 means a {} dictionary.
+//
+// The high 0x80 bit holds the even/odd-ness of the number of elements in that
+// container. A valid dictionary contains key-value pairs and should therefore
+// contain an even number of elements.
+typedef uint8_t stack_element;
+
+const char*  //
+fuzz_one_token(wuffs_base__token t,
+               wuffs_base__token prev_token,
+               wuffs_base__io_buffer* src,
+               size_t* ti,
+               stack_element* stack,
+               size_t* depth) {
+  uint64_t len = wuffs_base__token__length(&t);
+  if (len > 0xFFFF) {
+    return "fuzz: internal error: length too long (vs 0xFFFF)";
+  } else if (len > (src->meta.wi - *ti)) {
+    return "fuzz: internal error: length too long (vs wi - ti)";
+  }
+  *ti += len;
+
+  if ((wuffs_base__token__value_extension(&t) >= 0) &&
+      !wuffs_base__token__continued(&prev_token)) {
+    return "fuzz: internal error: extended token not after continued token";
+  }
+
+  int64_t vbc = wuffs_base__token__value_base_category(&t);
+  uint64_t vbd = wuffs_base__token__value_base_detail(&t);
+
+  switch (vbc) {
+    case WUFFS_BASE__TOKEN__VBC__STRUCTURE: {
+      bool from_consistent = false;
+      if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_NONE) {
+        from_consistent = stack[*depth] & 0x01;
+      } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_LIST) {
+        from_consistent = stack[*depth] & 0x02;
+      } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_DICT) {
+        from_consistent = stack[*depth] & 0x04;
+      }
+      if (!from_consistent) {
+        return "fuzz: internal error: inconsistent VBD__STRUCTURE__FROM_ETC";
+      }
+
+      if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__PUSH) {
+        (*depth)++;
+        if ((*depth >= STACK_SIZE) || (*depth == 0)) {
+          return "fuzz: internal error: depth too large";
+        }
+
+        if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_NONE) {
+          return "fuzz: internal error: push to the 'none' container";
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_LIST) {
+          stack[*depth] = 0x02;
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_DICT) {
+          stack[*depth] = 0x04;
+        } else {
+          return "fuzz: internal error: unrecognized VBD__STRUCTURE__TO_ETC";
+        }
+
+      } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__POP) {
+        if ((vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_DICT) &&
+            (0 != (0x80 & stack[*depth]))) {
+          return "fuzz: internal error: dictionary had an incomplete key/value "
+                 "pair";
+        }
+
+        if (*depth <= 0) {
+          return "fuzz: internal error: depth too small";
+        }
+        (*depth)--;
+
+        bool to_consistent = false;
+        if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_NONE) {
+          to_consistent = stack[*depth] & 0x01;
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_LIST) {
+          to_consistent = stack[*depth] & 0x02;
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_DICT) {
+          to_consistent = stack[*depth] & 0x04;
+        }
+        if (!to_consistent) {
+          return "fuzz: internal error: inconsistent VBD__STRUCTURE__TO_ETC";
+        }
+
+      } else {
+        return "fuzz: internal error: unrecognized VBC__STRUCTURE";
+      }
+      break;
+    }
+
+    case WUFFS_BASE__TOKEN__VBC__STRING: {
+      if (vbd & WUFFS_BASE__TOKEN__VBD__STRING__CONVERT_1_DST_1_SRC_COPY) {
+        wuffs_base__slice_u8 s =
+            wuffs_base__make_slice_u8(src->data.ptr + *ti - len, len);
+        if ((vbd & WUFFS_BASE__TOKEN__VBD__STRING__DEFINITELY_UTF_8) &&
+            (s.len != wuffs_base__utf_8__longest_valid_prefix(s.ptr, s.len))) {
+          return "fuzz: internal error: invalid UTF-8";
+        }
+        if ((vbd & WUFFS_BASE__TOKEN__VBD__STRING__DEFINITELY_ASCII) &&
+            (s.len != wuffs_base__ascii__longest_valid_prefix(s.ptr, s.len))) {
+          return "fuzz: internal error: invalid ASCII";
+        }
+      }
+      break;
+    }
+
+    case WUFFS_BASE__TOKEN__VBC__UNICODE_CODE_POINT: {
+      if ((WUFFS_BASE__UNICODE_SURROGATE__MIN_INCL <= vbd) &&
+          (vbd <= WUFFS_BASE__UNICODE_SURROGATE__MAX_INCL)) {
+        return "fuzz: internal error: invalid Unicode surrogate";
+      } else if (WUFFS_BASE__UNICODE_CODE_POINT__MAX_INCL < vbd) {
+        return "fuzz: internal error: invalid Unicode code point";
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+
+  // After a complete JSON value, update the parity (even/odd count) of the
+  // container.
+  if (!wuffs_base__token__continued(&t) &&
+      (vbc != WUFFS_BASE__TOKEN__VBC__FILLER) &&
+      ((vbc != WUFFS_BASE__TOKEN__VBC__STRUCTURE) ||
+       (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__POP))) {
+    stack[*depth] ^= 0x80;
+  }
+
+  return NULL;
+}
+
+uint64_t  //
+buffer_limit(uint64_t hash, uint64_t min, uint64_t max) {
+  hash &= 0x3F;
+  uint64_t n;
+  if (hash < 0x20) {
+    n = min + hash;
+  } else {
+    n = max - (0x3F - hash);
+  }
+  if (n < min) {
+    return min;
+  } else if (n > max) {
+    return max;
+  }
+  return n;
+}
+
+uint32_t g_quirks[] = {
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_A,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_CAPITAL_U,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_E,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_QUESTION_MARK,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_SINGLE_QUOTE,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_V,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_X_AS_CODE_POINTS,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_ZERO,
+    WUFFS_JSON__QUIRK_ALLOW_COMMENT_BLOCK,
+    WUFFS_JSON__QUIRK_ALLOW_COMMENT_LINE,
+    WUFFS_JSON__QUIRK_ALLOW_EXTRA_COMMA,
+    WUFFS_JSON__QUIRK_ALLOW_INF_NAN_NUMBERS,
+    WUFFS_JSON__QUIRK_ALLOW_LEADING_ASCII_RECORD_SEPARATOR,
+    WUFFS_JSON__QUIRK_ALLOW_LEADING_UNICODE_BYTE_ORDER_MARK,
+    WUFFS_JSON__QUIRK_ALLOW_TRAILING_FILLER,
+    WUFFS_JSON__QUIRK_JSON_POINTER_ALLOW_TILDE_N_TILDE_R_TILDE_T,
+    WUFFS_JSON__QUIRK_REPLACE_INVALID_UNICODE,
+    0,
+};
+
+void set_quirks(wuffs_json__decoder* dec, uint64_t hash) {
+  for (uint32_t i = 0; g_quirks[i]; i++) {
+    uint64_t bit = 1 << (i & 63);
+    if (hash & bit) {
+      wuffs_json__decoder__set_quirk(dec, g_quirks[i], 1);
+    }
+  }
+}
+
+const char*  //
+fuzz_complex(wuffs_base__io_buffer* full_src, uint64_t hash) {
+  uint64_t tok_limit = buffer_limit(
+      hash & 0x3F, WUFFS_JSON__DECODER_DST_TOKEN_BUFFER_LENGTH_MIN_INCL,
+      TOK_BUFFER_ARRAY_SIZE);
+  hash = wuffs_base__u64__rotate_right(hash, 6);
+
+  uint64_t src_limit = buffer_limit(
+      hash & 0x3F, WUFFS_JSON__DECODER_SRC_IO_BUFFER_LENGTH_MIN_INCL, 4096);
+  hash = wuffs_base__u64__rotate_right(hash, 6);
+
+  // ----
+
+  wuffs_json__decoder dec;
+  wuffs_base__status status = wuffs_json__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  set_quirks(&dec, hash);
+
+  wuffs_base__token tok_array[TOK_BUFFER_ARRAY_SIZE];
+  wuffs_base__token_buffer tok = ((wuffs_base__token_buffer){
+      .data = ((wuffs_base__slice_token){
+          .ptr = tok_array,
+          .len = (size_t)((tok_limit < TOK_BUFFER_ARRAY_SIZE)
+                              ? tok_limit
+                              : TOK_BUFFER_ARRAY_SIZE),
+      }),
+  });
+
+  wuffs_base__token prev_token = wuffs_base__make_token(0);
+  uint32_t no_progress_count = 0;
+
+  stack_element stack[STACK_SIZE];
+  stack[0] = 0x01;  // We start in the 'none' container.
+  size_t depth = 0;
+
+  // ----
+
+  while (true) {  // Outer loop.
+    wuffs_base__io_buffer src = make_limited_reader(*full_src, src_limit);
+
+    size_t old_tok_wi = tok.meta.wi;
+    size_t old_tok_ri = tok.meta.ri;
+    size_t old_src_wi = src.meta.wi;
+    size_t old_src_ri = src.meta.ri;
+    size_t ti = old_src_ri;
+
+    status = wuffs_json__decoder__decode_tokens(
+        &dec, &tok, &src,
+        wuffs_base__make_slice_u8(g_work_buffer_array, WORK_BUFFER_ARRAY_SIZE));
+    if ((tok.data.len < tok.meta.wi) ||  //
+        (tok.meta.wi < tok.meta.ri) ||   //
+        (tok.meta.ri != old_tok_ri)) {
+      return "fuzz: internal error: inconsistent tok indexes";
+    } else if ((src.data.len < src.meta.wi) ||  //
+               (src.meta.wi < src.meta.ri) ||   //
+               (src.meta.wi != old_src_wi)) {
+      return "fuzz: internal error: inconsistent src indexes";
+    }
+    full_src->meta.ri += src.meta.ri - old_src_ri;
+
+    if ((tok.meta.wi > old_tok_wi) || (src.meta.ri > old_src_ri) ||
+        !wuffs_base__status__is_suspension(&status)) {
+      no_progress_count = 0;
+    } else if (no_progress_count < 999) {
+      no_progress_count++;
+    } else if (!full_src->meta.closed &&
+               (status.repr == wuffs_base__suspension__short_read)) {
+      return wuffs_base__status__message(&status);
+    } else {
+      return "fuzz: internal error: no progress";
+    }
+
+    // ----
+
+    while (tok.meta.ri < tok.meta.wi) {  // Inner loop.
+      wuffs_base__token t = tok.data.ptr[tok.meta.ri++];
+      const char* z =
+          fuzz_one_token(t, prev_token, &src, &ti, &stack[0], &depth);
+      if (z != NULL) {
+        return z;
+      }
+      prev_token = t;
+    }  // Inner loop.
+
+    // ----
+
+    // Check that, starting from old_src_ri, summing the token lengths brings
+    // us to the new src.meta.ri.
+    if (ti != src.meta.ri) {
+      return "fuzz: internal error: ti != ri";
+    }
+
+    if (status.repr == NULL) {
+      break;
+
+    } else if (status.repr == wuffs_base__suspension__short_read) {
+      if (src.meta.closed) {
+        return "fuzz: internal error: short read on a closed io_reader";
+      }
+      // We don't compact full_src as it may be mmap'ed read-only.
+      continue;
+
+    } else if (status.repr == wuffs_base__suspension__short_write) {
+      wuffs_base__token_buffer__compact(&tok);
+      continue;
+    }
+
+    return wuffs_base__status__message(&status);
+  }  // Outer loop.
+
+  // ----
+
+  if (depth != 0) {
+    return "fuzz: internal error: decoded OK but final depth was not zero";
+  } else if (wuffs_base__token__continued(&prev_token)) {
+    return "fuzz: internal error: decoded OK but final token was continued";
+  }
+  return NULL;
+}
+
+const char*  //
+fuzz_simple(wuffs_base__io_buffer* full_src) {
+  wuffs_json__decoder dec;
+  wuffs_base__status status =
+      wuffs_json__decoder__initialize(&dec, sizeof dec, WUFFS_VERSION, 0);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+
+  wuffs_base__token tok_array[TOK_BUFFER_ARRAY_SIZE];
+  wuffs_base__token_buffer tok = ((wuffs_base__token_buffer){
+      .data = ((wuffs_base__slice_token){
+          .ptr = tok_array,
+          .len = TOK_BUFFER_ARRAY_SIZE,
+      }),
+  });
+
+  while (true) {
+    status = wuffs_json__decoder__decode_tokens(
+        &dec, &tok, full_src,
+        wuffs_base__make_slice_u8(g_work_buffer_array, WORK_BUFFER_ARRAY_SIZE));
+    if (status.repr == NULL) {
+      break;
+
+    } else if (status.repr == wuffs_base__suspension__short_write) {
+      tok.meta.ri = tok.meta.wi;
+      wuffs_base__token_buffer__compact(&tok);
+      continue;
+    }
+
+    return wuffs_base__status__message(&status);
+  }
+
+  return NULL;
+}
+
+#if defined(__cplusplus)
+#include <vector>
+
+class Callbacks : public wuffs_aux::DecodeJsonCallbacks {
+ public:
+  Callbacks() : m_depth(0) {}
+
+  std::string AppendNull() override { return ""; }
+
+  std::string AppendBool(bool val) override { return ""; }
+
+  std::string AppendI64(int64_t val) override { return ""; }
+
+  std::string AppendF64(double val) override { return ""; }
+
+  std::string AppendTextString(std::string&& val) override { return ""; }
+
+  std::string Push(uint32_t flags) override {
+    m_depth++;
+    return "";
+  }
+
+  std::string Pop(uint32_t flags) override {
+    m_depth--;
+    if (m_depth < 0) {
+      fprintf(stderr, "negative depth\n");
+      intentional_segfault();
+    }
+    return "";
+  }
+
+  void Done(wuffs_aux::DecodeJsonResult& result,
+            wuffs_aux::sync_io::Input& input,
+            wuffs_aux::IOBuffer& buffer) override {
+    if (result.error_message.empty()) {
+      if (m_depth != 0) {
+        fprintf(stderr, "no error message but final depth is non-zero\n");
+        intentional_segfault();
+      }
+    } else if (result.error_message.find("internal error:") !=
+               std::string::npos) {
+      fprintf(stderr, "internal errors shouldn't occur: \"%s\"\n",
+              result.error_message.c_str());
+      intentional_segfault();
+    }
+  }
+
+ private:
+  int64_t m_depth;
+};
+
+void  //
+fuzz_cpp(const uint8_t* in_ptr, size_t in_len, uint64_t hash) {
+  static const char* json_pointers[16] = {
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "/",          //
+      "/2/3/4/5",   //
+      "/k0",        //
+      "/k0/1",      //
+      "/x/y",       //
+      "/~0/~1/~n",  //
+  };
+  const char* json_pointer = json_pointers[hash & 15];
+  hash = wuffs_base__u64__rotate_right(hash, 4);
+
+  std::vector<uint32_t> quirks;
+  for (uint32_t i = 0; g_quirks[i]; i++) {
+    uint64_t bit = 1 << (i & 63);
+    if (hash & bit) {
+      quirks.push_back(g_quirks[i]);
+    }
+  }
+
+  Callbacks callbacks;
+  wuffs_aux::sync_io::MemoryInput input(in_ptr, in_len);
+  wuffs_aux::DecodeJson(
+      callbacks, input,
+      wuffs_aux::DecodeJsonArgQuirks(quirks.data(), quirks.size()),
+      wuffs_aux::DecodeJsonArgJsonPointer(json_pointer));
+}
+#endif  // defined(__cplusplus)
+
+const char*  //
+fuzz(wuffs_base__io_buffer* full_src, uint64_t hash) {
+#if defined(__cplusplus)
+  fuzz_cpp(full_src->reader_pointer(), full_src->reader_length(),
+           wuffs_base__u64__rotate_right(hash, 32));
+#endif  // defined(__cplusplus)
+
+  // Send 99.6% of inputs to fuzz_complex and the remainder to fuzz_simple. The
+  // 0xA5 constant is arbitrary but non-zero. If the hash function maps the
+  // empty input to 0, this still sends the empty input to fuzz_complex.
+  //
+  // The fuzz_simple implementation shows how easy decoding with Wuffs is when
+  // all you want is to run LLVMFuzzerTestOneInput's built-in (Wuffs API
+  // independent) checks (e.g. the ASan address sanitizer) and you don't really
+  // care what the output is, just that it doesn't crash.
+  //
+  // The fuzz_complex implementation adds many more Wuffs API specific checks
+  // (e.g. that the sum of the tokens' lengths do not exceed the input length).
+  if ((hash & 0xFF) != 0xA5) {
+    return fuzz_complex(full_src, wuffs_base__u64__rotate_right(hash, 8));
+  }
+  return fuzz_simple(full_src);
+}
+```
+
+No semantic helper beyond the generic runner is directly included.
+
+## Complete S0 -> S1 hand-written production-source diff
+
+The fixed rule includes every changed `std/**/*.wuffs` production file. It
+excludes generated release snapshots, tests, docs, examples, and commit text.
+
+```diff
+diff --git a/std/crc64/common_crc64.wuffs b/std/crc64/common_crc64.wuffs
+index e084ed6e..20e0a11b 100644
+--- a/std/crc64/common_crc64.wuffs
++++ b/std/crc64/common_crc64.wuffs
+@@ -12,24 +12,39 @@ pub struct ecma_hasher? implements base.hasher_u64(
+         state : base.u64,
+ )
+ 
+ pub func ecma_hasher.get_quirk(key: base.u32) base.u64 {
+     return 0
+ }
+ 
+ pub func ecma_hasher.set_quirk!(key: base.u32, value: base.u64) base.status {
+     return base."#unsupported option"
+ }
+ 
+ pub func ecma_hasher.update!(x: roslice base.u8) {
++    if this.state == 0 {
++        choose up = [
++                up_x86_sse42]
++    }
++    this.up!(x: args.x)
++}
++
++pub func ecma_hasher.update_u64!(x: roslice base.u8) base.u64 {
++    this.update!(x: args.x)
++    return this.checksum_u64()
++}
++
++pri func ecma_hasher.up!(x: roslice base.u8),
++        choosy,
++{
+     var s : base.u64
+     var p : roslice base.u8
+ 
+     s = 0xFFFF_FFFF_FFFF_FFFF ^ this.state
+ 
+     // Use the same slicing-by-M algorithm as for std/crc32, with M = 8.
+     iterate (p = args.x)(length: 8, advance: 8, unroll: 1) {
+         s ^= ((p[0x00] as base.u64) << 0) |
+                 ((p[0x01] as base.u64) << 8) |
+                 ((p[0x02] as base.u64) << 16) |
+                 ((p[0x03] as base.u64) << 24) |
+                 ((p[0x04] as base.u64) << 32) |
+@@ -42,29 +57,24 @@ pub func ecma_hasher.update!(x: roslice base.u8) {
+                 ECMA_TABLE[0x03][0xFF & (s >> 32)] ^
+                 ECMA_TABLE[0x04][0xFF & (s >> 24)] ^
+                 ECMA_TABLE[0x05][0xFF & (s >> 16)] ^
+                 ECMA_TABLE[0x06][0xFF & (s >> 8)] ^
+                 ECMA_TABLE[0x07][0xFF & (s >> 0)]
+     } else (length: 1, advance: 1, unroll: 1) {
+         s = ECMA_TABLE[0][((s & 0xFF) as base.u8) ^ p[0]] ^ (s >> 8)
+     }
+ 
+     this.state = 0xFFFF_FFFF_FFFF_FFFF ^ s
+ }
+ 
+-pub func ecma_hasher.update_u64!(x: roslice base.u8) base.u64 {
+-    this.update!(x: args.x)
+-    return this.checksum_u64()
+-}
+-
+ pub func ecma_hasher.checksum_u64() base.u64 {
+     return this.state
+ }
+ 
+ // The table below was created by script/print-crc64-magic-numbers.go.
+ 
+ pri const ECMA_TABLE : roarray[8] roarray[256] base.u64 = [[
+         0x0000_0000_0000_0000, 0xB32E_4CBE_03A7_5F6F, 0xF484_3657_A840_A05B, 0x47AA_7AE9_ABE7_FF34,
+         0x7BD0_C384_FF8F_5E33, 0xC8FE_8F3A_FC28_015C, 0x8F54_F5D3_57CF_FE68, 0x3C7A_B96D_5468_A107,
+         0xF7A1_8709_FF1E_BC66, 0x448F_CBB7_FCB9_E309, 0x0325_B15E_575E_1C3D, 0xB00B_FDE0_54F9_4352,
+         0x8C71_448D_0091_E255, 0x3F5F_0833_0336_BD3A, 0x78F5_72DA_A8D1_420E, 0xCBDB_3E64_AB76_1D61,
+         0x7D9B_A138_5133_6649, 0xCEB5_ED86_5294_3926, 0x891F_976F_F973_C612, 0x3A31_DBD1_FAD4_997D,
+diff --git a/std/crc64/common_up_x86_sse42.wuffs b/std/crc64/common_up_x86_sse42.wuffs
+new file mode 100644
+index 00000000..189a175f
+--- /dev/null
++++ b/std/crc64/common_up_x86_sse42.wuffs
+@@ -0,0 +1,145 @@
++// Copyright 2024 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
++// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
++// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
++// option. This file may not be copied, modified, or distributed
++// except according to those terms.
++//
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++// --------
++
++// Like std/crc32's x86 SIMD implementation, this is based on Gopal et al.
++// "Fast CRC Computation for Generic Polynomials Using PCLMULQDQ Instruction".
++
++pri func ecma_hasher.up_x86_sse42!(x: roslice base.u8),
++        choose cpu_arch >= x86_sse42,
++{
++    var s : base.u64
++    var p : roslice base.u8
++
++    var util    : base.x86_sse42_utility
++    var s0      : base.x86_m128i
++    var s0_707F : base.x86_m128i
++    var s0_8F80 : base.x86_m128i
++    var x0      : base.x86_m128i
++    var aa      : base.x86_m128i
++    var k1k2    : base.x86_m128i
++    var t0      : base.x86_m128i
++    var t1      : base.x86_m128i
++    var t2      : base.x86_m128i
++    var u0      : base.x86_m128i
++    var u1      : base.x86_m128i
++    var u2      : base.x86_m128i
++    var v0      : base.x86_m128i
++    var v1      : base.x86_m128i
++    var pxmu    : base.x86_m128i
++    var w1      : base.x86_m128i
++    var w2      : base.x86_m128i
++
++    var tail_index : base.u64
++
++    s = 0xFFFF_FFFF_FFFF_FFFF ^ this.state
++
++    // Align to a 16-byte boundary.
++    while (args.x.length() > 0) and ((15 & args.x.uintptr_low_12_bits()) <> 0) {
++        s = ECMA_TABLE[0][((s & 0xFF) as base.u8) ^ args.x[0]] ^ (s >> 8)
++        args.x = args.x[1 ..]
++    } endwhile
++
++    // For short inputs, just do a simple loop.
++    if args.x.length() < 0x20 {
++        iterate (p = args.x)(length: 1, advance: 1, unroll: 1) {
++            s = ECMA_TABLE[0][((s & 0xFF) as base.u8) ^ p[0]] ^ (s >> 8)
++        }
++        this.state = 0xFFFF_FFFF_FFFF_FFFF ^ s
++        return nothing
++    }
++
++    // Process N 16-byte chunks (1 on ramp, N-2 main loop, 1 off ramp). The
++    // algorithm is loosely based on https://github.com/rawrunprotected/crc but
++    // modified to always start and end on 16-byte alignment boundaries. It
++    // also doesn't crash on zero-length input.
++
++    // On ramp.
++
++    s0 = util.make_m128i_single_u64(a: s)
++    s0_707F = s0._mm_shuffle_epi8(b: util.make_m128i_slice128(a: SHUFFLE_707F[.. 16]))
++    s0_8F80 = s0._mm_shuffle_epi8(b: util.make_m128i_slice128(a: SHUFFLE_8F80[.. 16]))
++
++    x0 = util.make_m128i_slice128(a: args.x[0x00 .. 0x10])
++    args.x = args.x[0x10 ..]
++
++    k1k2 = util.make_m128i_slice128(a: ECMA_X86_SSE42_K1K2[.. 16])
++    t0 = s0_707F._mm_xor_si128(b: x0)
++    t1 = t0._mm_clmulepi64_si128(b: k1k2, imm8: 0x00)
++    t2 = t0._mm_clmulepi64_si128(b: k1k2, imm8: 0x11)
++    aa = t1._mm_xor_si128(b: t2)._mm_xor_si128(b: s0_8F80)
++
++    // Main loop.
++
++    while args.x.length() >= 0x20 {
++        x0 = util.make_m128i_slice128(a: args.x[0x00 .. 0x10])
++        args.x = args.x[0x10 ..]
++
++        u0 = aa._mm_xor_si128(b: x0)
++        u1 = u0._mm_clmulepi64_si128(b: k1k2, imm8: 0x00)
++        u2 = u0._mm_clmulepi64_si128(b: k1k2, imm8: 0x11)
++        aa = u1._mm_xor_si128(b: u2)
++    } endwhile
++
++    // Off ramp.
++
++    if args.x.length() < 0x10 {
++        // Unreachable, but the "if" is needed by the bounds checker.
++        return nothing
++    }
++    x0 = util.make_m128i_slice128(a: args.x[0x00 .. 0x10])
++    args.x = args.x[0x10 ..]
++
++    v0 = aa._mm_xor_si128(b: x0)
++    v1 = v0._mm_clmulepi64_si128(b: k1k2, imm8: 0x10)
++    aa = v1._mm_xor_si128(b: v0._mm_srli_si128(imm8: 8))
++
++    // Barrett reduction.
++    pxmu = util.make_m128i_slice128(a: ECMA_X86_SSE42_PXMU[.. 16])
++    w1 = aa._mm_clmulepi64_si128(b: pxmu, imm8: 0x10)
++    w2 = w1._mm_clmulepi64_si128(b: pxmu, imm8: 0x00)
++    s = aa._mm_xor_si128(b:
++            w2._mm_xor_si128(b:
++            w1._mm_slli_si128(imm8: 8)))._mm_extract_epi64(imm8: 1)
++
++    // Handle the tail of args.x that wasn't a complete 16-byte chunk.
++    tail_index = args.x.length() & 0xFFFF_FFFF_FFFF_FFF0  // And-not 16.
++    if tail_index < args.x.length() {
++        iterate (p = args.x[tail_index ..])(length: 1, advance: 1, unroll: 1) {
++            s = ECMA_TABLE[0][((s & 0xFF) as base.u8) ^ p[0]] ^ (s >> 8)
++        }
++    }
++
++    this.state = 0xFFFF_FFFF_FFFF_FFFF ^ s
++}
++
++pri const SHUFFLE_707F : roarray[16] base.u8 = [
++        0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77,
++        0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
++]
++
++pri const SHUFFLE_8F80 : roarray[16] base.u8 = [
++        0x8F, 0x8E, 0x8D, 0x8C, 0x8B, 0x8A, 0x89, 0x88,
++        0x87, 0x86, 0x85, 0x84, 0x83, 0x82, 0x81, 0x80,
++]
++
++// These constants are reproduced by
++// script/print-crc64-x86-sse42-magic-numbers.go
++
++pri const ECMA_X86_SSE42_K1K2 : roarray[16] base.u8 = [
++        0xE4, 0x3A, 0x39, 0xCA, 0x97, 0xD4, 0x5D, 0xE0,  // k1' = 0xE05D_D497_CA39_3AE4
++        0x40, 0x5F, 0x87, 0xC7, 0xAF, 0x95, 0xBE, 0xDA,  // k2' = 0xDABE_95AF_C787_5F40
++]
++
++pri const ECMA_X86_SSE42_PXMU : roarray[16] base.u8 = [
++        0x85, 0x1E, 0x0E, 0xAF, 0x2B, 0xAF, 0xD8, 0x92,  // Px' = 0x92D8_AF2B_AF0E_1E85
++        0xD5, 0x63, 0x29, 0x17, 0x6C, 0x46, 0x3E, 0x9C,  // μ'  = 0x9C3E_466C_1729_63D5
++]
+```
+
+## Uniform selected declaration context
+
+This same mechanically selected S0/S1 context is supplied for every case.
+
+### S0
+
+```text
+lines 29-77
+000029:     // Use the same slicing-by-M algorithm as for std/crc32, with M = 8.
+000030:     iterate (p = args.x)(length: 8, advance: 8, unroll: 1) {
+000031:         s ^= ((p[0x00] as base.u64) << 0) |
+000032:                 ((p[0x01] as base.u64) << 8) |
+000033:                 ((p[0x02] as base.u64) << 16) |
+000034:                 ((p[0x03] as base.u64) << 24) |
+000035:                 ((p[0x04] as base.u64) << 32) |
+000036:                 ((p[0x05] as base.u64) << 40) |
+000037:                 ((p[0x06] as base.u64) << 48) |
+000038:                 ((p[0x07] as base.u64) << 56)
+000039:         s = ECMA_TABLE[0x00][0xFF & (s >> 56)] ^
+000040:                 ECMA_TABLE[0x01][0xFF & (s >> 48)] ^
+000041:                 ECMA_TABLE[0x02][0xFF & (s >> 40)] ^
+000042:                 ECMA_TABLE[0x03][0xFF & (s >> 32)] ^
+000043:                 ECMA_TABLE[0x04][0xFF & (s >> 24)] ^
+000044:                 ECMA_TABLE[0x05][0xFF & (s >> 16)] ^
+000045:                 ECMA_TABLE[0x06][0xFF & (s >> 8)] ^
+000046:                 ECMA_TABLE[0x07][0xFF & (s >> 0)]
+000047:     } else (length: 1, advance: 1, unroll: 1) {
+000048:         s = ECMA_TABLE[0][((s & 0xFF) as base.u8) ^ p[0]] ^ (s >> 8)
+000049:     }
+000050: 
+000051:     this.state = 0xFFFF_FFFF_FFFF_FFFF ^ s
+000052: }
+000053: 
+000054: pub func ecma_hasher.update_u64!(x: roslice base.u8) base.u64 {
+000055:     this.update!(x: args.x)
+000056:     return this.checksum_u64()
+000057: }
+000058: 
+000059: pub func ecma_hasher.checksum_u64() base.u64 {
+000060:     return this.state
+000061: }
+000062: 
+000063: // The table below was created by script/print-crc64-magic-numbers.go.
+000064: 
+000065: pri const ECMA_TABLE : roarray[8] roarray[256] base.u64 = [[
+000066:         0x0000_0000_0000_0000, 0xB32E_4CBE_03A7_5F6F, 0xF484_3657_A840_A05B, 0x47AA_7AE9_ABE7_FF34,
+000067:         0x7BD0_C384_FF8F_5E33, 0xC8FE_8F3A_FC28_015C, 0x8F54_F5D3_57CF_FE68, 0x3C7A_B96D_5468_A107,
+000068:         0xF7A1_8709_FF1E_BC66, 0x448F_CBB7_FCB9_E309, 0x0325_B15E_575E_1C3D, 0xB00B_FDE0_54F9_4352,
+000069:         0x8C71_448D_0091_E255, 0x3F5F_0833_0336_BD3A, 0x78F5_72DA_A8D1_420E, 0xCBDB_3E64_AB76_1D61,
+000070:         0x7D9B_A138_5133_6649, 0xCEB5_ED86_5294_3926, 0x891F_976F_F973_C612, 0x3A31_DBD1_FAD4_997D,
+000071:         0x064B_62BC_AEBC_387A, 0xB565_2E02_AD1B_6715, 0xF2CF_54EB_06FC_9821, 0x41E1_1855_055B_C74E,
+000072:         0x8A3A_2631_AE2D_DA2F, 0x3914_6A8F_AD8A_8540, 0x7EBE_1066_066D_7A74, 0xCD90_5CD8_05CA_251B,
+000073:         0xF1EA_E5B5_51A2_841C, 0x42C4_A90B_5205_DB73, 0x056E_D3E2_F9E2_2447, 0xB640_9F5C_FA45_7B28,
+000074:         0xFB37_4270_A266_CC92, 0x4819_0ECE_A1C1_93FD, 0x0FB3_7427_0A26_6CC9, 0xBC9D_3899_0981_33A6,
+000075:         0x80E7_81F4_5DE9_92A1, 0x33C9_CD4A_5E4E_CDCE, 0x7463_B7A3_F5A9_32FA, 0xC74D_FB1D_F60E_6D95,
+000076:         0x0C96_C579_5D78_70F4, 0xBFB8_89C7_5EDF_2F9B, 0xF812_F32E_F538_D0AF, 0x4B3C_BF90_F69F_8FC0,
+000077:         0x7746_06FD_A2F7_2EC7, 0xC468_4A43_A150_71A8, 0x83C2_30AA_0AB7_8E9C, 0x30EC_7C14_0910_D1F3,
+```
+
+### S1
+
+```text
+lines 6-54
+000006: // option. This file may not be copied, modified, or distributed
+000007: // except according to those terms.
+000008: //
+000009: // SPDX-License-Identifier: Apache-2.0 OR MIT
+000010: 
+000011: pub struct ecma_hasher? implements base.hasher_u64(
+000012:         state : base.u64,
+000013: )
+000014: 
+000015: pub func ecma_hasher.get_quirk(key: base.u32) base.u64 {
+000016:     return 0
+000017: }
+000018: 
+000019: pub func ecma_hasher.set_quirk!(key: base.u32, value: base.u64) base.status {
+000020:     return base."#unsupported option"
+000021: }
+000022: 
+000023: pub func ecma_hasher.update!(x: roslice base.u8) {
+000024:     if this.state == 0 {
+000025:         choose up = [
+000026:                 up_x86_sse42]
+000027:     }
+000028:     this.up!(x: args.x)
+000029: }
+000030: 
+000031: pub func ecma_hasher.update_u64!(x: roslice base.u8) base.u64 {
+000032:     this.update!(x: args.x)
+000033:     return this.checksum_u64()
+000034: }
+000035: 
+000036: pri func ecma_hasher.up!(x: roslice base.u8),
+000037:         choosy,
+000038: {
+000039:     var s : base.u64
+000040:     var p : roslice base.u8
+000041: 
+000042:     s = 0xFFFF_FFFF_FFFF_FFFF ^ this.state
+000043: 
+000044:     // Use the same slicing-by-M algorithm as for std/crc32, with M = 8.
+000045:     iterate (p = args.x)(length: 8, advance: 8, unroll: 1) {
+000046:         s ^= ((p[0x00] as base.u64) << 0) |
+000047:                 ((p[0x01] as base.u64) << 8) |
+000048:                 ((p[0x02] as base.u64) << 16) |
+000049:                 ((p[0x03] as base.u64) << 24) |
+000050:                 ((p[0x04] as base.u64) << 32) |
+000051:                 ((p[0x05] as base.u64) << 40) |
+000052:                 ((p[0x06] as base.u64) << 48) |
+000053:                 ((p[0x07] as base.u64) << 56)
+000054:         s = ECMA_TABLE[0x00][0xFF & (s >> 56)] ^
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C025","gap_exists":true,"gap_type":["entry_point","API protocol","state","configuration","input semantics"],"confidence":100,"affected_functions":["ecma_hasher.update!","ecma_hasher.update_u64!","ecma_hasher.up!","ecma_hasher.up_x86_sse42!","ecma_hasher.checksum_u64"],"reason":"H0 exclusively configures and exercises the JSON decoder, while S1 changes CRC64 ECMA hashing and introduces a CPU-selected x86 SSE4.2 implementation. Consequently, H0 cannot reach the new CRC64 entry points or test their stateful and boundary-sensitive behavior.","evidence":["H0 defines WUFFS_CONFIG__MODULE__JSON and WUFFS_CONFIG__MODULE__AUX__JSON but no CRC64 module.","H0 calls wuffs_json__decoder__decode_tokens and wuffs_aux::DecodeJson; it never constructs or invokes ecma_hasher.","ecma_hasher.update! selects up_x86_sse42 only when this.state == 0, making initial versus incremental update state material.","ecma_hasher.up_x86_sse42! has alignment handling, a short-input threshold at 0x20, 0x10-byte chunk processing, and tail handling based on length modulo 16.","The accelerated implementation uses x86 SSE4.2 operations and therefore adds a CPU-dependent implementation path absent from H0."],"recommended_action":"Add a CRC64 ECMA fuzz harness that exercises update!, update_u64!, and checksum_u64 across one-shot and variably chunked updates, varied input alignment, and lengths around 0x10 and 0x20 boundaries; compare accelerated results against the generic up! implementation and verify identical final checksums."}
+tokens used
+25,442

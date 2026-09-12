@@ -1,0 +1,311 @@
+PROJECT simdjson
+COMMIT bddb23177e0c47314e1449b97e94df3be07f8624
+PARENT 2c5de6c6edc57c6e08dd48d9b05452eea779f9e3
+SUBJECT feat: Add DOM tape support for big integers (opt-in) (#2640)
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/include/simdjson/dom/document-inl.h b/include/simdjson/dom/document-inl.h
+index 40d74b99..9caa7a3c 100644
+--- a/include/simdjson/dom/document-inl.h
++++ b/include/simdjson/dom/document-inl.h
+@@ -141,6 +141,15 @@ inline bool document::dump_raw_tape(std::ostream &os) const noexcept {
+     case 'r': // we start and end with the root node
+       // should we be hitting the root node?
+       return false;
++    case 'Z': // we have a big integer
++      os << "bigint ";
++      std::memcpy(&string_length, string_buf.get() + payload, sizeof(uint32_t));
++      os << std::string_view(
++        reinterpret_cast<const char *>(string_buf.get() + payload + sizeof(uint32_t)),
++        string_length
++      );
++      os << '\n';
++      break;
+     default:
+       return false;
+     }
+diff --git a/include/simdjson/dom/element-inl.h b/include/simdjson/dom/element-inl.h
+index f5f9ed5b..ff4d3d3a 100644
+--- a/include/simdjson/dom/element-inl.h
++++ b/include/simdjson/dom/element-inl.h
+@@ -81,6 +81,10 @@ simdjson_inline simdjson_result<bool> simdjson_result<dom::element>::get_bool()
+   if (error()) { return error(); }
+   return first.get_bool();
+ }
++simdjson_inline simdjson_result<std::string_view> simdjson_result<dom::element>::get_bigint() const noexcept {
++  if (error()) { return error(); }
++  return first.get_bigint();
++}
+ 
+ simdjson_inline bool simdjson_result<dom::element>::is_array() const noexcept {
+   return !error() && first.is_array();
+@@ -110,6 +114,9 @@ simdjson_inline bool simdjson_result<dom::element>::is_bool() const noexcept {
+ simdjson_inline bool simdjson_result<dom::element>::is_null() const noexcept {
+   return !error() && first.is_null();
+ }
++simdjson_inline bool simdjson_result<dom::element>::is_bigint() const noexcept {
++  return !error() && first.is_bigint();
++}
+ 
+ simdjson_inline simdjson_result<dom::element> simdjson_result<dom::element>::operator[](std::string_view key) const noexcept {
+   if (error()) { return error(); }
+@@ -218,6 +225,15 @@ inline simdjson_result<bool> element::get_bool() const noexcept {
+   }
+   return INCORRECT_TYPE;
+ }
++inline simdjson_result<std::string_view> element::get_bigint() const noexcept {
++  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable());
++  switch (tape.tape_ref_type()) {
++    case internal::tape_type::BIGINT:
++      return tape.get_string_view();
++    default:
++      return INCORRECT_TYPE;
++  }
++}
+ inline simdjson_result<const char *> element::get_c_str() const noexcept {
+   SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
+   switch (tape.tape_ref_type()) {
+@@ -360,6 +376,10 @@ inline bool element::is_null() const noexcept {
+   return tape.is_null_on_tape();
+ }
+ 
++inline bool element::is_bigint() const noexcept {
++  return tape.tape_ref_type() == internal::tape_type::BIGINT;
++}
++
+ #if SIMDJSON_EXCEPTIONS
+ 
+ inline element::operator bool() const noexcept(false) { return get<bool>(); }
+@@ -492,6 +512,8 @@ inline std::ostream& operator<<(std::ostream& out, element_type type) {
+       return out << "bool";
+     case element_type::NULL_VALUE:
+       return out << "null";
++    case element_type::BIGINT:
++      return out << "bigint";
+     default:
+       return out << "unexpected content!!!"; // abort() usage is forbidden in the library
+   }
+diff --git a/include/simdjson/dom/element.h b/include/simdjson/dom/element.h
+index a661718f..07877fed 100644
+--- a/include/simdjson/dom/element.h
++++ b/include/simdjson/dom/element.h
+@@ -21,7 +21,8 @@ enum class element_type {
+   DOUBLE = 'd',    ///< double: Any number with a "." or "e" that fits in double.
+   STRING = '"',    ///< std::string_view
+   BOOL = 't',      ///< bool
+-  NULL_VALUE = 'n' ///< null
++  NULL_VALUE = 'n', ///< null
++  BIGINT = 'Z'     ///< std::string_view: big integer stored as raw digit string
+ };
+ 
+ /**
+@@ -120,6 +121,14 @@ public:
+    */
+   inline simdjson_result<bool> get_bool() const noexcept;
+ 
++  /**
++   * Read this element as a big integer (raw digit string).
++   *
++   * @returns A string_view of the raw digits, or:
++   *          INCORRECT_TYPE if the JSON element is not a big integer.
++   */
++  inline simdjson_result<std::string_view> get_bigint() const noexcept;
++
+   /**
+    * Whether this element is a json array.
+    *
+@@ -175,6 +184,11 @@ public:
+    */
+   inline bool is_null() const noexcept;
+ 
++  /**
++   * Whether this element is a big integer (number exceeding 64-bit range).
++   */
++  inline bool is_bigint() const noexcept;
++
+   /**
+    * Tell whether the value can be cast to provided type (T).
+    *
+@@ -533,6 +547,7 @@ public:
+   simdjson_inline simdjson_result<uint64_t> get_uint64() const noexcept;
+   simdjson_inline simdjson_result<double> get_double() const noexcept;
+   simdjson_inline simdjson_result<bool> get_bool() const noexcept;
++  simdjson_inline simdjson_result<std::string_view> get_bigint() const noexcept;
+ 
+   simdjson_inline bool is_array() const noexcept;
+   simdjson_inline bool is_object() const noexcept;
+@@ -543,6 +558,7 @@ public:
+   simdjson_inline bool is_number() const noexcept;
+   simdjson_inline bool is_bool() const noexcept;
+   simdjson_inline bool is_null() const noexcept;
++  simdjson_inline bool is_bigint() const noexcept;
+ 
+   simdjson_inline simdjson_result<dom::element> operator[](std::string_view key) const noexcept;
+   simdjson_inline simdjson_result<dom::element> operator[](const char *key) const noexcept;
+diff --git a/include/simdjson/dom/parser-inl.h b/include/simdjson/dom/parser-inl.h
+index bf26b298..b116d63b 100644
+--- a/include/simdjson/dom/parser-inl.h
++++ b/include/simdjson/dom/parser-inl.h
+@@ -132,6 +132,7 @@ inline simdjson_result<element> parser::parse_into_document(document& provided_d
+     buf += 3;
+     len -= 3;
+   }
++  implementation->_number_as_string = _number_as_string;
+   _error = implementation->parse(buf, len, provided_doc);
+ 
+   if (_error) { return _error; }
+diff --git a/include/simdjson/dom/parser.h b/include/simdjson/dom/parser.h
+index 6fa461b8..eee411bf 100644
+--- a/include/simdjson/dom/parser.h
++++ b/include/simdjson/dom/parser.h
+@@ -610,6 +610,13 @@ public:
+   inline bool dump_raw_tape(std::ostream &os) const noexcept;
+ 
+ 
++  /**
++   * When enabled, big integers (exceeding uint64 range) are stored as strings
++   * in the tape instead of returning BIGINT_ERROR. Default: false.
++   */
++  inline void number_as_string(bool enabled) noexcept { _number_as_string = enabled; }
++  inline bool number_as_string() const noexcept { return _number_as_string; }
++
+ private:
+   /**
+    * The maximum document length this parser will automatically support.
+@@ -618,6 +625,9 @@ private:
+    */
+   size_t _max_capacity;
+ 
++  /** Whether to store big integers as strings instead of returning BIGINT_ERROR */
++  bool _number_as_string{false};
++
+   /**
+    * The loaded buffer (reused each time load() is called)
+    */
+diff --git a/include/simdjson/dom/serialization-inl.h b/include/simdjson/dom/serialization-inl.h
+index 6baf7f84..cfb963ca 100644
+--- a/include/simdjson/dom/serialization-inl.h
++++ b/include/simdjson/dom/serialization-inl.h
+@@ -460,6 +460,12 @@ inline void string_builder<serializer>::append(simdjson::dom::element value) {
+     case tape_type::STRING:
+       format.string(iter.get_string_view());
+       break;
++    case tape_type::BIGINT: {
++      // Big integer stored as string — output raw digits (no quotes)
++      auto sv = iter.get_string_view();
++      format.chars(sv.data(), sv.data() + sv.size());
++      break;
++    }
+     case tape_type::INT64:
+       format.number(iter.next_tape_value<int64_t>());
+       iter.json_index++; // numbers take up 2 spots, so we need to increment
+diff --git a/include/simdjson/internal/dom_parser_implementation.h b/include/simdjson/internal/dom_parser_implementation.h
+index a93fe38f..8d8401a2 100644
+--- a/include/simdjson/internal/dom_parser_implementation.h
++++ b/include/simdjson/internal/dom_parser_implementation.h
+@@ -212,6 +212,12 @@ protected:
+    */
+   size_t _max_depth{0};
+ 
++public:
++  /** Whether to store big integers as strings instead of returning BIGINT_ERROR */
++  bool _number_as_string{false};
++
++protected:
++
+   // Declaring these so that subclasses can use them to implement their constructors.
+   simdjson_inline dom_parser_implementation() noexcept;
+   simdjson_inline dom_parser_implementation(dom_parser_implementation &&other) noexcept;
+diff --git a/include/simdjson/internal/tape_type.h b/include/simdjson/internal/tape_type.h
+index d43c57c7..938c5cf0 100644
+--- a/include/simdjson/internal/tape_type.h
++++ b/include/simdjson/internal/tape_type.h
+@@ -19,7 +19,8 @@ enum class tape_type {
+   DOUBLE = 'd',
+   TRUE_VALUE = 't',
+   FALSE_VALUE = 'f',
+-  NULL_VALUE = 'n'
++  NULL_VALUE = 'n',
++  BIGINT = 'Z'  // Big integer stored as string in string buffer
+ }; // enum class tape_type
+ 
+ } // namespace internal
+diff --git a/src/generic/stage2/tape_builder.h b/src/generic/stage2/tape_builder.h
+index 52931010..58041aa9 100644
+--- a/src/generic/stage2/tape_builder.h
++++ b/src/generic/stage2/tape_builder.h
+@@ -172,7 +172,23 @@ simdjson_warn_unused simdjson_inline error_code tape_builder::visit_root_string(
+ 
+ simdjson_warn_unused simdjson_inline error_code tape_builder::visit_number(json_iterator &iter, const uint8_t *value) noexcept {
+   iter.log_value("number");
+-  return numberparsing::parse_number(value, tape);
++  error_code err = numberparsing::parse_number(value, tape);
++  if (simdjson_unlikely(err == BIGINT_ERROR &&
++      iter.dom_parser._number_as_string)) {
++    // Write big integer to string buffer using the same format as strings.
++    // Scan digits the same way parse_number does (skip optional '-', then digits).
++    const uint8_t *p = value;
++    if (*p == '-') p++;
++    while (numberparsing::is_digit(*p)) p++;
++    size_t len = size_t(p - value);
++    tape.append(current_string_buf_loc - iter.dom_parser.doc->string_buf.get(), internal::tape_type::BIGINT);
++    uint8_t *dst = current_string_buf_loc + sizeof(uint32_t);
++    memcpy(dst, value, len);
++    dst += len;
++    on_end_string(dst);
++    return SUCCESS;
++  }
++  return err;
+ }
+ 
+ simdjson_warn_unused simdjson_inline error_code tape_builder::visit_root_number(json_iterator &iter, const uint8_t *value) noexcept {
+diff --git a/src/generic/stage2/tape_writer.h b/src/generic/stage2/tape_writer.h
+index 947aa6d0..1f1f5777 100644
+--- a/src/generic/stage2/tape_writer.h
++++ b/src/generic/stage2/tape_writer.h
+@@ -26,6 +26,9 @@ struct tape_writer {
+   /** Write a double value to tape. */
+   simdjson_inline void append_double(double value) noexcept;
+ 
++  /** Write a big integer (as string) to tape. src points to first digit, len is byte count. */
++  simdjson_inline void append_bigint(const uint8_t *src, size_t len, uint8_t *&string_buf) noexcept;
++
+   /**
+    * Append a tape entry (an 8-bit type,and 56 bits worth of value).
+    */
+@@ -109,6 +112,18 @@ simdjson_inline void tape_writer::write(uint64_t &tape_loc, uint64_t val, intern
+   tape_loc = val | ((uint64_t(char(t))) << 56);
+ }
+ 
++simdjson_inline void tape_writer::append_bigint(const uint8_t *src, size_t len, uint8_t *&string_buf) noexcept {
++  // Write to string buffer: [4-byte LE length][digits][null]
++  uint32_t str_len = uint32_t(len);
++  memcpy(string_buf, &str_len, sizeof(uint32_t));
++  memcpy(string_buf + sizeof(uint32_t), src, len);
++  string_buf[sizeof(uint32_t) + len] = 0;
++  // Tape entry: offset into string buffer
++  // The caller must set the offset relative to doc.string_buf base
++  append(0, internal::tape_type::BIGINT); // placeholder offset, caller patches
++  string_buf += sizeof(uint32_t) + len + 1;
++}
++
+ } // namespace stage2
+ } // unnamed namespace
+ } // namespace SIMDJSON_IMPLEMENTATION
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/fuzz/fuzz_dump.cpp b/fuzz/fuzz_dump.cpp
+index 2c5b1517..50343ee6 100644
+--- a/fuzz/fuzz_dump.cpp
++++ b/fuzz/fuzz_dump.cpp
+@@ -54,6 +54,9 @@ static void print_json(std::ostream& os, simdjson::dom::element element) noexcep
+   case simdjson::dom::element_type::NULL_VALUE:
+     os << "null" << endl;
+     break;
++  case simdjson::dom::element_type::BIGINT:
++    os << element.get_bigint().value_unsafe() << endl;
++    break;
+   }
+ }
+ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {

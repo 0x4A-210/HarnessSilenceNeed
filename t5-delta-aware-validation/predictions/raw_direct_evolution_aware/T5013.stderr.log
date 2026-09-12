@@ -1,0 +1,524 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t5-direct_evolution_aware-T5013-2jp6uahv
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08aee-fadc-7c01-9a58-a211131a1877
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T5013
+
+## Existing harness H0
+
+Every project-owned C/C++ path containing `fuzz` at the pre-change snapshot is shown below. Framework and build-script scaffolding are not expanded.
+
+### H0 path: `test/ares-fuzz.c`
+
+~~~~cpp
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+/*
+ * General driver to allow command-line fuzzer (i.e. afl) to
+ * exercise the libFuzzer entrypoint.
+ */
+
+#include <sys/types.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef WIN32
+#  include <io.h>
+#else
+#  include <unistd.h>
+#endif
+
+#include "ares.h"
+
+#define kMaxAflInputSize (1 << 20)
+static unsigned char afl_buffer[kMaxAflInputSize];
+
+#ifdef __AFL_LOOP
+/* If we are built with afl-clang-fast, use persistent mode */
+#  define KEEP_FUZZING(count) __AFL_LOOP(1000)
+#else
+/* If we are built with afl-clang, execute each input once */
+#  define KEEP_FUZZING(count) ((count) < 1)
+#endif
+
+/* In ares-test-fuzz.c and ares-test-fuzz-name.c: */
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+static void ProcessFile(int fd)
+{
+  ares_ssize_t count = read(fd, afl_buffer, kMaxAflInputSize);
+  /*
+   * Make a copy of the data so that it's not part of a larger
+   * buffer (where buffer overflows would go unnoticed).
+   */
+  if (count > 0) {
+    unsigned char *copied_data = (unsigned char *)malloc((size_t)count);
+    memcpy(copied_data, afl_buffer, (size_t)count);
+    LLVMFuzzerTestOneInput(copied_data, (size_t)count);
+    free(copied_data);
+  }
+}
+
+int main(int argc, char *argv[])
+{
+  if (argc == 1) {
+    int count = 0;
+    while (KEEP_FUZZING(count)) {
+      ProcessFile(fileno(stdin));
+      count++;
+    }
+  } else {
+    int ii;
+    for (ii = 1; ii < argc; ++ii) {
+      int fd = open(argv[ii], O_RDONLY);
+      if (fd < 0) {
+        fprintf(stderr, "Failed to open '%s'\n", argv[ii]);
+        continue;
+      }
+      ProcessFile(fd);
+      close(fd);
+    }
+  }
+  return 0;
+}
+~~~~
+
+### H0 path: `test/ares-test-fuzz-name.c`
+
+~~~~cpp
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "ares.h"
+// Include ares internal file for DNS protocol constants
+#include "ares_nameser.h"
+
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+// Entrypoint for Clang's libfuzzer, exercising query creation.
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+  // Null terminate the data.
+  char          *name   = malloc(size + 1);
+  unsigned char *buf    = NULL;
+  int            buflen = 0;
+  name[size]            = '\0';
+  memcpy(name, data, size);
+
+  ares_create_query(name, C_IN, T_AAAA, 1234, 0, &buf, &buflen, 1024);
+  free(buf);
+  free(name);
+  return 0;
+}
+~~~~
+
+### H0 path: `test/ares-test-fuzz.c`
+
+~~~~cpp
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#include <stddef.h>
+
+#include "ares.h"
+
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+// Entrypoint for Clang's libfuzzer
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+  // Feed the data into each of the ares_parse_*_reply functions.
+  struct hostent          *host = NULL;
+  struct ares_addrttl      info[5];
+  struct ares_addr6ttl     info6[5];
+  unsigned char            addrv4[4] = { 0x10, 0x20, 0x30, 0x40 };
+  struct ares_srv_reply   *srv       = NULL;
+  struct ares_mx_reply    *mx        = NULL;
+  struct ares_txt_reply   *txt       = NULL;
+  struct ares_soa_reply   *soa       = NULL;
+  struct ares_naptr_reply *naptr     = NULL;
+  struct ares_caa_reply   *caa       = NULL;
+  struct ares_uri_reply   *uri       = NULL;
+  int                      count     = 5;
+  ares_parse_a_reply(data, (int)size, &host, info, &count);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  host  = NULL;
+  count = 5;
+  ares_parse_aaaa_reply(data, (int)size, &host, info6, &count);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  host = NULL;
+  ares_parse_ptr_reply(data, (int)size, addrv4, sizeof(addrv4), AF_INET, &host);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  host = NULL;
+  ares_parse_ns_reply(data, (int)size, &host);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  ares_parse_srv_reply(data, (int)size, &srv);
+  if (srv) {
+    ares_free_data(srv);
+  }
+
+  ares_parse_mx_reply(data, (int)size, &mx);
+  if (mx) {
+    ares_free_data(mx);
+  }
+
+  ares_parse_txt_reply(data, (int)size, &txt);
+  if (txt) {
+    ares_free_data(txt);
+  }
+
+  ares_parse_soa_reply(data, (int)size, &soa);
+  if (soa) {
+    ares_free_data(soa);
+  }
+
+  ares_parse_naptr_reply(data, (int)size, &naptr);
+  if (naptr) {
+    ares_free_data(naptr);
+  }
+
+  ares_parse_caa_reply(data, (int)size, &caa);
+  if (caa) {
+    ares_free_data(caa);
+  }
+
+  ares_parse_uri_reply(data, (int)size, &uri);
+  if (uri) {
+    ares_free_data(uri);
+  }
+
+  return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed C/C++ production paths and all hunks are included. Function-context mode expands changed C/C++ function bodies; tests, examples, documentation, build files, and Harness files are excluded by the frozen rule.
+
+~~~~diff
+diff --git a/src/lib/ares_init.c b/src/lib/ares_init.c
+index eb0bfc1..33120ac 100644
+--- a/src/lib/ares_init.c
++++ b/src/lib/ares_init.c
+@@ -398,28 +398,31 @@ done:
+ ares_status_t ares_reinit(ares_channel_t *channel)
+ {
+   ares_status_t status;
+ 
+   if (channel == NULL) {
+     return ARES_EFORMERR;
+   }
+ 
+-  ares__channel_lock(channel);
++  /* ares__init_by_sysconfig() will lock when applying the config, but not
++   * when retrieving. */
+ 
+   status = ares__init_by_sysconfig(channel);
+   if (status != ARES_SUCCESS) {
+     DEBUGF(fprintf(stderr, "Error: init_by_sysconfig failed: %s\n",
+                    ares_strerror(status)));
+   }
+ 
++  ares__channel_lock(channel);
++
+   /* Flush cached queries on reinit */
+   if (channel->qcache) {
+     ares__qcache_flush(channel->qcache);
+   }
+ 
+   ares__channel_unlock(channel);
+ 
+   return status;
+ }
+ 
+ /* ares_dup() duplicates a channel handle with all its options and returns a
+    new channel handle */
+diff --git a/src/lib/ares_sysconfig.c b/src/lib/ares_sysconfig.c
+index e6a8a80..f8c4ac5 100644
+--- a/src/lib/ares_sysconfig.c
++++ b/src/lib/ares_sysconfig.c
+@@ -1070,39 +1070,45 @@ static ares_status_t ares_sysconfig_apply(ares_channel_t         *channel,
+ ares_status_t ares__init_by_sysconfig(ares_channel_t *channel)
+ {
+   ares_status_t    status;
+   ares_sysconfig_t sysconfig;
+ 
+   memset(&sysconfig, 0, sizeof(sysconfig));
+ 
+ #ifdef _WIN32
+   status = ares__init_sysconfig_windows(&sysconfig);
+ #elif defined(__MVS__)
+   status = ares__init_sysconfig_mvs(&sysconfig);
+ #elif defined(__riscos__)
+   status = ares__init_sysconfig_riscos(&sysconfig);
+ #elif defined(WATT32)
+   status = ares__init_sysconfig_watt32(&sysconfig);
+ #elif defined(ANDROID) || defined(__ANDROID__)
+   status = ares__init_sysconfig_android(&sysconfig);
+ #elif defined(__APPLE__)
+   status = ares__init_sysconfig_macos(&sysconfig);
+ #elif defined(CARES_USE_LIBRESOLV)
+   status = ares__init_sysconfig_libresolv(&sysconfig);
+ #else
+   status = ares__init_sysconfig_files(channel, &sysconfig);
+ #endif
+ 
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+   /* Environment is supposed to override sysconfig */
+   status = ares__init_by_environment(&sysconfig);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
++  /* Lock when applying the configuration to the channel.  Don't need to
++   * lock prior to this. */
++
++  ares__channel_lock(channel);
+   status = ares_sysconfig_apply(channel, &sysconfig);
++  ares__channel_unlock(channel);
++
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+~~~~
+
+## Uniform selected declaration context
+
+The same mechanical rule is used for every case: in lexicographic changed-production-path order, show +/-24 lines around the first literal identity match in each snapshot.
+
+### S0
+
+Path: `src/lib/ares_init.c`; lines 374-422
+
+~~~~text
+000374:   if (status != ARES_SUCCESS) {
+000375:     DEBUGF(fprintf(stderr, "Error: init_by_defaults failed: %s\n",
+000376:                    ares_strerror(status)));
+000377:     goto done;
+000378:   }
+000379: 
+000380:   /* Initialize the event thread */
+000381:   if (channel->optmask & ARES_OPT_EVENT_THREAD) {
+000382:     status = ares_event_thread_init(channel);
+000383:     if (status != ARES_SUCCESS) {
+000384:       goto done;
+000385:     }
+000386:   }
+000387: 
+000388: done:
+000389:   if (status != ARES_SUCCESS) {
+000390:     ares_destroy(channel);
+000391:     return (int)status;
+000392:   }
+000393: 
+000394:   *channelptr = channel;
+000395:   return ARES_SUCCESS;
+000396: }
+000397: 
+000398: ares_status_t ares_reinit(ares_channel_t *channel)
+000399: {
+000400:   ares_status_t status;
+000401: 
+000402:   if (channel == NULL) {
+000403:     return ARES_EFORMERR;
+000404:   }
+000405: 
+000406:   ares__channel_lock(channel);
+000407: 
+000408:   status = ares__init_by_sysconfig(channel);
+000409:   if (status != ARES_SUCCESS) {
+000410:     DEBUGF(fprintf(stderr, "Error: init_by_sysconfig failed: %s\n",
+000411:                    ares_strerror(status)));
+000412:   }
+000413: 
+000414:   /* Flush cached queries on reinit */
+000415:   if (channel->qcache) {
+000416:     ares__qcache_flush(channel->qcache);
+000417:   }
+000418: 
+000419:   ares__channel_unlock(channel);
+000420: 
+000421:   return status;
+000422: }
+~~~~
+
+### S1
+
+Path: `src/lib/ares_init.c`; lines 374-422
+
+~~~~text
+000374:   if (status != ARES_SUCCESS) {
+000375:     DEBUGF(fprintf(stderr, "Error: init_by_defaults failed: %s\n",
+000376:                    ares_strerror(status)));
+000377:     goto done;
+000378:   }
+000379: 
+000380:   /* Initialize the event thread */
+000381:   if (channel->optmask & ARES_OPT_EVENT_THREAD) {
+000382:     status = ares_event_thread_init(channel);
+000383:     if (status != ARES_SUCCESS) {
+000384:       goto done;
+000385:     }
+000386:   }
+000387: 
+000388: done:
+000389:   if (status != ARES_SUCCESS) {
+000390:     ares_destroy(channel);
+000391:     return (int)status;
+000392:   }
+000393: 
+000394:   *channelptr = channel;
+000395:   return ARES_SUCCESS;
+000396: }
+000397: 
+000398: ares_status_t ares_reinit(ares_channel_t *channel)
+000399: {
+000400:   ares_status_t status;
+000401: 
+000402:   if (channel == NULL) {
+000403:     return ARES_EFORMERR;
+000404:   }
+000405: 
+000406:   /* ares__init_by_sysconfig() will lock when applying the config, but not
+000407:    * when retrieving. */
+000408: 
+000409:   status = ares__init_by_sysconfig(channel);
+000410:   if (status != ARES_SUCCESS) {
+000411:     DEBUGF(fprintf(stderr, "Error: init_by_sysconfig failed: %s\n",
+000412:                    ares_strerror(status)));
+000413:   }
+000414: 
+000415:   ares__channel_lock(channel);
+000416: 
+000417:   /* Flush cached queries on reinit */
+000418:   if (channel->qcache) {
+000419:     ares__qcache_flush(channel->qcache);
+000420:   }
+000421: 
+000422:   ares__channel_unlock(channel);
+~~~~
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T5013","gap_exists":true,"gap_type":["entry point","state","configuration","API protocol"],"commit_induced":"YES","maintenance_needed":true,"confidence":89,"affected_functions":["ares_reinit","ares__init_by_sysconfig","ares_sysconfig_apply"],"reason":"H0 only invokes `ares_create_query` and the `ares_parse_*_reply` functions; it never creates channel state or calls `ares_reinit`. S1 materially changes the synchronization protocol by moving `ares__channel_lock(channel)` past `ares__init_by_sysconfig(channel)` and adding locking specifically around `ares_sysconfig_apply(channel, &sysconfig)`. Thus H0 cannot exercise the newly exposed unlocked configuration-retrieval phase, the locked apply phase, or their interaction with the later `channel->qcache` flush. Although absence of `ares_reinit` coverage existed in S0, these new lock boundaries and possible state interleavings are introduced by S1, materially aggravating the gap.","evidence":["`test/ares-test-fuzz-name.c` calls only `ares_create_query`.","`test/ares-test-fuzz.c` calls only `ares_parse_a_reply`, `ares_parse_aaaa_reply`, `ares_parse_ptr_reply`, `ares_parse_ns_reply`, `ares_parse_srv_reply`, `ares_parse_mx_reply`, `ares_parse_txt_reply`, `ares_parse_soa_reply`, `ares_parse_naptr_reply`, `ares_parse_caa_reply`, and `ares_parse_uri_reply`.","In S0, `ares_reinit` acquires `ares__channel_lock(channel)` before calling `ares__init_by_sysconfig(channel)` and retains it through the `channel->qcache` flush.","In S1, `ares_reinit` calls `ares__init_by_sysconfig(channel)` before acquiring the lock used for the `channel->qcache` flush.","In S1, `ares__init_by_sysconfig` newly locks and unlocks only around `ares_sysconfig_apply(channel, &sysconfig)`, while configuration retrieval and `ares__init_by_environment(&sysconfig)` occur outside that lock."],"recommended_action":"Add a stateful harness that supplies a valid `ares_channel_t` to `ares_reinit`, controls configuration and environment-derived inputs reaching `ares__init_by_sysconfig`, and exercises concurrent or deliberately interleaved channel activity so both the unlocked retrieval phase, locked `ares_sysconfig_apply` phase, and subsequent `channel->qcache` flush are covered."}
+tokens used
+19,137

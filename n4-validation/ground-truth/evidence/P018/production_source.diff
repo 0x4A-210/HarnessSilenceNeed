@@ -1,0 +1,168 @@
+diff --git a/std/thumbhash/decode_quirks.wuffs b/std/thumbhash/decode_quirks.wuffs
+new file mode 100644
+index 00000000..f5f42875
+--- /dev/null
++++ b/std/thumbhash/decode_quirks.wuffs
+@@ -0,0 +1,26 @@
++// Copyright 2024 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
++// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
++// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
++// option. This file may not be copied, modified, or distributed
++// except according to those terms.
++//
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++// --------
++
++// Quirks are discussed in (/doc/note/quirks.md).
++//
++// The base38 encoding of "th.." is 0x19_83D8. Left shifting by 10 gives
++// 0x660F_6000.
++pri const QUIRKS_BASE : base.u32 = 0x660F_6000
++
++// --------
++
++// When this quirk is enabled, the decoder speaks just raw thumbhash, without
++// the "\xC3\xBE\xFE" magic identifier to start the file.
++//
++// Enabling this quirk matches the behavior of the original JavaScript
++// reference implementation at https://evanw.github.io/thumbhash/
++pub const QUIRK_JUST_RAW_THUMBHASH : base.u32 = 0x660F_6000 | 0x00
+diff --git a/std/thumbhash/decode_thumbhash.wuffs b/std/thumbhash/decode_thumbhash.wuffs
+index 7556ef61..487ea1cb 100644
+--- a/std/thumbhash/decode_thumbhash.wuffs
++++ b/std/thumbhash/decode_thumbhash.wuffs
+@@ -62,24 +62,26 @@ pub struct decoder? implements base.image_decoder(
+         //
+         // The A channel is not combined with L, P or Q and a_scale is out of
+         // 15, so we can keep the a_dc denominator at (15 << 42).
+         //
+         // Let LDENOM = ((63 * 31) << 14) = 0x01E8_4000.
+         //
+         // Let ADENOM = ( 15       << 14) = 0x0003_C000.
+         l_dc : base.u64,  // Fixed-point denominator is (LDENOM << 28).
+         p_dc : base.u64,  // Fixed-point denominator is (LDENOM << 28).
+         q_dc : base.u64,  // Fixed-point denominator is (LDENOM << 28).
+         a_dc : base.u64,  // Fixed-point denominator is (ADENOM << 28).
+ 
++        quirk_just_raw_thumbhash : base.bool,
++
+         l_scale : base.u8[..= 31],
+         p_scale : base.u8[..= 63],
+         q_scale : base.u8[..= 63],
+         a_scale : base.u8[..= 15],
+ 
+         // The first three fields determine lx and ly: the exclusive max of the
+         // (cx, cy) pairs indexing two-dimensional AC coefficients. The (0, 0)
+         // pair is the DC coefficient. (lx / ly) is also the image's aspect
+         // ratio, after rounding width and height to a whole number of pixels
+         // such that the longest dimension is 32.
+         //
+         // Let lminor and lmajor alias lx and ly if is_landscape is 0 (false).
+@@ -176,55 +178,63 @@ pub struct decoder? implements base.image_decoder(
+         // qac) or 14 (aac). But we round up the array sizes up to a power of 2
+         // (and bitwise-and the array indexes) to simplify bounds checking.
+         lac : array[32] base.u32,  // Fixed-point denominator is LDENOM.
+         pac : array[8] base.u32,  //  Fixed-point denominator is LDENOM.
+         qac : array[8] base.u32,  //  Fixed-point denominator is LDENOM.
+         aac : array[16] base.u32,  // Fixed-point denominator is ADENOM.
+ 
+         // 32 rows, 32 BGRA pixels per row.
+         pixels : array[32] array[128] base.u8,
+ )
+ 
+ pub func decoder.get_quirk(key: base.u32) base.u64 {
++    if (args.key == QUIRK_JUST_RAW_THUMBHASH) and this.quirk_just_raw_thumbhash {
++        return 1
++    }
+     return 0
+ }
+ 
+ pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
++    if args.key == QUIRK_JUST_RAW_THUMBHASH {
++        this.quirk_just_raw_thumbhash = args.value > 0
++        return ok
++    }
+     return base."#unsupported option"
+ }
+ 
+ pub func decoder.decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+     var status : base.status
+ 
+     while true {
+         status =? this.do_decode_image_config?(dst: args.dst, src: args.src)
+         if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+         yield? status
+     }
+ }
+ 
+ pri func decoder.do_decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+     var c32  : base.u32
+     var swap : base.u8[..= 7]
+ 
+     if this.call_sequence <> 0x00 {
+         return base."#bad call sequence"
+     }
+ 
+-    // TODO: implement QUIRK_JUST_RAW_THUMBHASH.
+-    c32 = args.src.read_u24le_as_u32?()
+-    if c32 <> '\xC3\xBE\xFE'le {
+-        return "#bad header"
++    if not this.quirk_just_raw_thumbhash {
++        c32 = args.src.read_u24le_as_u32?()
++        if c32 <> '\xC3\xBE\xFE'le {
++            return "#bad header"
++        }
+     }
+ 
+     c32 = args.src.read_u24le_as_u32?()
+     this.l_dc = (((c32 >> 0x00) & 63) as base.u64) * (31 << 42)
+     this.p_dc = ((((c32 >> 0x06) & 63) as base.u64) * (31 << 43)) ~mod- ((63 * 31) << 42)
+     this.q_dc = ((((c32 >> 0x0C) & 63) as base.u64) * (31 << 43)) ~mod- ((63 * 31) << 42)
+     this.l_scale = ((c32 >> 0x12) & 31) as base.u8
+     this.has_alpha = ((c32 >> 0x17) & 1) as base.u8
+ 
+     c32 = args.src.read_u16le_as_u32?()
+     this.l_count = ((c32 >> 0x00) & 7) as base.u8
+     this.p_scale = ((c32 >> 0x03) & 63) as base.u8
+@@ -238,29 +248,35 @@ pri func decoder.do_decode_image_config?(dst: nptr base.image_config, src: base.
+         this.h_dimension_code = swap
+     }
+ 
+     if this.is_landscape <> 0 {
+         this.lx = (7 - (2 * this.has_alpha)) as base.u32
+         this.ly = (this.l_count.max(no_less_than: 3)) as base.u32
+     } else {
+         this.lx = (this.l_count.max(no_less_than: 3)) as base.u32
+         this.ly = (7 - (2 * this.has_alpha)) as base.u32
+     }
+ 
+     this.frame_config_io_position = 8
++    assert this.frame_config_io_position >= 8
+     if this.has_alpha <> 0 {
+-        this.frame_config_io_position = 9
+         c32 = args.src.read_u8_as_u32?()
+         this.a_dc = (((c32 >> 0x00) & 15) as base.u64) << 42
+         this.a_scale = ((c32 >> 0x04) & 15) as base.u8
++        this.frame_config_io_position = 9
++        assert this.frame_config_io_position >= 8
++    }
++
++    if this.quirk_just_raw_thumbhash {
++        this.frame_config_io_position -= 3
+     }
+ 
+     this.pixfmt = base.PIXEL_FORMAT__BGRX
+     if this.has_alpha <> 0 {
+         this.pixfmt = base.PIXEL_FORMAT__BGRA_NONPREMUL
+     }
+ 
+     if args.dst <> nullptr {
+         args.dst.set!(
+                 pixfmt: this.pixfmt,
+                 pixsub: 0,
+                 width: DIMENSIONS_FROM_DIMENSION_CODES[this.w_dimension_code] as base.u32,

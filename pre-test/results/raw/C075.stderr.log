@@ -1,0 +1,433 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-blind-run-40ko0e9q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08553-f5b2-7470-933f-15ee39e81131
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C075
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `fuzz/bplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * bplist_fuzzer.cc
+ * binary plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_bin(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+### `fuzz/xplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * xplist_fuzzer.cc
+ * XML plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_xml(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/libplist/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+#
+# Copyright 2016 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+./autogen.sh --without-cython --enable-debug
+make -j$(nproc) clean
+make -j$(nproc) all
+
+for fuzzer in bplist_fuzzer xplist_fuzzer; do
+  $CXX $CXXFLAGS -std=c++11 -Iinclude/ \
+      fuzz/$fuzzer.cc -o $OUT/$fuzzer \
+      $LIB_FUZZING_ENGINE src/.libs/libplist-2.0.a
+done
+
+zip -j $OUT/bplist_fuzzer_seed_corpus.zip test/data/*.bplist
+zip -j $OUT/xplist_fuzzer_seed_corpus.zip test/data/*.plist
+
+cp fuzz/*.dict fuzz/*.options $OUT/
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `include/plist/plist.h`
+- `src/bplist.c`
+- `src/plist.c`
+- `src/xplist.c`
+
+~~~~diff
+diff --git a/include/plist/plist.h b/include/plist/plist.h
+--- a/include/plist/plist.h
++++ b/include/plist/plist.h
+@@ -100,23 +100,24 @@ extern "C"
+ 
+     /**
+      * The enumeration of plist node types.
+      */
+     typedef enum
+     {
+-        PLIST_BOOLEAN,	/**< Boolean, scalar type */
+-        PLIST_UINT,	/**< Unsigned integer, scalar type */
+-        PLIST_REAL,	/**< Real, scalar type */
+-        PLIST_STRING,	/**< ASCII string, scalar type */
+-        PLIST_ARRAY,	/**< Ordered array, structured type */
+-        PLIST_DICT,	/**< Unordered dictionary (key/value pair), structured type */
+-        PLIST_DATE,	/**< Date, scalar type */
+-        PLIST_DATA,	/**< Binary data, scalar type */
+-        PLIST_KEY,	/**< Key in dictionaries (ASCII String), scalar type */
++        PLIST_BOOLEAN,  /**< Boolean, scalar type */
++        PLIST_UINT,     /**< Unsigned integer, scalar type */
++        PLIST_REAL,     /**< Real, scalar type */
++        PLIST_STRING,   /**< ASCII string, scalar type */
++        PLIST_ARRAY,    /**< Ordered array, structured type */
++        PLIST_DICT,     /**< Unordered dictionary (key/value pair), structured type */
++        PLIST_DATE,     /**< Date, scalar type */
++        PLIST_DATA,     /**< Binary data, scalar type */
++        PLIST_KEY,      /**< Key in dictionaries (ASCII String), scalar type */
+         PLIST_UID,      /**< Special type used for 'keyed encoding' */
+-        PLIST_NONE	/**< No type */
++        PLIST_NULL,     /**< NULL type */
++        PLIST_NONE      /**< No type */
+     } plist_type;
+ 
+ 
+     /********************************************
+      *                                          *
+      *          Creation & Destruction          *
+@@ -201,12 +202,21 @@ extern "C"
+      * @param val the unsigned integer value
+      * @return the created item
+      * @sa #plist_type
+      */
+     plist_t plist_new_uid(uint64_t val);
+ 
++    /**
++     * Create a new plist_t type #PLIST_NULL
++     * @return the created item
++     * @sa #plist_type
++     * @note This type is not valid for all formats, e.g. the XML format
++     *     does not support it.
++     */
++    plist_t plist_new_null(void);
++
+     /**
+      * Destruct a plist_t node and all its children recursively
+      *
+      * @param plist the plist to free
+      */
+     void plist_free(plist_t plist);
+diff --git a/src/bplist.c b/src/bplist.c
+--- a/src/bplist.c
++++ b/src/bplist.c
+@@ -627,12 +627,19 @@ static plist_t parse_bin_node(struct bplist_data *bplist, const char** object)
+             data->boolval = FALSE;
+             data->length = 1;
+             return node_create(NULL, data);
+         }
+ 
+         case BPLIST_NULL:
++        {
++            plist_data_t data = plist_new_plist_data();
++            data->type = PLIST_NULL;
++            data->length = 0;
++            return node_create(NULL, data);
++        }
++
+         default:
+             return NULL;
+         }
+ 
+     case BPLIST_UINT:
+         if (pobject + (uint64_t)(1 << size) > poffset_table) {
+@@ -1292,12 +1299,17 @@ PLIST_API void plist_to_bin(plist_t plist, char **plist_bin, uint32_t * length)
+ 
+         plist_data_t data = plist_get_data(ptr_array_index(objects, i));
+         offsets[i] = bplist_buff->len;
+ 
+         switch (data->type)
+         {
++        case PLIST_NULL: {
++            uint8_t b = 0;
++            byte_array_append(bplist_buff, &b, 1);
++            break;
++        }
+         case PLIST_BOOLEAN: {
+             uint8_t b = data->boolval ? BPLIST_TRUE : BPLIST_FALSE;
+             byte_array_append(bplist_buff, &b, 1);
+             break;
+         }
+         case PLIST_UINT:
+diff --git a/src/plist.c b/src/plist.c
+--- a/src/plist.c
++++ b/src/plist.c
+@@ -371,12 +371,21 @@ PLIST_API plist_t plist_new_date(int32_t sec, int32_t usec)
+     data->type = PLIST_DATE;
+     data->realval = (double)sec + (double)usec / 1000000;
+     data->length = sizeof(double);
+     return plist_new_node(data);
+ }
+ 
++PLIST_API plist_t plist_new_null(void)
++{
++    plist_data_t data = plist_new_plist_data();
++    data->type = PLIST_NULL;
++    data->intval = 0;
++    data->length = 0;
++    return plist_new_node(data);
++}
++
+ PLIST_API void plist_free(plist_t plist)
+ {
+     if (plist)
+     {
+         plist_free_node(plist);
+     }
+diff --git a/src/xplist.c b/src/xplist.c
+--- a/src/xplist.c
++++ b/src/xplist.c
+@@ -78,14 +78,16 @@ static const char XML_PLIST_PROLOG[] = "<?xml version=\"1.0\" encoding=\"UTF-8\"
+ <plist version=\"1.0\">\n";
+ static const char XML_PLIST_EPILOG[] = "</plist>\n";
+ 
+ #ifdef DEBUG
+ static int plist_xml_debug = 0;
+ #define PLIST_XML_ERR(...) if (plist_xml_debug) { fprintf(stderr, "libplist[xmlparser] ERROR: " __VA_ARGS__); }
++#define PLIST_XML_WRITE_ERR(...) if (plist_xml_debug) { fprintf(stderr, "libplist[xmlwriter] ERROR: " __VA_ARGS__); }
+ #else
+ #define PLIST_XML_ERR(...)
++#define PLIST_XML_WRITE_ERR(...)
+ #endif
+ 
+ void plist_xml_init(void)
+ {
+     /* init XML stuff */
+ #ifdef DEBUG
+@@ -122,13 +124,13 @@ static size_t dtostr(char *buf, size_t bufsize, double realval)
+             }
+         }
+     }
+     return len;
+ }
+ 
+-static void node_to_xml(node_t* node, bytearray_t **outbuf, uint32_t depth)
++static int node_to_xml(node_t* node, bytearray_t **outbuf, uint32_t depth)
+ {
+     plist_data_t node_data = NULL;
+ 
+     char isStruct = FALSE;
+     char tagOpen = FALSE;
+ 
+@@ -136,14 +138,16 @@ static void node_to_xml(node_t* node, bytearray_t **outbuf, uint32_t depth)
+     size_t tag_len = 0;
+     char *val = NULL;
+     size_t val_len = 0;
+ 
+     uint32_t i = 0;
+ 
+-    if (!node)
+-        return;
++    if (!node) {
++        PLIST_XML_WRITE_ERR("Encountered invalid empty node in property list\n");
++        return -1;
++    }
+ 
+     node_data = plist_get_data(node);
+ 
+     switch (node_data->type)
+     {
+     case PLIST_BOOLEAN:
+@@ -229,12 +233,15 @@ static void node_to_xml(node_t* node, bytearray_t **outbuf, uint32_t depth)
+         if (node_data->length == 16) {
+             val_len = snprintf(val, 64, "%"PRIu64, node_data->intval);
+         } else {
+             val_len = snprintf(val, 64, "%"PRIi64, node_data->intval);
+         }
+         break;
++    case PLIST_NULL:
++        PLIST_XML_WRITE_ERR("PLIST_NULL type is not valid for XML format\n");
++        return -1;
+     default:
+         break;
+     }
+ 
+     for (i = 0; i < depth; i++) {
+         str_buf_append(*outbuf, "\t", 1);
+@@ -350,13 +357,14 @@ static void node_to_xml(node_t* node, bytearray_t **outbuf, uint32_t depth)
+         /* add child nodes */
+         if (node_data->type == PLIST_DICT && node->children) {
+             assert((node->children->count % 2) == 0);
+         }
+         node_t *ch;
+         for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
+-            node_to_xml(ch, outbuf, depth+1);
++            int res = node_to_xml(ch, outbuf, depth+1);
++            if (res < 0) return res;
+         }
+ 
+         /* fix indent for structured types */
+         for (i = 0; i < depth; i++) {
+             str_buf_append(*outbuf, "\t", 1);
+         }
+@@ -366,12 +374,13 @@ static void node_to_xml(node_t* node, bytearray_t **outbuf, uint32_t depth)
+         /* add closing tag */
+         str_buf_append(*outbuf, "</", 2);
+         str_buf_append(*outbuf, tag, tag_len);
+         str_buf_append(*outbuf, ">", 1);
+     }
+     str_buf_append(*outbuf, "\n", 1);
++    return 0;
+ }
+ 
+ static void parse_date(const char *strval, struct TM *btime)
+ {
+     if (!btime) return;
+     memset(btime, 0, sizeof(struct tm));
+@@ -516,13 +525,18 @@ PLIST_API void plist_to_xml(plist_t plist, char **plist_xml, uint32_t * length)
+     size += sizeof(XML_PLIST_PROLOG) + sizeof(XML_PLIST_EPILOG) - 1;
+ 
+     strbuf_t *outbuf = str_buf_new(size);
+ 
+     str_buf_append(outbuf, XML_PLIST_PROLOG, sizeof(XML_PLIST_PROLOG)-1);
+ 
+-    node_to_xml(plist, &outbuf, 0);
++    if (node_to_xml(plist, &outbuf, 0) < 0) {
++        str_buf_free(outbuf);
++        *plist_xml = NULL;
++        *length = 0;
++        return;
++    }
+ 
+     str_buf_append(outbuf, XML_PLIST_EPILOG, sizeof(XML_PLIST_EPILOG));
+ 
+     *plist_xml = outbuf->data;
+     *length = outbuf->len - 1;
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C075","maintenance_needed":true,"confidence":94,"change_types":["new public entry point","new plist node type","serialization behavior change","attack-surface expansion"],"affected_functions":["plist_new_null","parse_bin_node","plist_to_bin","node_to_xml","plist_to_xml"],"reason":"The commit adds the public PLIST_NULL type and plist_new_null(), along with new binary serialization and XML rejection behavior. The existing bplist harness can reach PLIST_NULL parsing through plist_from_bin, but it only frees the parsed tree; neither harness invokes plist_new_null, plist_to_bin, or plist_to_xml. Consequently, the newly added writer behavior and the recursive XML failure path for null nodes are outside the harnesses' exercised paths.","evidence":["include/plist/plist.h adds PLIST_NULL and the public plist_new_null(void) API.","parse_bin_node now creates a PLIST_NULL node for BPLIST_NULL, which bplist_fuzzer can exercise through plist_from_bin.","plist_to_bin adds a PLIST_NULL serialization case, but bplist_fuzzer never calls plist_to_bin.","node_to_xml now returns an error for PLIST_NULL and propagates child errors recursively; plist_to_xml converts that error into NULL output and zero length.","Both existing harnesses only call their corresponding parser and plist_free, so they do not exercise constructors or serialization."],"recommended_action":"Extend the binary harness or add a round-trip/cross-format target that parses fuzz-controlled binary plists and invokes plist_to_bin and plist_to_xml, including trees containing PLIST_NULL; also directly exercise plist_new_null where appropriate and safely free any produced output."}
+tokens used
+7,250

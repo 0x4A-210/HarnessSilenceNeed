@@ -1,0 +1,362 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8032-okkv6xkc
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093f8-edf1-79a1-b2fa-0536ee67f582
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8032
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `fuzz/fuzz_dump.cpp`
+
+~~~~cpp
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <string_view>
+
+#include "NullBuffer.h"
+
+// example from doc/basics.md#tree-walking-and-json-element-types
+static void print_json(std::ostream& os, simdjson::dom::element element) {
+  const char endl='\n';
+  switch (element.type()) {
+  case simdjson::dom::element_type::ARRAY:
+    os << "[";
+    for (simdjson::dom::element child : element.get<simdjson::dom::array>().first) {
+      print_json(os, child);
+      os << ",";
+    }
+    os << "]";
+    break;
+  case simdjson::dom::element_type::OBJECT:
+    os << "{";
+    for (simdjson::dom::key_value_pair field : element.get<simdjson::dom::object>().first) {
+      os << "\"" << field.key << "\": ";
+      print_json(os, field.value);
+    }
+    os << "}";
+    break;
+  case simdjson::dom::element_type::INT64:
+    os << element.get<int64_t>().first << endl;
+    break;
+  case simdjson::dom::element_type::UINT64:
+    os << element.get<uint64_t>().first << endl;
+    break;
+  case simdjson::dom::element_type::DOUBLE:
+    os << element.get<double>().first << endl;
+    break;
+  case simdjson::dom::element_type::STRING:
+    os << element.get<std::string_view>().first << endl;
+    break;
+  case simdjson::dom::element_type::BOOL:
+    os << element.get<bool>().first << endl;
+    break;
+  case simdjson::dom::element_type::NULL_VALUE:
+    os << "null" << endl;
+    break;
+  }
+}
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+  simdjson::dom::parser parser;
+  simdjson::dom::element elem;
+  auto error = parser.parse(Data, Size).get(elem);
+
+  if (error) { return 0; }
+  NulOStream os;
+  //std::ostream& os(std::cout);
+  print_json(os,elem);
+  return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/include/simdjson/error-inl.h b/include/simdjson/error-inl.h
+index 7622114b..681df206 100644
+--- a/include/simdjson/error-inl.h
++++ b/include/simdjson/error-inl.h
+@@ -92,6 +92,16 @@ simdjson_really_inline simdjson_result_base<T>::operator T&&() && noexcept(false
+ 
+ #endif // SIMDJSON_EXCEPTIONS
+ 
++template<typename T>
++simdjson_really_inline const T& simdjson_result_base<T>::value_unsafe() const& noexcept {
++  return this->first;
++}
++
++template<typename T>
++simdjson_really_inline T&& simdjson_result_base<T>::value_unsafe() && noexcept {
++  return std::forward<T>(this->first);;
++}
++
+ template<typename T>
+ simdjson_really_inline simdjson_result_base<T>::simdjson_result_base(T &&value, error_code error) noexcept
+     : std::pair<T, error_code>(std::forward<T>(value), error) {}
+@@ -150,6 +160,16 @@ simdjson_really_inline simdjson_result<T>::operator T&&() && noexcept(false) {
+ 
+ #endif // SIMDJSON_EXCEPTIONS
+ 
++template<typename T>
++simdjson_really_inline const T& simdjson_result<T>::value_unsafe() const& noexcept {
++  return internal::simdjson_result_base<T>::value_unsafe();
++}
++
++template<typename T>
++simdjson_really_inline T&& simdjson_result<T>::value_unsafe() && noexcept {
++  return std::forward<internal::simdjson_result_base<T>>(*this).value_unsafe();
++}
++
+ template<typename T>
+ simdjson_really_inline simdjson_result<T>::simdjson_result(T &&value, error_code error) noexcept
+     : internal::simdjson_result_base<T>(std::forward<T>(value), error) {}
+diff --git a/include/simdjson/error.h b/include/simdjson/error.h
+index 08161c2f..e4792c08 100644
+--- a/include/simdjson/error.h
++++ b/include/simdjson/error.h
+@@ -97,85 +97,97 @@ namespace internal {
+  * Then any method returning simdjson_result<T> will be chainable with your methods.
+  */
+ template<typename T>
+-struct simdjson_result_base : public std::pair<T, error_code> {
++struct simdjson_result_base : protected std::pair<T, error_code> {
+ 
+   /**
+    * Create a new empty result with error = UNINITIALIZED.
+    */
+   simdjson_really_inline simdjson_result_base() noexcept;
+ 
+   /**
+    * Create a new error result.
+    */
+   simdjson_really_inline simdjson_result_base(error_code error) noexcept;
+ 
+   /**
+    * Create a new successful result.
+    */
+   simdjson_really_inline simdjson_result_base(T &&value) noexcept;
+ 
+   /**
+    * Create a new result with both things (use if you don't want to branch when creating the result).
+    */
+   simdjson_really_inline simdjson_result_base(T &&value, error_code error) noexcept;
+ 
+   /**
+    * Move the value and the error to the provided variables.
+    *
+    * @param value The variable to assign the value to. May not be set if there is an error.
+    * @param error The variable to assign the error to. Set to SUCCESS if there is no error.
+    */
+   simdjson_really_inline void tie(T &value, error_code &error) && noexcept;
+ 
+   /**
+    * Move the value to the provided variable.
+    *
+    * @param value The variable to assign the value to. May not be set if there is an error.
+    */
+   simdjson_really_inline error_code get(T &value) && noexcept;
+ 
+   /**
+    * The error.
+    */
+   simdjson_really_inline error_code error() const noexcept;
+ 
+ #if SIMDJSON_EXCEPTIONS
+ 
+   /**
+    * Get the result value.
+    *
+    * @throw simdjson_error if there was an error.
+    */
+   simdjson_really_inline T& value() & noexcept(false);
+ 
+   /**
+    * Take the result value (move it).
+    *
+    * @throw simdjson_error if there was an error.
+    */
+   simdjson_really_inline T&& value() && noexcept(false);
+ 
+   /**
+    * Take the result value (move it).
+    *
+    * @throw simdjson_error if there was an error.
+    */
+   simdjson_really_inline T&& take_value() && noexcept(false);
+ 
+   /**
+    * Cast to the value (will throw on error).
+    *
+    * @throw simdjson_error if there was an error.
+    */
+   simdjson_really_inline operator T&&() && noexcept(false);
+-
+ #endif // SIMDJSON_EXCEPTIONS
++
++  /**
++   * Get the result value. This function is safe if and only
++   * the error() method returns a value that evoluates to false.
++   */
++  simdjson_really_inline const T& value_unsafe() const& noexcept;
++
++  /**
++   * Take the result value (move it). This function is safe if and only
++   * the error() method returns a value that evoluates to false.
++   */
++  simdjson_really_inline T&& value_unsafe() && noexcept;
++
+ }; // struct simdjson_result_base
+ 
+ } // namespace internal
+ 
+ /**
+  * The result of a simdjson operation that could fail.
+  *
+  * Gives the option of reading error codes, or throwing an exception by casting to the desired result.
+  */
+@@ -183,75 +195,87 @@ template<typename T>
+ struct simdjson_result : public internal::simdjson_result_base<T> {
+   /**
+    * @private Create a new empty result with error = UNINITIALIZED.
+    */
+   simdjson_really_inline simdjson_result() noexcept;
+   /**
+    * @private Create a new error result.
+    */
+   simdjson_really_inline simdjson_result(T &&value) noexcept;
+   /**
+    * @private Create a new successful result.
+    */
+   simdjson_really_inline simdjson_result(error_code error_code) noexcept;
+   /**
+    * @private Create a new result with both things (use if you don't want to branch when creating the result).
+    */
+   simdjson_really_inline simdjson_result(T &&value, error_code error) noexcept;
+ 
+   /**
+    * Move the value and the error to the provided variables.
+    *
+    * @param value The variable to assign the value to. May not be set if there is an error.
+    * @param error The variable to assign the error to. Set to SUCCESS if there is no error.
+    */
+   simdjson_really_inline void tie(T &value, error_code &error) && noexcept;
+ 
+   /**
+    * Move the value to the provided variable.
+    *
+    * @param value The variable to assign the value to. May not be set if there is an error.
+    */
+   simdjson_warn_unused simdjson_really_inline error_code get(T &value) && noexcept;
+ 
+   /**
+    * The error.
+    */
+   simdjson_really_inline error_code error() const noexcept;
+ 
+ #if SIMDJSON_EXCEPTIONS
+ 
+   /**
+    * Get the result value.
+    *
+    * @throw simdjson_error if there was an error.
+    */
+   simdjson_really_inline T& value() & noexcept(false);
+ 
+   /**
+    * Take the result value (move it).
+    *
+    * @throw simdjson_error if there was an error.
+    */
+   simdjson_really_inline T&& value() && noexcept(false);
+ 
+   /**
+    * Take the result value (move it).
+    *
+    * @throw simdjson_error if there was an error.
+    */
+   simdjson_really_inline T&& take_value() && noexcept(false);
+ 
+   /**
+    * Cast to the value (will throw on error).
+    *
+    * @throw simdjson_error if there was an error.
+    */
+   simdjson_really_inline operator T&&() && noexcept(false);
+-
+ #endif // SIMDJSON_EXCEPTIONS
++
++  /**
++   * Get the result value. This function is safe if and only
++   * the error() method returns a value that evoluates to false.
++   */
++  simdjson_really_inline const T& value_unsafe() const& noexcept;
++
++  /**
++   * Take the result value (move it). This function is safe if and only
++   * the error() method returns a value that evoluates to false.
++   */
++  simdjson_really_inline T&& value_unsafe() && noexcept;
++
+ }; // struct simdjson_result
+ 
+ #ifndef SIMDJSON_DISABLE_DEPRECATED_API
+ /**
+  * @deprecated This is an alias and will be removed, use error_code instead
+  */
+diff --git a/include/simdjson/generic/ondemand/parser-inl.h b/include/simdjson/generic/ondemand/parser-inl.h
+index e6b5ff84..7b03ec68 100644
+--- a/include/simdjson/generic/ondemand/parser-inl.h
++++ b/include/simdjson/generic/ondemand/parser-inl.h
+@@ -35,7 +35,7 @@ simdjson_warn_unused simdjson_really_inline simdjson_result<document> parser::it
+ simdjson_warn_unused simdjson_really_inline simdjson_result<document> parser::iterate(const simdjson_result<padded_string> &result) & noexcept {
+   // We don't presently have a way to temporarily get a const T& from a simdjson_result<T> without throwing an exception
+   SIMDJSON_TRY( result.error() );
+-  const padded_string &buf = result.first;
++  const padded_string &buf = result.value_unsafe();
+   return iterate(buf);
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8032","gap_exists":true,"gap_type":["harness_build_compatibility","new_public_api","api_protocol","ondemand_entry_point"],"confidence":99,"affected_functions":["simdjson_result_base<T>::value_unsafe() const&","simdjson_result_base<T>::value_unsafe() &&","simdjson_result<T>::value_unsafe() const&","simdjson_result<T>::value_unsafe() &&","simdjson::ondemand::parser::iterate(const simdjson_result<padded_string>&) &","print_json"],"reason":"S1 makes std::pair<T,error_code> a protected base of simdjson_result_base<T>, while H0 directly accesses `.first` in every `element.get<...>()` result. H0 therefore does not remain a valid consumer of the S1 result API. It also never exercises the newly public `value_unsafe()` lvalue/rvalue overloads or their required protocol of first establishing that `error()` is false. Finally, H0 only uses `simdjson::dom::parser`; it cannot reach the changed ondemand `parser::iterate(const simdjson_result<padded_string>&)` path that now calls `result.value_unsafe()`.","evidence":["S1 changes `simdjson_result_base : public std::pair<T, error_code>` to `simdjson_result_base : protected std::pair<T, error_code>`.","H0 uses `element.get<simdjson::dom::array>().first`, `element.get<simdjson::dom::object>().first`, and `.first` for all scalar getters.","S1 adds public `value_unsafe() const&` and `value_unsafe() &&` declarations and implementations to both `simdjson_result_base<T>` and `simdjson_result<T>`.","The documented contract says `value_unsafe()` is safe only when `error()` evaluates to false; H0 exercises neither that check/access sequence nor the rvalue move overload.","The changed ondemand overload replaces `result.first` with `result.value_unsafe()`, but H0 instantiates only `simdjson::dom::parser` and calls `parser.parse(Data, Size).get(elem)`."],"recommended_action":"Update H0 to consume successful getter results through `value_unsafe()` after checking `error()`, and add coverage for both const-lvalue and rvalue overloads. Add an ondemand path that constructs a `simdjson_result<padded_string>` from fuzz bytes and invokes `simdjson::ondemand::parser::iterate(const simdjson_result<padded_string>&)` for both successful and error results while respecting the accessor precondition."}
+tokens used
+6,980

@@ -1,0 +1,991 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8104-l7_molra
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093ff-ec8a-7890-a829-3004a88313be
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8104
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `fuzz/driver.cc`
+
+~~~~cpp
+/*
+ * Copyright (c) 2016 Fastly, Inc.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+/*
+ * This file implements a test harness for using h2o with LibFuzzer.
+ * See http://llvm.org/docs/LibFuzzer.html for more info.
+ */
+
+#define H2O_USE_EPOLL 1
+#include <string.h>
+#include <errno.h>
+#include <limits.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/select.h>
+#include <wait.h>
+#include <malloc.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+#include "h2o.h"
+#include "h2o/http1.h"
+#include "h2o/http2.h"
+#include "h2o/url.h"
+#include "h2o/memcached.h"
+
+#if !defined(HTTP1) && !defined(HTTP2)
+#error "Please defined one of HTTP1 or HTTP2"
+#endif
+
+#if defined(HTTP1) && defined(HTTP2)
+#error "Please defined one of HTTP1 or HTTP2, but not both"
+#endif
+
+static h2o_globalconf_t config;
+static h2o_context_t ctx;
+static h2o_accept_ctx_t accept_ctx;
+static int client_timeout_ms;
+static char unix_listener[PATH_MAX];
+
+/*
+ * Registers a request handler with h2o
+ */
+static h2o_pathconf_t *register_handler(h2o_hostconf_t *hostconf, const char *path, int (*on_req)(h2o_handler_t *, h2o_req_t *))
+{
+    h2o_pathconf_t *pathconf = h2o_config_register_path(hostconf, path, 0);
+    h2o_handler_t *handler = h2o_create_handler(pathconf, sizeof(*handler));
+    handler->on_req = on_req;
+    return pathconf;
+}
+
+/*
+ * Request handler used for testing. Returns a basic "200 OK" response.
+ */
+static int chunked_test(h2o_handler_t *self, h2o_req_t *req)
+{
+    static h2o_generator_t generator = {NULL, NULL};
+
+    if (!h2o_memis(req->method.base, req->method.len, H2O_STRLIT("GET")))
+        return -1;
+
+    h2o_iovec_t body = h2o_strdup(&req->pool, "hello world\n", SIZE_MAX);
+    req->res.status = 200;
+    req->res.reason = "OK";
+    h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL, H2O_STRLIT("text/plain"));
+    h2o_start_response(req, &generator);
+    h2o_send(req, &body, 1, H2O_SEND_STATE_FINAL);
+
+    return 0;
+}
+
+/* copy from src to dst, return true if src has EOF */
+static int drain(int fd)
+{
+    char buf[4096];
+    ssize_t n;
+
+    n = read(fd, buf, sizeof(buf));
+    if (n <= 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/* A request sent from client thread to h2o server */
+struct writer_thread_arg {
+    char *buf;
+    size_t len;
+    int fd;
+    pthread_barrier_t barrier;
+};
+
+/*
+ * Reads writer_thread_arg from fd and stores to buf
+ */
+static void read_fully(int fd, char *buf, size_t len)
+{
+    int done = 0;
+    while (len) {
+        int ret;
+        while ((ret = read(fd, buf + done, len)) == -1 && errno == EINTR)
+            ;
+        if (ret <= 0) {
+            abort();
+        }
+        done += ret;
+        len -= ret;
+    }
+}
+
+/*
+ * Writes the writer_thread_args at buf to fd
+ */
+static void write_fully(int fd, char *buf, size_t len, int abort_on_err)
+{
+    int done = 0;
+    while (len) {
+        int ret;
+        while ((ret = write(fd, buf + done, len)) == -1 && errno == EINTR)
+            ;
+        if (ret <= 0) {
+            if (abort_on_err)
+                abort();
+            else
+                return;
+        }
+        done += ret;
+        len -= ret;
+    }
+}
+
+#define OK_RESP "HTTP/1.0 200 OK\r\n" \
+                "Connection: Close\r\n\r\nOk"
+#define OK_RESP_LEN (sizeof(OK_RESP) - 1)
+
+void *upstream_thread(void *arg)
+{
+    char *dirname = (char *)arg;
+    char path[PATH_MAX];
+    char rbuf[1 * 1024 * 1024];
+    snprintf(path, sizeof(path), "/%s/_.sock", dirname);
+    int sd = socket(AF_UNIX, SOCK_STREAM, 0);
+    assert(sd >= 0);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path)-1);
+    assert(bind(sd, (struct sockaddr*)&addr, sizeof(addr)) == 0);
+    assert(listen(sd, 100) == 0);
+
+    while (1) {
+        struct sockaddr_un caddr;
+        socklen_t slen;
+        int cfs = accept(sd, (struct sockaddr *)&caddr, &slen);
+        if (cfs < 0) {
+            continue;
+        }
+        read(cfs, rbuf, sizeof(rbuf));
+        write_fully(cfs, (char *)OK_RESP, OK_RESP_LEN, 0);
+        close(cfs);
+    }
+}
+/*
+ * Thread: Loops writing fuzzed req to socket and then reading results back.
+ * Acts as a client to h2o. *arg points to file descripter to read
+ * writer_thread_args from.
+ */
+void *writer_thread(void *arg)
+{
+    int rfd = (long)arg;
+    while (1) {
+        int pos, sockinp, sockoutp, cnt, len;
+        char *buf;
+        struct writer_thread_arg *wta;
+
+        /* Get fuzzed request */
+        read_fully(rfd, (char *)&wta, sizeof(wta));
+
+        pos = 0;
+        sockinp = wta->fd;
+        sockoutp = wta->fd;
+        cnt = 0;
+        buf = wta->buf;
+        len = wta->len;
+
+        /*
+         * Send fuzzed req and read results until the socket is closed (or
+         * something spurious happens)
+         */
+        while (cnt++ < 20 && (pos < len || sockinp >= 0)) {
+#define MARKER "\n--MARK--\n"
+            /* send 1 packet */
+            if (pos < len) {
+                char *p = (char *)memmem(buf + pos, len - pos, MARKER, sizeof(MARKER) - 1);
+                if (p) {
+                    int l = p - (buf + pos);
+                    write(sockoutp, buf + pos, l);
+                    pos += l;
+                    pos += sizeof(MARKER) - 1;
+                }
+            } else {
+                if (sockinp >= 0) {
+                    shutdown(sockinp, SHUT_WR);
+                }
+            }
+
+            /* drain socket */
+            if (sockinp >= 0) {
+                struct timeval timeo;
+                fd_set rd;
+                int n;
+
+                FD_ZERO(&rd);
+                FD_SET(sockinp, &rd);
+                timeo.tv_sec = 0;
+                timeo.tv_usec = client_timeout_ms * 1000;
+                n = select(sockinp + 1, &rd, NULL, NULL, &timeo);
+                if (n > 0 && FD_ISSET(sockinp, &rd) && drain(sockinp)) {
+                    sockinp = -1;
+                }
+            }
+        }
+        close(wta->fd);
+        pthread_barrier_wait(&wta->barrier);
+        free(wta);
+    }
+}
+
+/*
+ * Creates socket pair and passes fuzzed req to a thread (the HTTP[/2] client)
+ * for writing to the target h2o server. Returns the server socket fd.
+ */
+static int feeder(int sfd, char *buf, size_t len, pthread_barrier_t **barrier)
+{
+    int pair[2];
+    struct writer_thread_arg *wta;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == -1)
+        return -1;
+
+    wta = (struct writer_thread_arg *)malloc(sizeof(*wta));
+    wta->fd = pair[0];
+    wta->buf = buf;
+    wta->len = len;
+    pthread_barrier_init(&wta->barrier, NULL, 2);
+    *barrier = &wta->barrier;
+
+    write_fully(sfd, (char *)&wta, sizeof(wta), 1);
+    return pair[1];
+}
+
+/*
+ * Creates/connects socket pair for client/server interaction and passes
+ * fuzzed request to client for sending.
+ * Returns server socket fd.
+ */
+static int create_accepted(int sfd, char *buf, size_t len, pthread_barrier_t **barrier)
+{
+    int fd;
+    h2o_socket_t *sock;
+    struct timeval connected_at = *h2o_get_timestamp(&ctx, NULL, NULL);
+
+    /* Create an HTTP[/2] client that will send the fuzzed request */
+    fd = feeder(sfd, buf, len, barrier);
+    assert(fd >= 0);
+
+    /* Pass the server socket to h2o and invoke request processing */
+    sock = h2o_evloop_socket_create(ctx.loop, fd, H2O_SOCKET_FLAG_IS_ACCEPTED_CONNECTION);
+
+#if defined(HTTP1)
+    h2o_http1_accept(&accept_ctx, sock, connected_at);
+#else
+    h2o_http2_accept(&accept_ctx, sock, connected_at);
+#endif
+
+    return fd;
+}
+
+/*
+ * Returns true if fd if valid. Used to determine when connection is closed.
+ */
+static int is_valid_fd(int fd)
+{
+    return fcntl(fd, F_GETFD) != -1 || errno != EBADF;
+}
+
+/*
+ * Entry point for libfuzzer.
+ * See http://llvm.org/docs/LibFuzzer.html for more info
+ */
+static int init_done;
+static int job_queue[2];
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size)
+{
+    int c;
+    h2o_loop_t *loop;
+    h2o_hostconf_t *hostconf;
+    pthread_t twriter;
+    pthread_t tupstream;
+
+    /*
+     * Perform one-time initialization
+     */
+    if (!init_done) {
+        const char *client_timeout_ms_str;
+        char tmpname[] = "/tmp/h2o-fuzz-XXXXXX";
+        char *dirname;
+        h2o_url_t upstream;
+        signal(SIGPIPE, SIG_IGN);
+
+        dirname = mkdtemp(tmpname);
+        snprintf(unix_listener, sizeof(unix_listener), "http://[unix://%s/_.sock]/proxy", dirname);
+        if ((client_timeout_ms_str = getenv("H2O_FUZZER_CLIENT_TIMEOUT")) != NULL)
+            client_timeout_ms = atoi(client_timeout_ms_str);
+        if (!client_timeout_ms)
+            client_timeout_ms = 10;
+
+        /* Create a single h2o host with multiple request handlers */
+        h2o_config_init(&config);
+        config.http2.idle_timeout = 10 * 1000;
+        config.http1.req_timeout = 10 * 1000;
+        config.proxy.io_timeout = 10 * 1000;
+        h2o_proxy_config_vars_t proxy_config = {};
+        proxy_config.io_timeout = 10 * 1000;
+        hostconf = h2o_config_register_host(&config, h2o_iovec_init(H2O_STRLIT(unix_listener)), 65535);
+        register_handler(hostconf, "/chunked-test", chunked_test);
+        h2o_url_parse(unix_listener, strlen(unix_listener), &upstream);
+        void h2o_proxy_register_reverse_proxy(h2o_pathconf_t *pathconf, h2o_url_t *upstream, h2o_proxy_config_vars_t *config);
+        h2o_proxy_register_reverse_proxy(h2o_config_register_path(hostconf, "/reproxy-test", 0), &upstream, &proxy_config);
+        h2o_file_register(h2o_config_register_path(hostconf, "/", 0), "./examples/doc_root", NULL, NULL, 0);
+
+        loop = h2o_evloop_create();
+        h2o_context_init(&ctx, loop, &config);
+
+        accept_ctx.ctx = &ctx;
+        accept_ctx.hosts = config.hosts;
+
+        /* Create a thread to act as the HTTP client */
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, job_queue) == 0);
+        assert(pthread_create(&twriter, NULL, writer_thread, (void *)(long)job_queue[1]) == 0);
+        assert(pthread_create(&tupstream, NULL, upstream_thread, dirname) == 0);
+        init_done = 1;
+    }
+
+    /*
+     * Pass fuzzed request to client thread and get h2o server socket for
+     * use below
+     */
+    pthread_barrier_t *end;
+    c = create_accepted(job_queue[0], (char *)Data, (size_t)Size, &end);
+    if (c < 0) {
+        goto Error;
+    }
+
+    /* Loop until the connection is closed by the client or server */
+    while (is_valid_fd(c)) {
+	    h2o_evloop_run(ctx.loop, 10);
+    }
+
+    pthread_barrier_wait(end);
+    pthread_barrier_destroy(end);
+    return 0;
+Error:
+    return 1;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/include/h2o.h b/include/h2o.h
+index 8361388f89..fbf49134a4 100644
+--- a/include/h2o.h
++++ b/include/h2o.h
+@@ -1092,11 +1092,13 @@ ssize_t h2o_find_header_by_str(const h2o_headers_t *headers, const char *name, s
+ /**
+  * adds a header to list
+  */
+-void h2o_add_header(h2o_mem_pool_t *pool, h2o_headers_t *headers, const h2o_token_t *token, const char *orig_name, const char *value, size_t value_len);
++void h2o_add_header(h2o_mem_pool_t *pool, h2o_headers_t *headers, const h2o_token_t *token, const char *orig_name,
++                    const char *value, size_t value_len);
+ /**
+  * adds a header to list
+  */
+-void h2o_add_header_by_str(h2o_mem_pool_t *pool, h2o_headers_t *headers, const char *name, size_t name_len, int maybe_token, const char *orig_name, const char *value, size_t value_len);
++void h2o_add_header_by_str(h2o_mem_pool_t *pool, h2o_headers_t *headers, const char *name, size_t name_len, int maybe_token,
++                           const char *orig_name, const char *value, size_t value_len);
+ /**
+  * adds or replaces a header into the list
+  */
+diff --git a/lib/core/headers.c b/lib/core/headers.c
+index e7428d0f07..d311836234 100644
+--- a/lib/core/headers.c
++++ b/lib/core/headers.c
+@@ -24,15 +24,15 @@
+ #include "h2o.h"
+ 
+ static void add_header(h2o_mem_pool_t *pool, h2o_headers_t *headers, h2o_iovec_t *name, const char *orig_name, const char *value,
+-                                size_t value_len)
++                       size_t value_len)
+ {
+     h2o_header_t *slot;
+ 
+     h2o_vector_reserve(pool, headers, headers->size + 1);
+     slot = headers->entries + headers->size++;
+ 
+     slot->name = name;
+     slot->value.base = (char *)value;
+     slot->value.len = value_len;
+     slot->orig_name = orig_name ? h2o_strdup(pool, orig_name, name->len).base : NULL;
+ }
+@@ -58,24 +58,26 @@ ssize_t h2o_find_header_by_str(const h2o_headers_t *headers, const char *name, s
+     return -1;
+ }
+ 
+-void h2o_add_header(h2o_mem_pool_t *pool, h2o_headers_t *headers, const h2o_token_t *token, const char *orig_name, const char *value, size_t value_len)
++void h2o_add_header(h2o_mem_pool_t *pool, h2o_headers_t *headers, const h2o_token_t *token, const char *orig_name,
++                    const char *value, size_t value_len)
+ {
+     add_header(pool, headers, (h2o_iovec_t *)&token->buf, orig_name, value, value_len);
+ }
+ 
+-void h2o_add_header_by_str(h2o_mem_pool_t *pool, h2o_headers_t *headers, const char *name, size_t name_len, int maybe_token, const char *orig_name, const char *value, size_t value_len)
++void h2o_add_header_by_str(h2o_mem_pool_t *pool, h2o_headers_t *headers, const char *name, size_t name_len, int maybe_token,
++                           const char *orig_name, const char *value, size_t value_len)
+ {
+     h2o_iovec_t *name_buf;
+ 
+     if (maybe_token) {
+         const h2o_token_t *token = h2o_lookup_token(name, name_len);
+         if (token != NULL) {
+             add_header(pool, headers, (h2o_iovec_t *)token, orig_name, value, value_len);
+             return;
+         }
+     }
+     name_buf = h2o_mem_alloc_pool(pool, sizeof(h2o_iovec_t));
+     name_buf->base = (char *)name;
+     name_buf->len = name_len;
+     add_header(pool, headers, name_buf, orig_name, value, value_len);
+ }
+diff --git a/lib/core/proxy.c b/lib/core/proxy.c
+index b0dcd5243f..43cf140609 100644
+--- a/lib/core/proxy.c
++++ b/lib/core/proxy.c
+@@ -397,94 +397,95 @@ static char compress_hint_to_enum(const char *val, size_t len)
+     return H2O_COMPRESS_HINT_AUTO;
+ }
+ 
+-static h2o_http1client_body_cb on_head(h2o_http1client_t *client, const char *errstr, int minor_version, int status, h2o_iovec_t msg,
+-                                       h2o_header_t *headers, size_t num_headers)
++static h2o_http1client_body_cb on_head(h2o_http1client_t *client, const char *errstr, int minor_version, int status,
++                                       h2o_iovec_t msg, h2o_header_t *headers, size_t num_headers)
+ {
+     struct rp_generator_t *self = client->data;
+     h2o_req_t *req = self->src_req;
+     size_t i;
+ 
+     if (errstr != NULL && errstr != h2o_http1client_error_is_eos) {
+         self->client = NULL;
+         h2o_req_log_error(req, "lib/core/proxy.c", "%s", errstr);
+         h2o_send_error_502(req, "Gateway Error", errstr, 0);
+         return NULL;
+     }
+ 
+     /* copy the response (note: all the headers must be copied; http1client discards the input once we return from this callback) */
+     req->res.status = status;
+     req->res.reason = h2o_strdup(&req->pool, msg.base, msg.len).base;
+     for (i = 0; i != num_headers; ++i) {
+         if (h2o_iovec_is_token(headers[i].name)) {
+             const h2o_token_t *token = H2O_STRUCT_FROM_MEMBER(h2o_token_t, buf, headers[i].name);
+             h2o_iovec_t value;
+             if (token->proxy_should_drop) {
+                 goto Skip;
+             }
+             if (token == H2O_TOKEN_CONTENT_LENGTH) {
+                 if (req->res.content_length != SIZE_MAX ||
+                     (req->res.content_length = h2o_strtosize(headers[i].value.base, headers[i].value.len)) == SIZE_MAX) {
+                     self->client = NULL;
+                     h2o_req_log_error(req, "lib/core/proxy.c", "%s", "invalid response from upstream (malformed content-length)");
+                     h2o_send_error_502(req, "Gateway Error", "invalid response from upstream", 0);
+                     return NULL;
+                 }
+                 goto Skip;
+             } else if (token == H2O_TOKEN_LOCATION) {
+                 if (req->res_is_delegated && (300 <= status && status <= 399) && status != 304) {
+                     self->client = NULL;
+                     h2o_iovec_t method = h2o_get_redirect_method(req->method, status);
+                     h2o_send_redirect_internal(req, method, headers[i].value.base, headers[i].value.len, 1);
+                     return NULL;
+                 }
+                 if (req->overrides != NULL && req->overrides->location_rewrite.match != NULL) {
+                     value = rewrite_location(&req->pool, headers[i].value.base, headers[i].value.len,
+                                              req->overrides->location_rewrite.match, req->input.scheme, req->input.authority,
+                                              req->overrides->location_rewrite.path_prefix);
+                     if (value.base != NULL)
+                         goto AddHeader;
+                 }
+                 goto AddHeaderDuped;
+             } else if (token == H2O_TOKEN_LINK) {
+                 h2o_iovec_t new_value;
+                 new_value = h2o_push_path_in_link_header(req, headers[i].value.base, headers[i].value.len);
+                 if (!new_value.len)
+                     goto Skip;
+                 headers[i].value.base = new_value.base;
+                 headers[i].value.len = new_value.len;
+             } else if (token == H2O_TOKEN_X_COMPRESS_HINT) {
+                 req->compress_hint = compress_hint_to_enum(headers[i].value.base, headers[i].value.len);
+                 goto Skip;
+             }
+         /* default behaviour, transfer the header downstream */
+         AddHeaderDuped:
+             value = h2o_strdup(&req->pool, headers[i].value.base, headers[i].value.len);
+         AddHeader:
+             h2o_add_header(&req->pool, &req->res.headers, token, headers[i].orig_name, value.base, value.len);
+         Skip:;
+         } else {
+             h2o_iovec_t name = h2o_strdup(&req->pool, headers[i].name->base, headers[i].name->len);
+             h2o_iovec_t value = h2o_strdup(&req->pool, headers[i].value.base, headers[i].value.len);
+-            h2o_add_header_by_str(&req->pool, &req->res.headers, name.base, name.len, 0, headers[i].orig_name, value.base, value.len);
++            h2o_add_header_by_str(&req->pool, &req->res.headers, name.base, name.len, 0, headers[i].orig_name, value.base,
++                                  value.len);
+         }
+     }
+ 
+     if (self->is_websocket_handshake && req->res.status == 101) {
+         h2o_http1client_ctx_t *client_ctx = get_client_ctx(req);
+         assert(client_ctx->websocket_timeout != NULL);
+         h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_UPGRADE, NULL, H2O_STRLIT("websocket"));
+         on_websocket_upgrade(self, client_ctx->websocket_timeout);
+         self->client = NULL;
+         return NULL;
+     }
+     /* declare the start of the response */
+     h2o_start_response(req, &self->super);
+ 
+     if (errstr == h2o_http1client_error_is_eos) {
+         self->client = NULL;
+         h2o_send(req, NULL, 0, H2O_SEND_STATE_FINAL);
+         return NULL;
+     }
+ 
+     return on_body;
+ }
+diff --git a/lib/handler/file.c b/lib/handler/file.c
+index 31a6602f56..adc95f0761 100644
+--- a/lib/handler/file.c
++++ b/lib/handler/file.c
+@@ -235,41 +235,41 @@ static h2o_send_state_t do_pull(h2o_generator_t *_self, h2o_req_t *req, h2o_iove
+ static struct st_h2o_sendfile_generator_t *create_generator(h2o_req_t *req, const char *path, size_t path_len, int *is_dir,
+                                                             int flags)
+ {
+     struct st_h2o_sendfile_generator_t *self;
+     h2o_filecache_ref_t *fileref;
+     h2o_iovec_t content_encoding = (h2o_iovec_t){NULL};
+     unsigned gunzip = 0;
+ 
+     *is_dir = 0;
+ 
+     if ((flags & H2O_FILE_FLAG_SEND_COMPRESSED) != 0 && req->version >= 0x101) {
+         int compressible_types = h2o_get_compressible_types(&req->headers);
+         if (compressible_types != 0) {
+             char *variant_path = h2o_mem_alloc_pool(&req->pool, path_len + sizeof(".gz"));
+             memcpy(variant_path, path, path_len);
+ #define TRY_VARIANT(mask, enc, ext)                                                                                                \
+     if ((compressible_types & mask) != 0) {                                                                                        \
+         strcpy(variant_path + path_len, ext);                                                                                      \
+         if ((fileref = h2o_filecache_open_file(req->conn->ctx->filecache, variant_path, O_RDONLY | O_CLOEXEC)) != NULL) {          \
+             content_encoding = h2o_iovec_init(enc, sizeof(enc) - 1);                                                               \
+             goto Opened;                                                                                                           \
+         }                                                                                                                          \
+     }
+             TRY_VARIANT(H2O_COMPRESSIBLE_BROTLI, "br", ".br");
+             TRY_VARIANT(H2O_COMPRESSIBLE_GZIP, "gzip", ".gz");
+ #undef TRY_VARIANT
+         }
+     }
+     if ((fileref = h2o_filecache_open_file(req->conn->ctx->filecache, path, O_RDONLY | O_CLOEXEC)) != NULL) {
+         goto Opened;
+     }
+-    if ((flags & H2O_FILE_FLAG_GUNZIP) != 0 && req->version >= 0x101){
++    if ((flags & H2O_FILE_FLAG_GUNZIP) != 0 && req->version >= 0x101) {
+         char *variant_path = h2o_mem_alloc_pool(&req->pool, path_len + sizeof(".gz"));
+         memcpy(variant_path, path, path_len);
+         strcpy(variant_path + path_len, ".gz");
+         if ((fileref = h2o_filecache_open_file(req->conn->ctx->filecache, variant_path, O_RDONLY | O_CLOEXEC)) != NULL) {
+             gunzip = 1;
+             goto Opened;
+         }
+     }
+     return NULL;
+diff --git a/lib/handler/http2_debug_state.c b/lib/handler/http2_debug_state.c
+index b67b9d2e13..0aa0bd1b19 100644
+--- a/lib/handler/http2_debug_state.c
++++ b/lib/handler/http2_debug_state.c
+@@ -30,31 +30,32 @@ struct st_h2o_http2_debug_state_handler_t {
+ static int on_req(h2o_handler_t *_self, h2o_req_t *req)
+ {
+     struct st_h2o_http2_debug_state_handler_t *self = (void *)_self;
+ 
+     static h2o_generator_t generator = {NULL, NULL};
+ 
+     if (req->conn->callbacks->get_debug_state == NULL) {
+         return -1;
+     }
+ 
+     h2o_http2_debug_state_t *debug_state = req->conn->callbacks->get_debug_state(req, self->hpack_enabled);
+ 
+     // stringify these variables to embed in Debug Header
+     h2o_iovec_t conn_flow_in, conn_flow_out;
+     conn_flow_in.base = h2o_mem_alloc_pool(&req->pool, sizeof(H2O_INT64_LONGEST_STR));
+     conn_flow_in.len = sprintf(conn_flow_in.base, "%zd", debug_state->conn_flow_in);
+     conn_flow_out.base = h2o_mem_alloc_pool(&req->pool, sizeof(H2O_INT64_LONGEST_STR));
+     conn_flow_out.len = sprintf(conn_flow_out.base, "%zd", debug_state->conn_flow_out);
+ 
+     req->res.status = 200;
+     h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL, H2O_STRLIT("application/json; charset=utf-8"));
+     h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CACHE_CONTROL, NULL, H2O_STRLIT("no-cache, no-store"));
+     h2o_add_header_by_str(&req->pool, &req->res.headers, H2O_STRLIT("conn-flow-in"), 0, NULL, conn_flow_in.base, conn_flow_in.len);
+-    h2o_add_header_by_str(&req->pool, &req->res.headers, H2O_STRLIT("conn-flow-out"), 0, NULL, conn_flow_out.base, conn_flow_out.len);
++    h2o_add_header_by_str(&req->pool, &req->res.headers, H2O_STRLIT("conn-flow-out"), 0, NULL, conn_flow_out.base,
++                          conn_flow_out.len);
+ 
+     h2o_start_response(req, &generator);
+     h2o_send(req, debug_state->json.entries,
+              h2o_memis(req->input.method.base, req->input.method.len, H2O_STRLIT("HEAD")) ? 0 : debug_state->json.size,
+              H2O_SEND_STATE_FINAL);
+     return 0;
+ }
+diff --git a/lib/handler/mruby.c b/lib/handler/mruby.c
+index cba8aa9360..b41ab0fcfb 100644
+--- a/lib/handler/mruby.c
++++ b/lib/handler/mruby.c
+@@ -208,74 +208,76 @@ static h2o_iovec_t convert_header_name_to_env(h2o_mem_pool_t *pool, const char *
+ static mrb_value build_constants(mrb_state *mrb, const char *server_name, size_t server_name_len)
+ {
+     mrb_value ary = mrb_ary_new_capa(mrb, H2O_MRUBY_NUM_CONSTANTS);
+     mrb_int i;
+ 
+     int gc_arena = mrb_gc_arena_save(mrb);
+ 
+     {
+         h2o_mem_pool_t pool;
+         h2o_mem_init_pool(&pool);
+         for (i = 0; i != H2O_MAX_TOKENS; ++i) {
+             const h2o_token_t *token = h2o__tokens + i;
+             mrb_value lit = mrb_nil_value();
+             if (token == H2O_TOKEN_CONTENT_TYPE) {
+                 lit = mrb_str_new_lit(mrb, "CONTENT_TYPE");
+             } else if (token->buf.len != 0) {
+                 h2o_iovec_t n = convert_header_name_to_env(&pool, token->buf.base, token->buf.len);
+                 lit = mrb_str_new(mrb, n.base, n.len);
+             }
+             if (mrb_string_p(lit)) {
+                 FREEZE_STRING(lit);
+                 mrb_ary_set(mrb, ary, i, lit);
+             }
+         }
+         h2o_mem_clear_pool(&pool);
+     }
+ 
+ #define SET_STRING(idx, value)                                                                                                     \
+     do {                                                                                                                           \
+         mrb_value lit = (value);                                                                                                   \
+         FREEZE_STRING(lit);                                                                                                        \
+         mrb_ary_set(mrb, ary, idx, lit);                                                                                           \
+     } while (0)
+ #define SET_LITERAL(idx, str) SET_STRING(idx, mrb_str_new_lit(mrb, str))
+ 
+     SET_LITERAL(H2O_MRUBY_LIT_REQUEST_METHOD, "REQUEST_METHOD");
+     SET_LITERAL(H2O_MRUBY_LIT_SCRIPT_NAME, "SCRIPT_NAME");
+     SET_LITERAL(H2O_MRUBY_LIT_PATH_INFO, "PATH_INFO");
+     SET_LITERAL(H2O_MRUBY_LIT_QUERY_STRING, "QUERY_STRING");
+     SET_LITERAL(H2O_MRUBY_LIT_SERVER_NAME, "SERVER_NAME");
+     SET_LITERAL(H2O_MRUBY_LIT_SERVER_ADDR, "SERVER_ADDR");
+     SET_LITERAL(H2O_MRUBY_LIT_SERVER_PORT, "SERVER_PORT");
+     SET_LITERAL(H2O_MRUBY_LIT_CONTENT_LENGTH, "CONTENT_LENGTH");
+     SET_LITERAL(H2O_MRUBY_LIT_REMOTE_ADDR, "REMOTE_ADDR");
+     SET_LITERAL(H2O_MRUBY_LIT_REMOTE_PORT, "REMOTE_PORT");
+     SET_LITERAL(H2O_MRUBY_LIT_REMOTE_USER, "REMOTE_USER");
+     SET_LITERAL(H2O_MRUBY_LIT_RACK_URL_SCHEME, "rack.url_scheme");
+     SET_LITERAL(H2O_MRUBY_LIT_RACK_MULTITHREAD, "rack.multithread");
+     SET_LITERAL(H2O_MRUBY_LIT_RACK_MULTIPROCESS, "rack.multiprocess");
+     SET_LITERAL(H2O_MRUBY_LIT_RACK_RUN_ONCE, "rack.run_once");
+     SET_LITERAL(H2O_MRUBY_LIT_RACK_HIJACK_, "rack.hijack?");
+     SET_LITERAL(H2O_MRUBY_LIT_RACK_INPUT, "rack.input");
+     SET_LITERAL(H2O_MRUBY_LIT_RACK_ERRORS, "rack.errors");
+     SET_LITERAL(H2O_MRUBY_LIT_SERVER_SOFTWARE, "SERVER_SOFTWARE");
+     SET_STRING(H2O_MRUBY_LIT_SERVER_SOFTWARE_VALUE, mrb_str_new(mrb, server_name, server_name_len));
+     SET_LITERAL(H2O_MRUBY_LIT_SEPARATOR_COMMA, ", ");
+     SET_LITERAL(H2O_MRUBY_LIT_SEPARATOR_SEMICOLON, "; ");
+ 
+ #undef SET_LITERAL
+ #undef SET_STRING
+ 
+     h2o_mruby_eval_expr(mrb, H2O_MRUBY_CODE_CORE);
+     h2o_mruby_assert(mrb);
+ 
+-    mrb_ary_set(mrb, ary, H2O_MRUBY_PROC_EACH_TO_ARRAY, mrb_funcall(mrb, mrb_obj_value(mrb->kernel_module), "_h2o_proc_each_to_array", 0));
++    mrb_ary_set(mrb, ary, H2O_MRUBY_PROC_EACH_TO_ARRAY,
++                mrb_funcall(mrb, mrb_obj_value(mrb->kernel_module), "_h2o_proc_each_to_array", 0));
+     h2o_mruby_assert(mrb);
+ 
+     /* sends exception using H2O_MRUBY_CALLBACK_ID_EXCEPTION_RAISED */
+-    mrb_ary_set(mrb, ary, H2O_MRUBY_PROC_APP_TO_FIBER, mrb_funcall(mrb, mrb_obj_value(mrb->kernel_module), "_h2o_proc_app_to_fiber", 0));
++    mrb_ary_set(mrb, ary, H2O_MRUBY_PROC_APP_TO_FIBER,
++                mrb_funcall(mrb, mrb_obj_value(mrb->kernel_module), "_h2o_proc_app_to_fiber", 0));
+     h2o_mruby_assert(mrb);
+ 
+     mrb_gc_arena_restore(mrb, gc_arena);
+     return ary;
+ }
+diff --git a/lib/http1.c b/lib/http1.c
+index 637e56fee5..76f66df4b2 100644
+--- a/lib/http1.c
++++ b/lib/http1.c
+@@ -267,54 +267,54 @@ static int create_entity_reader(struct st_h2o_http1_conn_t *conn, const struct p
+     return -1;
+ }
+ 
+-static ssize_t init_headers(h2o_mem_pool_t *pool, h2o_headers_t *headers, const struct phr_header *src,
+-                            size_t len, h2o_iovec_t *connection, h2o_iovec_t *host, h2o_iovec_t *upgrade, h2o_iovec_t *expect)
++static ssize_t init_headers(h2o_mem_pool_t *pool, h2o_headers_t *headers, const struct phr_header *src, size_t len,
++                            h2o_iovec_t *connection, h2o_iovec_t *host, h2o_iovec_t *upgrade, h2o_iovec_t *expect)
+ {
+     ssize_t entity_header_index = -1;
+ 
+     assert(headers->size == 0);
+ 
+     /* setup */
+     if (len != 0) {
+         size_t i;
+         h2o_vector_reserve(pool, headers, len);
+         for (i = 0; i != len; ++i) {
+             const h2o_token_t *name_token;
+             char orig_case[src[i].name_len];
+ 
+             /* preserve the original case */
+             memcpy(orig_case, src[i].name, src[i].name_len);
+             /* convert to lower-case in-place */
+             h2o_strtolower((char *)src[i].name, src[i].name_len);
+             if ((name_token = h2o_lookup_token(src[i].name, src[i].name_len)) != NULL) {
+                 if (name_token->is_init_header_special) {
+                     if (name_token == H2O_TOKEN_HOST) {
+                         host->base = (char *)src[i].value;
+                         host->len = src[i].value_len;
+                     } else if (name_token == H2O_TOKEN_CONTENT_LENGTH) {
+                         if (entity_header_index == -1)
+                             entity_header_index = i;
+                     } else if (name_token == H2O_TOKEN_TRANSFER_ENCODING) {
+                         entity_header_index = i;
+                     } else if (name_token == H2O_TOKEN_EXPECT) {
+                         expect->base = (char *)src[i].value;
+                         expect->len = src[i].value_len;
+                     } else if (name_token == H2O_TOKEN_UPGRADE) {
+                         upgrade->base = (char *)src[i].value;
+                         upgrade->len = src[i].value_len;
+                     } else {
+                         assert(!"logic flaw");
+                     }
+                 } else {
+                     h2o_add_header(pool, headers, name_token, orig_case, src[i].value, src[i].value_len);
+                     if (name_token == H2O_TOKEN_CONNECTION)
+                         *connection = headers->entries[headers->size - 1].value;
+                 }
+             } else {
+                 h2o_add_header_by_str(pool, headers, src[i].name, src[i].name_len, 0, orig_case, src[i].value, src[i].value_len);
+             }
+         }
+     }
+ 
+     return entity_header_index;
+ }
+diff --git a/lib/http2/stream.c b/lib/http2/stream.c
+index 7e0b357be3..ef7ad77612 100644
+--- a/lib/http2/stream.c
++++ b/lib/http2/stream.c
+@@ -212,94 +212,96 @@ static int is_blocking_asset(h2o_req_t *req)
+ static int send_headers(h2o_http2_conn_t *conn, h2o_http2_stream_t *stream)
+ {
+     h2o_timestamp_t ts;
+ 
+     h2o_get_timestamp(conn->super.ctx, &stream->req.pool, &ts);
+ 
+     /* cancel push with an error response */
+     if (h2o_http2_stream_is_push(stream->stream_id)) {
+         if (400 <= stream->req.res.status)
+             goto CancelPush;
+         if (stream->cache_digests != NULL) {
+             ssize_t etag_index = h2o_find_header(&stream->req.headers, H2O_TOKEN_ETAG, -1);
+             if (etag_index != -1) {
+                 h2o_iovec_t url = h2o_concat(&stream->req.pool, stream->req.input.scheme->name, h2o_iovec_init(H2O_STRLIT("://")),
+                                              stream->req.input.authority, stream->req.input.path);
+                 h2o_iovec_t *etag = &stream->req.headers.entries[etag_index].value;
+                 if (h2o_cache_digests_lookup_by_url_and_etag(stream->cache_digests, url.base, url.len, etag->base, etag->len) ==
+                     H2O_CACHE_DIGESTS_STATE_FRESH)
+                     goto CancelPush;
+             }
+         }
+     }
+ 
+     /* reset casper cookie in case cache-digests exist */
+     if (stream->cache_digests != NULL && stream->req.hostconf->http2.casper.capacity_bits != 0) {
+         h2o_add_header(&stream->req.pool, &stream->req.res.headers, H2O_TOKEN_SET_COOKIE, NULL,
+                        H2O_STRLIT("h2o_casper=; Path=/; Expires=Sat, 01 Jan 2000 00:00:00 GMT"));
+     }
+ 
+     /* CASPER */
+     if (conn->casper != NULL) {
+         /* update casper if necessary */
+         if (stream->req.hostconf->http2.casper.track_all_types || is_blocking_asset(&stream->req)) {
+             if (h2o_http2_casper_lookup(conn->casper, stream->req.path.base, stream->req.path.len, 1)) {
+                 /* cancel if the pushed resource is already marked as cached */
+                 if (h2o_http2_stream_is_push(stream->stream_id))
+                     goto CancelPush;
+             }
+         }
+         if (stream->cache_digests != NULL)
+             goto SkipCookie;
+         /* browsers might ignore push responses, or they may process the responses in a different order than they were pushed.
+          * Therefore H2O tries to include casper cookie only in the last stream that may be received by the client, or when the
+          * value become stable; see also: https://github.com/h2o/h2o/issues/421
+          */
+         if (h2o_http2_stream_is_push(stream->stream_id)) {
+             if (!(conn->num_streams.pull.open == 0 && (conn->num_streams.push.half_closed - conn->num_streams.push.send_body) == 1))
+                 goto SkipCookie;
+         } else {
+             if (conn->num_streams.push.half_closed - conn->num_streams.push.send_body != 0)
+                 goto SkipCookie;
+         }
+         h2o_iovec_t cookie = h2o_http2_casper_get_cookie(conn->casper);
+         h2o_add_header(&stream->req.pool, &stream->req.res.headers, H2O_TOKEN_SET_COOKIE, NULL, cookie.base, cookie.len);
+     SkipCookie:;
+     }
+ 
+     if (h2o_http2_stream_is_push(stream->stream_id)) {
+         /* for push, send the push promise */
+         if (!stream->push.promise_sent)
+             h2o_http2_stream_send_push_promise(conn, stream);
+         /* send ASAP if it is a blocking asset (even in case of Firefox we can't wait 1RTT for it to reprioritize the asset) */
+         if (is_blocking_asset(&stream->req))
+             h2o_http2_scheduler_rebind(&stream->_refs.scheduler, &conn->scheduler, 257, 0);
+     } else {
+         /* raise the priority of asset files that block rendering to highest if the user-agent is _not_ using dependency-based
+          * prioritization (e.g. that of Firefox)
+          */
+         if (conn->num_streams.priority.open == 0 && stream->req.hostconf->http2.reprioritize_blocking_assets &&
+             h2o_http2_scheduler_get_parent(&stream->_refs.scheduler) == &conn->scheduler && is_blocking_asset(&stream->req))
+             h2o_http2_scheduler_rebind(&stream->_refs.scheduler, &conn->scheduler, 257, 0);
+     }
+ 
+     /* send HEADERS, as well as start sending body */
+     if (h2o_http2_stream_is_push(stream->stream_id))
+-        h2o_add_header_by_str(&stream->req.pool, &stream->req.res.headers, H2O_STRLIT("x-http2-push"), 0, NULL, H2O_STRLIT("pushed"));
++        h2o_add_header_by_str(&stream->req.pool, &stream->req.res.headers, H2O_STRLIT("x-http2-push"), 0, NULL,
++                              H2O_STRLIT("pushed"));
+     h2o_hpack_flatten_response(&conn->_write.buf, &conn->_output_header_table, stream->stream_id,
+                                conn->peer_settings.max_frame_size, &stream->req.res, &ts, &conn->super.ctx->globalconf->server_name,
+                                stream->req.res.content_length);
+     h2o_http2_conn_request_write(conn);
+     h2o_http2_stream_set_state(conn, stream, H2O_HTTP2_STREAM_STATE_SEND_BODY);
+ 
+     return 0;
+ 
+ CancelPush:
+-    h2o_add_header_by_str(&stream->req.pool, &stream->req.res.headers, H2O_STRLIT("x-http2-push"), 0, NULL, H2O_STRLIT("cancelled"));
++    h2o_add_header_by_str(&stream->req.pool, &stream->req.res.headers, H2O_STRLIT("x-http2-push"), 0, NULL,
++                          H2O_STRLIT("cancelled"));
+     h2o_http2_stream_set_state(conn, stream, H2O_HTTP2_STREAM_STATE_END_STREAM);
+     h2o_linklist_insert(&conn->_write.streams_to_proceed, &stream->_refs.link);
+     if (stream->push.promise_sent) {
+         h2o_http2_encode_rst_stream_frame(&conn->_write.buf, stream->stream_id, -H2O_HTTP2_ERROR_INTERNAL);
+         h2o_http2_conn_request_write(conn);
+     }
+     return -1;
+ }
+diff --git a/lib/websocket.c b/lib/websocket.c
+index 235d0e066a..2886acda63 100644
+--- a/lib/websocket.c
++++ b/lib/websocket.c
+@@ -130,31 +130,32 @@ static void on_complete(void *user_data, h2o_socket_t *sock, size_t reqsize)
+ h2o_websocket_conn_t *h2o_upgrade_to_websocket(h2o_req_t *req, const char *client_key, void *data, h2o_websocket_msg_callback cb)
+ {
+     h2o_websocket_conn_t *conn = h2o_mem_alloc(sizeof(*conn));
+     char accept_key[29];
+ 
+     /* only for http1 connection */
+     assert(req->version < 0x200);
+ 
+     /* setup the context */
+     memset(conn, 0, sizeof(*conn));
+     // conn->sock = sock; set by on_complete
+     conn->ws_callbacks.recv_callback = recv_callback;
+     conn->ws_callbacks.send_callback = send_callback;
+     conn->ws_callbacks.on_msg_recv_callback = on_msg_callback;
+     conn->data = data;
+     conn->cb = cb;
+ 
+     wslay_event_context_server_init(&conn->ws_ctx, &conn->ws_callbacks, conn);
+ 
+     /* build response */
+     create_accept_key(accept_key, client_key);
+     req->res.status = 101;
+     req->res.reason = "Switching Protocols";
+     h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_UPGRADE, NULL, H2O_STRLIT("websocket"));
+-    h2o_add_header_by_str(&req->pool, &req->res.headers, H2O_STRLIT("sec-websocket-accept"), 0, NULL, accept_key, strlen(accept_key));
++    h2o_add_header_by_str(&req->pool, &req->res.headers, H2O_STRLIT("sec-websocket-accept"), 0, NULL, accept_key,
++                          strlen(accept_key));
+ 
+     /* send */
+     h2o_http1_upgrade(req, NULL, 0, on_complete, conn);
+ 
+     return conn;
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8104","gap_exists":true,"gap_type":["input_semantics","api_protocol","configuration"],"confidence":96,"affected_functions":["on_head","h2o_upgrade_to_websocket","create_generator"],"reason":"H0 reaches the reverse proxy only with a fixed upstream response, never installs a WebSocket-upgrade handler, and registers the file handler with flags set to 0. Consequently, material S1 paths in the supplied changed functions are unreachable or lack fuzz-controlled inputs.","evidence":["upstream_thread always returns the constant OK_RESP, while on_head processes fuzz-worthy upstream-controlled status, reason, arbitrary headers, malformed or duplicate content-length, location, link, x-compress-hint, and status 101 WebSocket responses.","H0 registers chunked_test, h2o_proxy_register_reverse_proxy, and h2o_file_register, but no handler calls h2o_upgrade_to_websocket; therefore HTTP/1 WebSocket upgrade and subsequent protocol handling cannot be entered by Data alone.","H0 calls h2o_file_register(..., 0), while create_generator branches on H2O_FILE_FLAG_SEND_COMPRESSED and H2O_FILE_FLAG_GUNZIP, leaving compressed-variant and gunzip configuration states uncovered."],"recommended_action":"Add focused harness modes that make the upstream HTTP response fuzz-controlled, register a handler invoking h2o_upgrade_to_websocket and continue fuzzing WebSocket frames after the handshake, and exercise h2o_file_register with H2O_FILE_FLAG_SEND_COMPRESSED and H2O_FILE_FLAG_GUNZIP using controlled file variants."}
+tokens used
+15,474

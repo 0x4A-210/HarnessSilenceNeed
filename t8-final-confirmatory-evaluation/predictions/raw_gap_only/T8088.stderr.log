@@ -1,0 +1,415 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8088-_c56xbx8
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fe-15f1-7dd3-8624-fe3e5958b4c9
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8088
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `tools/simplifyfuzz.cpp`
+
+~~~~cpp
+#include "../src/meshoptimizer.h"
+
+#include <float.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* buffer, size_t size)
+{
+	if (size == 0)
+		return 0;
+
+	srand(buffer[0]);
+
+	float vb[100][4];
+
+	for (int i = 0; i < 100; ++i)
+	{
+		vb[i][0] = rand() % 10;
+		vb[i][1] = rand() % 10;
+		vb[i][2] = rand() % 10;
+		vb[i][3] = rand() % 10;
+	}
+
+	unsigned int ib[999];
+	int indices = (size - 1) < 999 ? (size - 1) / 3 * 3 : 999;
+
+	for (int i = 0; i < indices; ++i)
+		ib[i] = buffer[1 + i] % 100;
+
+	unsigned int res[999];
+
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, 1e-1f, 0, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, 0, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifyLockBorder, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifySparse, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifyPrune, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifyPermissive, NULL);
+
+	float aw = 1;
+	meshopt_simplifyWithAttributes(res, ib, indices, vb[0], 100, sizeof(float) * 4, vb[0] + 3, sizeof(float) * 4, &aw, 1, NULL, 0, FLT_MAX, 0, NULL);
+
+	// must be last, as it modifies all inputs in place
+	meshopt_simplifyWithUpdate(ib, indices, vb[0], 100, sizeof(float) * 4, vb[0] + 3, sizeof(float) * 4, &aw, 1, NULL, 0, FLT_MAX, 0, NULL);
+
+	return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/src/simplifier.cpp b/src/simplifier.cpp
+index 724502aa..bab58c29 100644
+--- a/src/simplifier.cpp
++++ b/src/simplifier.cpp
+@@ -368,163 +368,163 @@ static bool hasEdge(const EdgeAdjacency& adjacency, unsigned int a, unsigned int
+ static void classifyVertices(unsigned char* result, unsigned int* loop, unsigned int* loopback, size_t vertex_count, const EdgeAdjacency& adjacency, const unsigned int* remap, const unsigned int* wedge, const unsigned char* vertex_lock, const unsigned int* sparse_remap, unsigned int options)
+ {
+ 	memset(loop, -1, vertex_count * sizeof(unsigned int));
+ 	memset(loopback, -1, vertex_count * sizeof(unsigned int));
+ 
+ 	// incoming & outgoing open edges: ~0u if no open edges, i if there are more than 1
+ 	// note that this is the same data as required in loop[] arrays; loop[] data is only used for border/seam by default
+ 	// in permissive mode we also use it to guide complex-complex collapses, so we fill it for all vertices
+ 	unsigned int* openinc = loopback;
+ 	unsigned int* openout = loop;
+ 
+ 	for (size_t i = 0; i < vertex_count; ++i)
+ 	{
+ 		unsigned int vertex = unsigned(i);
+ 
+ 		unsigned int count = adjacency.offsets[vertex + 1] - adjacency.offsets[vertex];
+ 		const EdgeAdjacency::Edge* edges = adjacency.data + adjacency.offsets[vertex];
+ 
+ 		for (size_t j = 0; j < count; ++j)
+ 		{
+ 			unsigned int target = edges[j].next;
+ 
+ 			if (target == vertex)
+ 			{
+ 				// degenerate triangles have two distinct edges instead of three, and the self edge
+ 				// is bi-directional by definition; this can break border/seam classification by "closing"
+ 				// the open edge from another triangle and falsely marking the vertex as manifold
+ 				// instead we mark the vertex as having >1 open edges which turns it into locked/complex
+ 				openinc[vertex] = openout[vertex] = vertex;
+ 			}
+ 			else if (!hasEdge(adjacency, target, vertex))
+ 			{
+ 				openinc[target] = (openinc[target] == ~0u) ? vertex : target;
+ 				openout[vertex] = (openout[vertex] == ~0u) ? target : vertex;
+ 			}
+ 		}
+ 	}
+ 
+ 	for (size_t i = 0; i < vertex_count; ++i)
+ 	{
+ 		if (remap[i] == i)
+ 		{
+ 			if (wedge[i] == i)
+ 			{
+ 				// no attribute seam, need to check if it's manifold
+ 				unsigned int openi = openinc[i], openo = openout[i];
+ 
+ 				// note: we classify any vertices with no open edges as manifold
+ 				// this is technically incorrect - if 4 triangles share an edge, we'll classify vertices as manifold
+ 				// it's unclear if this is a problem in practice
+ 				if (openi == ~0u && openo == ~0u)
+ 				{
+ 					result[i] = Kind_Manifold;
+ 				}
+ 				else if (openi != ~0u && openo != ~0u && remap[openi] == remap[openo] && openi != i)
+ 				{
+ 					// classify half-seams as seams (the branch below would mis-classify them as borders)
+ 					// half-seam is a single vertex that connects to both vertices of a potential seam
+ 					// treating these as seams allows collapsing the "full" seam vertex onto them
+ 					result[i] = Kind_Seam;
+ 				}
+ 				else if (openi != i && openo != i)
+ 				{
+ 					result[i] = Kind_Border;
+ 				}
+ 				else
+ 				{
+ 					result[i] = Kind_Locked;
+ 				}
+ 			}
+ 			else if (wedge[wedge[i]] == i)
+ 			{
+ 				// attribute seam; need to distinguish between Seam and Locked
+ 				unsigned int w = wedge[i];
+ 				unsigned int openiv = openinc[i], openov = openout[i];
+ 				unsigned int openiw = openinc[w], openow = openout[w];
+ 
+ 				// seam should have one open half-edge for each vertex, and the edges need to "connect" - point to the same vertex post-remap
+ 				if (openiv != ~0u && openiv != i && openov != ~0u && openov != i &&
+ 				    openiw != ~0u && openiw != w && openow != ~0u && openow != w &&
+ 				    remap[openiv] == remap[openow] && remap[openov] == remap[openiw] && remap[openiv] != remap[openov])
+ 				{
+ 					result[i] = Kind_Seam;
+ 				}
+ 				else
+ 				{
+ 					// mismatched seam endpoints or disconnected seam; we don't have classification available
+ 					result[i] = Kind_Locked;
+ 				}
+ 			}
+ 			else
+ 			{
+ 				// more than one vertex maps to this one; we don't have classification available
+ 				result[i] = Kind_Locked;
+ 			}
+ 		}
+ 		else
+ 		{
+ 			assert(remap[i] < i);
+ 
+ 			result[i] = result[remap[i]];
+ 		}
+ 	}
+ 
+ 	if (options & meshopt_SimplifyPermissive)
+ 		for (size_t i = 0; i < vertex_count; ++i)
+ 			if (result[i] == Kind_Seam || result[i] == Kind_Locked)
+ 			{
+ 				if (remap[i] != i)
+ 				{
+ 					// only process primary vertices; wedges will be updated to match the primary vertex
+ 					result[i] = result[remap[i]];
+ 					continue;
+ 				}
+ 
+ 				unsigned int v = unsigned(i);
+ 
+ 				// vertex_lock may protect any wedge, not just the primary vertex, so we switch to complex only if no wedges are protected
+ 				bool protect = false;
+ 				do
+ 				{
+ 					unsigned int rv = sparse_remap ? sparse_remap[v] : v;
+ 					protect |= vertex_lock && (vertex_lock[rv] & meshopt_SimplifyVertex_Protect) != 0;
+ 					v = wedge[v];
+ 				} while (v != i);
+ 
+ 				// check if any adjoining edge doesn't have an opposite edge (indicating vertex is on the border)
+ 				bool border = false;
+ 				do
+ 				{
+ 					const EdgeAdjacency::Edge* edges = &adjacency.data[adjacency.offsets[v]];
+ 					size_t count = adjacency.offsets[v + 1] - adjacency.offsets[v];
+ 
+ 					for (size_t j = 0; j < count; ++j)
+ 						border |= !hasEdge(adjacency, edges[j].next, v, remap, wedge);
+ 					v = wedge[v];
+ 				} while (v != i);
+ 
+ 				// border vertices with attribute discontinuities can only collapse along the border, so they need a separate tagging
+-				result[i] = protect ? result[i] : int(border ? Kind_Fringe : Kind_Complex);
++				result[i] = protect ? result[i] : (unsigned char)(border ? Kind_Fringe : Kind_Complex);
+ 			}
+ 
+ 	if (vertex_lock)
+ 	{
+ 		// vertex_lock may lock any wedge, not just the primary vertex, so we need to lock the primary vertex and relock any wedges
+ 		for (size_t i = 0; i < vertex_count; ++i)
+ 		{
+ 			unsigned int ri = sparse_remap ? sparse_remap[i] : unsigned(i);
+ 
+ 			if (vertex_lock[ri] & meshopt_SimplifyVertex_Lock)
+ 				result[remap[i]] = Kind_Locked;
+ 		}
+ 
+ 		for (size_t i = 0; i < vertex_count; ++i)
+ 			if (result[remap[i]] == Kind_Locked)
+ 				result[i] = Kind_Locked;
+ 	}
+ 
+ 	if (options & meshopt_SimplifyLockBorder)
+ 		for (size_t i = 0; i < vertex_count; ++i)
+ 			if (result[i] == Kind_Border || result[i] == Kind_Fringe)
+ 				result[i] = Kind_Locked;
+ }
+@@ -1525,136 +1525,131 @@ static void sortEdgeCollapses(unsigned int* sort_order, const Collapse* collapse
+ static size_t performEdgeCollapses(unsigned int* collapse_remap, unsigned char* collapse_locked, const Collapse* collapses, size_t collapse_count, const unsigned int* collapse_order, const unsigned int* remap, const unsigned int* wedge, const unsigned char* vertex_kind, const unsigned int* loop, const unsigned int* loopback, const Vector3* vertex_positions, const EdgeAdjacency& adjacency, size_t triangle_collapse_goal, float error_limit, float& result_error)
+ {
+ 	size_t edge_collapses = 0;
+ 	size_t triangle_collapses = 0;
+ 
+ 	// most collapses remove 2 triangles; use this to establish a bound on the pass in terms of error limit
+ 	// note that edge_collapse_goal is an estimate; triangle_collapse_goal will be used to actually limit collapses
+ 	size_t edge_collapse_goal = triangle_collapse_goal / 2;
+ 
+ #if TRACE
+ 	size_t stats[7] = {};
+ #endif
+ 
+ 	for (size_t i = 0; i < collapse_count; ++i)
+ 	{
+ 		const Collapse& c = collapses[collapse_order[i]];
+ 
+ 		TRACESTATS(0);
+ 
+ 		if (c.error > error_limit)
+ 		{
+ 			TRACESTATS(4);
+ 			break;
+ 		}
+ 
+ 		if (triangle_collapses >= triangle_collapse_goal)
+ 		{
+ 			TRACESTATS(5);
+ 			break;
+ 		}
+ 
+ 		// we limit the error in each pass based on the error of optimal last collapse; since many collapses will be locked
+ 		// as they will share vertices with other successful collapses, we need to increase the acceptable error by some factor
+ 		float error_goal = edge_collapse_goal < collapse_count ? 1.5f * collapses[collapse_order[edge_collapse_goal]].error : FLT_MAX;
+ 
+ 		// on average, each collapse is expected to lock 6 other collapses; to avoid degenerate passes on meshes with odd
+ 		// topology, we only abort if we got over 1/6 collapses accordingly.
+ 		if (c.error > error_goal && c.error > result_error && triangle_collapses > triangle_collapse_goal / 6)
+ 		{
+ 			TRACESTATS(6);
+ 			break;
+ 		}
+ 
+ 		unsigned int i0 = c.v0;
+ 		unsigned int i1 = c.v1;
+ 
+ 		unsigned int r0 = remap[i0];
+ 		unsigned int r1 = remap[i1];
+ 
+ 		unsigned char kind = vertex_kind[i0];
+ 
+ 		// we don't collapse vertices that had source or target vertex involved in a collapse
+ 		// it's important to not move the vertices twice since it complicates the tracking/remapping logic
+ 		// it's important to not move other vertices towards a moved vertex to preserve error since we don't re-rank collapses mid-pass
+ 		if (collapse_locked[r0] | collapse_locked[r1])
+ 		{
+ 			TRACESTATS(1);
+ 			continue;
+ 		}
+ 
+ 		if (hasTriangleFlips(adjacency, vertex_positions, collapse_remap, r0, r1))
+ 		{
+ 			// adjust collapse goal since this collapse is invalid and shouldn't factor into error goal
+ 			edge_collapse_goal++;
+ 
+ 			TRACESTATS(2);
+ 			continue;
+ 		}
+ 
+ 		assert(collapse_remap[r0] == r0);
+ 		assert(collapse_remap[r1] == r1);
+ 
+ 		if (kind == Kind_Complex || kind == Kind_Fringe)
+ 		{
+-			// remap all vertices in the complex to the target vertex
+-			unsigned int v = i0;
+-
+-			do
+-			{
+-				unsigned int t = getComplexTarget(v, i1, remap, loop, loopback);
++			collapse_remap[i0] = i1;
+ 
+-				collapse_remap[v] = t;
+-				v = wedge[v];
+-			} while (v != i0);
++			// remap all vertices in the complex to the target vertex, using the same ranking that we used to evaluate the collapses
++			for (unsigned int v = wedge[i0]; v != i0; v = wedge[v])
++				collapse_remap[v] = getComplexTarget(v, i1, remap, loop, loopback);
+ 		}
+ 		else if (kind == Kind_Seam)
+ 		{
+ 			// for seam collapses we need to move the seam pair together; this is a bit tricky since we need to rely on edge loops as target vertex may be locked (and thus have more than two wedges)
+ 			unsigned int s0 = wedge[i0];
+ 			unsigned int s1 = loop[i0] == i1 ? loopback[s0] : loop[s0];
+ 			assert(wedge[s0] == i0); // s0 may be equal to i0 for half-seams
+ 			assert(s1 != ~0u && remap[s1] == r1);
+ 
+ 			// additional asserts to verify that the seam pair is consistent
+ 			assert(kind != vertex_kind[i1] || s1 == wedge[i1]);
+ 			assert(loop[i0] == i1 || loopback[i0] == i1);
+ 			assert(loop[s0] == s1 || loopback[s0] == s1);
+ 
+ 			// note: this should never happen due to the assertion above, but when disabled if we ever hit this case we'll get a memory safety issue; for now play it safe
+ 			s1 = (s1 != ~0u) ? s1 : wedge[i1];
+ 
+ 			collapse_remap[i0] = i1;
+ 			collapse_remap[s0] = s1;
+ 		}
+ 		else
+ 		{
+ 			assert(wedge[i0] == i0);
+ 
+ 			collapse_remap[i0] = i1;
+ 		}
+ 
+ 		// note: we technically don't need to lock r1 if it's a locked vertex, as it can't move and its quadric won't be used
+ 		// however, this results in slightly worse error on some meshes because the locked collapses get an unfair advantage wrt scheduling
+ 		collapse_locked[r0] = 1;
+ 		collapse_locked[r1] = 1;
+ 
+ 		// border edges collapse 1 triangle, other edges collapse 2 or more
+ 		// fringe edges often collapse 1 but may also collapse 2 because they don't respect loops, so we conservatively assume 2
+ 		triangle_collapses += (kind == Kind_Border) ? 1 : 2;
+ 		edge_collapses++;
+ 
+ 		result_error = result_error < c.error ? c.error : result_error;
+ 	}
+ 
+ #if TRACE
+ 	float error_goal_last = edge_collapse_goal < collapse_count ? 1.5f * collapses[collapse_order[edge_collapse_goal]].error : FLT_MAX;
+ 	float error_goal_limit = error_goal_last < error_limit ? error_goal_last : error_limit;
+ 
+ 	printf("removed %d triangles, error %e (goal %e); evaluated %d/%d collapses (done %d, skipped %d, invalid %d); %s\n",
+ 	    int(triangle_collapses), sqrtf(result_error), sqrtf(error_goal_limit),
+ 	    int(stats[0]), int(collapse_count), int(edge_collapses), int(stats[1]), int(stats[2]),
+ 	    stats[4] ? "error limit" : (stats[5] ? "count limit" : (stats[6] ? "error goal" : "out of collapses")));
+ #endif
+ 
+ 	return edge_collapses;
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8088","gap_exists":true,"gap_type":["configuration","input_semantics","state"],"confidence":94,"affected_functions":["meshopt_simplifyWithAttributes","meshopt_simplifyWithUpdate","classifyVertices","performEdgeCollapses"],"reason":"H0 exercises meshopt_SimplifyPermissive only through meshopt_simplify. Both attribute-aware entry points pass options=0, so the harness cannot cover permissive attribute-seam/complex/fringe collapses through meshopt_simplifyWithAttributes or meshopt_simplifyWithUpdate. This is material because the S1 logic in performEdgeCollapses specifically changes remapping for Kind_Complex and Kind_Fringe wedges using getComplexTarget, while classifyVertices creates those kinds under meshopt_SimplifyPermissive. H0 also derives all vertex data from srand(buffer[0]), limiting geometry to 256 generated buffers instead of allowing the fuzzer to construct targeted coincident-position wedges and divergent attributes.","evidence":["meshopt_simplify is called with meshopt_SimplifyPermissive, but meshopt_simplifyWithAttributes and meshopt_simplifyWithUpdate are each called with options argument 0.","performEdgeCollapses changes the Kind_Complex/Kind_Fringe branch from applying getComplexTarget to every wedge to assigning collapse_remap[i0] = i1 and applying getComplexTarget only to subsequent wedges.","classifyVertices assigns Kind_Fringe or Kind_Complex only inside the `options & meshopt_SimplifyPermissive` branch.","H0 consumes only buffer[0] for srand and generates vb with rand() % 10; remaining fuzz bytes control ib, so arbitrary vertex positions and attributes cannot be encoded."],"recommended_action":"Add permissive-mode calls for meshopt_simplifyWithAttributes and meshopt_simplifyWithUpdate, and decode fuzzer bytes into positions, attributes, and topology. Seed or structure inputs to create coincident-position wedge cycles with differing attributes and border/non-border cases so both Kind_Complex and Kind_Fringe remapping paths are exercised."}
+tokens used
+9,449

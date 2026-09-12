@@ -1,0 +1,329 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/silent-maintenance-gap_only-C037-08h2n5h3
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08998-d50a-7492-9d50-49d6c963270c
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous Fuzz-Harness Maintenance Case
+
+Case ID
+
+C037
+
+## Evidence boundary
+
+The material below contains only the complete existing harness H0 and the complete production source diff from S0 to S1. No developer-updated harness, commit message, build result, coverage result, reachability result, or label is supplied.
+
+## Existing Harness H0
+
+### `fuzz/c/std/gif_fuzzer.c`
+
+```text
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a sanity check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN gif_fuzzer.c
+./a.out ../../../test/data/*.gif
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.h"
+#include "../fuzzlib/fuzzlib.c"
+
+const char* fuzz(wuffs_base__io_reader src_reader, uint32_t hash) {
+  const char* ret = NULL;
+  wuffs_base__slice_u8 pixbuf = ((wuffs_base__slice_u8){});
+  wuffs_base__slice_u8 workbuf = ((wuffs_base__slice_u8){});
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_gif__decoder dec = ((wuffs_gif__decoder){});
+    wuffs_base__status z = wuffs_gif__decoder__check_wuffs_version(
+        &dec, sizeof dec, WUFFS_VERSION);
+    if (z) {
+      ret = z;
+      goto exit;
+    }
+
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    z = wuffs_gif__decoder__decode_image_config(&dec, &ic, src_reader);
+    if (z) {
+      ret = z;
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    uint64_t n = wuffs_base__image_config__workbuf_len(&ic).max_incl;
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    workbuf = wuffs_base__malloc_slice_u8(malloc, n);
+    if (!workbuf.ptr) {
+      ret = "out of memory";
+      goto exit;
+    }
+
+    n = wuffs_base__pixel_config__pixbuf_len(&ic.pixcfg);
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    pixbuf = wuffs_base__malloc_slice_u8(malloc, n);
+    if (!pixbuf.ptr) {
+      ret = "out of memory";
+      goto exit;
+    }
+
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    z = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, pixbuf);
+    if (z) {
+      ret = z;
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      z = wuffs_gif__decoder__decode_frame(&dec, &pb, src_reader, workbuf,
+                                           NULL);
+      if (z) {
+        if ((z != wuffs_base__warning__end_of_data) || !seen_ok) {
+          ret = z;
+        }
+        goto exit;
+      }
+      seen_ok = true;
+    }
+  }
+
+exit:
+  free(workbuf.ptr);
+  free(pixbuf.ptr);
+  return ret;
+}
+
+```
+
+## Complete production source diff S0 -> S1
+
+The fixed `--function-context` rule includes the complete diff and expanded changed-function bodies where Git recognizes them.
+
+```diff
+diff --git a/release/c/wuffs-unsupported-snapshot.h b/release/c/wuffs-unsupported-snapshot.h
+index 6d1a2b04bfa2a552cc30d32775168aae10cf7a6c..ce59de62631484282e5eacb79c3f20f841b742f4 100644
+--- a/release/c/wuffs-unsupported-snapshot.h
++++ b/release/c/wuffs-unsupported-snapshot.h
+@@ -7506,13 +7506,14 @@ WUFFS_BASE__MAYBE_STATIC wuffs_base__range_ii_u64  //
+ wuffs_gif__decoder__workbuf_len(const wuffs_gif__decoder* self) {
+   if (!self) {
+     return ((wuffs_base__range_ii_u64){});
+   }
+   if (self->private_impl.magic != WUFFS_BASE__MAGIC) {
+     return ((wuffs_base__range_ii_u64){});
+   }
+ 
+-  return wuffs_base__utility__make_range_ii_u64(&self->private_impl.f_util, 0,
+-                                                0);
++  return wuffs_base__utility__make_range_ii_u64(
++      &self->private_impl.f_util, ((uint64_t)(self->private_impl.f_width)),
++      ((uint64_t)(self->private_impl.f_width)));
+ }
+ 
+ // -------- func gif.decoder.restart_frame
+@@ -7752,55 +7753,55 @@ WUFFS_BASE__MAYBE_STATIC wuffs_base__status  //
+ wuffs_gif__decoder__decode_frame(wuffs_gif__decoder* self,
+                                  wuffs_base__pixel_buffer* a_dst,
+                                  wuffs_base__io_reader a_src,
+                                  wuffs_base__slice_u8 a_workbuf,
+                                  wuffs_base__decode_frame_options* a_opts) {
+   if (!self) {
+     return wuffs_base__error__bad_receiver;
+   }
+   if (self->private_impl.magic != WUFFS_BASE__MAGIC) {
+     return (self->private_impl.magic == WUFFS_BASE__DISABLED)
+                ? wuffs_base__error__disabled_by_previous_error
+                : wuffs_base__error__check_wuffs_version_missing;
+   }
+   if (!a_dst) {
+     self->private_impl.magic = WUFFS_BASE__DISABLED;
+     return wuffs_base__error__bad_argument;
+   }
+   wuffs_base__status status = NULL;
+ 
+   uint32_t coro_susp_point =
+       self->private_impl.c_decode_frame[0].coro_susp_point;
+   if (coro_susp_point) {
+   } else {
+   }
+   switch (coro_susp_point) {
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT_0;
+ 
+-    if (((uint64_t)(a_workbuf.len)) !=
++    if (((uint64_t)(a_workbuf.len)) <
+         ((uint64_t)(self->private_impl.f_width))) {
+       status = wuffs_base__error__bad_workbuf_length;
+       goto exit;
+     }
+     if (self->private_impl.f_call_sequence != 2) {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(1);
+       status = wuffs_gif__decoder__decode_frame_config(self, NULL, a_src);
+       if (status) {
+         goto suspend;
+       }
+     }
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT(2);
+     status = wuffs_gif__decoder__decode_id_part1(self, a_dst, a_src);
+     if (status) {
+       goto suspend;
+     }
+     wuffs_base__u64__sat_add_indirect(
+         &self->private_impl.f_num_decoded_frames_value, 1);
+     wuffs_gif__decoder__reset_gc(self);
+ 
+     goto ok;
+   ok:
+     self->private_impl.c_decode_frame[0].coro_susp_point = 0;
+     goto exit;
+   }
+ 
+   goto suspend;
+diff --git a/std/gif/decode_gif.wuffs b/std/gif/decode_gif.wuffs
+index 7cac24abe53c8c61a2734de309a6fccd8e16cc73..8e6678305277a41e690d8469478d291e558bca49 100644
+--- a/std/gif/decode_gif.wuffs
++++ b/std/gif/decode_gif.wuffs
+@@ -121,36 +121,37 @@ pub struct decoder?(
+ pub func decoder.decode_image_config!??(dst nptr base.image_config, src base.io_reader) {
+ 	if this.call_sequence >= 1 {
+ 		return status "?bad call sequence"
+ 	}
+ 	this.dirty_y.reset!()
+ 
+ 	this.decode_header!??(src:args.src)
+ 	this.decode_lsd!??(src:args.src)
+ 	this.decode_up_to_id_part1!??(src:args.src)
+ 
+ 	// TODO: if this.end_of_data, return an error and/or set dst to zero?
+ 
+ 	var ffio base.bool = (not this.gc_has_transparent_index) and
+ 		(this.frame_rect_x0 == 0) and
+ 		(this.frame_rect_y0 == 0) and
+ 		(this.frame_rect_x1 == this.width) and
+ 		(this.frame_rect_y1 == this.height)
+ 
+ 	if args.dst != nullptr {
+ 		// TODO: rename initialize to set?
+ 		//
+ 		// TODO: a Wuffs (not just C) name for the
+ 		// WUFFS_BASE__PIXEL_FORMAT__INDEXED__BGRA_NONPREMUL magic pixfmt constant.
+ 		args.dst.initialize!(
+ 			pixfmt:0x42040008,
+ 			pixsub:0,
+ 			width:this.width,
+ 			height:this.height,
++			// TODO: workbuf_len should be an aspect of the decoder, not the image_config.
+ 			workbuf_len0:this.width as base.u64,
+ 			workbuf_len1:this.width as base.u64,
+ 			first_frame_io_position:this.frame_config_io_position,
+ 			first_frame_is_opaque:ffio)
+ 	}
+ 
+ 	this.call_sequence = 1
+ }
+@@ -179,7 +180,9 @@ pub func decoder.frame_dirty_rect() base.rect_ie_u32 {
+ }
+ 
+ pub func decoder.workbuf_len() base.range_ii_u64 {
+-	return this.util.make_range_ii_u64(min_incl:0, max_incl:0)
++	return this.util.make_range_ii_u64(
++		min_incl:this.width as base.u64,
++		max_incl:this.width as base.u64)
+ }
+ 
+ pub func decoder.restart_frame!??(index base.u64, io_position base.u64) {
+@@ -251,14 +254,14 @@ pri func decoder.skip_frame!??(src base.io_reader) {
+ 
+ // TODO: honor args.opts.
+ pub func decoder.decode_frame!??(dst ptr base.pixel_buffer, src base.io_reader, workbuf slice base.u8, opts nptr base.decode_frame_options) {
+-	if args.workbuf.length() != (this.width as base.u64) {
++	if args.workbuf.length() < (this.width as base.u64) {
+ 		return status "?bad workbuf length"
+ 	}
+ 	if this.call_sequence != 2 {
+ 		this.decode_frame_config!??(dst:nullptr, src:args.src)
+ 	}
+ 	this.decode_id_part1!??(dst:args.dst, src:args.src)
+ 
+ 	this.num_decoded_frames_value ~sat+= 1
+ 	this.reset_gc!()
+ }
+
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C037","gap_exists":true,"gap_type":["input semantics","API protocol","boundary state"],"confidence":98,"affected_functions":["wuffs_gif__decoder__decode_frame","wuffs_gif__decoder__workbuf_len","decoder.decode_frame","decoder.workbuf_len"],"reason":"H0 always allocates and passes the exact work-buffer length reported by image_config, so it does not exercise the newly accepted oversized-workbuf path in decode_frame or directly validate the decoder workbuf_len API. Consequently, buffer-length boundaries below, at, and above f_width are not fuzzed.","evidence":["H0 obtains n only from wuffs_base__image_config__workbuf_len(&ic).max_incl and allocates workbuf with exactly n bytes.","H0 passes that unchanged slice to wuffs_gif__decoder__decode_frame on every iteration.","S1 changes decode_frame validation from a_workbuf.len != f_width to a_workbuf.len < f_width, making lengths greater than f_width a distinct accepted input class absent from H0.","S1 changes wuffs_gif__decoder__workbuf_len from [0, 0] to [f_width, f_width], but H0 never calls wuffs_gif__decoder__workbuf_len.","decoder.decode_image_config sets workbuf_len0 and workbuf_len1 to this.width, keeping H0 on the exact-width case."],"recommended_action":"Extend the harness to query wuffs_gif__decoder__workbuf_len and use fuzz-derived work-buffer lengths covering width-1, width, and width+N, subject to allocation limits; verify undersized buffers return bad_workbuf_length while exact and oversized buffers exercise decoding."}
+tokens used
+6,551

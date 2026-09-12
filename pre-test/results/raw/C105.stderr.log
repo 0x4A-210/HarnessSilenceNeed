@@ -1,0 +1,204 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-blind-run-40ko0e9q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08556-ba49-7dd3-b4dd-9b727abfb6e6
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C105
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `c/fuzz/decode_fuzzer.c`
+
+~~~~c
+// Copyright 2015 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#include <brotli/decode.h>
+
+// Entry point for LibFuzzer.
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  size_t addend = 0;
+  if (size > 0)
+    addend = data[size - 1] & 7;
+  const uint8_t* next_in = data;
+
+  const int kBufferSize = 1024;
+  uint8_t* buffer = (uint8_t*) malloc(kBufferSize);
+  if (!buffer) {
+    // OOM is out-of-scope here.
+    return 0;
+  }
+  /* The biggest "magic number" in brotli is 16MiB - 16, so no need to check
+     the cases with much longer output. */
+  const size_t total_out_limit = (addend == 0) ? (1 << 26) : (1 << 24);
+  size_t total_out = 0;
+
+  BrotliDecoderState* state = BrotliDecoderCreateInstance(0, 0, 0);
+
+  if (addend == 0)
+    addend = size;
+  /* Test both fast (addend == size) and slow (addend <= 7) decoding paths. */
+  for (size_t i = 0; i < size;) {
+    size_t next_i = i + addend;
+    if (next_i > size)
+      next_i = size;
+    size_t avail_in = next_i - i;
+    i = next_i;
+    BrotliDecoderResult result = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
+    while (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
+      size_t avail_out = kBufferSize;
+      uint8_t* next_out = buffer;
+      result = BrotliDecoderDecompressStream(
+          state, &avail_in, &next_in, &avail_out, &next_out, &total_out);
+      if (total_out > total_out_limit)
+        break;
+    }
+    if (total_out > total_out_limit)
+      break;
+    if (result != BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT)
+      break;
+  }
+
+  BrotliDecoderDestroyInstance(state);
+  free(buffer);
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/brotli/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2016 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+cmake . -DBUILD_TESTING=OFF -DBUILD_SHARED_LIBS=OFF
+make clean
+make -j$(nproc) brotlidec
+
+$CC $CFLAGS -c -std=c99 -I. -I./c/include c/fuzz/decode_fuzzer.c 
+
+$CXX $CXXFLAGS ./decode_fuzzer.o  -o $OUT/decode_fuzzer \
+    $LIB_FUZZING_ENGINE ./libbrotlidec.a ./libbrotlicommon.a
+
+cp java/org/brotli/integration/fuzz_data.zip $OUT/decode_fuzzer_seed_corpus.zip
+chmod a-x $OUT/decode_fuzzer_seed_corpus.zip # we will try to run it otherwise
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `c/dec/decode.c`
+
+~~~~diff
+diff --git a/c/dec/decode.c b/c/dec/decode.c
+--- a/c/dec/decode.c
++++ b/c/dec/decode.c
+@@ -113,12 +113,16 @@ void BrotliDecoderDestroyInstance(BrotliDecoderState* state) {
+ 
+ /* Saves error code and converts it to BrotliDecoderResult. */
+ static BROTLI_NOINLINE BrotliDecoderResult SaveErrorCode(
+     BrotliDecoderState* s, BrotliDecoderErrorCode e, size_t consumed_input) {
+   s->error_code = (int)e;
+   s->used_input += consumed_input;
++  if ((s->buffer_length != 0) && (s->br.next_in == s->br.last_in)) {
++    /* If internal buffer is depleted at last, reset it. */
++    s->buffer_length = 0;
++  }
+   switch (e) {
+     case BROTLI_DECODER_SUCCESS:
+       return BROTLI_DECODER_RESULT_SUCCESS;
+ 
+     case BROTLI_DECODER_NEEDS_MORE_INPUT:
+       return BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT;
+@@ -2348,12 +2352,13 @@ BrotliDecoderResult BrotliDecoderDecompressStream(
+             BrotliBitReaderSetInput(br, *next_in, *available_in);
+             continue;
+           } else if (*available_in != 0) {
+             /* Not enough data in buffer, but can take one more byte from
+                input stream. */
+             result = BROTLI_DECODER_SUCCESS;
++            BROTLI_DCHECK(s->buffer_length < 8);
+             s->buffer.u8[s->buffer_length] = **next_in;
+             s->buffer_length++;
+             BrotliBitReaderSetInput(br, &s->buffer.u8[0], s->buffer_length);
+             (*next_in)++;
+             (*available_in)--;
+             /* Retry with more data in buffer. */
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C105","maintenance_needed":false,"confidence":98,"change_types":["internal decoder state handling","defensive assertion"],"affected_functions":["SaveErrorCode","BrotliDecoderDecompressStream"],"reason":"The commit only adjusts internal decoder-buffer bookkeeping and adds a debug assertion; it does not add an entry point, alter the decoding API, require new initialization or configuration, or impose a new caller-controlled input constraint. The existing harness already invokes BrotliDecoderDecompressStream repeatedly on one BrotliDecoderState with both whole-input and 1-to-7-byte chunking, which is the relevant high-level streaming path for the changed buffer-depletion behavior.","evidence":["SaveErrorCode now resets s->buffer_length when the internal buffer is depleted: s->br.next_in == s->br.last_in.","BrotliDecoderDecompressStream only gains BROTLI_DCHECK(s->buffer_length < 8) before appending another byte to the existing internal buffer.","The public call signature and result protocol of BrotliDecoderDecompressStream are unchanged.","decode_fuzzer.c already creates a decoder with BrotliDecoderCreateInstance and repeatedly supplies incrementally chunked input through BrotliDecoderDecompressStream using addend values up to 7, while also testing the full-input path."],"recommended_action":"Keep the existing fuzz harness unchanged."}
+tokens used
+5,031

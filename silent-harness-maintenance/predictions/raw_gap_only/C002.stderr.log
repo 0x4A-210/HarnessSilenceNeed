@@ -1,0 +1,553 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/silent-maintenance-gap_only-C002-fsjk_spi
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08995-2042-7f01-a8d7-986c16cbab9c
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous Fuzz-Harness Maintenance Case
+
+Case ID
+
+C002
+
+## Evidence boundary
+
+The material below contains only the complete existing harness H0 and the complete production source diff from S0 to S1. No developer-updated harness, commit message, build result, coverage result, reachability result, or label is supplied.
+
+## Existing Harness H0
+
+### `fuzz/c/std/gif_fuzzer.c`
+
+```text
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a sanity check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN gif_fuzzer.c
+./a.out ../../../test/data/*.gif
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+
+const char* fuzz(wuffs_base__io_reader src_reader, uint32_t hash) {
+  const char* ret = NULL;
+  wuffs_base__slice_u8 pixbuf = ((wuffs_base__slice_u8){});
+  wuffs_base__slice_u8 workbuf = ((wuffs_base__slice_u8){});
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_gif__decoder dec;
+    const char* status = wuffs_gif__decoder__initialize(
+        &dec, sizeof dec, WUFFS_VERSION,
+        (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED
+                   : 0);
+    if (status) {
+      ret = status;
+      goto exit;
+    }
+
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    status = wuffs_gif__decoder__decode_image_config(&dec, &ic, src_reader);
+    if (status) {
+      ret = status;
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    // Wuffs allows either statically or dynamically allocated work buffers.
+    // This program exercises dynamic allocation.
+    uint64_t n = wuffs_gif__decoder__workbuf_len(&dec).max_incl;
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      workbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!workbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    n = wuffs_base__pixel_config__pixbuf_len(&ic.pixcfg);
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      pixbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!pixbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    status = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, pixbuf);
+    if (status) {
+      ret = status;
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      wuffs_base__frame_config fc = ((wuffs_base__frame_config){});
+      status = wuffs_gif__decoder__decode_frame_config(&dec, &fc, src_reader);
+      if (status) {
+        if ((status != wuffs_base__warning__end_of_data) || !seen_ok) {
+          ret = status;
+        }
+        goto exit;
+      }
+
+      status = wuffs_gif__decoder__decode_frame(&dec, &pb, src_reader, workbuf,
+                                                NULL);
+      if (status) {
+        if ((status != wuffs_base__warning__end_of_data) || !seen_ok) {
+          ret = status;
+        }
+        goto exit;
+      }
+      seen_ok = true;
+
+      wuffs_base__rect_ie_u32 frame_rect =
+          wuffs_base__frame_config__bounds(&fc);
+      wuffs_base__rect_ie_u32 dirty_rect =
+          wuffs_gif__decoder__frame_dirty_rect(&dec);
+      if (!wuffs_base__rect_ie_u32__contains_rect(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not contain dirty_rect";
+        goto exit;
+      }
+    }
+  }
+
+exit:
+  free(workbuf.ptr);
+  free(pixbuf.ptr);
+  return ret;
+}
+
+```
+
+## Complete production source diff S0 -> S1
+
+The fixed `--function-context` rule includes the complete diff and expanded changed-function bodies where Git recognizes them.
+
+```diff
+diff --git a/release/c/wuffs-unsupported-snapshot.c b/release/c/wuffs-unsupported-snapshot.c
+index ea792585f16f2a79583f7b3479e752c38d05f2e9..c6c0f66c0e54b425efafe807e9185d464fbf39bc 100644
+--- a/release/c/wuffs-unsupported-snapshot.c
++++ b/release/c/wuffs-unsupported-snapshot.c
+@@ -185,6 +185,7 @@ extern const char* wuffs_base__error__disabled_by_previous_error;
+ extern const char* wuffs_base__error__initialize_falsely_claimed_already_zeroed;
+ extern const char* wuffs_base__error__initialize_not_called;
+ extern const char* wuffs_base__error__interleaved_coroutine_calls;
++extern const char* wuffs_base__error__not_enough_data;
+ 
+ static inline bool  //
+ wuffs_base__status__is_complete(wuffs_base__status z) {
+@@ -4806,6 +4807,7 @@ const char* wuffs_base__error__initialize_not_called =
+     "?base: initialize not called";
+ const char* wuffs_base__error__interleaved_coroutine_calls =
+     "?base: interleaved coroutine calls";
++const char* wuffs_base__error__not_enough_data = "?base: not enough data";
+ 
+ // ---------------- Images
+ 
+@@ -10488,209 +10490,217 @@ static wuffs_base__status  //
+ wuffs_gif__decoder__decode_id_part2(wuffs_gif__decoder* self,
+                                     wuffs_base__pixel_buffer* a_dst,
+                                     wuffs_base__io_reader a_src,
+                                     wuffs_base__slice_u8 a_workbuf) {
+   wuffs_base__status status = NULL;
+ 
+   uint64_t v_block_size = 0;
+   bool v_need_block_size = false;
+   uint64_t v_n_compressed = 0;
+   wuffs_base__slice_u8 v_compressed = {0};
+   wuffs_base__io_reader v_r = {.private_impl = {0}};
+   wuffs_base__io_buffer u_r WUFFS_BASE__POTENTIALLY_UNUSED = {
+       .data = ((wuffs_base__slice_u8){0}),
+       .meta = ((wuffs_base__io_buffer_meta){0}),
+   };
+   uint8_t* iop_v_r WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   uint8_t* io1_v_r WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   wuffs_base__status v_lzw_status = NULL;
+   wuffs_base__status v_copy_status = NULL;
+   wuffs_base__slice_u8 v_uncompressed = {0};
+ 
+   uint8_t* iop_a_src = NULL;
+   uint8_t* io0_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   uint8_t* io1_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   if (a_src.private_impl.buf) {
+     iop_a_src =
+         a_src.private_impl.buf->data.ptr + a_src.private_impl.buf->meta.ri;
+     if (!a_src.private_impl.mark) {
+       a_src.private_impl.mark = iop_a_src;
+       a_src.private_impl.limit =
+           a_src.private_impl.buf->data.ptr + a_src.private_impl.buf->meta.wi;
+     }
+     io0_a_src = a_src.private_impl.mark;
+     io1_a_src = a_src.private_impl.limit;
+   }
+ 
+   uint32_t coro_susp_point = self->private_impl.p_decode_id_part2[0];
+   if (coro_susp_point) {
+     v_block_size = self->private_data.s_decode_id_part2[0].v_block_size;
+     v_need_block_size =
+         self->private_data.s_decode_id_part2[0].v_need_block_size;
+     v_lzw_status = self->private_data.s_decode_id_part2[0].v_lzw_status;
+   }
+   switch (coro_susp_point) {
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT_0;
+ 
+     v_need_block_size = true;
+   label_0_continue:;
+     while (true) {
+       if (v_need_block_size) {
+         v_need_block_size = false;
+         {
+           WUFFS_BASE__COROUTINE_SUSPENSION_POINT(1);
+           if (WUFFS_BASE__UNLIKELY(iop_a_src == io1_a_src)) {
+             status = wuffs_base__suspension__short_read;
+             goto suspend;
+           }
+           uint64_t t_0 = *iop_a_src++;
+           v_block_size = t_0;
+         }
+       }
+       if (v_block_size == 0) {
+         goto label_0_break;
+       }
+       while (((uint64_t)(io1_a_src - iop_a_src)) == 0) {
+         status = wuffs_base__suspension__short_read;
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT_MAYBE_SUSPEND(2);
+       }
+       if (self->private_impl.f_compressed_ri ==
+           self->private_impl.f_compressed_wi) {
+         self->private_impl.f_compressed_ri = 0;
+         self->private_impl.f_compressed_wi = 0;
+       }
+       while (self->private_impl.f_compressed_wi <= 3841) {
+         v_n_compressed = wuffs_base__u64__min(
+             v_block_size, ((uint64_t)(io1_a_src - iop_a_src)));
+         if (v_n_compressed <= 0) {
+           goto label_1_break;
+         }
+         v_compressed =
+             wuffs_base__io_reader__take(&iop_a_src, io1_a_src, v_n_compressed);
+         wuffs_base__slice_u8__copy_from_slice(
+             wuffs_base__slice_u8__subslice_i(
+                 ((wuffs_base__slice_u8){
+                     .ptr = self->private_data.f_compressed,
+                     .len = 4096,
+                 }),
+                 self->private_impl.f_compressed_wi),
+             v_compressed);
+         wuffs_base__u64__sat_add_indirect(&self->private_impl.f_compressed_wi,
+                                           v_n_compressed);
+         wuffs_base__u64__sat_sub_indirect(&v_block_size, v_n_compressed);
+         if (v_block_size > 0) {
+           goto label_1_break;
+         }
+         if (((uint64_t)(io1_a_src - iop_a_src)) <= 0) {
+           v_need_block_size = true;
+           goto label_1_break;
+         }
+         v_block_size = ((uint64_t)(wuffs_base__load_u8be(iop_a_src)));
+         (iop_a_src += 1, wuffs_base__return_empty_struct());
+       }
+     label_1_break:;
+       if (1 > ((uint64_t)(a_workbuf.len))) {
+         status = wuffs_base__error__bad_workbuf_length;
+         goto exit;
+       }
+     label_2_continue:;
+       while (true) {
+         if ((self->private_impl.f_compressed_ri >
+              self->private_impl.f_compressed_wi) ||
+             (self->private_impl.f_compressed_wi > 4096)) {
+           status = wuffs_gif__error__internal_error_inconsistent_ri_wi;
+           goto exit;
+         }
+         {
+           wuffs_base__io_reader o_0_v_r = v_r;
+           uint8_t* o_0_iop_v_r = iop_v_r;
+           uint8_t* o_0_io1_v_r = io1_v_r;
+           wuffs_base__io_reader__set(
+               &v_r, &u_r, &iop_v_r, &io1_v_r,
+               wuffs_base__slice_u8__subslice_ij(
+                   ((wuffs_base__slice_u8){
+                       .ptr = self->private_data.f_compressed,
+                       .len = 4096,
+                   }),
+                   self->private_impl.f_compressed_ri,
+                   self->private_impl.f_compressed_wi));
+           {
+             u_r.meta.ri = iop_v_r - u_r.data.ptr;
+             wuffs_base__status t_1 = wuffs_lzw__decoder__decode_io_writer(
+                 &self->private_data.f_lzw,
+                 wuffs_base__utility__null_io_writer(), v_r,
+                 wuffs_base__utility__null_slice_u8());
+             iop_v_r = u_r.data.ptr + u_r.meta.ri;
+             v_lzw_status = t_1;
+           }
+           wuffs_base__u64__sat_add_indirect(
+               &self->private_impl.f_compressed_ri,
+               ((uint64_t)(iop_v_r - v_r.private_impl.mark)));
+           v_r = o_0_v_r;
+           iop_v_r = o_0_iop_v_r;
+           io1_v_r = o_0_io1_v_r;
+         }
+         v_uncompressed = wuffs_lzw__decoder__flush(&self->private_data.f_lzw);
+         if (((uint64_t)(v_uncompressed.len)) > 0) {
+           v_copy_status = wuffs_gif__decoder__copy_to_image_buffer(
+               self, a_dst, v_uncompressed);
+           if (wuffs_base__status__is_error(v_copy_status)) {
+             status = v_copy_status;
+             goto exit;
+           }
+         }
+         if (wuffs_base__status__is_ok(v_lzw_status)) {
+           self->private_impl.f_previous_lzw_decode_ended_abruptly = false;
+           if (v_need_block_size || (v_block_size > 0)) {
+             self->private_data.s_decode_id_part2[0].scratch =
+                 ((uint32_t)(v_block_size));
+             WUFFS_BASE__COROUTINE_SUSPENSION_POINT(3);
+             if (self->private_data.s_decode_id_part2[0].scratch >
+                 ((uint64_t)(io1_a_src - iop_a_src))) {
+               self->private_data.s_decode_id_part2[0].scratch -=
+                   io1_a_src - iop_a_src;
+               iop_a_src = io1_a_src;
+               status = wuffs_base__suspension__short_read;
+               goto suspend;
+             }
+             iop_a_src += self->private_data.s_decode_id_part2[0].scratch;
+             if (a_src.private_impl.buf) {
+               a_src.private_impl.buf->meta.ri =
+                   iop_a_src - a_src.private_impl.buf->data.ptr;
+             }
+             WUFFS_BASE__COROUTINE_SUSPENSION_POINT(4);
+             status = wuffs_gif__decoder__skip_blocks(self, a_src);
+             if (a_src.private_impl.buf) {
+               iop_a_src = a_src.private_impl.buf->data.ptr +
+                           a_src.private_impl.buf->meta.ri;
+             }
+             if (status) {
+               goto suspend;
+             }
+           }
+           goto label_0_break;
+         } else if (v_lzw_status == wuffs_base__suspension__short_read) {
+           goto label_0_continue;
+         } else if (v_lzw_status == wuffs_base__suspension__short_write) {
+           goto label_2_continue;
+         }
+         status = v_lzw_status;
+         if (wuffs_base__status__is_error(status)) {
+           goto exit;
+         } else if (wuffs_base__status__is_suspension(status)) {
+           status = wuffs_base__error__cannot_return_a_suspension;
+           goto exit;
+         }
+         goto ok;
+       }
+     }
+   label_0_break:;
+     self->private_impl.f_compressed_ri = 0;
+     self->private_impl.f_compressed_wi = 0;
++    if ((self->private_impl.f_dst_y < self->private_impl.f_frame_rect_y1) &&
++        (self->private_impl.f_frame_rect_x0 !=
++         self->private_impl.f_frame_rect_x1) &&
++        (self->private_impl.f_frame_rect_y0 !=
++         self->private_impl.f_frame_rect_y1)) {
++      status = wuffs_base__error__not_enough_data;
++      goto exit;
++    }
+ 
+     goto ok;
+   ok:
+     self->private_impl.p_decode_id_part2[0] = 0;
+     goto exit;
+   }
+ 
+   goto suspend;
+diff --git a/std/gif/decode_gif.wuffs b/std/gif/decode_gif.wuffs
+index b9dc0475c8bb9dd6ec3f982f68dbe093fcabd2ec..dbeb1e6d23dad3ef44de63fd081d38c0cb50f1fa 100644
+--- a/std/gif/decode_gif.wuffs
++++ b/std/gif/decode_gif.wuffs
+@@ -675,95 +675,99 @@ pri func decoder.decode_id_part1?(dst ptr base.pixel_buffer, src base.io_reader)
+ pri func decoder.decode_id_part2?(dst ptr base.pixel_buffer, src base.io_reader, workbuf slice base.u8) {
+ 	var block_size      base.u64[..255]
+ 	var need_block_size base.bool
+ 	var n_compressed    base.u64
+ 	var compressed      slice base.u8
+ 	var r               base.io_reader
+ 	var lzw_status      base.status
+ 	var copy_status     base.status
+ 	var uncompressed    slice base.u8
+ 
+ 	need_block_size = true
+ 	while:outer true {
+ 		if need_block_size {
+ 			need_block_size = false
+ 			block_size = args.src.read_u8_as_u64?()
+ 		}
+ 		if block_size == 0 {
+ 			break
+ 		}
+ 		while args.src.available() == 0 {
+ 			yield base."$short read"
+ 		}
+ 
+ 		if this.compressed_ri == this.compressed_wi {
+ 			this.compressed_ri = 0
+ 			this.compressed_wi = 0
+ 		}
+ 		while this.compressed_wi <= (4096 - 255) {
+ 			n_compressed = block_size.min(x:args.src.available())
+ 			if n_compressed <= 0 {
+ 				break
+ 			}
+ 			compressed = args.src.take!(n:n_compressed)
+ 			this.compressed[this.compressed_wi:].copy_from_slice!(s:compressed)
+ 			this.compressed_wi ~sat+= n_compressed
+ 			block_size ~sat-= n_compressed
+ 			if block_size > 0 {
+ 				break
+ 			}
+ 			if args.src.available() <= 0 {
+ 				need_block_size = true
+ 				break
+ 			}
+ 			block_size = args.src.peek_u8_as_u64()
+ 			args.src.skip_fast!(actual:1, worst_case:1)
+ 		}
+ 
+ 		if decoder_workbuf_len_max_incl_worst_case > args.workbuf.length() {
+ 			return base."?bad workbuf length"
+ 		}
+ 
+ 		while:inner true {
+ 			if (this.compressed_ri > this.compressed_wi) or (this.compressed_wi > 4096) {
+ 				return "?internal error: inconsistent ri/wi"
+ 			}
+ 			io_bind (io:r, data:this.compressed[this.compressed_ri:this.compressed_wi]) {
+ 				lzw_status =? this.lzw.decode_io_writer?(
+ 					dst:this.util.null_io_writer(), src:r, workbuf:this.util.null_slice_u8())
+ 				this.compressed_ri ~sat+= r.since_mark().length()
+ 			}
+ 
+ 			uncompressed = this.lzw.flush!()
+ 			if uncompressed.length() > 0 {
+ 				copy_status = this.copy_to_image_buffer!(pb:args.dst, src:uncompressed)
+ 				if copy_status.is_error() {
+ 					return copy_status
+ 				}
+ 			}
+ 
+ 			if lzw_status.is_ok() {
+ 				this.previous_lzw_decode_ended_abruptly = false
+ 
+ 				// Skip any trailing blocks.
+ 				if need_block_size or (block_size > 0) {
+ 					args.src.skip?(n:block_size as base.u32)
+ 					this.skip_blocks?(src:args.src)
+ 				}
+ 
+ 				break:outer
+ 			} else if lzw_status == base."$short read" {
+ 				continue:outer
+ 			} else if lzw_status == base."$short write" {
+ 				continue:inner
+ 			}
+ 			return lzw_status
+ 		}
+ 	}
+ 
+ 	this.compressed_ri = 0
+ 	this.compressed_wi = 0
+ 
+-	// TODO: check for "not enough pixel data".
++	if (this.dst_y < this.frame_rect_y1) and
++		(this.frame_rect_x0 != this.frame_rect_x1) and
++		(this.frame_rect_y0 != this.frame_rect_y1) {
++		return base."?not enough data"
++	}
+ }
+ 
+ pri func decoder.copy_to_image_buffer!(pb ptr base.pixel_buffer, src slice base.u8) base.status {
+
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C002","gap_exists":false,"gap_type":[],"confidence":96,"affected_functions":["wuffs_gif__decoder__decode_id_part2","wuffs_gif__decoder__decode_frame","fuzz"],"reason":"H0 already exercises the changed malformed-input semantics through the ordinary GIF frame-decoding path. Arbitrary input can describe a non-empty frame whose LZW data ends before filling `frame_rect`; `fuzz` repeatedly calls `wuffs_gif__decoder__decode_frame`, which reaches `wuffs_gif__decoder__decode_id_part2` and observes the new `wuffs_base__error__not_enough_data` status. The change introduces no separate entry point, configuration, or caller protocol that H0 must add.","evidence":["S1 adds the check `self->private_impl.f_dst_y < self->private_impl.f_frame_rect_y1` with non-empty `f_frame_rect` dimensions at the end of `wuffs_gif__decoder__decode_id_part2`.","On that condition, S1 returns `wuffs_base__error__not_enough_data`, so the behavior is driven by GIF pixel-data contents and frame dimensions already supplied by the fuzz input.","H0 obtains each `wuffs_base__frame_config` and then calls `wuffs_gif__decoder__decode_frame(&dec, &pb, src_reader, workbuf, NULL)` in a loop.","H0 propagates every non-null `decode_frame` status other than its explicit end-of-data handling, so the new error path is not suppressed."],"recommended_action":"Keep H0 unchanged; malformed GIF inputs with prematurely terminated or insufficient image data are already in scope."}
+tokens used
+19,681

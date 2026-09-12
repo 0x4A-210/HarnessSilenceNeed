@@ -1,0 +1,125 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/maintenance-gap_only-C005-x907tagk
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08638-455b-7bf2-be79-d99ba0fa3f97
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C005
+
+## Existing Fuzz Harness H0
+
+### `prog/fuzzing/enhance_fuzzer.cc`
+
+~~~~cpp
+#include "string.h"
+#include "leptfuzz.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+
+extern "C" int
+LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+        if(size<3) return 0;
+        PIX *pix, *pix0, *pix1, *pix2, *pix3, *pix4;
+
+        leptSetStdNullHandler();
+
+        pix = pixReadMem(data, size);
+        if(pix==NULL) return 0;
+        
+        pix0 = pixModifyHue(NULL, pix, 0.01 + 0.05 * 1);
+        pix1 = pixModifySaturation(NULL, pix, -0.9 + 0.1 * 1);
+        pix2 = pixMosaicColorShiftRGB(pix, -0.1, 0.0, 0.0, 0.0999, 1);
+        pix3 = pixMultConstantColor(pix, 0.7, 0.4, 1.3);
+        pix4 = pixUnsharpMasking(pix, 3, 0.01 + 0.15 * 1);
+
+        pixDestroy(&pix);
+        pixDestroy(&pix0);
+        pixDestroy(&pix1);
+        pixDestroy(&pix2);
+        pixDestroy(&pix3);
+        pixDestroy(&pix4);
+        return 0;	
+}
+~~~~
+
+## Production Source Change (S0 -> S1)
+
+Harness changes, commit messages, tests, outcomes, and future evidence are excluded. The source diff is complete.
+
+~~~~diff
+diff --git a/src/readbarcode.c b/src/readbarcode.c
+index 77c6774..71257be 100644
+--- a/src/readbarcode.c
++++ b/src/readbarcode.c
+@@ -858,7 +858,7 @@ numaQuantizeCrossingsByWidth(NUMA       *nas,
+                              NUMA      **pnaohist,
+                              l_int32     debugflag)
+ {
+-l_int32    i, n, ned, nod, iw, width;
++l_int32    i, n, ret, ned, nod, iw, width;
+ l_float32  val, minsize, maxsize, factor;
+ GPLOT     *gplot;
+ NUMA      *naedist, *naodist, *naehist, *naohist, *naecent, *naocent;
+@@ -875,7 +875,9 @@ NUMA      *naerange, *naorange, *naelut, *naolut, *nad;
+         return (NUMA *)ERROR_PTR("binfract <= 0.0", procName, NULL);
+ 
+         /* Get even and odd crossing distances */
+-    numaGetCrossingDistances(nas, &naedist, &naodist, &minsize, &maxsize);
++    ret = numaGetCrossingDistances(nas, &naedist, &naodist, &minsize, &maxsize);
++    if (ret)
++        return (NUMA *)ERROR_PTR("crossing data not found", procName, NULL);
+ 
+         /* Bin the spans in units of binfract * minsize.  These
+          * units are convenient because they scale to make at least
+diff --git a/src/readfile.c b/src/readfile.c
+index f37bf12..51e58bf 100644
+--- a/src/readfile.c
++++ b/src/readfile.c
+@@ -633,7 +633,7 @@ l_int32  format;
+ 
+     if (fread(&firstbytes, 1, 12, fp) != 12)
+         return ERROR_INT("failed to read first 12 bytes of file", procName, 1);
+-    firstbytes[12] = '\0';
++    firstbytes[12] = 0;
+     rewind(fp);
+ 
+     findFileFormatBuffer(firstbytes, &format);
+~~~~
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C005","gap_exists":true,"gap_type":["entry_point","state","input_semantics","error_path"],"confidence":96,"affected_functions":["numaQuantizeCrossingsByWidth","numaGetCrossingDistances"],"reason":"H0 only decodes bytes with pixReadMem and exercises five PIX color/sharpening transforms. It never constructs a NUMA or directly invokes numaQuantizeCrossingsByWidth, so it does not exercise the newly checked failure state where numaGetCrossingDistances returns nonzero because crossing data is unavailable.","evidence":["S1 assigns the return value of numaGetCrossingDistances to ret and returns ERROR_PTR(\"crossing data not found\", procName, NULL) when ret is nonzero.","The changed path depends on the contents and validity of the NUMA argument nas, plus the parameters supplied to numaQuantizeCrossingsByWidth.","H0's only fuzz-derived object is PIX *pix from pixReadMem(data, size); its subsequent calls are pixModifyHue, pixModifySaturation, pixMosaicColorShiftRGB, pixMultConstantColor, and pixUnsharpMasking.","The readfile.c change only replaces the character literal '\\0' with the equivalent integer value 0 and does not expose a distinct fuzz-worthy semantic gap."],"recommended_action":"Add a harness that derives varied NUMA crossing sequences and quantization parameters from fuzz input, calls numaQuantizeCrossingsByWidth, and covers empty, insufficient, malformed, and valid crossing data, including the nonzero return from numaGetCrossingDistances; destroy every returned NUMA."}
+tokens used
+15,436

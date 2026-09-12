@@ -1,0 +1,945 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/silent-maintenance-evolution_aware-C070-o0qu_af5
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a089a5-c7f9-70a3-8ffb-f0f99faa11e7
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous Fuzz-Harness Maintenance Case
+
+Case ID
+
+C070
+
+## Evidence boundary
+
+The material below contains only the complete existing harness H0 and the complete production source diff from S0 to S1. No developer-updated harness, commit message, build result, coverage result, reachability result, or label is supplied.
+
+## Existing Harness H0
+
+### `fuzz/c/std/gif_fuzzer.c`
+
+```text
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a sanity check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN gif_fuzzer.c
+./a.out ../../../test/data/*.gif
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// If building this program in an environment that doesn't easily accomodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../gen/c/std/gif.c"
+#include "../fuzzlib/fuzzlib.c"
+
+const char* fuzz(wuffs_base__io_reader src_reader, uint32_t hash) {
+  const char* ret = NULL;
+  void* pixbuf = NULL;
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_gif__status s;
+    wuffs_gif__decoder dec;
+    wuffs_gif__decoder__initialize(&dec, WUFFS_VERSION, 0);
+
+    wuffs_base__image_buffer ib = ((wuffs_base__image_buffer){});
+    wuffs_base__image_config ic = {{0}};
+    s = wuffs_gif__decoder__decode_config(&dec, &ic, src_reader);
+    if (s) {
+      ret = wuffs_gif__status__string(s);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    size_t pixbuf_size = wuffs_base__image_config__pixbuf_size(&ic);
+    // Don't try to allocate more than 64 MiB.
+    if (pixbuf_size > 64 * 1024 * 1024) {
+      ret = "image too large";
+      goto exit;
+    }
+    pixbuf = malloc(pixbuf_size);
+    if (!pixbuf) {
+      ret = "out of memory";
+      goto exit;
+    }
+    // TODO: check wuffs_base__image_buffer__set_from_slice errors?
+    wuffs_base__image_buffer__set_from_slice(
+        &ib, ic, ((wuffs_base__slice_u8){.ptr = pixbuf, .len = pixbuf_size}));
+
+    wuffs_base__io_buffer dst = {.ptr = (uint8_t*)(pixbuf), .len = pixbuf_size};
+    wuffs_base__io_writer dst_writer = wuffs_base__io_buffer__writer(&dst);
+
+    bool seen_ok = false;
+    while (true) {
+      // TODO: handle the frame rect being larger than the image rect. The
+      // GIF89a spec doesn't disallow this and the Wuffs code tolerates it, in
+      // that it returns a "short write" (because the dst buffer is too small)
+      // and will not e.g. write past the buffer bounds. But the Wuffs GIF API
+      // should somehow pass a subset of pixbuf to decode_frame.
+      dst.wi = 0;
+      s = wuffs_gif__decoder__decode_frame(&dec, dst_writer, src_reader);
+      if (s) {
+        if ((s == WUFFS_GIF__SUSPENSION_END_OF_DATA) && seen_ok) {
+          s = WUFFS_GIF__STATUS_OK;
+        }
+        ret = wuffs_gif__status__string(s);
+        goto exit;
+      }
+      seen_ok = true;
+    }
+  }
+
+exit:
+  if (pixbuf) {
+    free(pixbuf);
+  }
+  return ret;
+}
+
+```
+
+## Complete production source diff S0 -> S1
+
+The fixed `--function-context` rule includes the complete diff and expanded changed-function bodies where Git recognizes them.
+
+```diff
+diff --git a/gen/c/std/gif.c b/gen/c/std/gif.c
+index 555309e1f79cc85a2027d606ae828374f2fe1671..223d9303abf7666a3e50729020e3c3e57794568c 100644
+--- a/gen/c/std/gif.c
++++ b/gen/c/std/gif.c
+@@ -1266,109 +1266,111 @@ wuffs_gif__status wuffs_gif__decoder__decode_config(
+     wuffs_base__image_config* a_dst,
+     wuffs_base__io_reader a_src);
+ 
+-wuffs_gif__status wuffs_gif__decoder__decode_frame(wuffs_gif__decoder* self,
+-                                                   wuffs_base__io_writer a_dst,
+-                                                   wuffs_base__io_reader a_src);
++wuffs_gif__status wuffs_gif__decoder__decode_frame(
++    wuffs_gif__decoder* self,
++    wuffs_base__image_buffer* a_ib,
++    wuffs_base__io_writer a_dst,
++    wuffs_base__io_reader a_src);
+ 
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+ 
+ #endif  // WUFFS_GIF_H
+ 
+ // C HEADER ENDS HERE.
+ 
+ #ifndef WUFFS_BASE_IMPL_H
+ #define WUFFS_BASE_IMPL_H
+ 
+ // Copyright 2017 The Wuffs Authors.
+ //
+ // Licensed under the Apache License, Version 2.0 (the "License");
+ // you may not use this file except in compliance with the License.
+ // You may obtain a copy of the License at
+ //
+ //    https://www.apache.org/licenses/LICENSE-2.0
+ //
+ // Unless required by applicable law or agreed to in writing, software
+ // distributed under the License is distributed on an "AS IS" BASIS,
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+ #define WUFFS_BASE__IGNORE_POTENTIALLY_UNUSED_VARIABLE(x) (void)(x)
+ 
+ // WUFFS_BASE__MAGIC is a magic number to check that initializers are called.
+ // It's not foolproof, given C doesn't automatically zero memory before use,
+ // but it should catch 99.99% of cases.
+ //
+ // Its (non-zero) value is arbitrary, based on md5sum("wuffs").
+ #define WUFFS_BASE__MAGIC ((uint32_t)0x3CCB6C71)
+ 
+ // WUFFS_BASE__ALREADY_ZEROED is passed from a container struct's initializer
+ // to a containee struct's initializer when the container has already zeroed
+ // the containee's memory.
+ //
+ // Its (non-zero) value is arbitrary, based on md5sum("zeroed").
+ #define WUFFS_BASE__ALREADY_ZEROED ((uint32_t)0x68602EF1)
+ 
+ // Denote intentional fallthroughs for -Wimplicit-fallthrough.
+ //
+ // The order matters here. Clang also defines "__GNUC__".
+ #if defined(__clang__) && __cplusplus >= 201103L
+ #define WUFFS_BASE__FALLTHROUGH [[clang::fallthrough]]
+ #elif !defined(__clang__) && defined(__GNUC__) && (__GNUC__ >= 7)
+ #define WUFFS_BASE__FALLTHROUGH __attribute__((fallthrough))
+ #else
+ #define WUFFS_BASE__FALLTHROUGH
+ #endif
+ 
+ // Use switch cases for coroutine suspension points, similar to the technique
+ // in https://www.chiark.greenend.org.uk/~sgtatham/coroutines.html
+ //
+ // We use trivial macros instead of an explicit assignment and case statement
+ // so that clang-format doesn't get confused by the unusual "case"s.
+ #define WUFFS_BASE__COROUTINE_SUSPENSION_POINT_0 case 0:;
+ #define WUFFS_BASE__COROUTINE_SUSPENSION_POINT(n) \
+   coro_susp_point = n;                            \
+   WUFFS_BASE__FALLTHROUGH;                        \
+   case n:;
+ 
+ #define WUFFS_BASE__COROUTINE_SUSPENSION_POINT_MAYBE_SUSPEND(n) \
+   if (status < 0) {                                             \
+     goto exit;                                                  \
+   } else if (status == 0) {                                     \
+     goto ok;                                                    \
+   }                                                             \
+   coro_susp_point = n;                                          \
+   goto suspend;                                                 \
+   case n:;
+ 
+ // Clang also defines "__GNUC__".
+ #if defined(__GNUC__)
+ #define WUFFS_BASE__LIKELY(expr) (__builtin_expect(!!(expr), 1))
+ #define WUFFS_BASE__UNLIKELY(expr) (__builtin_expect(!!(expr), 0))
+ #else
+ #define WUFFS_BASE__LIKELY(expr) (expr)
+ #define WUFFS_BASE__UNLIKELY(expr) (expr)
+ #endif
+ 
+ // Uncomment this #include for printf-debugging.
+ // #include <stdio.h>
+ 
+ // The helpers below are functions, instead of macros, because their arguments
+ // can be an expression that we shouldn't evaluate more than once.
+ //
+ // They are in base-impl.h and hence copy/pasted into every generated C file,
+ // instead of being in some "base.c" file, since a design goal is that users of
+ // the generated C code can often just #include a single .c file, such as
+ // "gif.c", without having to additionally include or otherwise build and link
+ // a "base.c" file.
+ //
+ // They are static, so that linking multiple wuffs .o files won't complain about
+ // duplicate function definitions.
+ //
+ // They are explicitly marked inline, even if modern compilers don't use the
+ // inline attribute to guide optimizations such as inlining, to avoid the
+ // -Wunused-function warning, and we like to compile with -Wall -Werror.
+ 
+ // ---------------- Fundamentals
+@@ -1806,6 +1808,7 @@ static wuffs_gif__status wuffs_gif__decoder__decode_ae(
+ 
+ static wuffs_gif__status wuffs_gif__decoder__decode_id(
+     wuffs_gif__decoder* self,
++    wuffs_base__image_buffer* a_ib,
+     wuffs_base__io_writer a_dst,
+     wuffs_base__io_reader a_src);
+ 
+@@ -1993,103 +1996,108 @@ short_read_src:
+ 
+ wuffs_gif__status wuffs_gif__decoder__decode_frame(
+     wuffs_gif__decoder* self,
++    wuffs_base__image_buffer* a_ib,
+     wuffs_base__io_writer a_dst,
+     wuffs_base__io_reader a_src) {
+   if (!self) {
+     return WUFFS_GIF__ERROR_BAD_RECEIVER;
+   }
+   if (self->private_impl.magic != WUFFS_BASE__MAGIC) {
+     self->private_impl.status = WUFFS_GIF__ERROR_INITIALIZER_NOT_CALLED;
+   }
+   if (self->private_impl.status < 0) {
+     return self->private_impl.status;
+   }
++  if (!a_ib) {
++    self->private_impl.status = WUFFS_GIF__ERROR_BAD_ARGUMENT;
++    return WUFFS_GIF__ERROR_BAD_ARGUMENT;
++  }
+   wuffs_gif__status status = WUFFS_GIF__STATUS_OK;
+ 
+   uint8_t* ioptr_src = NULL;
+   uint8_t* iobounds0orig_src = NULL;
+   uint8_t* iobounds1_src = NULL;
+   WUFFS_BASE__IGNORE_POTENTIALLY_UNUSED_VARIABLE(iobounds0orig_src);
+   WUFFS_BASE__IGNORE_POTENTIALLY_UNUSED_VARIABLE(iobounds1_src);
+   if (a_src.private_impl.buf) {
+     ioptr_src = a_src.private_impl.buf->ptr + a_src.private_impl.buf->ri;
+     if (!a_src.private_impl.bounds[0]) {
+       a_src.private_impl.bounds[0] = ioptr_src;
+       a_src.private_impl.bounds[1] =
+           a_src.private_impl.buf->ptr + a_src.private_impl.buf->wi;
+     }
+     iobounds0orig_src = a_src.private_impl.bounds[0];
+     iobounds1_src = a_src.private_impl.bounds[1];
+   }
+ 
+   uint32_t coro_susp_point =
+       self->private_impl.c_decode_frame[0].coro_susp_point;
+   if (coro_susp_point) {
+   } else {
+   }
+   switch (coro_susp_point) {
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT_0;
+ 
+     if (self->private_impl.f_call_sequence < 1) {
+       status = WUFFS_GIF__ERROR_INVALID_CALL_SEQUENCE;
+       goto exit;
+     }
+     while (true) {
+       if (self->private_impl.f_peek_block_type) {
+         self->private_impl.f_peek_block_type = false;
+       } else {
+         {
+           WUFFS_BASE__COROUTINE_SUSPENSION_POINT(1);
+           if (WUFFS_BASE__UNLIKELY(ioptr_src == iobounds1_src)) {
+             goto short_read_src;
+           }
+           uint8_t t_0 = *ioptr_src++;
+           self->private_impl.f_block_type = t_0;
+         }
+       }
+       if (self->private_impl.f_block_type == 33) {
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT(2);
+         if (a_src.private_impl.buf) {
+           a_src.private_impl.buf->ri = ioptr_src - a_src.private_impl.buf->ptr;
+         }
+         status = wuffs_gif__decoder__decode_extension(self, a_src);
+         if (a_src.private_impl.buf) {
+           ioptr_src = a_src.private_impl.buf->ptr + a_src.private_impl.buf->ri;
+         }
+         if (status) {
+           goto suspend;
+         }
+       } else if (self->private_impl.f_block_type == 44) {
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT(3);
+         if (a_src.private_impl.buf) {
+           a_src.private_impl.buf->ri = ioptr_src - a_src.private_impl.buf->ptr;
+         }
+-        status = wuffs_gif__decoder__decode_id(self, a_dst, a_src);
++        status = wuffs_gif__decoder__decode_id(self, a_ib, a_dst, a_src);
+         if (a_src.private_impl.buf) {
+           ioptr_src = a_src.private_impl.buf->ptr + a_src.private_impl.buf->ri;
+         }
+         if (status) {
+           goto suspend;
+         }
+         status = WUFFS_GIF__STATUS_OK;
+         goto ok;
+       } else if (self->private_impl.f_block_type == 59) {
+         goto label_0_break;
+       } else {
+         status = WUFFS_GIF__ERROR_BAD_BLOCK;
+         goto exit;
+       }
+     }
+   label_0_break:;
+     while (true) {
+       status = WUFFS_GIF__SUSPENSION_END_OF_DATA;
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT_MAYBE_SUSPEND(4);
+     }
+ 
+     goto ok;
+   ok:
+     self->private_impl.c_decode_frame[0].coro_susp_point = 0;
+     goto exit;
+   }
+ 
+   goto suspend;
+@@ -2720,353 +2728,354 @@ short_read_src:
+ 
+ static wuffs_gif__status wuffs_gif__decoder__decode_id(
+     wuffs_gif__decoder* self,
++    wuffs_base__image_buffer* a_ib,
+     wuffs_base__io_writer a_dst,
+     wuffs_base__io_reader a_src) {
+   wuffs_gif__status status = WUFFS_GIF__STATUS_OK;
+ 
+   uint8_t v_flags;
+   uint32_t v_lct_size;
+   uint32_t v_i;
+   uint8_t v_lw;
+   uint64_t v_block_size;
+   wuffs_base__io_writer v_w;
+   wuffs_base__io_buffer u_w;
+   uint8_t* ioptr_w = NULL;
+   uint8_t* iobounds1_w = NULL;
+   WUFFS_BASE__IGNORE_POTENTIALLY_UNUSED_VARIABLE(u_w);
+   WUFFS_BASE__IGNORE_POTENTIALLY_UNUSED_VARIABLE(ioptr_w);
+   WUFFS_BASE__IGNORE_POTENTIALLY_UNUSED_VARIABLE(iobounds1_w);
+   wuffs_gif__status v_z;
+   wuffs_base__slice_u8 v_pass_through;
+   uint64_t v_n_copied;
+ 
+   uint8_t* ioptr_dst = NULL;
+   uint8_t* iobounds0orig_dst = NULL;
+   uint8_t* iobounds1_dst = NULL;
+   WUFFS_BASE__IGNORE_POTENTIALLY_UNUSED_VARIABLE(iobounds0orig_dst);
+   WUFFS_BASE__IGNORE_POTENTIALLY_UNUSED_VARIABLE(iobounds1_dst);
+   if (a_dst.private_impl.buf) {
+     ioptr_dst = a_dst.private_impl.buf->ptr + a_dst.private_impl.buf->wi;
+     if (!a_dst.private_impl.bounds[0]) {
+       a_dst.private_impl.bounds[0] = ioptr_dst;
+       a_dst.private_impl.bounds[1] =
+           a_dst.private_impl.buf->ptr + a_dst.private_impl.buf->len;
+     }
+     if (a_dst.private_impl.buf->closed) {
+       a_dst.private_impl.bounds[1] = ioptr_dst;
+     }
+     iobounds0orig_dst = a_dst.private_impl.bounds[0];
+     iobounds1_dst = a_dst.private_impl.bounds[1];
+   }
+   uint8_t* ioptr_src = NULL;
+   uint8_t* iobounds0orig_src = NULL;
+   uint8_t* iobounds1_src = NULL;
+   WUFFS_BASE__IGNORE_POTENTIALLY_UNUSED_VARIABLE(iobounds0orig_src);
+   WUFFS_BASE__IGNORE_POTENTIALLY_UNUSED_VARIABLE(iobounds1_src);
+   if (a_src.private_impl.buf) {
+     ioptr_src = a_src.private_impl.buf->ptr + a_src.private_impl.buf->ri;
+     if (!a_src.private_impl.bounds[0]) {
+       a_src.private_impl.bounds[0] = ioptr_src;
+       a_src.private_impl.bounds[1] =
+           a_src.private_impl.buf->ptr + a_src.private_impl.buf->wi;
+     }
+     iobounds0orig_src = a_src.private_impl.bounds[0];
+     iobounds1_src = a_src.private_impl.bounds[1];
+   }
+ 
+   uint32_t coro_susp_point = self->private_impl.c_decode_id[0].coro_susp_point;
+   if (coro_susp_point) {
+     v_flags = self->private_impl.c_decode_id[0].v_flags;
+     v_lct_size = self->private_impl.c_decode_id[0].v_lct_size;
+     v_i = self->private_impl.c_decode_id[0].v_i;
+     v_lw = self->private_impl.c_decode_id[0].v_lw;
+     v_block_size = self->private_impl.c_decode_id[0].v_block_size;
+     v_w = ((wuffs_base__io_writer){});
+     v_z = self->private_impl.c_decode_id[0].v_z;
+     v_pass_through = ((wuffs_base__slice_u8){});
+     v_n_copied = self->private_impl.c_decode_id[0].v_n_copied;
+   } else {
+     v_w = ((wuffs_base__io_writer){});
+     v_pass_through = ((wuffs_base__slice_u8){});
+   }
+   switch (coro_susp_point) {
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT_0;
+ 
+     {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(1);
+       uint16_t t_1;
+       if (WUFFS_BASE__LIKELY(iobounds1_src - ioptr_src >= 2)) {
+         t_1 = wuffs_base__load_u16le(ioptr_src);
+         ioptr_src += 2;
+       } else {
+         self->private_impl.c_decode_id[0].scratch = 0;
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT(2);
+         while (true) {
+           if (WUFFS_BASE__UNLIKELY(ioptr_src == iobounds1_src)) {
+             goto short_read_src;
+           }
+           uint32_t t_0 = self->private_impl.c_decode_id[0].scratch >> 56;
+           self->private_impl.c_decode_id[0].scratch <<= 8;
+           self->private_impl.c_decode_id[0].scratch >>= 8;
+           self->private_impl.c_decode_id[0].scratch |=
+               ((uint64_t)(*ioptr_src++)) << t_0;
+           if (t_0 == 8) {
+             t_1 = self->private_impl.c_decode_id[0].scratch;
+             break;
+           }
+           t_0 += 8;
+           self->private_impl.c_decode_id[0].scratch |= ((uint64_t)(t_0)) << 56;
+         }
+       }
+       self->private_impl.f_frame_left = ((uint32_t)(t_1));
+     }
+     {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(3);
+       uint16_t t_3;
+       if (WUFFS_BASE__LIKELY(iobounds1_src - ioptr_src >= 2)) {
+         t_3 = wuffs_base__load_u16le(ioptr_src);
+         ioptr_src += 2;
+       } else {
+         self->private_impl.c_decode_id[0].scratch = 0;
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT(4);
+         while (true) {
+           if (WUFFS_BASE__UNLIKELY(ioptr_src == iobounds1_src)) {
+             goto short_read_src;
+           }
+           uint32_t t_2 = self->private_impl.c_decode_id[0].scratch >> 56;
+           self->private_impl.c_decode_id[0].scratch <<= 8;
+           self->private_impl.c_decode_id[0].scratch >>= 8;
+           self->private_impl.c_decode_id[0].scratch |=
+               ((uint64_t)(*ioptr_src++)) << t_2;
+           if (t_2 == 8) {
+             t_3 = self->private_impl.c_decode_id[0].scratch;
+             break;
+           }
+           t_2 += 8;
+           self->private_impl.c_decode_id[0].scratch |= ((uint64_t)(t_2)) << 56;
+         }
+       }
+       self->private_impl.f_frame_top = ((uint32_t)(t_3));
+     }
+     {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(5);
+       uint16_t t_5;
+       if (WUFFS_BASE__LIKELY(iobounds1_src - ioptr_src >= 2)) {
+         t_5 = wuffs_base__load_u16le(ioptr_src);
+         ioptr_src += 2;
+       } else {
+         self->private_impl.c_decode_id[0].scratch = 0;
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT(6);
+         while (true) {
+           if (WUFFS_BASE__UNLIKELY(ioptr_src == iobounds1_src)) {
+             goto short_read_src;
+           }
+           uint32_t t_4 = self->private_impl.c_decode_id[0].scratch >> 56;
+           self->private_impl.c_decode_id[0].scratch <<= 8;
+           self->private_impl.c_decode_id[0].scratch >>= 8;
+           self->private_impl.c_decode_id[0].scratch |=
+               ((uint64_t)(*ioptr_src++)) << t_4;
+           if (t_4 == 8) {
+             t_5 = self->private_impl.c_decode_id[0].scratch;
+             break;
+           }
+           t_4 += 8;
+           self->private_impl.c_decode_id[0].scratch |= ((uint64_t)(t_4)) << 56;
+         }
+       }
+       self->private_impl.f_frame_width = ((uint32_t)(t_5));
+     }
+     {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(7);
+       uint16_t t_7;
+       if (WUFFS_BASE__LIKELY(iobounds1_src - ioptr_src >= 2)) {
+         t_7 = wuffs_base__load_u16le(ioptr_src);
+         ioptr_src += 2;
+       } else {
+         self->private_impl.c_decode_id[0].scratch = 0;
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT(8);
+         while (true) {
+           if (WUFFS_BASE__UNLIKELY(ioptr_src == iobounds1_src)) {
+             goto short_read_src;
+           }
+           uint32_t t_6 = self->private_impl.c_decode_id[0].scratch >> 56;
+           self->private_impl.c_decode_id[0].scratch <<= 8;
+           self->private_impl.c_decode_id[0].scratch >>= 8;
+           self->private_impl.c_decode_id[0].scratch |=
+               ((uint64_t)(*ioptr_src++)) << t_6;
+           if (t_6 == 8) {
+             t_7 = self->private_impl.c_decode_id[0].scratch;
+             break;
+           }
+           t_6 += 8;
+           self->private_impl.c_decode_id[0].scratch |= ((uint64_t)(t_6)) << 56;
+         }
+       }
+       self->private_impl.f_frame_height = ((uint32_t)(t_7));
+     }
+     {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(9);
+       if (WUFFS_BASE__UNLIKELY(ioptr_src == iobounds1_src)) {
+         goto short_read_src;
+       }
+       uint8_t t_8 = *ioptr_src++;
+       v_flags = t_8;
+     }
+     self->private_impl.f_interlace = ((v_flags & 64) != 0);
+     self->private_impl.f_have_lct = ((v_flags & 128) != 0);
+     if (self->private_impl.f_have_lct) {
+       v_lct_size = (((uint32_t)(1)) << (1 + (v_flags & 7)));
+       v_i = 0;
+       while (v_i < v_lct_size) {
+         {
+           WUFFS_BASE__COROUTINE_SUSPENSION_POINT(10);
+           if (WUFFS_BASE__UNLIKELY(ioptr_src == iobounds1_src)) {
+             goto short_read_src;
+           }
+           uint8_t t_9 = *ioptr_src++;
+           self->private_impl.f_lct[((3 * v_i) + 0)] = t_9;
+         }
+         {
+           WUFFS_BASE__COROUTINE_SUSPENSION_POINT(11);
+           if (WUFFS_BASE__UNLIKELY(ioptr_src == iobounds1_src)) {
+             goto short_read_src;
+           }
+           uint8_t t_10 = *ioptr_src++;
+           self->private_impl.f_lct[((3 * v_i) + 1)] = t_10;
+         }
+         {
+           WUFFS_BASE__COROUTINE_SUSPENSION_POINT(12);
+           if (WUFFS_BASE__UNLIKELY(ioptr_src == iobounds1_src)) {
+             goto short_read_src;
+           }
+           uint8_t t_11 = *ioptr_src++;
+           self->private_impl.f_lct[((3 * v_i) + 2)] = t_11;
+         }
+         v_i += 1;
+       }
+     }
+     if (self->private_impl.f_previous_lzw_decode_ended_abruptly) {
+       wuffs_gif__lzw_decoder__initialize(&self->private_impl.f_lzw,
+                                          WUFFS_VERSION, 0);
+     }
+     {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(13);
+       if (WUFFS_BASE__UNLIKELY(ioptr_src == iobounds1_src)) {
+         goto short_read_src;
+       }
+       uint8_t t_12 = *ioptr_src++;
+       v_lw = t_12;
+     }
+     if ((v_lw < 2) || (8 < v_lw)) {
+       status = WUFFS_GIF__ERROR_BAD_LITERAL_WIDTH;
+       goto exit;
+     }
+     wuffs_gif__lzw_decoder__set_literal_width(&self->private_impl.f_lzw,
+                                               ((uint32_t)(v_lw)));
+     self->private_impl.f_previous_lzw_decode_ended_abruptly = true;
+     while (true) {
+       {
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT(14);
+         if (WUFFS_BASE__UNLIKELY(ioptr_src == iobounds1_src)) {
+           goto short_read_src;
+         }
+         uint8_t t_13 = *ioptr_src++;
+         v_block_size = ((uint64_t)(t_13));
+       }
+       if (v_block_size == 0) {
+         goto label_0_break;
+       }
+       self->private_impl.f_previous_lzw_decode_ended_abruptly = true;
+     label_1_continue:;
+       while (true) {
+         v_w = ((wuffs_base__io_writer){});
+         {
+           wuffs_base__io_reader o_0_a_src = a_src;
+           wuffs_base__io_writer o_0_v_w = v_w;
+           uint8_t* o_0_ioptr_v_w = ioptr_w;
+           uint8_t* o_0_iobounds1_v_w = iobounds1_w;
+           wuffs_base__io_writer__set(
+               &v_w, &u_w, &ioptr_w, &iobounds1_w,
+               wuffs_base__slice_u8__subslice_i(
+                   ((wuffs_base__slice_u8){
+                       .ptr = self->private_impl.f_uncompressed, .len = 4096}),
+                   self->private_impl.f_uncompressed_wi));
+           wuffs_base__io_reader__set_limit(&a_src, ioptr_src, v_block_size);
+           wuffs_base__io_reader__set_mark(&a_src, ioptr_src);
+           {
+             u_w.wi = ioptr_w - u_w.ptr;
+             if (a_src.private_impl.buf) {
+               a_src.private_impl.buf->ri =
+                   ioptr_src - a_src.private_impl.buf->ptr;
+             }
+             wuffs_gif__status t_14 = wuffs_gif__lzw_decoder__decode(
+                 &self->private_impl.f_lzw, v_w, a_src);
+             ioptr_w = u_w.ptr + u_w.wi;
+             if (a_src.private_impl.buf) {
+               ioptr_src =
+                   a_src.private_impl.buf->ptr + a_src.private_impl.buf->ri;
+             }
+             v_z = t_14;
+           }
+           self->private_impl.f_uncompressed_wi =
+               (4096 - ((uint32_t)(wuffs_base__u64__min(
+                           ((uint64_t)(iobounds1_w - ioptr_w)), 4096))));
+           wuffs_base__u64__sat_sub_indirect(
+               &v_block_size,
+               ((uint64_t)(((wuffs_base__slice_u8){
+                                .ptr = a_src.private_impl.bounds[0],
+                                .len = (size_t)(ioptr_src -
+                                                a_src.private_impl.bounds[0]),
+                            })
+                               .len)));
+           v_w = o_0_v_w;
+           ioptr_w = o_0_ioptr_v_w;
+           iobounds1_w = o_0_iobounds1_v_w;
+           a_src = o_0_a_src;
+         }
+         if ((v_z == 0) || (v_z == WUFFS_GIF__SUSPENSION_SHORT_WRITE)) {
+           while (self->private_impl.f_uncompressed_ri <
+                  self->private_impl.f_uncompressed_wi) {
+             v_pass_through = wuffs_base__slice_u8__subslice_ij(
+                 ((wuffs_base__slice_u8){
+                     .ptr = self->private_impl.f_uncompressed, .len = 4096}),
+                 self->private_impl.f_uncompressed_ri,
+                 self->private_impl.f_uncompressed_wi);
+             v_n_copied = wuffs_base__io_writer__copy_from_slice(
+                 &ioptr_dst, iobounds1_dst, v_pass_through);
+             if (v_n_copied == ((uint64_t)(v_pass_through.len))) {
+               self->private_impl.f_uncompressed_ri = 0;
+               self->private_impl.f_uncompressed_wi = 0;
+               goto label_2_break;
+             }
+             self->private_impl.f_uncompressed_ri =
+                 ((self->private_impl.f_uncompressed_ri +
+                   ((uint32_t)((v_n_copied & 4095)))) &
+                  4095);
+             status = WUFFS_GIF__SUSPENSION_SHORT_WRITE;
+             WUFFS_BASE__COROUTINE_SUSPENSION_POINT_MAYBE_SUSPEND(15);
+           }
+         label_2_break:;
+           if (v_z == WUFFS_GIF__SUSPENSION_SHORT_WRITE) {
+             goto label_1_continue;
+           }
+           self->private_impl.f_previous_lzw_decode_ended_abruptly = false;
+           goto label_1_break;
+         }
+         if ((v_block_size == 0) && (v_z == WUFFS_GIF__SUSPENSION_SHORT_READ)) {
+           goto label_1_break;
+         }
+         status = v_z;
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT_MAYBE_SUSPEND(16);
+       }
+     label_1_break:;
+     }
+   label_0_break:;
+ 
+     goto ok;
+   ok:
+     self->private_impl.c_decode_id[0].coro_susp_point = 0;
+     goto exit;
+   }
+ 
+   goto suspend;
+diff --git a/gen/h/std/gif.h b/gen/h/std/gif.h
+index 06bbbe3286084cab8bc9d61b4407accbe3ea3459..2769626e7647f34114196f85a9959a969a453b2b 100644
+--- a/gen/h/std/gif.h
++++ b/gen/h/std/gif.h
+@@ -1266,12 +1266,14 @@ wuffs_gif__status wuffs_gif__decoder__decode_config(
+     wuffs_base__image_config* a_dst,
+     wuffs_base__io_reader a_src);
+ 
+-wuffs_gif__status wuffs_gif__decoder__decode_frame(wuffs_gif__decoder* self,
+-                                                   wuffs_base__io_writer a_dst,
+-                                                   wuffs_base__io_reader a_src);
++wuffs_gif__status wuffs_gif__decoder__decode_frame(
++    wuffs_gif__decoder* self,
++    wuffs_base__image_buffer* a_ib,
++    wuffs_base__io_writer a_dst,
++    wuffs_base__io_reader a_src);
+ 
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+ 
+ #endif  // WUFFS_GIF_H
+diff --git a/std/gif/decode_gif.wuffs b/std/gif/decode_gif.wuffs
+index ed659f9e8c4eed94ca5ba2050dcf2fe160c4bb6b..9a5113e510594de90a5f19c701c85bb7c1b6a57f 100644
+--- a/std/gif/decode_gif.wuffs
++++ b/std/gif/decode_gif.wuffs
+@@ -89,39 +89,39 @@ pub func decoder.decode_config?(dst ptr base.image_config, src base.io_reader)()
+ 	this.call_sequence = 1
+ }
+ 
+-pub func decoder.decode_frame?(dst base.io_writer, src base.io_reader)() {
++pub func decoder.decode_frame?(ib ptr base.image_buffer, dst base.io_writer, src base.io_reader)() {
+ 	if this.call_sequence < 1 {
+ 		return error "invalid call sequence"
+ 	}
+ 
+ 	while true {
+ 		if this.peek_block_type {
+ 			this.peek_block_type = false
+ 		} else {
+ 			this.block_type = in.src.read_u8?()
+ 		}
+ 
+ 		if this.block_type == 0x21 {  // The spec calls 0x21 the "Extension Introducer".
+ 			this.decode_extension?(src:in.src)
+ 		} else if this.block_type == 0x2C {  // The spec calls 0x2C the "Image Separator".
+ 			// TODO: animated GIFs can have multiple Image Descriptors. What's
+ 			// the API? Should the 0x3B Trailer byte result in a "no more
+ 			// frames" suspension instead of ok? Do we need additional
+ 			// destination arguments for timing and palette?
+-			this.decode_id?(dst:in.dst, src:in.src)
++			this.decode_id?(ib:in.ib, dst:in.dst, src:in.src)
+ 			return
+ 		} else if this.block_type == 0x3B {  // The spec calls 0x3B the "Trailer".
+ 			break
+ 		} else {
+ 			return error "bad block"
+ 		}
+ 	}
+ 
+ 	while true {
+ 		yield suspension "end of data"
+ 	}
+ }
+ 
+ // decode_header reads either "GIF87a" or "GIF89a".
+ //
+ // See the spec section 17 "Header" on page 7.
+@@ -278,113 +278,113 @@ pri func decoder.decode_ae?(src base.io_reader)() {
+ // decode_id reads an Image Descriptor. The Image Separator byte has already
+ // been read.
+ //
+ // See the spec section 20 "Image Descriptor" on page 11.
+ //
+ // TODO: dst should be a ptr base.image_buffer, not a base.io_writer.
+-pri func decoder.decode_id?(dst base.io_writer, src base.io_reader)() {
++pri func decoder.decode_id?(ib ptr base.image_buffer, dst base.io_writer, src base.io_reader)() {
+ 	// TODO: check that the frame rect is inside the image rect??
+ 	this.frame_left = in.src.read_u16le?() as base.u32
+ 	this.frame_top = in.src.read_u16le?() as base.u32
+ 	this.frame_width = in.src.read_u16le?() as base.u32
+ 	this.frame_height = in.src.read_u16le?() as base.u32
+ 
+ 	// TODO: use this.interlace.
+ 	var flags base.u8 = in.src.read_u8?()
+ 	this.interlace = (flags & 0x40) != 0
+ 
+ 	// Read the optional Local Color Table.
+ 	this.have_lct = (flags & 0x80) != 0
+ 	if this.have_lct {
+ 		var lct_size base.u32[..256] = (1 as base.u32) << (1 + (flags & 0x07))
+ 		var i base.u32
+ 		while i < lct_size {
+ 			assert i < 256 via "a < b: a < c; c <= b"(c:lct_size)
+ 			this.lct[(3 * i) + 0] = in.src.read_u8?()
+ 			this.lct[(3 * i) + 1] = in.src.read_u8?()
+ 			this.lct[(3 * i) + 2] = in.src.read_u8?()
+ 			i += 1
+ 		}
+ 	}
+ 
+ 	// Other GIF implementations accept GIF files that aren't completely spec
+ 	// compliant. For example, the test/data/gifplayer-muybridge.gif file
+ 	// (created by the gifsicle program) is accepted by other GIF decoders.
+ 	// However, in that file, frame #61's embedded LZW data is truncated,
+ 	// finishing with only 8 of the 9 bits required of the LZW end code. The
+ 	// end code itself, 0x81, is representable in only 8 bits, but the number
+ 	// of bits for the decoder to read has ticked over from 8 to 9 just before
+ 	// that end code is encountered.
+ 	//
+ 	// To accomodate such malformed GIFs, we detect when the previous frame's
+ 	// LZW decoding ended abruptly. The previous LZW decode 'works', in that it
+ 	// decodes as much pixel data as is available, but without seeing that end
+ 	// code (i.e. returning the "ok" status code), the LZW decoder is stuck in
+ 	// a coroutine-in-progress lzw_decoder.decode call, still waiting for that
+ 	// end code. To cancel that coroutine, we reset the LZW decoder.
+ 	if this.previous_lzw_decode_ended_abruptly {
+ 		this.lzw.reset()
+ 	}
+ 
+ 	var lw base.u8 = in.src.read_u8?()
+ 	if (lw < 2) or (8 < lw) {
+ 		return error "bad literal width"
+ 	}
+ 	this.lzw.set_literal_width!(lw:lw as base.u32)
+ 
+ 	this.previous_lzw_decode_ended_abruptly = true
+ 	while true {
+ 		var block_size base.u64 = in.src.read_u8?() as base.u64
+ 		if block_size == 0 {
+ 			break
+ 		}
+ 		this.previous_lzw_decode_ended_abruptly = true
+ 
+ 		while:inner true {
+ 			var w base.io_writer
+ 			io_bind (in.src, w) {
+ 				w.set!(s:this.uncompressed[this.uncompressed_wi:])
+ 				// TODO: enforce that calling r.set_limit has a precondition
+ 				// that r.is_bound(), and that you can't suspend inside an
+ 				// io_bind? Otherwise, the cgen implementation becomes more
+ 				// complicated if we must save and re-apply limits.
+ 				//
+ 				// Should calling r.set_mark also require r.is_bound()?
+ 				in.src.set_limit!(l:block_size)
+ 				in.src.set_mark!()
+ 				var z base.status = try this.lzw.decode?(dst:w, src:in.src)
+ 				this.uncompressed_wi = 4096 - (w.available().min(x:4096) as base.u32)
+ 				block_size ~sat-= in.src.since_mark().length()
+ 			}
+ 
+ 			if z.is_ok() or (z == suspension "short write") {
+ 				// Pass through the uncompressed bytes to in.dst.
+ 				//
+ 				// TODO: in.dst should be a ptr base.image_buffer and we should
+ 				// composite the pixels instead of just copying them.
+ 				while this.uncompressed_ri < this.uncompressed_wi {
+ 					var pass_through slice base.u8 = this.uncompressed[this.uncompressed_ri:this.uncompressed_wi]
+ 					var n_copied base.u64 = in.dst.copy_from_slice!(s:pass_through)
+ 					if n_copied == pass_through.length() {
+ 						this.uncompressed_ri = 0
+ 						this.uncompressed_wi = 0
+ 						break
+ 					}
+ 					this.uncompressed_ri = (this.uncompressed_ri + ((n_copied & 4095) as base.u32)) & 4095
+ 					// TODO: "closed for writes" instead?
+ 					yield suspension "short write"
+ 				}
+ 
+ 				if z == suspension "short write" {
+ 					continue:inner
+ 				}
+ 				// TODO: check that block_size is zero?
+ 				this.previous_lzw_decode_ended_abruptly = false
+ 				break:inner
+ 			}
+ 			if (block_size == 0) and (z == suspension "short read") {
+ 				break:inner
+ 			}
+ 			yield z
+ 		}
+ 	}
+ }
+
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C070","gap_exists":true,"gap_type":["API_PROTOCOL","ENTRY_POINT"],"commit_induced":"YES","maintenance_needed":true,"confidence":99,"affected_functions":["fuzz","wuffs_gif__decoder__decode_frame","wuffs_gif__decoder__decode_id"],"reason":"S1 changes the public wuffs_gif__decoder__decode_frame call protocol by adding the required wuffs_base__image_buffer* a_ib argument, while H0's fuzz function still calls it with only &dec, dst_writer, and src_reader. Consequently, H0 cannot invoke the S1 entry point as declared and cannot reach frame decoding until the call is updated. This gap did not exist in S0, whose three-argument signature matched H0, so it is introduced by this commit.","evidence":["In H0, fuzz calls wuffs_gif__decoder__decode_frame(&dec, dst_writer, src_reader).","In S0, wuffs_gif__decoder__decode_frame accepted self, a_dst, and a_src, matching H0's three arguments.","In S1, wuffs_gif__decoder__decode_frame accepts self, wuffs_base__image_buffer* a_ib, a_dst, and a_src.","S1 explicitly rejects a null a_ib with WUFFS_GIF__ERROR_BAD_ARGUMENT and passes a_ib to wuffs_gif__decoder__decode_id.","H0 already constructs wuffs_base__image_buffer ib and initializes it with wuffs_base__image_buffer__set_from_slice, but does not pass &ib to decode_frame."],"recommended_action":"Update H0's frame-decoding call to wuffs_gif__decoder__decode_frame(&dec, &ib, dst_writer, src_reader), preserving the existing initialized image buffer and input-driven decoding loop."}
+tokens used
+13,527

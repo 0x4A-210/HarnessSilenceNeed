@@ -1,0 +1,566 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-blind-run-40ko0e9q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08553-d040-7dc3-a343-b357d559c5d2
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C072
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `tests/spng_read_fuzzer.cc`
+
+~~~~cpp
+#define SPNG_UNTESTED
+#include "../spng.h"
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+    unsigned char *out = NULL;
+    int flags;
+
+    spng_ctx *ctx = spng_ctx_new(0);
+    if(ctx == NULL) return 0;
+
+    if(spng_set_png_buffer(ctx, (void*)data, size)) goto err;
+
+    spng_set_image_limits(ctx, 200000, 200000);
+    
+    spng_set_chunk_limits(ctx, 4 * 1000 * 1000, 8 * 1000 * 1000);
+
+    spng_set_crc_action(ctx, SPNG_CRC_USE, SPNG_CRC_USE);
+
+    size_t out_size;
+    if(spng_decoded_image_size(ctx, SPNG_FMT_RGBA8, &out_size)) goto err;
+
+    if(out_size > 80000000) goto err;
+
+    out = (unsigned char*)malloc(out_size);
+    if(out == NULL) goto err;
+
+    flags = SPNG_DECODE_USE_TRNS | SPNG_DECODE_USE_GAMA | SPNG_DECODE_USE_SBIT;
+    if(spng_decode_image(ctx, out, out_size, SPNG_FMT_RGBA8, flags)) goto err;
+
+err:
+    spng_ctx_free(ctx);
+    if(out != NULL) free(out);
+
+    return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/libspng/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2018 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+mkdir build
+meson --buildtype=plain --default-library static build
+ninja -C build
+
+$CXX $CXXFLAGS -std=c++11 -I. \
+    $SRC/libspng/tests/spng_read_fuzzer.cc \
+    -o $OUT/spng_read_fuzzer \
+    -lFuzzingEngine $SRC/libspng/build/libspng.a -lz
+
+$CXX $CXXFLAGS -std=c++11 -I. \
+    $SRC/libspng/tests/spng_read_fuzzer.cc \
+    -o $OUT/spng_read_fuzzer_structure_aware \
+    -include ../fuzzer-test-suite/libpng-1.2.56/png_mutator.h \
+    -D PNG_MUTATOR_DEFINE_LIBFUZZER_CUSTOM_MUTATOR \
+    -lFuzzingEngine $SRC/libspng/build/libspng.a -lz
+
+find $SRC/libspng/tests/images -name "*.png" | \
+     xargs zip $OUT/spng_read_fuzzer_seed_corpus.zip
+
+cp $SRC/libspng/tests/spng.dict \
+   $SRC/libspng/tests/spng_read_fuzzer.options $OUT/
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `spng.c`
+
+~~~~diff
+diff --git a/spng.c b/spng.c
+--- a/spng.c
++++ b/spng.c
+@@ -8,23 +8,33 @@
+ 
+ #define SPNG_READ_SIZE 8192
+ 
+ #if defined(SPNG_OPTIMIZE_FILTER)
+     #if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+         #define SPNG_X86
++    #elif defined( __arm__) || defined(_M_ARM)
++        #define SPNG_ARM
+     #else
+         #undef SPNG_OPTIMIZE_FILTER
+     #endif
+ 
++    #if defined(SPNG_X86) || defined(SPNG_ARM)
++        typedef unsigned char png_byte;
++        typedef uint16_t png_uint_16;
++        typedef uint32_t png_uint_32;
++        typedef unsigned char* png_bytep;
++        typedef const unsigned char* png_const_bytep;
++
+         static void png_read_filter_row_sub3(size_t rowbytes, unsigned char* row);
+         static void png_read_filter_row_sub4(size_t rowbytes, unsigned char* row);
+         static void png_read_filter_row_avg3(size_t rowbytes, unsigned char* row, const unsigned char* prev);
+         static void png_read_filter_row_avg4(size_t rowbytes, unsigned char* row, const unsigned char* prev);
+         static void png_read_filter_row_paeth3(size_t rowbytes, unsigned char* row, const unsigned char* prev);
+         static void png_read_filter_row_paeth4(size_t rowbytes, unsigned char* row, const unsigned char* prev);
+     #endif
++#endif
+ 
+ #define SPNG_FILTER_TYPE_NONE 0
+ #define SPNG_FILTER_TYPE_SUB 1
+ #define SPNG_FILTER_TYPE_UP 2
+ #define SPNG_FILTER_TYPE_AVERAGE 3
+ #define SPNG_FILTER_TYPE_PAETH 4
+@@ -2998,18 +3008,12 @@ const char *spng_version_string(void)
+ #include <immintrin.h>
+ #include <inttypes.h>
+ #include <string.h>
+ 
+ #define PNG_INTEL_SSE_IMPLEMENTATION 3
+ 
+-typedef unsigned char png_byte;
+-typedef uint16_t png_uint_16;
+-typedef uint32_t png_uint_32;
+-typedef unsigned char* png_bytep;
+-typedef const unsigned char* png_const_bytep;
+-
+ /* Functions in this file look at most 3 pixels (a,b,c) to predict the 4th (d).
+  * They're positioned like this:
+  *    prev:  c b
+  *    row:   a d
+  * The Sub filter predicts d=a, Avg d=(a+b)/2, and Paeth predicts d to be
+  * whichever of a, b, or c is closest to p=a+b-c.
+@@ -3349,7 +3353,348 @@ static void png_read_filter_row_paeth4(size_t rowbytes, png_bytep row, png_const
+       prev += 4;
+       row  += 4;
+       rb   -= 4;
+    }
+ }
+ 
+-#endif /* SPNG_OPTIMIZE_FILTER && SPNG_X86 */
+\ No newline at end of file
++#endif /* SPNG_OPTIMIZE_FILTER && SPNG_X86 */
++
++
++/* filter_neon_intrinsics.c - NEON optimised filter functions
++ *
++ * Copyright (c) 2018 Cosmin Truta
++ * Copyright (c) 2014,2016 Glenn Randers-Pehrson
++ * Written by James Yu <james.yu at linaro.org>, October 2013.
++ * Based on filter_neon.S, written by Mans Rullgard, 2011.
++ *
++ * This code is released under the libpng license.
++ * For conditions of distribution and use, see the disclaimer
++ * and license in png.h
++ */
++
++
++#if defined(SPNG_OPTIMIZER_FILTER) && defined(SPNG_ARM)
++
++#if defined(_MSC_VER) && defined(_M_ARM64)
++    #include <arm64_neon.h>
++#else
++    # include <arm_neon.h>
++#endif
++
++static void png_read_filter_row_up(png_row_infop row_info, png_bytep row, png_const_bytep prev_row)
++{
++   png_bytep rp = row;
++   png_bytep rp_stop = row + row_info->rowbytes;
++   png_const_bytep pp = prev_row;
++
++   for (; rp < rp_stop; rp += 16, pp += 16)
++   {
++      uint8x16_t qrp, qpp;
++
++      qrp = vld1q_u8(rp);
++      qpp = vld1q_u8(pp);
++      qrp = vaddq_u8(qrp, qpp);
++      vst1q_u8(rp, qrp);
++   }
++}
++
++static void png_read_filter_row_sub3(png_row_infop row_info, png_bytep row)
++{
++   png_bytep rp = row;
++   png_bytep rp_stop = row + row_info->rowbytes;
++
++   uint8x16_t vtmp = vld1q_u8(rp);
++   uint8x8x2_t *vrpt = png_ptr(uint8x8x2_t, &vtmp);
++   uint8x8x2_t vrp = *vrpt;
++
++   uint8x8x4_t vdest;
++   vdest.val[3] = vdup_n_u8(0);
++
++   for (; rp < rp_stop;)
++   {
++      uint8x8_t vtmp1, vtmp2;
++      uint32x2_t *temp_pointer;
++
++      vtmp1 = vext_u8(vrp.val[0], vrp.val[1], 3);
++      vdest.val[0] = vadd_u8(vdest.val[3], vrp.val[0]);
++      vtmp2 = vext_u8(vrp.val[0], vrp.val[1], 6);
++      vdest.val[1] = vadd_u8(vdest.val[0], vtmp1);
++
++      vtmp1 = vext_u8(vrp.val[1], vrp.val[1], 1);
++      vdest.val[2] = vadd_u8(vdest.val[1], vtmp2);
++      vdest.val[3] = vadd_u8(vdest.val[2], vtmp1);
++
++      vtmp = vld1q_u8(rp + 12);
++      vrpt = png_ptr(uint8x8x2_t, &vtmp);
++      vrp = *vrpt;
++
++      vst1_lane_u32(png_ptr(uint32_t,rp), png_ldr(uint32x2_t,&vdest.val[0]), 0);
++      rp += 3;
++      vst1_lane_u32(png_ptr(uint32_t,rp), png_ldr(uint32x2_t,&vdest.val[1]), 0);
++      rp += 3;
++      vst1_lane_u32(png_ptr(uint32_t,rp), png_ldr(uint32x2_t,&vdest.val[2]), 0);
++      rp += 3;
++      vst1_lane_u32(png_ptr(uint32_t,rp), png_ldr(uint32x2_t,&vdest.val[3]), 0);
++      rp += 3;
++   }
++}
++
++static void png_read_filter_row_sub4(png_row_infop row_info, png_bytep row)
++{
++   png_bytep rp = row;
++   png_bytep rp_stop = row + row_info->rowbytes;
++
++   uint8x8x4_t vdest;
++   vdest.val[3] = vdup_n_u8(0);
++
++   for (; rp < rp_stop; rp += 16)
++   {
++      uint32x2x4_t vtmp = vld4_u32(png_ptr(uint32_t,rp));
++      uint8x8x4_t *vrpt = png_ptr(uint8x8x4_t,&vtmp);
++      uint8x8x4_t vrp = *vrpt;
++      uint32x2x4_t *temp_pointer;
++      uint32x2x4_t vdest_val;
++
++      vdest.val[0] = vadd_u8(vdest.val[3], vrp.val[0]);
++      vdest.val[1] = vadd_u8(vdest.val[0], vrp.val[1]);
++      vdest.val[2] = vadd_u8(vdest.val[1], vrp.val[2]);
++      vdest.val[3] = vadd_u8(vdest.val[2], vrp.val[3]);
++
++      vdest_val = png_ldr(uint32x2x4_t, &vdest);
++      vst4_lane_u32(png_ptr(uint32_t,rp), vdest_val, 0);
++   }
++}
++
++static void png_read_filter_row_avg3(png_row_infop row_info, png_bytep row, png_const_bytep prev_row)
++{
++   png_bytep rp = row;
++   png_const_bytep pp = prev_row;
++   png_bytep rp_stop = row + row_info->rowbytes;
++
++   uint8x16_t vtmp;
++   uint8x8x2_t *vrpt;
++   uint8x8x2_t vrp;
++   uint8x8x4_t vdest;
++   vdest.val[3] = vdup_n_u8(0);
++
++   vtmp = vld1q_u8(rp);
++   vrpt = png_ptr(uint8x8x2_t,&vtmp);
++   vrp = *vrpt;
++
++   for (; rp < rp_stop; pp += 12)
++   {
++      uint8x8_t vtmp1, vtmp2, vtmp3;
++
++      uint8x8x2_t *vppt;
++      uint8x8x2_t vpp;
++
++      uint32x2_t *temp_pointer;
++
++      vtmp = vld1q_u8(pp);
++      vppt = png_ptr(uint8x8x2_t,&vtmp);
++      vpp = *vppt;
++
++      vtmp1 = vext_u8(vrp.val[0], vrp.val[1], 3);
++      vdest.val[0] = vhadd_u8(vdest.val[3], vpp.val[0]);
++      vdest.val[0] = vadd_u8(vdest.val[0], vrp.val[0]);
++
++      vtmp2 = vext_u8(vpp.val[0], vpp.val[1], 3);
++      vtmp3 = vext_u8(vrp.val[0], vrp.val[1], 6);
++      vdest.val[1] = vhadd_u8(vdest.val[0], vtmp2);
++      vdest.val[1] = vadd_u8(vdest.val[1], vtmp1);
++
++      vtmp2 = vext_u8(vpp.val[0], vpp.val[1], 6);
++      vtmp1 = vext_u8(vrp.val[1], vrp.val[1], 1);
++
++      vtmp = vld1q_u8(rp + 12);
++      vrpt = png_ptr(uint8x8x2_t,&vtmp);
++      vrp = *vrpt;
++
++      vdest.val[2] = vhadd_u8(vdest.val[1], vtmp2);
++      vdest.val[2] = vadd_u8(vdest.val[2], vtmp3);
++
++      vtmp2 = vext_u8(vpp.val[1], vpp.val[1], 1);
++
++      vdest.val[3] = vhadd_u8(vdest.val[2], vtmp2);
++      vdest.val[3] = vadd_u8(vdest.val[3], vtmp1);
++
++      vst1_lane_u32(png_ptr(uint32_t,rp), png_ldr(uint32x2_t,&vdest.val[0]), 0);
++      rp += 3;
++      vst1_lane_u32(png_ptr(uint32_t,rp), png_ldr(uint32x2_t,&vdest.val[1]), 0);
++      rp += 3;
++      vst1_lane_u32(png_ptr(uint32_t,rp), png_ldr(uint32x2_t,&vdest.val[2]), 0);
++      rp += 3;
++      vst1_lane_u32(png_ptr(uint32_t,rp), png_ldr(uint32x2_t,&vdest.val[3]), 0);
++      rp += 3;
++   }
++}
++
++static void png_read_filter_row_avg4(png_row_infop row_info, png_bytep row, png_const_bytep prev_row)
++{
++   png_bytep rp = row;
++   png_bytep rp_stop = row + row_info->rowbytes;
++   png_const_bytep pp = prev_row;
++
++   uint8x8x4_t vdest;
++   vdest.val[3] = vdup_n_u8(0);
++
++   for (; rp < rp_stop; rp += 16, pp += 16)
++   {
++      uint32x2x4_t vtmp;
++      uint8x8x4_t *vrpt, *vppt;
++      uint8x8x4_t vrp, vpp;
++      uint32x2x4_t *temp_pointer;
++      uint32x2x4_t vdest_val;
++
++      vtmp = vld4_u32(png_ptr(uint32_t,rp));
++      vrpt = png_ptr(uint8x8x4_t,&vtmp);
++      vrp = *vrpt;
++      vtmp = vld4_u32(png_ptrc(uint32_t,pp));
++      vppt = png_ptr(uint8x8x4_t,&vtmp);
++      vpp = *vppt;
++
++      vdest.val[0] = vhadd_u8(vdest.val[3], vpp.val[0]);
++      vdest.val[0] = vadd_u8(vdest.val[0], vrp.val[0]);
++      vdest.val[1] = vhadd_u8(vdest.val[0], vpp.val[1]);
++      vdest.val[1] = vadd_u8(vdest.val[1], vrp.val[1]);
++      vdest.val[2] = vhadd_u8(vdest.val[1], vpp.val[2]);
++      vdest.val[2] = vadd_u8(vdest.val[2], vrp.val[2]);
++      vdest.val[3] = vhadd_u8(vdest.val[2], vpp.val[3]);
++      vdest.val[3] = vadd_u8(vdest.val[3], vrp.val[3]);
++
++      vdest_val = png_ldr(uint32x2x4_t, &vdest);
++      vst4_lane_u32(png_ptr(uint32_t,rp), vdest_val, 0);
++   }
++}
++
++static uint8x8_t paeth_arm(uint8x8_t a, uint8x8_t b, uint8x8_t c)
++{
++   uint8x8_t d, e;
++   uint16x8_t p1, pa, pb, pc;
++
++   p1 = vaddl_u8(a, b); /* a + b */
++   pc = vaddl_u8(c, c); /* c * 2 */
++   pa = vabdl_u8(b, c); /* pa */
++   pb = vabdl_u8(a, c); /* pb */
++   pc = vabdq_u16(p1, pc); /* pc */
++
++   p1 = vcleq_u16(pa, pb); /* pa <= pb */
++   pa = vcleq_u16(pa, pc); /* pa <= pc */
++   pb = vcleq_u16(pb, pc); /* pb <= pc */
++
++   p1 = vandq_u16(p1, pa); /* pa <= pb && pa <= pc */
++
++   d = vmovn_u16(pb);
++   e = vmovn_u16(p1);
++
++   d = vbsl_u8(d, b, c);
++   e = vbsl_u8(e, a, d);
++
++   return e;
++}
++
++static void png_read_filter_row_paeth3(png_row_infop row_info, png_bytep row, png_const_bytep prev_row)
++{
++   png_bytep rp = row;
++   png_const_bytep pp = prev_row;
++   png_bytep rp_stop = row + row_info->rowbytes;
++
++   uint8x16_t vtmp;
++   uint8x8x2_t *vrpt;
++   uint8x8x2_t vrp;
++   uint8x8_t vlast = vdup_n_u8(0);
++   uint8x8x4_t vdest;
++   vdest.val[3] = vdup_n_u8(0);
++
++   vtmp = vld1q_u8(rp);
++   vrpt = png_ptr(uint8x8x2_t,&vtmp);
++   vrp = *vrpt;
++
++   for (; rp < rp_stop; pp += 12)
++   {
++      uint8x8x2_t *vppt;
++      uint8x8x2_t vpp;
++      uint8x8_t vtmp1, vtmp2, vtmp3;
++      uint32x2_t *temp_pointer;
++
++      vtmp = vld1q_u8(pp);
++      vppt = png_ptr(uint8x8x2_t,&vtmp);
++      vpp = *vppt;
++
++      vdest.val[0] = paeth_arm(vdest.val[3], vpp.val[0], vlast);
++      vdest.val[0] = vadd_u8(vdest.val[0], vrp.val[0]);
++
++      vtmp1 = vext_u8(vrp.val[0], vrp.val[1], 3);
++      vtmp2 = vext_u8(vpp.val[0], vpp.val[1], 3);
++      vdest.val[1] = paeth_arm(vdest.val[0], vtmp2, vpp.val[0]);
++      vdest.val[1] = vadd_u8(vdest.val[1], vtmp1);
++
++      vtmp1 = vext_u8(vrp.val[0], vrp.val[1], 6);
++      vtmp3 = vext_u8(vpp.val[0], vpp.val[1], 6);
++      vdest.val[2] = paeth_arm(vdest.val[1], vtmp3, vtmp2);
++      vdest.val[2] = vadd_u8(vdest.val[2], vtmp1);
++
++      vtmp1 = vext_u8(vrp.val[1], vrp.val[1], 1);
++      vtmp2 = vext_u8(vpp.val[1], vpp.val[1], 1);
++
++      vtmp = vld1q_u8(rp + 12);
++      vrpt = png_ptr(uint8x8x2_t,&vtmp);
++      vrp = *vrpt;
++
++      vdest.val[3] = paeth_arm(vdest.val[2], vtmp2, vtmp3);
++      vdest.val[3] = vadd_u8(vdest.val[3], vtmp1);
++
++      vlast = vtmp2;
++
++      vst1_lane_u32(png_ptr(uint32_t,rp), png_ldr(uint32x2_t,&vdest.val[0]), 0);
++      rp += 3;
++      vst1_lane_u32(png_ptr(uint32_t,rp), png_ldr(uint32x2_t,&vdest.val[1]), 0);
++      rp += 3;
++      vst1_lane_u32(png_ptr(uint32_t,rp), png_ldr(uint32x2_t,&vdest.val[2]), 0);
++      rp += 3;
++      vst1_lane_u32(png_ptr(uint32_t,rp), png_ldr(uint32x2_t,&vdest.val[3]), 0);
++      rp += 3;
++   }
++}
++
++static void png_read_filter_row_paeth4(png_row_infop row_info, png_bytep row, png_const_bytep prev_row)
++{
++   png_bytep rp = row;
++   png_bytep rp_stop = row + row_info->rowbytes;
++   png_const_bytep pp = prev_row;
++
++   uint8x8_t vlast = vdup_n_u8(0);
++   uint8x8x4_t vdest;
++   vdest.val[3] = vdup_n_u8(0);
++
++   for (; rp < rp_stop; rp += 16, pp += 16)
++   {
++      uint32x2x4_t vtmp;
++      uint8x8x4_t *vrpt, *vppt;
++      uint8x8x4_t vrp, vpp;
++      uint32x2x4_t *temp_pointer;
++      uint32x2x4_t vdest_val;
++
++      vtmp = vld4_u32(png_ptr(uint32_t,rp));
++      vrpt = png_ptr(uint8x8x4_t,&vtmp);
++      vrp = *vrpt;
++      vtmp = vld4_u32(png_ptrc(uint32_t,pp));
++      vppt = png_ptr(uint8x8x4_t,&vtmp);
++      vpp = *vppt;
++
++      vdest.val[0] = paeth_arm(vdest.val[3], vpp.val[0], vlast);
++      vdest.val[0] = vadd_u8(vdest.val[0], vrp.val[0]);
++      vdest.val[1] = paeth_arm(vdest.val[0], vpp.val[1], vpp.val[0]);
++      vdest.val[1] = vadd_u8(vdest.val[1], vrp.val[1]);
++      vdest.val[2] = paeth_arm(vdest.val[1], vpp.val[2], vpp.val[1]);
++      vdest.val[2] = vadd_u8(vdest.val[2], vrp.val[2]);
++      vdest.val[3] = paeth_arm(vdest.val[2], vpp.val[3], vpp.val[2]);
++      vdest.val[3] = vadd_u8(vdest.val[3], vrp.val[3]);
++
++      vlast = vpp.val[3];
++
++      vdest_val = png_ldr(uint32x2x4_t, &vdest);
++      vst4_lane_u32(png_ptr(uint32_t,rp), vdest_val, 0);
++   }
++}
++
++#endif /* SPNG_OPTIMIZER_FILTER && SPNG_ARM */
+\ No newline at end of file
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C072","maintenance_needed":false,"confidence":96,"change_types":["architecture-specific optimization","internal implementation"],"affected_functions":["png_read_filter_row_up","png_read_filter_row_sub3","png_read_filter_row_sub4","png_read_filter_row_avg3","png_read_filter_row_avg4","paeth_arm","png_read_filter_row_paeth3","png_read_filter_row_paeth4"],"reason":"The commit adds an ARM/NEON implementation of internal PNG row-filter operations without changing the public decoding entry point, initialization protocol, state requirements, or accepted input format. The existing harness already feeds arbitrary PNG bytes through spng_set_png_buffer() and reaches row filtering through spng_decode_image(), so no new input construction or API sequencing is required. Moreover, the added NEON block is guarded by SPNG_OPTIMIZER_FILTER while the surrounding configuration defines SPNG_OPTIMIZE_FILTER, so the supplied diff does not demonstrate that this new block is enabled at all.","evidence":["The harness invokes the high-level decode path with spng_decoded_image_size() followed by spng_decode_image().","The harness gives the decoder direct control over arbitrary input bytes through spng_set_png_buffer(ctx, (void*)data, size).","All newly added functions are static internal filter routines; no new public API or caller-visible protocol appears in the diff.","The change adds SPNG_ARM architecture detection under SPNG_OPTIMIZE_FILTER but does not introduce new runtime initialization or configuration calls for callers.","The NEON implementation is conditionally compiled with '#if defined(SPNG_OPTIMIZER_FILTER) && defined(SPNG_ARM)', which does not match the visible SPNG_OPTIMIZE_FILTER macro name."],"recommended_action":"Keep the existing fuzz harness unchanged; address or test the optimization's compile-time macro and architecture-specific build behavior separately from harness maintenance."}
+tokens used
+9,988

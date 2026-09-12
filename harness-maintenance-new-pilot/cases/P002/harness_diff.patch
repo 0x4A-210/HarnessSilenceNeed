@@ -1,0 +1,109 @@
+diff --git a/c/fuzz/decode_fuzzer.cc b/c/fuzz/decode_fuzzer.cc
+new file mode 100644
+index 0000000..60c6f8e
+--- /dev/null
++++ b/c/fuzz/decode_fuzzer.cc
+@@ -0,0 +1,53 @@
++// Copyright 2015 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include <brotli/decode.h>
++
++// Entry point for LibFuzzer.
++extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
++  size_t addend = 0;
++  if (size > 0)
++    addend = data[size - 1] & 7;
++  const uint8_t* next_in = data;
++
++  const int kBufferSize = 1024;
++  uint8_t* buffer = new uint8_t[kBufferSize];
++  /* The biggest "magic number" in brotli is 16MiB - 16, so no need to check
++     the cases with much longer output. */
++  const size_t total_out_limit = (addend == 0) ? (1 << 26) : (1 << 24);
++  size_t total_out = 0;
++
++  BrotliDecoderState* state = BrotliDecoderCreateInstance(0, 0, 0);
++
++  if (addend == 0)
++    addend = size;
++  /* Test both fast (addend == size) and slow (addend <= 7) decoding paths. */
++  for (size_t i = 0; i < size;) {
++    size_t next_i = i + addend;
++    if (next_i > size)
++      next_i = size;
++    size_t avail_in = next_i - i;
++    i = next_i;
++    BrotliDecoderResult result = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
++    while (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
++      size_t avail_out = kBufferSize;
++      uint8_t* next_out = buffer;
++      result = BrotliDecoderDecompressStream(
++          state, &avail_in, &next_in, &avail_out, &next_out, &total_out);
++      if (total_out > total_out_limit)
++        break;
++    }
++    if (total_out > total_out_limit)
++      break;
++    if (result != BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT)
++      break;
++  }
++
++  BrotliDecoderDestroyInstance(state);
++  delete[] buffer;
++  return 0;
++}
+diff --git a/c/fuzz/run_decode_fuzzer.cc b/c/fuzz/run_decode_fuzzer.cc
+new file mode 100644
+index 0000000..8fd4189
+--- /dev/null
++++ b/c/fuzz/run_decode_fuzzer.cc
+@@ -0,0 +1,44 @@
++/* Copyright 2016 Google Inc. All Rights Reserved.
++
++   Distributed under MIT license.
++   See file LICENSE for detail or copy at https://opensource.org/licenses/MIT
++*/
++
++/* Simple runner for decode_fuzzer.cc */
++
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include <stdint.h>
++
++extern "C" void LLVMFuzzerTestOneInput(const uint8_t* data, size_t size);
++
++int main(int argc, char* *argv) {
++  if (argc != 2) {
++    fprintf(stderr, "Exactly one argument is expected.\n");
++    exit(EXIT_FAILURE);
++  }
++
++  FILE* f = fopen(argv[1], "r");
++  if (!f) {
++    fprintf(stderr, "Failed to open input file.");
++    exit(EXIT_FAILURE);
++  }
++
++  size_t max_len = 1 << 20;
++  unsigned char* tmp = (unsigned char*)malloc(max_len);
++  size_t len = fread(tmp, 1, max_len, f);
++  if (ferror(f)) {
++    fclose(f);
++    fprintf(stderr, "Failed read input file.");
++    exit(EXIT_FAILURE);
++  }
++  /* Make data after the end "inaccessible". */
++  unsigned char* data = (unsigned char*)malloc(len);
++  memcpy(data, tmp, len);
++  free(tmp);
++
++  LLVMFuzzerTestOneInput(data, len);
++  free(data);
++  exit(EXIT_SUCCESS);
++}

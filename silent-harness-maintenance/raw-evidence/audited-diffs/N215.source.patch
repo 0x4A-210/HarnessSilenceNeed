@@ -1,0 +1,78 @@
+diff --git a/release/c/wuffs-unsupported-snapshot.c b/release/c/wuffs-unsupported-snapshot.c
+index 764ec516ac999afc3b9b33aa19601361fef110cf..debb13180c3148944c1e4bb5950d0893b8624c64 100644
+--- a/release/c/wuffs-unsupported-snapshot.c
++++ b/release/c/wuffs-unsupported-snapshot.c
+@@ -8639,9 +8639,6 @@ wuffs_gif__decoder__decode_image_config(wuffs_gif__decoder* self,
+       status = wuffs_base__error__bad_call_sequence;
+       goto exit;
+     }
+-    (memset(&self->private_impl.f_dirty_y, 0,
+-            sizeof((wuffs_base__range_ie_u32){})),
+-     wuffs_base__return_empty_struct());
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT(1);
+     status = wuffs_gif__decoder__decode_header(self, a_src);
+     if (status) {
+@@ -8747,9 +8744,11 @@ wuffs_gif__decoder__frame_dirty_rect(const wuffs_gif__decoder* self) {
+   }
+ 
+   return wuffs_base__utility__make_rect_ie_u32(
+-      self->private_impl.f_frame_rect_x0,
++      wuffs_base__u32__min(self->private_impl.f_frame_rect_x0,
++                           self->private_impl.f_width),
+       wuffs_base__range_ie_u32__get_min_incl(&self->private_impl.f_dirty_y),
+-      self->private_impl.f_frame_rect_x1,
++      wuffs_base__u32__min(self->private_impl.f_frame_rect_x1,
++                           self->private_impl.f_width),
+       wuffs_base__range_ie_u32__get_max_excl(&self->private_impl.f_dirty_y));
+ }
+ 
+@@ -8826,6 +8825,9 @@ wuffs_gif__decoder__decode_frame_config(wuffs_gif__decoder* self,
+   switch (coro_susp_point) {
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT_0;
+ 
++    (memset(&self->private_impl.f_dirty_y, 0,
++            sizeof((wuffs_base__range_ie_u32){})),
++     wuffs_base__return_empty_struct());
+     if (!self->private_impl.f_end_of_data) {
+       if (self->private_impl.f_call_sequence == 0) {
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT(1);
+diff --git a/std/gif/decode_gif.wuffs b/std/gif/decode_gif.wuffs
+index 469e37fb8fc5388b64bdc4c4d4d0ceed10176fdd..6241fd08cf56cdd9b0472a494bb16428944ff967 100644
+--- a/std/gif/decode_gif.wuffs
++++ b/std/gif/decode_gif.wuffs
+@@ -132,7 +132,6 @@ pub func decoder.decode_image_config?(dst nptr base.image_config, src base.io_re
+ 	if this.call_sequence >= 1 {
+ 		return base."?bad call sequence"
+ 	}
+-	this.dirty_y.reset!()
+ 
+ 	this.decode_header?(src:args.src)
+ 	this.decode_lsd?(src:args.src)
+@@ -177,10 +176,16 @@ pub func decoder.num_decoded_frames() base.u64 {
+ }
+ 
+ pub func decoder.frame_dirty_rect() base.rect_ie_u32 {
++	// TODO: intersect this with the frame_rect? In theory, that should be
++	// unnecessary, and could hide bugs, but it'd be a cheap way to ensure that
++	// the dirty_rect is inside the frame_rect.
++	//
++	// Note that this method is pure, so it cannot set a sticky error bit if
++	// the dirty_rect is too big.
+ 	return this.util.make_rect_ie_u32(
+-		min_incl_x:this.frame_rect_x0,
++		min_incl_x:this.frame_rect_x0.min(x:this.width),
+ 		min_incl_y:this.dirty_y.get_min_incl(),
+-		max_excl_x:this.frame_rect_x1,
++		max_excl_x:this.frame_rect_x1.min(x:this.width),
+ 		max_excl_y:this.dirty_y.get_max_excl())
+ }
+ 
+@@ -206,6 +211,8 @@ pub func decoder.restart_frame!(index base.u64, io_position base.u64) base.statu
+ pub func decoder.decode_frame_config?(dst nptr base.frame_config, src base.io_reader) {
+ 	var blend base.u8
+ 
++	this.dirty_y.reset!()
++
+ 	if not this.end_of_data {
+ 		if this.call_sequence == 0 {
+ 			this.decode_image_config?(dst:nullptr, src:args.src)

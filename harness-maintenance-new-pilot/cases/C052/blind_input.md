@@ -1,0 +1,145 @@
+# Case ID
+
+C052
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `tools/codecfuzz.cpp`
+
+~~~~cpp
+#include "../src/meshoptimizer.h"
+
+#include <stdint.h>
+#include <stdlib.h>
+
+void fuzzDecoder(const uint8_t* data, size_t size, size_t stride, int (*decode)(void*, size_t, size_t, const unsigned char*, size_t))
+{
+	size_t count = 66; // must be divisible by 3 for decodeIndexBuffer; should be >=64 to cover large vertex blocks
+
+	void* destination = malloc(count * stride);
+	assert(destination);
+
+	int rc = decode(destination, count, stride, reinterpret_cast<const unsigned char*>(data), size);
+	(void)rc;
+
+	free(destination);
+}
+
+namespace meshopt
+{
+extern unsigned int cpuid;
+}
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+	// decodeIndexBuffer supports 2 and 4-byte indices
+	fuzzDecoder(data, size, 2, meshopt_decodeIndexBuffer);
+	fuzzDecoder(data, size, 4, meshopt_decodeIndexBuffer);
+
+	// decodeIndexSequence supports 2 and 4-byte indices
+	fuzzDecoder(data, size, 2, meshopt_decodeIndexSequence);
+	fuzzDecoder(data, size, 4, meshopt_decodeIndexSequence);
+
+	// decodeVertexBuffer supports any strides divisible by 4 in 4-256 interval
+	// It's a waste of time to check all of them, so we'll just check a few with different alignment mod 16
+	fuzzDecoder(data, size, 4, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 16, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 24, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 32, meshopt_decodeVertexBuffer);
+
+#if !(defined(__AVX__) || defined(__SSSE3__)) && (defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__))
+	// When SSSE3/AVX support isn't enabled unconditionally, we use a cpuid-based fallback
+	// It's useful to be able to test scalar code in this case, so we temporarily fake the feature bits
+	// and restore them later
+	unsigned int cpuid = meshopt::cpuid;
+	meshopt::cpuid = 0;
+
+	// Note that scalar code doesn't have odd edge conditions around 16b vertices so we could just test it for one stride
+	fuzzDecoder(data, size, 4, meshopt_decodeVertexBuffer);
+
+	meshopt::cpuid = cpuid;
+#endif
+
+	return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/meshoptimizer/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2020 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+mkdir build && cd build
+cmake -DCMAKE_VERBOSE_MAKEFILE:BOOL=ON ..
+make -j$(nproc)
+
+cd ..
+find . -name "*.o" -exec ar rcs fuzz_lib.a {} \;
+$CXX $CXXFLAGS tools/codecfuzz.cpp -o $OUT/codecfuzzer $LIB_FUZZING_ENGINE fuzz_lib.a
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `src/vertexcodec.cpp`
+
+~~~~diff
+diff --git a/src/vertexcodec.cpp b/src/vertexcodec.cpp
+--- a/src/vertexcodec.cpp
++++ b/src/vertexcodec.cpp
+@@ -707,24 +707,18 @@ static v128_t decodeShuffleMask(unsigned char mask0, unsigned char mask1)
+ 	return wasmx_unpacklo_v64x2(sm0, sm1r);
+ }
+ 
+ SIMD_TARGET
+ static void wasmMoveMask(v128_t mask, unsigned char& mask0, unsigned char& mask1)
+ {
+-	v128_t mask_0 = wasm_v32x4_shuffle(mask, mask, 0, 2, 1, 3);
+-
+-	uint64_t mask_1a = wasm_i64x2_extract_lane(mask_0, 0) & 0x0804020108040201ull;
+-	uint64_t mask_1b = wasm_i64x2_extract_lane(mask_0, 1) & 0x8040201080402010ull;
++	// magic constant found using z3 SMT assuming mask has 8 groups of 0xff or 0x00
++	const uint64_t magic = 0x000103070f1f3f80ull;
+ 
+ 	// TODO: This can use v8x16_bitmask in the future
+-	uint64_t mask_2 = mask_1a | mask_1b;
+-	uint64_t mask_4 = mask_2 | (mask_2 >> 16);
+-	uint64_t mask_8 = mask_4 | (mask_4 >> 8);
+-
+-	mask0 = uint8_t(mask_8);
+-	mask1 = uint8_t(mask_8 >> 32);
++	mask0 = uint8_t((wasm_i64x2_extract_lane(mask, 0) * magic) >> 56);
++	mask1 = uint8_t((wasm_i64x2_extract_lane(mask, 1) * magic) >> 56);
+ }
+ 
+ SIMD_TARGET
+ static const unsigned char* decodeBytesGroupSimd(const unsigned char* data, unsigned char* buffer, int bitslog2)
+ {
+ 	unsigned char byte, enc, encv;
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.

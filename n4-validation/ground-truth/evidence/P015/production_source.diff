@@ -1,0 +1,236 @@
+diff --git a/std/jpeg/decode_jpeg.wuffs b/std/jpeg/decode_jpeg.wuffs
+index 5616ec18..12e7a8d4 100644
+--- a/std/jpeg/decode_jpeg.wuffs
++++ b/std/jpeg/decode_jpeg.wuffs
+@@ -9,24 +9,25 @@
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
+ pub status "#bad DHT marker"
+ pub status "#bad DQT marker"
+ pub status "#bad DRI marker"
+ pub status "#bad SOF marker"
+ pub status "#bad SOS marker"
+ pub status "#bad header"
+ pub status "#bad marker"
+ pub status "#bad scan count"
+ pub status "#missing Huffman table"
+ pub status "#missing Quantization table"
++pub status "#rejected progressive JPEG"
+ pub status "#truncated input"
+ pub status "#unsupported arithmetic coding"
+ pub status "#unsupported color model"
+ pub status "#unsupported fractional sampling"
+ pub status "#unsupported hierarchical coding"
+ pub status "#unsupported implicit height"
+ pub status "#unsupported lossless coding"
+ pub status "#unsupported marker"
+ pub status "#unsupported precision (12 bits)"
+ pub status "#unsupported precision (16 bits)"
+ pub status "#unsupported precision"
+ pub status "#unsupported scan count"
+@@ -272,25 +273,26 @@ pub struct decoder? implements base.image_decoder(
+         seen_dht       : array[8] base.bool,
+ 
+         // These fields yield bitstream bits in Most Significant Bits order.
+         bitstream_bits   : base.u64,
+         bitstream_n_bits : base.u32,
+         bitstream_ri     : base.u32[..= 0x800],
+         bitstream_wi     : base.u32[..= 0x800],
+ 
+         bitstream_is_closed : base.bool,
+ 
+         expect_multiple_scans : base.bool,
+ 
+-        use_lower_quality : base.bool,
++        use_lower_quality        : base.bool,
++        reject_progressive_jpegs : base.bool,
+ 
+         swizzle_immediately           : base.bool,
+         swizzle_immediately_status    : base.status,
+         swizzle_immediately_b_offsets : array[10] base.u32[..= 576],
+         swizzle_immediately_c_offsets : array[5] base.u32,
+ 
+         // bitstream_padding is the number (per restart) of implicit zeroes
+         // remaining at the end of the bitstream. Its initial 12345 value is
+         // arbitrary.
+         bitstream_padding : base.u32[..= 12345],
+ 
+         quant_tables       : array[4] array[64] base.u16[..= 0xFF],
+@@ -333,58 +335,39 @@ pub struct decoder? implements base.image_decoder(
+         dht_temp_bit_lengths : array[256] base.u8,
+         // dht_temp_bit_strings[i] is the bit-string of the i'th code.
+         dht_temp_bit_strings : array[256] base.u16,
+ 
+         dst_palette : array[4 * 256] base.u8,
+ )
+ 
+ pub func decoder.get_quirk(key: base.u32) base.u64 {
+     if args.key == base.QUIRK_QUALITY {
+         if this.use_lower_quality {
+             return 0xFFFF_FFFF_FFFF_FFFF
+         }
++    } else if args.key == QUIRK_REJECT_PROGRESSIVE_JPEGS {
++        if this.reject_progressive_jpegs {
++            return 1
++        }
+     }
+     return 0
+ }
+ 
+-// If key is base.QUIRK_QUALITY then, when re-interpreting the value as a
+-// signed i64 value, a negative quirk value opts the decoder in to a slightly
+-// worse quality but leaner (less memory required) chroma upsampling algorithm.
+-//
+-// Negative (in i64 space) means >= 0x8000_0000_0000_0000 (in u64 space).
+-//
+-// Specifically, a negative quirk value uses a box filter. A non-negative quirk
+-// value (including the default value, zero) uses the same triangle filter that
+-// libjpeg-turbo also uses by default, which requires chroma upsampling on the
+-// edges of a MCU (Minimum Coded Unit) to remember adjacent MCU's values.
+-//
+-// Leaner means that for common (sequential) JPEG images, the range returned by
+-// decoder.workbuf_len can have a minimum value of zero, meaning that no work
+-// buffer memory needs to be allocated. Decoding rarer (progressive) JPEGs will
+-// still require a positive amount of work buffer memory. The exact amount
+-// required depends on factors like the JPEG image's width, height, component
+-// count and subsampling ratios.
+-//
+-// Regardless of the quirk value, as always, the workbuf_len method returns a
+-// range, whose min and max can be different. The caller is able to choose
+-// between providing the minimal amount of work buffer memory (for slightly
+-// slower decoding) or the maximal amount (for slightly faster decoding).
+-//
+-// Callers that never wish to allocate work buffer memory can simply reject
+-// progressive JPEGs (where workbuf_len().min_incl > 0 despite setting the
+-// base.QUIRK_QUALITY key to a negative quirk value) as unsupported.
+ pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+     if args.key == base.QUIRK_QUALITY {
+         this.use_lower_quality = args.value >= 0x8000_0000_0000_0000
+         return ok
++    } else if args.key == QUIRK_REJECT_PROGRESSIVE_JPEGS {
++        this.reject_progressive_jpegs = args.value <> 0
++        return ok
+     }
+     return base."#unsupported option"
+ }
+ 
+ pub func decoder.decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+     var status : base.status
+ 
+     while true {
+         status =? this.do_decode_image_config?(dst: args.dst, src: args.src)
+         if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+@@ -445,25 +428,27 @@ pri func decoder.do_decode_image_config?(dst: nptr base.image_config, src: base.
+             if this.payload_length < 2 {
+                 return "#bad marker"
+             }
+             this.payload_length -= 2
+         }
+ 
+         // Switch on the marker.
+         if marker < 0xC0 {
+             return "#unsupported marker"
+ 
+         } else if marker < 0xD0 {  // SOFn (Start of Frame) and friends.
+             if marker <= 0xC2 {
+-                if this.sof_marker <> 0 {
++                if (marker == 0xC2) and this.reject_progressive_jpegs {
++                    return "#rejected progressive JPEG"
++                } else if this.sof_marker <> 0 {
+                     return "#bad SOF marker"
+                 }
+                 this.sof_marker = marker
+                 this.decode_sof?(src: args.src)
+                 break
+ 
+             } else if marker == 0xC3 {
+                 return "#unsupported lossless coding"
+ 
+             } else if marker == 0xC4 {  // DHT (Define Huffman Table).
+                 // We shouldn't see DHT before SOF.
+                 return "#bad DHT marker"
+diff --git a/std/jpeg/decode_quirks.wuffs b/std/jpeg/decode_quirks.wuffs
+new file mode 100644
+index 00000000..16769474
+--- /dev/null
++++ b/std/jpeg/decode_quirks.wuffs
+@@ -0,0 +1,77 @@
++// Copyright 2024 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
++// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
++// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
++// option. This file may not be copied, modified, or distributed
++// except according to those terms.
++//
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++// --------
++
++// Quirks are discussed in (/doc/note/quirks.md).
++//
++// The base38 encoding of "jpeg" is 0x122FF6. Left shifting by 10 gives
++// 0x48BF_D800.
++pri const QUIRKS_BASE : base.u32 = 0x48BF_D800
++
++// --------
++
++// When this quirk value is non-zero, the decoder will not support progressive
++// JPEG images. When combined with setting base.QUIRK_QUALITY to "lower
++// quality", this means that decoding will never require any temporary "work
++// buffer" memory: decoder.workbuf_len will always return a range (a min and
++// max pair) whose minimum value is zero.
++//
++// The maximum value can still be positive, as using more memory might lead to
++// faster decoding, but a zero minimum means that it's valid for the caller to
++// not allocate any memory for a work buffer.
++//
++// When opted into lower quality decoding, the workbuf_len minimum will be zero
++// and positive for sequential and progressive JPEGs respectively, regardless
++// of this QUIRK_REJECT_PROGRESSIVE_JPEGS key's value. But setting this quirk
++// explicitly will produce a "#rejected progressive JPEG" error when
++// encountering a progressive JPEG. This results in more readable calling code,
++// instead of commenting about "positive work buffer minimum length implies a
++// progressive JPEG".
++pub const QUIRK_REJECT_PROGRESSIVE_JPEGS : base.u32 = 0x48BF_D800 | 0x00
++
++// --------
++
++// The base.QUIRK_QUALITY key is defined in the base package, not this package.
++// Still, here's some documentation on how this package responds to that (key,
++// value) quirk pair.
++//
++// If decoder.set_quirk is passed a base.QUIRK_QUALITY as the key argument
++// then, when re-interpreting the u64 value argument as a signed i64 number, a
++// negative number opts the decoder in to a slightly worse quality but leaner
++// (less memory required) chroma upsampling algorithm.
++//
++// Negative (in i64 space) means >= 0x8000_0000_0000_0000 (in u64 space).
++// base.QUIRK_QUALITY__VALUE__LOWER_QUALITY is one such value.
++//
++// Specifically, a negative quirk value uses a box filter. A non-negative quirk
++// value (including the default value, zero) uses the same triangle filter that
++// libjpeg-turbo also uses by default, which requires chroma upsampling on the
++// edges of a MCU (Minimum Coded Unit) to remember adjacent MCU's values.
++//
++// Leaner means that for common (sequential) JPEG images, the range returned by
++// decoder.workbuf_len will have a minimum value of zero, meaning that no work
++// buffer memory needs to be allocated. Decoding rarer (progressive) JPEGs will
++// still always require a positive amount of work buffer memory, for reasons
++// unrelated to chroma upsampling. The exact amount required depends on factors
++// like the JPEG image's width, height, component count and subsampling ratios.
++//
++// Regardless of the quirk value, as always, the workbuf_len method returns a
++// range, whose min and max can be different. The caller is able to choose
++// between providing the minimal amount of work buffer memory (for slightly
++// slower decoding) or the maximal amount (for slightly faster decoding).
++//
++// Callers that never wish to allocate work buffer memory can simply reject
++// progressive JPEGs (where "workbuf_len().min_incl > 0" despite setting the
++// base.QUIRK_QUALITY key to a negative quirk value) as unsupported. See also
++// QUIRK_REJECT_PROGRESSIVE_JPEGS.
++//
++// For some pictures comparing box and triangle filter decodings, see
++// https://nigeltao.github.io/blog/2024/jpeg-chroma-upsampling.html

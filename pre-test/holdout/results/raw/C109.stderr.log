@@ -1,0 +1,1570 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-holdout-blind-khrjei04
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0858c-b24f-72c1-8b58-1970fc18ded4
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C109
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `test/ossfuzz/json_load_dump_fuzzer.cc`
+
+~~~~cpp
+#include <stdint.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <inttypes.h>
+
+#include "jansson.h"
+
+static int enable_diags;
+
+#define FUZZ_DEBUG(FMT, ...)                                                  \
+        if (enable_diags)                                                     \
+        {                                                                     \
+          fprintf(stderr, FMT, ##__VA_ARGS__);                                \
+          fprintf(stderr, "\n");                                              \
+        }
+
+
+static int json_dump_counter(const char *buffer, size_t size, void *data)
+{
+  uint64_t *counter = reinterpret_cast<uint64_t *>(data);
+  *counter += size;
+  return 0;
+}
+
+
+#define NUM_COMMAND_BYTES  (sizeof(size_t) + sizeof(size_t) + 1)
+
+#define FUZZ_DUMP_CALLBACK 0x00
+#define FUZZ_DUMP_STRING   0x01
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+  json_error_t error;
+  unsigned char dump_mode;
+
+  // Enable or disable diagnostics based on the FUZZ_VERBOSE environment flag.
+  enable_diags = (getenv("FUZZ_VERBOSE") != NULL);
+
+  FUZZ_DEBUG("Input data length: %zd", size);
+
+  if (size < NUM_COMMAND_BYTES)
+  {
+    return 0;
+  }
+
+  // Use the first sizeof(size_t) bytes as load flags.
+  size_t load_flags = *(const size_t*)data;
+  data += sizeof(size_t);
+
+  FUZZ_DEBUG("load_flags: 0x%zx\n"
+             "& JSON_REJECT_DUPLICATES =  0x%zx\n"
+             "& JSON_DECODE_ANY =         0x%zx\n"
+             "& JSON_DISABLE_EOF_CHECK =  0x%zx\n"
+             "& JSON_DECODE_INT_AS_REAL = 0x%zx\n"
+             "& JSON_ALLOW_NUL =          0x%zx\n",
+             load_flags,
+             load_flags & JSON_REJECT_DUPLICATES,
+             load_flags & JSON_DECODE_ANY,
+             load_flags & JSON_DISABLE_EOF_CHECK,
+             load_flags & JSON_DECODE_INT_AS_REAL,
+             load_flags & JSON_ALLOW_NUL);
+
+  // Use the next sizeof(size_t) bytes as dump flags.
+  size_t dump_flags = *(const size_t*)data;
+  data += sizeof(size_t);
+
+  FUZZ_DEBUG("dump_flags: 0x%zx\n"
+             "& JSON_MAX_INDENT =     0x%zx\n"
+             "& JSON_COMPACT =        0x%zx\n"
+             "& JSON_ENSURE_ASCII =   0x%zx\n"
+             "& JSON_SORT_KEYS =      0x%zx\n"
+             "& JSON_PRESERVE_ORDER = 0x%zx\n"
+             "& JSON_ENCODE_ANY =     0x%zx\n"
+             "& JSON_ESCAPE_SLASH =   0x%zx\n"
+             "& JSON_REAL_PRECISION = 0x%zx\n"
+             "& JSON_EMBED =          0x%zx\n",
+             dump_flags,
+             dump_flags & JSON_MAX_INDENT,
+             dump_flags & JSON_COMPACT,
+             dump_flags & JSON_ENSURE_ASCII,
+             dump_flags & JSON_SORT_KEYS,
+             dump_flags & JSON_PRESERVE_ORDER,
+             dump_flags & JSON_ENCODE_ANY,
+             dump_flags & JSON_ESCAPE_SLASH,
+             ((dump_flags >> 11) & 0x1F) << 11,
+             dump_flags & JSON_EMBED);
+
+  // Use the next byte as the dump mode.
+  dump_mode = data[0];
+  data++;
+
+  FUZZ_DEBUG("dump_mode: 0x%x", (unsigned int)dump_mode);
+
+  // Remove the command bytes from the size total.
+  size -= NUM_COMMAND_BYTES;
+
+  // Attempt to load the remainder of the data with the given load flags.
+  const char* text = reinterpret_cast<const char *>(data);
+  json_t* jobj = json_loadb(text, size, load_flags, &error);
+
+  if (jobj == NULL)
+  {
+    return 0;
+  }
+
+  if (dump_mode & FUZZ_DUMP_STRING)
+  {
+    // Dump as a string. Remove indents so that we don't run out of memory.
+    char *out = json_dumps(jobj, dump_flags & ~JSON_MAX_INDENT);
+    if (out != NULL)
+    {
+      free(out);
+    }
+  }
+  else
+  {
+    // Default is callback mode.
+    //
+    // Attempt to dump the loaded json object with the given dump flags.
+    uint64_t counter = 0;
+
+    json_dump_callback(jobj, json_dump_counter, &counter, dump_flags);
+    FUZZ_DEBUG("Counter function counted %" PRIu64 " bytes.", counter);
+  }
+
+  if (jobj)
+  {
+    json_decref(jobj);
+  }
+
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/jansson/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2019 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+# --default-symver does not work with lto, which fuzz introspector uses.
+if [ "$SANITIZER" == "introspector" ]; then
+  sed -i 's/--default-symver/-flto/g' ./configure.ac
+fi
+# Run the OSS-Fuzz script in the project.
+./test/ossfuzz/ossfuzz.sh
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete production-source file list is shown below. The diff is a deterministic, keyword-centered excerpt because the complete diff exceeded 58,000 characters.
+
+- `src/dtoa.c`
+- `src/dump.c`
+- `src/strconv.c`
+
+~~~~diff
+... [unselected diff lines omitted] ...
+diff --git a/src/dtoa.c b/src/dtoa.c
+new file mode 100644
+--- /dev/null
++++ b/src/dtoa.c
+@@ -0,0 +1,6265 @@
++// clang-format off
++/****************************************************************
++ *
++ * The author of this software is David M. Gay.
++ *
++ * Copyright (c) 1991, 2000, 2001 by Lucent Technologies.
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose without fee is hereby granted, provided that this entire notice
++ * is included in all copies of any software which is or includes a copy
++ * or modification of this software and in all copies of the supporting
++ * documentation for such software.
++ *
++ * THIS SOFTWARE IS BEING PROVIDED "AS IS", WITHOUT ANY EXPRESS OR IMPLIED
++ * WARRANTY.  IN PARTICULAR, NEITHER THE AUTHOR NOR LUCENT MAKES ANY
++ * REPRESENTATION OR WARRANTY OF ANY KIND CONCERNING THE MERCHANTABILITY
++ * OF THIS SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR PURPOSE.
++ *
++ ***************************************************************/
++
++/* Please send bug reports to David M. Gay (dmg at acm dot org,
++ * with " at " changed at "@" and " dot " changed to ".").	*/
++
++/* On a machine with IEEE extended-precision registers, it is
++ * necessary to specify double-precision (53-bit) rounding precision
++ * before invoking strtod or dtoa.  If the machine uses (the equivalent
++ * of) Intel 80x87 arithmetic, the call
++ *	_control87(PC_53, MCW_PC);
++ * does this with many compilers.  Whether this or another call is
++ * appropriate depends on the compiler; for this to work, it may be
++ * necessary to #include "float.h" or another system-dependent header
++ * file.
++ */
++
++/* strtod for IEEE-, VAX-, and IBM-arithmetic machines.
++ * (Note that IEEE arithmetic is disabled by gcc's -ffast-math flag.)
++ *
++ * This strtod returns a nearest machine number to the input decimal
++ * string (or sets errno to ERANGE).  With IEEE arithmetic, ties are
++ * broken by the IEEE round-even rule.  Otherwise ties are broken by
++ * biased rounding (add half and chop).
++ *
++ * Inspired loosely by William D. Clinger's paper "How to Read Floating
++ * Point Numbers Accurately" [Proc. ACM SIGPLAN '90, pp. 92-101].
++ *
++ * Modifications:
++ *
++ *	1. We only require IEEE, IBM, or VAX double-precision
++ *		arithmetic (not IEEE double-extended).
++ *	2. We get by with floating-point arithmetic in a case that
++ *		Clinger missed -- when we're computing d * 10^n
++ *		for a small integer d and the integer n is not too
++ *		much larger than 22 (the maximum integer k for which
++ *		we can represent 10^k exactly), we may be able to
++ *		compute (d*10^k) * 10^(e-k) with just one roundoff.
++ *	3. Rather than a bit-at-a-time adjustment of the binary
++ *		result in the hard case, we use floating-point
++ *		arithmetic to determine the adjustment to within
++ *		one bit; only in really hard cases do we need to
++ *		compute a second residual.
++ *	4. Because of 3., we don't need a large table of powers of 10
++ *		for ten-to-e (just some small tables, e.g. of 10^k
++ *		for 0 <= k <= 22).
++ */
++
++#include "jansson_private.h"
++
++#ifdef WORDS_BIGENDIAN
++#  define IEEE_MC68k 1
++#else
++#  define IEEE_8087 1
++#endif
++
++#if defined(JSON_INTEGER_IS_LONG_LONG) && (JSON_INTEGER_IS_LONG_LONG == 0)
++#  define NO_LONG_LONG 1
++#endif
++
++#define MALLOC jsonp_malloc
++#define FREE jsonp_free
++
++/*
++ * #define IEEE_8087 for IEEE-arithmetic machines where the least
++ *	significant byte has the lowest address.
++ * #define IEEE_MC68k for IEEE-arithmetic machines where the most
++ *	significant byte has the lowest address.
++ * #define Long int on machines with 32-bit ints and 64-bit longs.
++ * #define IBM for IBM mainframe-style floating-point arithmetic.
++ * #define VAX for VAX-style floating-point arithmetic (D_floating).
++ * #define No_leftright to omit left-right logic in fast floating-point
++ *	computation of dtoa.  This will cause dtoa modes 4 and 5 to be
++ *	treated the same as modes 2 and 3 for some inputs.
++ * #define Honor_FLT_ROUNDS if FLT_ROUNDS can assume the values 2 or 3
++ *	and strtod and dtoa should round accordingly.  Unless Trust_FLT_ROUNDS
++ *	is also #defined, fegetround() will be queried for the rounding mode.
++ *	Note that both FLT_ROUNDS and fegetround() are specified by the C99
++ *	standard (and are specified to be consistent, with fesetround()
++ *	affecting the value of FLT_ROUNDS), but that some (Linux) systems
++ *	do not work correctly in this regard, so using fegetround() is more
++ *	portable than using FLT_ROUNDS directly.
++ * #define Check_FLT_ROUNDS if FLT_ROUNDS can assume the values 2 or 3
++ *	and Honor_FLT_ROUNDS is not #defined.
++ * #define RND_PRODQUOT to use rnd_prod and rnd_quot (assembly routines
++ *	that use extended-precision instructions to compute rounded
++ *	products and quotients) with IBM.
++ * #define ROUND_BIASED for IEEE-format with biased rounding and arithmetic
++ *	that rounds toward +Infinity.
++ * #define ROUND_BIASED_without_Round_Up for IEEE-format with biased
++ *	rounding when the underlying floating-point arithmetic uses
++ *	unbiased rounding.  This prevent using ordinary floating-point
++ *	arithmetic when the result could be computed with one rounding error.
++ * #define Inaccurate_Divide for IEEE-format with correctly rounded
++ *	products but inaccurate quotients, e.g., for Intel i860.
++ * #define NO_LONG_LONG on machines that do not have a "long long"
++ *	integer type (of >= 64 bits).  On such machines, you can
++ *	#define Just_16 to store 16 bits per 32-bit Long when doing
++ *	high-precision integer arithmetic.  Whether this speeds things
++ *	up or slows things down depends on the machine and the number
++ *	being converted.  If long long is available and the name is
++ *	something other than "long long", #define Llong to be the name,
++ *	and if "unsigned Llong" does not work as an unsigned version of
++ *	Llong, #define #ULLong to be the corresponding unsigned type.
++ * #define Bad_float_h if your system lacks a float.h or if it does not
++ *	define some or all of DBL_DIG, DBL_MAX_10_EXP, DBL_MAX_EXP,
++ *	FLT_RADIX, FLT_ROUNDS, and DBL_MAX.
++ * #define MALLOC your_malloc, where your_malloc(n) acts like malloc(n)
++ *	if memory is available and otherwise does something you deem
++ *	appropriate.  If MALLOC is undefined, malloc will be invoked
++ *	directly -- and assumed always to succeed.  Similarly, if you
++ *	want something other than the system's free() to be called to
++ *	recycle memory acquired from MALLOC, #define FREE to be the
++ *	name of the alternate routine.  (FREE or free is only called in
++ *	pathological cases, e.g., in a dtoa call after a dtoa return in
++ *	mode 3 with thousands of digits requested.)
++ * #define Omit_Private_Memory to omit logic (added Jan. 1998) for making
++ *	memory allocations from a private pool of memory when possible.
++ *	When used, the private pool is PRIVATE_MEM bytes long:  2304 bytes,
++ *	unless #defined to be a different length.  This default length
++ *	suffices to get rid of MALLOC calls except for unusual cases,
++ *	such as decimal-to-binary conversion of a very long string of
++ *	digits.  The longest string dtoa can return is about 751 bytes
++ *	long.  For conversions by strtod of strings of 800 digits and
++ *	all dtoa conversions in single-threaded executions with 8-byte
++ *	pointers, PRIVATE_MEM >= 7400 appears to suffice; with 4-byte
++ *	pointers, PRIVATE_MEM >= 7112 appears adequate.
++ * #define NO_INFNAN_CHECK if you do not wish to have INFNAN_CHECK
++ *	#defined automatically on IEEE systems.  On such systems,
++ *	when INFNAN_CHECK is #defined, strtod checks
++ *	for Infinity and NaN (case insensitively).  On some systems
++ *	(e.g., some HP systems), it may be necessary to #define NAN_WORD0
++ *	appropriately -- to the most significant word of a quiet NaN.
++ *	(On HP Series 700/800 machines, -DNAN_WORD0=0x7ff40000 works.)
++ *	When INFNAN_CHECK is #defined and No_Hex_NaN is not #defined,
++ *	strtod also accepts (case insensitively) strings of the form
++ *	NaN(x), where x is a string of hexadecimal digits and spaces;
++ *	if there is only one string of hexadecimal digits, it is taken
++ *	for the 52 fraction bits of the resulting NaN; if there are two
++ *	or more strings of hex digits, the first is for the high 20 bits,
++ *	the second and subsequent for the low 32 bits, with intervening
++ *	white space ignored; but if this results in none of the 52
++ *	fraction bits being on (an IEEE Infinity symbol), then NAN_WORD0
++ *	and NAN_WORD1 are used instead.
++ * #define MULTIPLE_THREADS if the system offers preemptively scheduled
++ *	multiple threads.  In this case, you must provide (or suitably
++ *	#define) two locks, acquired by ACQUIRE_DTOA_LOCK(n) and freed
++ *	by FREE_DTOA_LOCK(n) for n = 0 or 1.  (The second lock, accessed
++ *	in pow5mult, ensures lazy evaluation of only one copy of high
++ *	powers of 5; omitting this lock would introduce a small
++ *	probability of wasting memory, but would otherwise be harmless.)
++ *	You must also invoke freedtoa(s) to free the value s returned by
++ *	dtoa.  You may do so whether or not MULTIPLE_THREADS is #defined.
++
++ *	When MULTIPLE_THREADS is #defined, this source file provides
++ *		void set_max_dtoa_threads(unsigned int n);
++ *	and expects
++ *		unsigned int dtoa_get_threadno(void);
++ *	to be available (possibly provided by
++ *		#define dtoa_get_threadno omp_get_thread_num
++ *	if OpenMP is in use or by
++ *		#define dtoa_get_threadno pthread_self
++ *	if Pthreads is in use), to return the current thread number.
++ *	If set_max_dtoa_threads(n) was called and the current thread
++ *	number is k with k < n, then calls on ACQUIRE_DTOA_LOCK(...) and
++ *	FREE_DTOA_LOCK(...) are avoided; instead each thread with thread
++ *	number < n has a separate copy of relevant data structures.
++ *	After set_max_dtoa_threads(n), a call set_max_dtoa_threads(m)
++ *	with m <= n has has no effect, but a call with m > n is honored.
++ *	Such a call invokes REALLOC (assumed to be "realloc" if REALLOC
++ *	is not #defined) to extend the size of the relevant array.
++
++ * #define NO_IEEE_Scale to disable new (Feb. 1997) logic in strtod that
++ *	avoids underflows on inputs whose result does not underflow.
++ *	If you #define NO_IEEE_Scale on a machine that uses IEEE-format
++ *	floating-point numbers and flushes underflows to zero rather
++ *	than implementing gradual underflow, then you must also #define
++ *	Sudden_Underflow.
++ * #define USE_LOCALE to use the current locale's decimal_point value.
++ * #define SET_INEXACT if IEEE arithmetic is being used and extra
++ *	computation should be done to set the inexact flag when the
++ *	result is inexact and avoid setting inexact when the result
++ *	is exact.  In this case, dtoa.c must be compiled in
++ *	an environment, perhaps provided by #include "dtoa.c" in a
++ *	suitable wrapper, that defines two functions,
++ *		int get_inexact(void);
++ *		void clear_inexact(void);
++ *	such that get_inexact() returns a nonzero value if the
++ *	inexact bit is already set, and clear_inexact() sets the
++ *	inexact bit to 0.  When SET_INEXACT is #defined, strtod
++ *	also does extra computations to set the underflow and overflow
++ *	flags when appropriate (i.e., when the result is tiny and
++ *	inexact or when it is a numeric value rounded to +-infinity).
++ * #define NO_ERRNO if strtod should not assign errno = ERANGE when
++ *	the result overflows to +-Infinity or underflows to 0.
++ *	When errno should be assigned, under seemingly rare conditions
++ *	it may be necessary to define Set_errno(x) suitably, e.g., in
++ *	a local errno.h, such as
++ *		#include <errno.h>
++ *		#define Set_errno(x) _set_errno(x)
++ * #define NO_HEX_FP to omit recognition of hexadecimal floating-point
++ *	values by strtod.
++ * #define NO_STRTOD_BIGCOMP (on IEEE-arithmetic systems only for now)
++ *	to disable logic for "fast" testing of very long input strings
++ *	to strtod.  This testing proceeds by initially truncating the
++ *	input string, then if necessary comparing the whole string with
++ *	a decimal expansion to decide close cases. This logic is only
++ *	used for input more than STRTOD_DIGLIM digits long (default 40).
++ */
++
++#ifndef Long
++#define Long int
++#endif
++#ifndef ULong
++typedef unsigned Long ULong;
++#endif
++
++#ifdef DEBUG
++#include <assert.h>
++#include "stdio.h"
++#define Bug(x) {fprintf(stderr, "%s\n", x); exit(1);}
++#define Debug(x) x
++int dtoa_stats[7]; /* strtod_{64,96,bigcomp},dtoa_{exact,64,96,bigcomp} */
++#else
++#define assert(x) /*nothing*/
++#define Debug(x) /*nothing*/
++#endif
++
++#include "stdlib.h"
++#include "string.h"
++
++#ifdef USE_LOCALE
++#include "locale.h"
++#endif
++
++#ifdef Honor_FLT_ROUNDS
++#ifndef Trust_FLT_ROUNDS
++#include <fenv.h>
++#endif
++#endif
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++#ifdef MALLOC
++extern void *MALLOC(size_t);
+... [unselected diff lines omitted] ...
++#undef Pack_32
++/* When Pack_32 is not defined, we store 16 bits per 32-bit Long.
++ * This makes some inner loops simpler and sometimes saves work
++ * during multiplications, but it often seems to make things slightly
++ * slower.  Hence the default is now to store 32 bits per Long.
++ */
++#endif
++#else	/*}{ long long available */
++#ifndef Llong
++#define Llong long long
++#endif
++#ifndef ULLong
++#define ULLong unsigned Llong
++#endif
++#ifndef NO_BF96 /*{*/
++#define USE_BF96
++
++#ifdef SET_INEXACT
++#define dtoa_divmax 27
++#else
++int dtoa_divmax = 2;	/* Permit experimenting: on some systems, 64-bit integer */
++			/* division is slow enough that we may sometimes want to */
++			/* avoid using it.   We assume (but do not check) that   */
++			/* dtoa_divmax <= 27.*/
++#endif
++
++typedef struct BF96 {		/* Normalized 96-bit software floating point numbers */
++	unsigned int b0,b1,b2;	/* b0 = most significant, binary point just to its left */
++	int e;			/* number represented = b * 2^e, with .5 <= b < 1 */
++	} BF96;
++
++ static BF96 pten[667] = {
++	{ 0xeef453d6, 0x923bd65a, 0x113faa29, -1136 },
++	{ 0x9558b466, 0x1b6565f8, 0x4ac7ca59, -1132 },
++	{ 0xbaaee17f, 0xa23ebf76, 0x5d79bcf0, -1129 },
++	{ 0xe95a99df, 0x8ace6f53, 0xf4d82c2c, -1126 },
++	{ 0x91d8a02b, 0xb6c10594, 0x79071b9b, -1122 },
++	{ 0xb64ec836, 0xa47146f9, 0x9748e282, -1119 },
++	{ 0xe3e27a44, 0x4d8d98b7, 0xfd1b1b23, -1116 },
++	{ 0x8e6d8c6a, 0xb0787f72, 0xfe30f0f5, -1112 },
++	{ 0xb208ef85, 0x5c969f4f, 0xbdbd2d33, -1109 },
++	{ 0xde8b2b66, 0xb3bc4723, 0xad2c7880, -1106 },
++	{ 0x8b16fb20, 0x3055ac76, 0x4c3bcb50, -1102 },
++	{ 0xaddcb9e8, 0x3c6b1793, 0xdf4abe24, -1099 },
++	{ 0xd953e862, 0x4b85dd78, 0xd71d6dad, -1096 },
++	{ 0x87d4713d, 0x6f33aa6b, 0x8672648c, -1092 },
++	{ 0xa9c98d8c, 0xcb009506, 0x680efdaf, -1089 },
+... [unselected diff lines omitted] ...
++
++#define FFFFFFFF 0xffffffffUL
++
++#ifdef MULTIPLE_THREADS
++#define MTa , PTI
++#define MTb , &TI
++#define MTd , ThInfo **PTI
++static unsigned int maxthreads = 0;
++#else
++#define MTa /*nothing*/
++#define MTb /*nothing*/
++#define MTd /*nothing*/
++#endif
++
++#define Kmax 7
++
++#ifdef __cplusplus
++extern "C" double strtod(const char *s00, char **se);
++extern "C" char *dtoa(double d, int mode, int ndigits,
++			int *decpt, int *sign, char **rve);
++#endif
++
++ struct
++Bigint {
++	struct Bigint *next;
++	int k, maxwds, sign, wds;
++	ULong x[1];
++	};
++
++ typedef struct Bigint Bigint;
++ typedef struct
++ThInfo {
++	Bigint *Freelist[Kmax+1];
++	Bigint *P5s;
++	} ThInfo;
++
++ static ThInfo TI0;
++
++#ifdef MULTIPLE_THREADS
++ static ThInfo *TI1;
++ static int TI0_used;
++
++ void
++set_max_dtoa_threads(unsigned int n)
++{
++	size_t L;
++
++	if (n > maxthreads) {
++		L = n*sizeof(ThInfo);
++		if (TI1) {
++			TI1 = (ThInfo*)REALLOC(TI1, L);
++			memset(TI1 + maxthreads, 0, (n-maxthreads)*sizeof(ThInfo));
++			}
++		else {
++			TI1 = (ThInfo*)MALLOC(L);
++			if (TI0_used) {
++				memcpy(TI1, &TI0, sizeof(ThInfo));
++				if (n > 1)
++					memset(TI1 + 1, 0, L - sizeof(ThInfo));
++				memset(&TI0, 0, sizeof(ThInfo));
++				}
++			else
++				memset(TI1, 0, L);
++			}
++		maxthreads = n;
++		}
++	}
++
++ static ThInfo*
++get_TI(void)
++{
++	unsigned int thno = dtoa_get_threadno();
++	if (thno < maxthreads)
++		return TI1 + thno;
++	if (thno == 0)
++		TI0_used = 1;
++	return &TI0;
++	}
++#define freelist TI->Freelist
++#define p5s TI->P5s
++#else
++#define freelist TI0.Freelist
++#define p5s TI0.P5s
++#endif
++
++ static Bigint *
++Balloc(int k MTd)
++{
++	int x;
++	Bigint *rv;
++#ifndef Omit_Private_Memory
++	unsigned int len;
++#endif
++#ifdef MULTIPLE_THREADS
++	ThInfo *TI;
++
++	if (!(TI = *PTI))
++		*PTI = TI = get_TI();
++	if (TI == &TI0)
++		ACQUIRE_DTOA_LOCK(0);
++#endif
++	/* The k > Kmax case does not need ACQUIRE_DTOA_LOCK(0), */
++	/* but this case seems very unlikely. */
++	if (k <= Kmax && (rv = freelist[k]))
++		freelist[k] = rv->next;
++	else {
++		x = 1 << k;
++#ifdef Omit_Private_Memory
++		rv = (Bigint *)MALLOC(sizeof(Bigint) + (x-1)*sizeof(ULong));
++#else
++		len = (sizeof(Bigint) + (x-1)*sizeof(ULong) + sizeof(double) - 1)
++			/sizeof(double);
++		if (k <= Kmax && (unsigned long)(pmem_next - private_mem + len) <= PRIVATE_mem
++#ifdef MULTIPLE_THREADS
++			&& TI == TI1
++#endif
++			) {
++			rv = (Bigint*)pmem_next;
++			pmem_next += len;
++			}
++		else
++			rv = (Bigint*)MALLOC(len*sizeof(double));
++#endif
++		rv->k = k;
++		rv->maxwds = x;
++		}
++#ifdef MULTIPLE_THREADS
++	if (TI == &TI0)
++		FREE_DTOA_LOCK(0);
++#endif
++	rv->sign = rv->wds = 0;
++	return rv;
++	}
++
++ static void
++Bfree(Bigint *v MTd)
++{
++#ifdef MULTIPLE_THREADS
++	ThInfo *TI;
++#endif
++	if (v) {
++		if (v->k > Kmax)
++			FREE((void*)v);
++		else {
++#ifdef MULTIPLE_THREADS
++			if (!(TI = *PTI))
++				*PTI = TI = get_TI();
++			if (TI == &TI0)
++				ACQUIRE_DTOA_LOCK(0);
++#endif
++			v->next = freelist[v->k];
++			freelist[v->k] = v;
++#ifdef MULTIPLE_THREADS
++			if (TI == &TI0)
++				FREE_DTOA_LOCK(0);
++#endif
++			}
++		}
++	}
++
++#define Bcopy(x,y) memcpy((char *)&x->sign, (char *)&y->sign, \
++y->wds*sizeof(Long) + 2*sizeof(int))
++
++ static Bigint *
++multadd(Bigint *b, int m, int a MTd)	/* multiply by m and add a */
++{
++	int i, wds;
++#ifdef ULLong
++	ULong *x;
++	ULLong carry, y;
++#else
++	ULong carry, *x, y;
++#ifdef Pack_32
++	ULong xi, z;
++#endif
++#endif
++	Bigint *b1;
++
+... [unselected diff lines omitted] ...
++	int i;
++	static int p05[3] = { 5, 25, 125 };
++
++	if ((i = k & 3))
++		b = multadd(b, p05[i-1], 0 MTa);
++
++	if (!(k >>= 2))
++		return b;
++#ifdef  MULTIPLE_THREADS
++	if (!(TI = *PTI))
++		*PTI = TI = get_TI();
++#endif
++	if (!(p5 = p5s)) {
++		/* first time */
++#ifdef MULTIPLE_THREADS
++		if (!(TI = *PTI))
++			*PTI = TI = get_TI();
++		if (TI == &TI0)
++			ACQUIRE_DTOA_LOCK(1);
++		if (!(p5 = p5s)) {
++			p5 = p5s = i2b(625 MTa);
++			p5->next = 0;
++			}
++		if (TI == &TI0)
++			FREE_DTOA_LOCK(1);
++#else
++		p5 = p5s = i2b(625 MTa);
++		p5->next = 0;
++#endif
++		}
++	for(;;) {
++		if (k & 1) {
++			b1 = mult(b, p5 MTa);
++			Bfree(b MTa);
++			b = b1;
++			}
++		if (!(k >>= 1))
++			break;
++		if (!(p51 = p5->next)) {
++#ifdef MULTIPLE_THREADS
++			if (!TI && !(TI = *PTI))
++				*PTI = TI = get_TI();
++			if (TI == &TI0)
++				ACQUIRE_DTOA_LOCK(1);
++			if (!(p51 = p5->next)) {
++				p51 = p5->next = mult(p5,p5 MTa);
++				p51->next = 0;
++				}
++			if (TI == &TI0)
++				FREE_DTOA_LOCK(1);
++#else
++			p51 = p5->next = mult(p5,p5);
++			p51->next = 0;
++#endif
++			}
++		p5 = p51;
++		}
++	return b;
++	}
++
++ static Bigint *
++lshift(Bigint *b, int k MTd)
++{
++	int i, k1, n, n1;
++	Bigint *b1;
++	ULong *x, *x1, *xe, z;
++
++#ifdef Pack_32
++	n = k >> 5;
++#else
++	n = k >> 4;
++#endif
++	k1 = b->k;
+... [unselected diff lines omitted] ...
++	havedig = xshift = 0;
++	udx0 = 1;
++	s = *sp;
++	/* allow optional initial 0x or 0X */
++	while((c = *(const unsigned char*)(s+1)) && c <= ' ')
++		++s;
++	if (s[1] == '0' && (s[2] == 'x' || s[2] == 'X'))
++		s += 2;
++	while((c = *(const unsigned char*)++s)) {
++		if ((c1 = hexdig[c]))
++			c  = c1 & 0xf;
++		else if (c <= ' ') {
++			if (udx0 && havedig) {
++				udx0 = 0;
++				xshift = 1;
++				}
++			continue;
++			}
++#ifdef GDTOA_NON_PEDANTIC_NANCHECK
++		else if (/*(*/ c == ')' && havedig) {
++			*sp = s + 1;
++			break;
++			}
++		else
++			return;	/* invalid form: don't change *sp */
++#else
++		else {
++			do {
++				if (/*(*/ c == ')') {
++					*sp = s + 1;
++					break;
++					}
++				} while((c = *++s));
++			break;
++			}
++#endif
++		havedig = 1;
++		if (xshift) {
++			xshift = 0;
++			x[0] = x[1];
++			x[1] = 0;
++			}
+... [unselected diff lines omitted] ...
++	bc.inexact = 1;
++#ifndef USE_BF96
++	if (k <= DBL_DIG)
++#endif
++		oldinexact = get_inexact();
++#endif
++#ifdef Honor_FLT_ROUNDS
++	if (bc.rounding >= 2) {
++		if (sign)
++			bc.rounding = bc.rounding == 2 ? 0 : 2;
++		else
++			if (bc.rounding != 2)
++				bc.rounding = 0;
++		}
++#endif
++#endif /*IEEE_Arith*/
++
++#ifdef USE_BF96 /*{*/
++	Debug(++dtoa_stats[0]);
++	i = e1 + 342;
++	if (i < 0)
++		goto undfl;
++	if (i > 650)
++		goto ovfl;
++	p10 = &pten[i];
++	brv = yz;
++	/* shift brv left, with i =  number of bits shifted */
++	i = 0;
++	if (!(brv & 0xffffffff00000000ull)) {
++		i = 32;
++		brv <<= 32;
++		}
++	if (!(brv & 0xffff000000000000ull)) {
++		i += 16;
++		brv <<= 16;
++		}
++	if (!(brv & 0xff00000000000000ull)) {
++		i += 8;
++		brv <<= 8;
++		}
++	if (!(brv & 0xf000000000000000ull)) {
++		i += 4;
+... [unselected diff lines omitted] ...
++	else {
++		if ((t00 & 0x1ff) && (~t00 & 0x1fe)) { /* unambiguous result? */
++			if (nd > 19 && ((t00 + (1<<i) + 2) & 0x200) ^ (t00 & 0x200))
++				goto many_digits;
++			if (erv <= 1)
++				goto denormal1;
++#ifdef Honor_FLT_ROUNDS
++			switch(bc.rounding) {
++			  case 0: goto noround1;
++			  case 2: goto roundup1;
++			  }
++#endif
++			if (t00 & 0x200)
++				goto roundup1;
++			goto noround1;
++			}
++		}
++	/* 3 multiplies did not suffice; try a 96-bit approximation */
++	Debug(++dtoa_stats[1]);
++	t02 = bhi * p10->b2;
++	t11 = blo * p10->b1 + (t02 & 0xffffffffull);
++	bexact = 1;
++	if (e1 < 0 || e1 > 41 || (t10 | t11) & 0xffffffffull || nd > 19)
++		bexact = 0;
++	tlo = (t10 & 0xffffffffull) + (t02 >> 32) + (t11 >> 32);
++	if (!bexact && (tlo + 0x10) >> 32 > tlo >> 32)
++		goto many_digits;
++	t00 += tlo >> 32;
++	if (t00 & 0x8000000000000000ull) {
++		if (erv <= 0) { /* denormal result */
++			if (nd >= 20 || !((tlo & 0xfffffff0) | (t00 & 0x3ff)))
++				goto many_digits;
++ denormal:
++			if (erv <= -52) {
++#ifdef Honor_FLT_ROUNDS
++				switch(bc.rounding) {
++				  case 0: goto undfl;
++				  case 2: goto tiniest;
++				  }
++#endif
++				if (erv < -52 || !(t00 & 0x7fffffffffffffffull))
++					goto undfl;
+... [unselected diff lines omitted] ...
++				if (!(t00 & 0x4000000000000000ull)) {
++					/* rounded up to a power of 2 */
++					if (erv >= 0x7ff)
++						goto ovfl;
++					terv = erv;
++					LLval(&rv) = terv << 52;
++					goto ret;
++					}
++				}
++ noround1:
++			if (erv >= 0x800)
++				goto ovfl;
++			terv = erv - 1;
++			LLval(&rv) = (terv << 52) | ((t00 & 0x3ffffffffffffc00ull) >> 10);
++			goto ret;
++			}
++		}
++ many_digits:
++	Debug(++dtoa_stats[2]);
++	if (nd > 17) {
++		if (nd > 18) {
++			yz /= 100;
++			e1 += 2;
++			}
++		else {
++			yz /= 10;
++			e1 += 1;
++			}
++		y = yz / 100000000;
++		}
++	else if (nd > 9) {
++		i = nd - 9;
++		y = (yz >> i) / pfive[i-1];
++		}
++	else
++		y = yz;
++	dval(&rv) = yz;
++#endif /*}*/
++
++#ifdef IEEE_Arith
++#ifdef Avoid_Underflow
++	bc.scale = 0;
+... [unselected diff lines omitted] ...
++			dval(&rv0) = 1e-300;
++			dval(&rv0) *= dval(&rv0);
++			}
++		else if (!oldinexact) {
++			word0(&rv0) = Exp_1 + (70 << Exp_shift);
++			word1(&rv0) = 0;
++			dval(&rv0) += 1.;
++			}
++		}
++	else if (!oldinexact)
++		clear_inexact();
++#endif
++	if (se)
++		*se = (char *)s;
++	return sign ? -dval(&rv) : dval(&rv);
++	}
++
++#ifndef MULTIPLE_THREADS
++ static char *dtoa_result;
++#endif
++
++ static char *
++rv_alloc(int i MTd)
++{
++	int j, k, *r;
++
++	j = sizeof(ULong);
++	for(k = 0;
++		sizeof(Bigint) - sizeof(ULong) - sizeof(int) + j <= (size_t)i;
++		j <<= 1)
++			k++;
++	r = (int*)Balloc(k MTa);
++	*r = k;
++	return
++#ifndef MULTIPLE_THREADS
++	dtoa_result =
++#endif
++		(char *)(r+1);
++	}
++
++ static char *
++nrv_alloc(const char *s, char *s0, size_t s0len, char **rve, int n MTd)
++{
++	char *rv, *t;
++
++	if (!s0)
++		s0 = rv_alloc(n MTa);
++	else if (s0len <= (size_t)n) {
++		rv = 0;
++		t = rv + n;
++		goto rve_chk;
++		}
++	t = rv = s0;
++	while((*t = *s++))
++		++t;
++ rve_chk:
++	if (rve)
++		*rve = t;
++	return rv;
++	}
++
++/* freedtoa(s) must be used to free values s returned by dtoa
++ * when MULTIPLE_THREADS is #defined.  It should be used in all cases,
++ * but for consistency with earlier versions of dtoa, it is optional
++ * when MULTIPLE_THREADS is not defined.
++ */
++
++ void
++freedtoa(char *s)
++{
++#ifdef MULTIPLE_THREADS
++	ThInfo *TI = 0;
++#endif
++	Bigint *b = (Bigint *)((int *)s - 1);
++	b->maxwds = 1 << (b->k = *(int*)b);
++	Bfree(b MTb);
++#ifndef MULTIPLE_THREADS
++	if (s == dtoa_result)
++		dtoa_result = 0;
++#endif
++	}
++
++/* dtoa for IEEE arithmetic (dmg): convert double to ASCII string.
++ *
++ * Inspired by "How to Print Floating-Point Numbers Accurately" by
++ * Guy L. Steele, Jr. and Jon L. White [Proc. ACM SIGPLAN '90, pp. 112-126].
++ *
++ * Modifications:
++ *	1. Rather than iterating, we use a simple numeric overestimate
++ *	   to determine k = floor(log10(d)).  We scale relevant
++ *	   quantities using O(log2(k)) rather than O(k) multiplications.
++ *	2. For some modes > 2 (corresponding to ecvt and fcvt), we don't
++ *	   try to generate digits strictly left to right.  Instead, we
++ *	   compute with fewer bits and propagate the carry if necessary
++ *	   when rounding the final digit up.  This is often faster.
++ *	3. Under the assumption that input will be rounded nearest,
++ *	   mode 0 renders 1e23 as 1e23 rather than 9.999999999999999e22.
++ *	   That is, we allow equality in stopping tests when the
++ *	   round-nearest rule will give the same floating-point value
++ *	   as would satisfaction of the stopping test with strict
++ *	   inequality.
++ *	4. We remove common factors of powers of 2 from relevant
++ *	   quantities.
++ *	5. When converting floating-point integers less than 1e16,
++ *	   we use floating-point arithmetic rather than resorting
++ *	   to multiple-precision integers.
++ *	6. When asked to produce fewer than 15 digits, we first try
++ *	   to get by with floating-point arithmetic; we resort to
++ *	   multiple-precision integer arithmetic only if we cannot
++ *	   guarantee that the floating-point calculation has given
++ *	   the correctly rounded result.  For k requested digits and
++ *	   "uniformly" distributed input, the probability is
++ *	   something like 10^(k-15) that we must resort to the Long
++ *	   calculation.
++ */
++
++ char *
++dtoa_r(double dd, int mode, int ndigits, int *decpt, int *sign, char **rve, char *buf, size_t blen)
++{
++ /*	Arguments ndigits, decpt, sign are similar to those
++	of ecvt and fcvt; trailing zeros are suppressed from
++	the returned string.  If not null, *rve is set to point
++	to the end of the return value.  If d is +-Infinity or NaN,
++	then *decpt is set to 9999.
++
++	mode:
++		0 ==> shortest string that yields d when read in
++			and rounded to nearest.
++		1 ==> like 0, but with Steele & White stopping rule;
++			e.g. with IEEE P754 arithmetic , mode 0 gives
++			1e23 whereas mode 1 gives 9.999999999999999e22.
++		2 ==> max(1,ndigits) significant digits.  This gives a
++			return value similar to that of ecvt, except
++			that trailing zeros are suppressed.
++		3 ==> through ndigits past the decimal point.  This
++			gives a return value similar to that from fcvt,
++			except that trailing zeros are suppressed, and
++			ndigits can be negative.
++		4,5 ==> similar to 2 and 3, respectively, but (in
++			round-nearest mode) with the tests of mode 0 to
++			possibly return a shorter string that rounds to d.
++			With IEEE arithmetic and compilation with
++			-DHonor_FLT_ROUNDS, modes 4 and 5 behave the same
++			as modes 2 and 3 when FLT_ROUNDS != 1.
++		6-9 ==> Debugging modes similar to mode - 4:  don't try
++			fast floating-point estimate (if applicable).
++
++		Values of mode other than 0-9 are treated as mode 0.
++
++	When not NULL, buf is an output buffer of length blen, which must
++	be large enough to accommodate suppressed trailing zeros and a trailing
++	null byte.  If blen is too small, rv = NULL is returned, in which case
++	if rve is not NULL, a subsequent call with blen >= (*rve - rv) + 1
++	should succeed in returning buf.
++
++	When buf is NULL, sufficient space is allocated for the return value,
++	which, when done using, the caller should pass to freedtoa().
++
++	USE_BF is automatically defined when neither NO_LONG_LONG nor NO_BF96
++	is defined.
++	*/
++
++#ifdef MULTIPLE_THREADS
++	ThInfo *TI = 0;
++#endif
++	int bbits, b2, b5, be, dig, i, ilim, ilim1,
++		j, j1, k, leftright, m2, m5, s2, s5, spec_case;
++#if !defined(Sudden_Underflow) || defined(USE_BF96)
++	int denorm;
++#endif
++	Bigint *b, *b1, *delta, *mlo, *mhi, *S;
++	U u;
++	char *s;
++#ifdef SET_INEXACT
++	int inexact, oldinexact;
++#endif
++#ifdef USE_BF96 /*{{*/
++	BF96 *p10;
++	ULLong dbhi, dbits, dblo, den, hb, rb, rblo, res, res0, res3, reslo, sres,
++		sulp, tv0, tv1, tv2, tv3, ulp, ulplo, ulpmask, ures, ureslo, zb;
+... [unselected diff lines omitted] ...
++			ulplo = ulp;
++			ulp >>= ulpshift;
++			}
++		j += k;
++		if (ilim == 0) {
++			S = mhi = 0;
++			if (res > (5ull << j))
++				goto one_digit;
++			goto no_digits;
++			}
++		goto no_div;
++		}
++	if (ilim == 0 && j + k >= 0) {
++		S = mhi = 0;
++		if ((dbits >> 11) > (pfive[k-1] << j))
++			goto one_digit;
++		goto no_digits;
++		}
++	if (k <= dtoa_divmax && j + k >= 0) {
++		/* Another "yes" case -- we will use exact integer arithmetic. */
++ use_exact:
++		Debug(++dtoa_stats[3]);
++		res = dbits >> 11;	/* residual */
++		ulp = 1;
++		if (k <= 0)
++			goto no_div;
++		j1 = j + k + 1;
++		den = pfive[k-i] << (j1 - i);
++		for(;;) {
++			dig = res / den;
++			*s++ = '0' + dig;
++			if (!(res -= dig*den)) {
++#ifdef SET_INEXACT
++				inexact = 0;
++				oldinexact = 1;
++#endif
++				goto retc;
++				}
++			if (ilim < 0) {
++				ures = den - res;
++				if (2*res <= ulp
++				&& (spec_case ? 4*res <= ulp : (2*res < ulp || dig & 1)))
++					goto ulp_reached;
++				if (2*ures < ulp)
++					goto Roundup;
+... [unselected diff lines omitted] ...
++	if (ilim > 28)
++		goto Fast_failed1;
++	/* Scale by 10^-k */
++	p10 = &pten[342-k];
++	tv0 = p10->b2 * dblo; /* rarely matters, but does, e.g., for 9.862818194192001e18 */
++	tv1 = p10->b1 * dblo + (tv0 >> 32);
++	tv2 = p10->b2 * dbhi + (tv1 & 0xffffffffull);
++	tv3 = p10->b0 * dblo + (tv1>>32) + (tv2>>32);
++	res3 = p10->b1 * dbhi + (tv3 & 0xffffffffull);
++	res = p10->b0 * dbhi + (tv3>>32) + (res3>>32);
++	be += p10->e - 0x3fe;
++	eulp = j1 = be - 54 + ulpadj;
++	if (!(res & 0x8000000000000000ull)) {
++		--be;
++		res3 <<= 1;
++		res = (res << 1) | ((res3 & 0x100000000ull) >> 32);
++		}
++	res0 = res; /* save for Fast_failed */
++#if !defined(SET_INEXACT) && !defined(NO_DTOA_64) /*{*/
++	if (ilim > 19)
++		goto Fast_failed;
++	Debug(++dtoa_stats[4]);
++	assert(be >= 0 && be <= 4); /* be = 0 is rare, but possible, e.g., for 1e20 */
++	res >>= 4 - be;
++	ulp = p10->b0;	/* ulp */
++	ulp = (ulp << 29) | (p10->b1 >> 3);
++	/* scaled ulp = ulp * 2^(eulp - 60) */
++	/* We maintain 61 bits of the scaled ulp. */
++	if (ilim == 0) {
++		if (!(res & 0x7fffffffffffffeull)
++		 || !((~res) & 0x7fffffffffffffeull))
++			goto Fast_failed1;
++		S = mhi = 0;
++		if (res >= 0x5000000000000000ull)
++			goto one_digit;
++		goto no_digits;
++		}
++	rb = 1;	/* upper bound on rounding error */
++	for(;;++i) {
++		dig = res >> 60;
++		*s++ = '0' + dig;
++		res &= 0xfffffffffffffffull;
++		if (ilim < 0) {
++			ures = 0x1000000000000000ull - res;
++			if (eulp > 0) {
+... [unselected diff lines omitted] ...
++		rb *= 10;
++		if (rb >= 0x1000000000000000ull)
++			goto Fast_failed;
++		res *= 10;
++		ulp *= 5;
++		if (ulp & 0x8000000000000000ull) {
++			eulp += 4;
++			ulp >>= 3;
++			}
++		else {
++			eulp += 3;
++			ulp >>= 2;
++			}
++		}
++#endif /*}*/
++#ifndef NO_BF96
++ Fast_failed:
++#endif
++	Debug(++dtoa_stats[5]);
++	s = buf;
++	i = 4 - be;
++	res = res0 >> i;
++	reslo = 0xffffffffull & res3;
++	if (i)
++		reslo = (res0 << (64 - i)) >> 32 | (reslo >> i);
++	rb = 0;
++	rblo = 4; /* roundoff bound */
++	ulp = p10->b0;	/* ulp */
++	ulp = (ulp << 29) | (p10->b1 >> 3);
++	eulp = j1;
++	for(i = 1;;++i) {
++		dig = res >> 60;
++		*s++ = '0' + dig;
++		res &= 0xfffffffffffffffull;
++#ifdef SET_INEXACT
++		if (!res && !reslo) {
++			if (!(res3 & 0xffffffffull)) {
++				inexact = 0;
++				oldinexact = 1;
++				}
++			goto retc;
++			}
+... [unselected diff lines omitted] ...
++		rb = 10*rb + (rblo >> 32);
++		rblo &= 0xffffffffull;
++		if (rb >= 0x1000000000000000ull)
++			goto Fast_failed1;
++		reslo *= 10;
++		res = 10*res + (reslo >> 32);
++		reslo &= 0xffffffffull;
++		ulp *= 5;
++		if (ulp & 0x8000000000000000ull) {
++			eulp += 4;
++			ulp >>= 3;
++			}
++		else {
++			eulp += 3;
++			ulp >>= 2;
++			}
++		}
++ Fast_failed1:
++	Debug(++dtoa_stats[6]);
++	S = mhi = mlo = 0;
++#ifdef USE_BF96
++	b = d2b(&u, &be, &bbits MTb);
++#endif
++	s = buf;
++	i = (int)(word0(&u) >> Exp_shift1 & (Exp_mask>>Exp_shift1));
++	i -= Bias;
++	if (ulpadj)
++		i -= ulpadj - 1;
++	j = bbits - i - 1;
++	if (j >= 0) {
++		b2 = 0;
++		s2 = j;
++		}
++	else {
++		b2 = -j;
++		s2 = 0;
++		}
++	if (k >= 0) {
++		b5 = 0;
++		s5 = k;
++		s2 += k;
++		}
+... [unselected diff lines omitted] ...
++	*decpt = k + 1;
++	if (rve)
++		*rve = s;
++#ifdef SET_INEXACT
++	if (inexact) {
++		if (!oldinexact) {
++			word0(&u) = Exp_1 + (70 << Exp_shift);
++			word1(&u) = 0;
++			dval(&u) += 1.;
++			}
++		}
++	else if (!oldinexact)
++		clear_inexact();
++#endif
++	return buf;
++	}
++
++ char *
++dtoa(double dd, int mode, int ndigits, int *decpt, int *sign, char **rve)
++{
++	/*	Sufficient space is allocated to the return value
++		to hold the suppressed trailing zeros.
++		See dtoa_r() above for details on the other arguments.
++	*/
++#ifndef MULTIPLE_THREADS
++	if (dtoa_result)
++		freedtoa(dtoa_result);
++#endif
++	return dtoa_r(dd, mode, ndigits, decpt, sign, rve, 0, 0);
++	}
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/dump.c b/src/dump.c
+--- a/src/dump.c
++++ b/src/dump.c
+@@ -20,14 +20,14 @@
+ #endif
+ 
+ #include "jansson.h"
+ #include "strbuffer.h"
+ #include "utf.h"
+ 
+-#define MAX_INTEGER_STR_LENGTH 100
+-#define MAX_REAL_STR_LENGTH    100
++#define MAX_INTEGER_STR_LENGTH 25
++#define MAX_REAL_STR_LENGTH    25
+ 
+ #define FLAGS_TO_INDENT(f)    ((f)&0x1F)
+ #define FLAGS_TO_PRECISION(f) (((f) >> 11) & 0x1F)
+ 
+ struct buffer {
+     const size_t size;
+diff --git a/src/strconv.c b/src/strconv.c
+--- a/src/strconv.c
++++ b/src/strconv.c
+@@ -39,27 +39,12 @@ static void to_locale(strbuffer_t *strbuffer) {
+ 
+     pos = strchr(strbuffer->value, '.');
+     if (pos)
+         *pos = point;
+ }
+ 
+-static void from_locale(char *buffer) {
+-    char point;
+-    char *pos;
+-
+-    point = get_decimal_point();
+-    if (point == '.') {
+-        /* No conversion needed */
+-        return;
+-    }
+-
+-    pos = strchr(buffer, point);
+-    if (pos)
+-        *pos = '.';
+-}
+-
+ int jsonp_strtod(strbuffer_t *strbuffer, double *out) {
+     double value;
+     char *end;
+ 
+     to_locale(strbuffer);
+ 
+@@ -73,12 +58,133 @@ int jsonp_strtod(strbuffer_t *strbuffer, double *out) {
+     }
+ 
+     *out = value;
+     return 0;
+ }
+ 
++#if DTOA_ENABLED
++/* see dtoa.c */
++char *dtoa_r(double dd, int mode, int ndigits, int *decpt, int *sign, char **rve,
++             char *buf, size_t blen);
++
++int jsonp_dtostr(char *buffer, size_t size, double value, int precision) {
++    /* adapted from `format_float_short()` in
++     * https://github.com/python/cpython/blob/2cf18a44303b6d84faa8ecffaecc427b53ae121e/Python/pystrtod.c#L969
++     */
++    char digits[25];
++    char *digits_end;
++    int mode = precision == 0 ? 0 : 2;
++    int decpt, sign, exp_len, exp = 0, use_exp = 0;
++    int digits_len, vdigits_start, vdigits_end;
++    char *p;
++
++    if (dtoa_r(value, mode, precision, &decpt, &sign, &digits_end, digits, 25) == NULL) {
++        // digits is too short => should not happen
++        return -1;
++    }
++
++    digits_len = digits_end - digits;
++    if (decpt <= -4 || decpt > 16) {
++        use_exp = 1;
++        exp = decpt - 1;
++        decpt = 1;
++    }
++
++    vdigits_start = decpt <= 0 ? decpt - 1 : 0;
++    vdigits_end = digits_len;
++    if (!use_exp) {
++        /* decpt + 1 to add ".0" if value is an integer */
++        vdigits_end = vdigits_end > decpt ? vdigits_end : decpt + 1;
++    } else {
++        vdigits_end = vdigits_end > decpt ? vdigits_end : decpt;
++    }
++
++    if (
++        /* sign, decimal point and trailing 0 byte */
++        (size_t)(3 +
++
++                 /* total digit count (including zero padding on both sides) */
++                 (vdigits_end - vdigits_start) +
++
++                 /* exponent "e+100", max 3 numerical digits */
++                 (use_exp ? 5 : 0)) > size) {
++        /* buffer is too short */
++        return -1;
++    }
++
++    p = buffer;
++    if (sign == 1) {
++        *p++ = '-';
++    }
++
++    /* note that exactly one of the three 'if' conditions is true,
++      so we include exactly one decimal point */
++    /* Zero padding on left of digit string */
++    if (decpt <= 0) {
++        memset(p, '0', decpt - vdigits_start);
++        p += decpt - vdigits_start;
++        *p++ = '.';
++        memset(p, '0', 0 - decpt);
++        p += 0 - decpt;
++    } else {
++        memset(p, '0', 0 - vdigits_start);
++        p += 0 - vdigits_start;
++    }
++
++    /* Digits, with included decimal point */
++    if (0 < decpt && decpt <= digits_len) {
++        strncpy(p, digits, decpt - 0);
++        p += decpt - 0;
++        *p++ = '.';
++        strncpy(p, digits + decpt, digits_len - decpt);
++        p += digits_len - decpt;
++    } else {
++        strncpy(p, digits, digits_len);
++        p += digits_len;
++    }
++
++    /* And zeros on the right */
++    if (digits_len < decpt) {
++        memset(p, '0', decpt - digits_len);
++        p += decpt - digits_len;
++        *p++ = '.';
++        memset(p, '0', vdigits_end - decpt);
++        p += vdigits_end - decpt;
++    } else {
++        memset(p, '0', vdigits_end - digits_len);
++        p += vdigits_end - digits_len;
++    }
++
++    if (p[-1] == '.')
++        p--;
++
++    if (use_exp) {
++        *p++ = 'e';
++        exp_len = sprintf(p, "%d", exp);
++        p += exp_len;
++    }
++    *p = '\0';
++
++    return (int)(p - buffer);
++}
++#else /* DTOA_ENABLED == 0 */
++static void from_locale(char *buffer) {
++    char point;
++    char *pos;
++
++    point = get_decimal_point();
++    if (point == '.') {
++        /* No conversion needed */
++        return;
++    }
++
++    pos = strchr(buffer, point);
++    if (pos)
++        *pos = '.';
++}
++
+ int jsonp_dtostr(char *buffer, size_t size, double value, int precision) {
+     int ret;
+     char *start, *end;
+     size_t length;
+ 
+     if (precision == 0)
+@@ -125,6 +231,7 @@ int jsonp_dtostr(char *buffer, size_t size, double value, int precision) {
+             length -= (size_t)(end - start);
+         }
+     }
+ 
+     return (int)length;
+ }
++#endif
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C109","maintenance_needed":false,"confidence":97,"change_types":["internal numeric-conversion implementation change","buffer-size adjustment"],"affected_functions":["json_loadb","json_dumps","json_dump_callback","jsonp_strtod","jsonp_dtostr","dtoa_r"],"reason":"The commit replaces the internal floating-point formatting path with dtoa-based logic, but it does not introduce a new public entry point, protocol, initialization requirement, or input constraint. The existing harness already sends arbitrary bytes through json_loadb, which can create real values, and then serializes successful values through both json_dumps and json_dump_callback with fuzz-controlled dump flags, including JSON_REAL_PRECISION. Those high-level paths invoke the changed jsonp_dtostr/dtoa_r implementation, so no harness maintenance is required.","evidence":["The harness calls json_loadb(text, size, load_flags, &error) on the fuzz-controlled payload.","After a successful load, the harness calls either json_dumps(jobj, dump_flags & ~JSON_MAX_INDENT) or json_dump_callback(jobj, json_dump_counter, &counter, dump_flags).","dump_flags are derived directly from fuzz input and include the JSON_REAL_PRECISION field shown by ((dump_flags >> 11) & 0x1F) << 11.","src/strconv.c changes jsonp_dtostr internally to call dtoa_r when DTOA_ENABLED; no new caller-facing arguments or setup are added.","src/dump.c only reduces MAX_INTEGER_STR_LENGTH and MAX_REAL_STR_LENGTH from 100 to 25."],"recommended_action":"Keep the existing harness unchanged; it already exercises the modified real-number parsing and serialization paths with fuzz-controlled JSON data and formatting flags."}
+tokens used
+18,760

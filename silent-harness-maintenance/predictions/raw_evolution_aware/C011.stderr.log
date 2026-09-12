@@ -1,0 +1,613 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/silent-maintenance-evolution_aware-C011-ufd5npzk
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0899f-83c8-7323-920e-dfedec607606
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous Fuzz-Harness Maintenance Case
+
+Case ID
+
+C011
+
+## Evidence boundary
+
+The material below contains only the complete existing harness H0 and the complete production source diff from S0 to S1. No developer-updated harness, commit message, build result, coverage result, reachability result, or label is supplied.
+
+## Existing Harness H0
+
+### `test/tools/ossfuzz/strictasm_diff_ossfuzz.cpp`
+
+```text
+/*
+	This file is part of solidity.
+
+	solidity is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	solidity is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with solidity.  If not, see <http://www.gnu.org/licenses/>.
+*/
+// SPDX-License-Identifier: GPL-3.0
+
+#include <libyul/AsmAnalysisInfo.h>
+#include <libyul/AsmAnalysis.h>
+#include <libyul/Dialect.h>
+#include <libyul/backends/evm/EVMDialect.h>
+#include <libyul/YulStack.h>
+
+#include <liblangutil/DebugInfoSelection.h>
+#include <liblangutil/Exceptions.h>
+#include <liblangutil/EVMVersion.h>
+
+#include <libsolutil/CommonIO.h>
+#include <libsolutil/CommonData.h>
+#include <libsolutil/StringUtils.h>
+
+#include <test/tools/ossfuzz/yulFuzzerCommon.h>
+
+#include <string>
+#include <memory>
+#include <iostream>
+
+using namespace std;
+using namespace solidity;
+using namespace solidity::yul;
+using namespace solidity::util;
+using namespace solidity::langutil;
+using namespace solidity::yul::test::yul_fuzzer;
+
+// Prototype as we can't use the FuzzerInterface.h header.
+extern "C" int LLVMFuzzerTestOneInput(uint8_t const* _data, size_t _size);
+
+extern "C" int LLVMFuzzerTestOneInput(uint8_t const* _data, size_t _size)
+{
+	if (_size > 600)
+		return 0;
+
+	string input(reinterpret_cast<char const*>(_data), _size);
+
+	if (std::any_of(input.begin(), input.end(), [](char c) {
+		return ((static_cast<unsigned char>(c) > 127) || !(isPrint(c) || (c == '\n') || (c == '\t')));
+	}))
+		return 0;
+
+	YulStringRepository::reset();
+	auto optSequence = solidity::frontend::OptimiserSettings::randomYulOptimiserSequence(_size);
+	auto settings = solidity::frontend::OptimiserSettings::fuzz(optSequence);
+	YulStack stack(
+		langutil::EVMVersion(),
+		nullopt,
+		YulStack::Language::StrictAssembly,
+		settings,
+		DebugInfoSelection::All()
+	);
+	try
+	{
+		if (
+			!stack.parseAndAnalyze("source", input) ||
+			!stack.parserResult()->code ||
+			!stack.parserResult()->analysisInfo
+		)
+			return 0;
+	}
+	catch (Exception const&)
+	{
+		return 0;
+	}
+
+	ostringstream os1;
+	ostringstream os2;
+	// Disable memory tracing to avoid false positive reports
+	// such as unused write to memory e.g.,
+	// { mstore(0, 1) }
+	// that would be removed by the redundant store eliminator.
+	yulFuzzerUtil::TerminationReason termReason = yulFuzzerUtil::interpret(
+		os1,
+		stack.parserResult()->code,
+		EVMDialect::strictAssemblyForEVMObjects(langutil::EVMVersion()),
+		/*disableMemoryTracing=*/true
+	);
+	if (yulFuzzerUtil::resourceLimitsExceeded(termReason))
+		return 0;
+
+	stack.optimize();
+	termReason = yulFuzzerUtil::interpret(
+		os2,
+		stack.parserResult()->code,
+		EVMDialect::strictAssemblyForEVMObjects(langutil::EVMVersion()),
+		/*disableMemoryTracing=*/true
+	);
+
+	if (yulFuzzerUtil::resourceLimitsExceeded(termReason))
+		return 0;
+
+	bool isTraceEq = (os1.str() == os2.str());
+	yulAssert(isTraceEq, "Interpreted traces for optimized and unoptimized code differ.");
+	return 0;
+}
+
+```
+
+## Complete production source diff S0 -> S1
+
+The fixed `--function-context` rule includes the complete diff and expanded changed-function bodies where Git recognizes them.
+
+```diff
+diff --git a/libsolidity/interface/OptimiserSettings.h b/libsolidity/interface/OptimiserSettings.h
+index e51817ca66860c4bbce65064e531deef1bf56ac3..5831960ed46efac9c36fc2a197eb616c8e21e4b8 100644
+--- a/libsolidity/interface/OptimiserSettings.h
++++ b/libsolidity/interface/OptimiserSettings.h
+@@ -45,235 +45,245 @@ enum class OptimisationPreset
+ struct OptimiserSettings
+ {
+ 	static char constexpr DefaultYulOptimiserSteps[] =
+ 		"dhfoDgvulfnTUtnIf"            // None of these can make stack problems worse
+ 		"["
+ 			"xa[r]EscLM"               // Turn into SSA and simplify
+ 			"cCTUtTOntnfDIul"          // Perform structural simplification
+ 			"Lcul"                     // Simplify again
+ 			"Vcul [j]"                 // Reverse SSA
+ 
+ 			// should have good "compilability" property here.
+ 
+ 			"Tpeul"                    // Run functional expression inliner
+ 			"xa[rul]"                  // Prune a bit more in SSA
+ 			"xa[r]cL"                  // Turn into SSA again and simplify
+ 			"gvif"                     // Run full inliner
+ 			"CTUca[r]LSsTFOtfDnca[r]Iulc" // SSA plus simplify
+ 		"]"
+ 		"jmul[jul] VcTOcul jmul";      // Make source short and pretty
+ 
+ 	static char constexpr DefaultYulOptimiserCleanupSteps[] = "fDnTOcmu";
+ 
+ 	/// No optimisations at all - not recommended.
+ 	static OptimiserSettings none()
+ 	{
+ 		return {};
+ 	}
+ 	/// Minimal optimisations: Peephole and jumpdest remover
+ 	static OptimiserSettings minimal()
+ 	{
+ 		OptimiserSettings s = none();
+ 		s.runJumpdestRemover = true;
+ 		s.runPeephole = true;
+ 		s.simpleCounterForLoopUncheckedIncrement = true;
+ 		return s;
+ 	}
+ 	/// Standard optimisations.
+ 	static OptimiserSettings standard()
+ 	{
+ 		OptimiserSettings s;
+ 		s.runOrderLiterals = true;
+ 		s.runInliner = true;
+ 		s.runJumpdestRemover = true;
+ 		s.runPeephole = true;
+ 		s.runDeduplicate = true;
+ 		s.runCSE = true;
+ 		s.runConstantOptimiser = true;
+ 		s.simpleCounterForLoopUncheckedIncrement = true;
+ 		s.runYulOptimiser = true;
+ 		s.optimizeStackAllocation = true;
+ 		return s;
+ 	}
+ 	/// Full optimisations. Currently an alias for standard optimisations.
+ 	static OptimiserSettings full()
+ 	{
+ 		return standard();
+ 	}
+ 
++	static std::string removeInvalidCharacters(const std::string& _input)
++	{
++		std::string result;
++		const std::string validCharacters = "flcCUncDEvejsxIOoighFTLMrMaptSuud[]:";
++		for (char c : _input)
++			if (validCharacters.find(c) != std::string::npos)
++				result += c;
++		return result;
++	}
++
+ 	/// Create valid sequence
+ 	static std::string createValidSequence(std::string& _result)
+ 	{
+ 		std::stack<char> stk;
+ 		// Remove unmatched brackets
+ 		for (auto it = _result.begin(); it != _result.end(); /* no increment here */)
+ 		{
+ 			if (*it == '[')
+ 		        {
+ 				stk.push(*it);
+ 				++it;
+ 		        }
+ 		        else if (*it == ']')
+ 		        {
+ 			        if (stk.empty())
+ 				        it = _result.erase(it); // Erase returns the new iterator position
+ 				else
+ 			        {
+ 					stk.pop();
+ 					++it;
+ 			        }
+ 			}
+ 		        else
+ 			        ++it;
+ 		}
+ 		// Add matching brackets
+ 		while (!stk.empty())
+ 		{
+ 			_result += ']';
+ 			stk.pop();
+ 		}
+ 		// Remove colon inside brackets
+ 		std::stack<bool> insideBrackets;
+ 
+ 		// Remove colon within brackets
+ 		for (auto it = _result.begin(); it != _result.end(); /* no increment here */)
+ 		{
+ 			if (*it == '[') {
+ 			        insideBrackets.push(true);
+ 			        ++it; // Move to the next character
+ 		        }
+ 			else if (*it == ']')
+ 			{
+ 				insideBrackets.pop();
+ 			        ++it; // Move to the next character
+ 			}
+ 			else if (*it == ':' && !insideBrackets.empty())
+ 			{
+ 				// Erase the colon if we're inside brackets
+ 				it = _result.erase(it); // Erase returns the new iterator position
+ 			}
+ 			else
+ 				++it; // Move to the next character
+ 		}
+ 		assert(insideBrackets.empty());
+ 		std::string output;
+ 		bool wasColon = false;
+ 
+ 		// Keep at most one colon
+ 		for (auto& c: _result)
+ 		{
+ 			if (c == ':')
+ 			{
+ 			        if (!wasColon)
+ 				{
+ 			                output += c; // Append the first colon
+ 			                wasColon = true;
+ 			        }
+ 			        // Skip if the last character was also a colon
+ 			}
+ 		        else
+ 				output += c; // Append non-colon characters
+ 		}
+ 		return output;
+ 	}
+ 
+ 	/// Generate random Yul optimiser sequence
+ 	static std::string generateRandomPermutation(std::string const& input, size_t _seed)
+ 	{
+ 		std::string result = input;
+ 		std::mt19937 g(_seed);
+ 		std::shuffle(result.begin(), result.end(), g);
+ 
+ 		// Generate a random length for the substring
+ 		std::uniform_int_distribution<size_t> lengthDistribution(1, result.length());
+ 		size_t substringLength = lengthDistribution(g);
+ 
+ 		// Extract a substring from the shuffled result
+ 		std::string shuffledSubstring = result.substr(0, substringLength);
+ 		return createValidSequence(shuffledSubstring);
+ 	}
+ 
+ 	/// Get random Yul optimiser sequence
+ 	static std::string randomYulOptimiserSequence(size_t _seed)
+ 	{
+ 		return generateRandomPermutation(DefaultYulOptimiserSteps, _seed);
+ 	}
+ 
+ 	/// Fuzz Yul optimiser sequence
+ 	static OptimiserSettings fuzz(std::string const& _optSequence)
+ 	{
+ 		OptimiserSettings s = standard();
+ 		s.yulOptimiserSteps = _optSequence;
+ 		return s;
+ 	}
+ 
+ 	static OptimiserSettings preset(OptimisationPreset _preset)
+ 	{
+ 		switch (_preset)
+ 		{
+ 			case OptimisationPreset::None: return none();
+ 			case OptimisationPreset::Minimal: return minimal();
+ 			case OptimisationPreset::Standard: return standard();
+ 			case OptimisationPreset::Full: return full();
+ 		}
+ 		util::unreachable();
+ 	}
+ 
+ 	bool operator==(OptimiserSettings const& _other) const
+ 	{
+ 		return
+ 			runOrderLiterals == _other.runOrderLiterals &&
+ 			runInliner == _other.runInliner &&
+ 			runJumpdestRemover == _other.runJumpdestRemover &&
+ 			runPeephole == _other.runPeephole &&
+ 			runDeduplicate == _other.runDeduplicate &&
+ 			runCSE == _other.runCSE &&
+ 			runConstantOptimiser == _other.runConstantOptimiser &&
+ 			simpleCounterForLoopUncheckedIncrement == _other.simpleCounterForLoopUncheckedIncrement &&
+ 			optimizeStackAllocation == _other.optimizeStackAllocation &&
+ 			runYulOptimiser == _other.runYulOptimiser &&
+ 			yulOptimiserSteps == _other.yulOptimiserSteps &&
+ 			expectedExecutionsPerDeployment == _other.expectedExecutionsPerDeployment;
+ 	}
+ 
+ 	bool operator!=(OptimiserSettings const& _other) const
+ 	{
+ 		return !(*this == _other);
+ 	}
+ 
+ 	/// Move literals to the right of commutative binary operators during code generation.
+ 	/// This helps exploiting associativity.
+ 	bool runOrderLiterals = false;
+ 	/// Inliner
+ 	bool runInliner = false;
+ 	/// Non-referenced jump destination remover.
+ 	bool runJumpdestRemover = false;
+ 	/// Peephole optimizer
+ 	bool runPeephole = false;
+ 	/// Assembly block deduplicator
+ 	bool runDeduplicate = false;
+ 	/// Common subexpression eliminator based on assembly items.
+ 	bool runCSE = false;
+ 	/// Constant optimizer, which tries to find better representations that satisfy the given
+ 	/// size/cost-trade-off.
+ 	bool runConstantOptimiser = false;
+ 	/// Perform more efficient stack allocation for variables during code generation from Yul to bytecode.
+ 	bool simpleCounterForLoopUncheckedIncrement = false;
+ 	/// Yul optimiser with default settings. Will only run on certain parts of the code for now.
+ 	bool optimizeStackAllocation = false;
+ 	/// Allow unchecked arithmetic when incrementing the counter of certain kinds of 'for' loop
+ 	bool runYulOptimiser = false;
+ 	/// Sequence of optimisation steps to be performed by Yul optimiser.
+ 	/// Note that there are some hard-coded steps in the optimiser and you cannot disable
+ 	/// them just by setting this to an empty string. Set @a runYulOptimiser to false if you want
+ 	/// no optimisations.
+ 	std::string yulOptimiserSteps = DefaultYulOptimiserSteps;
+ 	/// Sequence of clean-up optimisation steps after yulOptimiserSteps is run. Note that if the string
+ 	/// is left empty, there will still be hard-coded optimisation steps that will run regardless.
+ 	/// Set @a runYulOptimiser to false if you want no optimisations.
+ 	std::string yulOptimiserCleanupSteps = DefaultYulOptimiserCleanupSteps;
+ 	/// This specifies an estimate on how often each opcode in this assembly will be executed,
+ 	/// i.e. use a small value to optimise for size and a large value to optimise for runtime gas usage.
+ 	size_t expectedExecutionsPerDeployment = 200;
+ };
+ 
+ }
+diff --git a/libyul/AsmAnalysis.cpp b/libyul/AsmAnalysis.cpp
+index ed4187540e763328753b9aed2c32388ea4d11c18..8d9e6e83df526d49237974434b0c953151f48a1a 100644
+--- a/libyul/AsmAnalysis.cpp
++++ b/libyul/AsmAnalysis.cpp
+@@ -1,48 +1,50 @@
+ /*
+ 	This file is part of solidity.
+ 
+ 	solidity is free software: you can redistribute it and/or modify
+ 	it under the terms of the GNU General Public License as published by
+ 	the Free Software Foundation, either version 3 of the License, or
+ 	(at your option) any later version.
+ 
+ 	solidity is distributed in the hope that it will be useful,
+ 	but WITHOUT ANY WARRANTY; without even the implied warranty of
+ 	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ 	GNU General Public License for more details.
+ 
+ 	You should have received a copy of the GNU General Public License
+ 	along with solidity.  If not, see <http://www.gnu.org/licenses/>.
+ */
+ // SPDX-License-Identifier: GPL-3.0
+ /**
+  * Analyzer part of inline assembly.
+  */
+ 
+ #include <libyul/AsmAnalysis.h>
++#include <libyul/AsmPrinter.h>
+ 
+ #include <libyul/AST.h>
+ #include <libyul/AsmAnalysisInfo.h>
+ #include <libyul/Utilities.h>
+ #include <libyul/Exceptions.h>
+ #include <libyul/Object.h>
+ #include <libyul/Scope.h>
+ #include <libyul/ScopeFiller.h>
+ 
+ #include <liblangutil/ErrorReporter.h>
+ 
+ #include <libsolutil/CommonData.h>
+ #include <libsolutil/StringUtils.h>
+ #include <libsolutil/Visitor.h>
+ 
+ #include <libevmasm/Instruction.h>
+ 
+ #include <boost/algorithm/string.hpp>
+ 
+ #include <fmt/format.h>
+ 
+ #include <memory>
+ #include <functional>
++#include <iostream>
+ 
+ using namespace std::string_literals;
+ using namespace solidity;
+@@ -85,15 +87,16 @@ bool AsmAnalyzer::analyze(Block const& _block)
+ AsmAnalysisInfo AsmAnalyzer::analyzeStrictAssertCorrect(Dialect const& _dialect, Object const& _object)
+ {
+ 	ErrorList errorList;
+ 	langutil::ErrorReporter errors(errorList);
+ 	AsmAnalysisInfo analysisInfo;
+ 	bool success = yul::AsmAnalyzer(
+ 		analysisInfo,
+ 		errors,
+ 		_dialect,
+ 		{},
+ 		_object.qualifiedDataNames()
+ 	).analyze(*_object.code);
++	std::cout << AsmPrinter{}(*_object.code) << std::endl;
+ 	yulAssert(success && !errors.hasErrors(), "Invalid assembly/yul code.");
+ 	return analysisInfo;
+ }
+diff --git a/libyul/optimiser/Suite.cpp b/libyul/optimiser/Suite.cpp
+index 545ae4de06d759ab94b66a0061939d5c1eee9de2..a455714b52699f769c6104baa39f90d673e49f0d 100644
+--- a/libyul/optimiser/Suite.cpp
++++ b/libyul/optimiser/Suite.cpp
+@@ -86,6 +86,9 @@
+ #include <fmt/format.h>
+ #endif
+ 
++#include <stdexcept>
++#include <iostream>
++
+ using namespace solidity;
+ using namespace solidity::yul;
+ #ifdef PROFILE_OPTIMIZER_STEPS
+@@ -405,90 +408,98 @@ bool OptimiserSuite::isEmptyOptimizerSequence(std::string const& _sequence)
+ void OptimiserSuite::runSequence(std::string_view _stepAbbreviations, Block& _ast, bool _repeatUntilStable)
+ {
+ 	validateSequence(_stepAbbreviations);
+ 
+ 	// This splits 'aaa[bbb]ccc...' into 'aaa' and '[bbb]ccc...'.
+ 	auto extractNonNestedPrefix = [](std::string_view _tail) -> std::tuple<std::string_view, std::string_view>
+ 	{
+ 		for (size_t i = 0; i < _tail.size(); ++i)
+ 		{
+ 			yulAssert(_tail[i] != ']');
+ 			if (_tail[i] == '[')
+ 				return {_tail.substr(0, i), _tail.substr(i)};
+ 		}
+ 		return {_tail, {}};
+ 	};
+ 
+ 	// This splits '[bbb]ccc...' into 'bbb' and 'ccc...'.
+ 	auto extractBracketContent = [](std::string_view _tail) -> std::tuple<std::string_view, std::string_view>
+ 	{
+ 		yulAssert(!_tail.empty() && _tail[0] == '[');
+ 
+ 		size_t contentLength = 0;
+ 		int8_t nestingLevel = 1;
+ 		for (char abbreviation: _tail.substr(1))
+ 		{
+ 			if (abbreviation == '[')
+ 			{
+ 				yulAssert(nestingLevel < std::numeric_limits<int8_t>::max());
+ 				++nestingLevel;
+ 			}
+ 			else if (abbreviation == ']')
+ 			{
+ 				--nestingLevel;
+ 				if (nestingLevel == 0)
+ 					break;
+ 			}
+ 			++contentLength;
+ 		}
+ 		yulAssert(nestingLevel == 0);
+ 		yulAssert(_tail[contentLength + 1] == ']');
+ 
+ 		return {_tail.substr(1, contentLength), _tail.substr(contentLength + 2)};
+ 	};
+ 
+ 	auto abbreviationsToSteps = [](std::string_view _sequence) -> std::vector<std::string>
+ 	{
+ 		std::vector<std::string> steps;
+ 		for (char abbreviation: _sequence)
+ 			if (abbreviation != ' ' && abbreviation != '\n')
+-				steps.emplace_back(stepAbbreviationToNameMap().at(abbreviation));
++			{
++				try {
++					steps.emplace_back(stepAbbreviationToNameMap().at(abbreviation));
++				}
++				catch (const std::out_of_range& _e)
++				{
++			                std::cout << "Key not found: " << abbreviation << std::endl;
++				}
++			}
+ 		return steps;
+ 	};
+ 
+ 	std::vector<std::tuple<std::string_view, bool>> subsequences;
+ 	std::string_view tail = _stepAbbreviations;
+ 	while (!tail.empty())
+ 	{
+ 		std::string_view subsequence;
+ 		tie(subsequence, tail) = extractNonNestedPrefix(tail);
+ 		if (subsequence.size() > 0)
+ 			subsequences.push_back({subsequence, false});
+ 
+ 		if (tail.empty())
+ 			break;
+ 
+ 		tie(subsequence, tail) = extractBracketContent(tail);
+ 		if (subsequence.size() > 0)
+ 			subsequences.push_back({subsequence, true});
+ 	}
+ 
+ 	size_t codeSize = 0;
+ 	for (size_t round = 0; round < MaxRounds; ++round)
+ 	{
+ 		for (auto const& [subsequence, repeat]: subsequences)
+ 		{
+ 			if (repeat)
+ 				runSequence(subsequence, _ast, true);
+ 			else
+ 				runSequence(abbreviationsToSteps(subsequence), _ast);
+ 		}
+ 
+ 		if (!_repeatUntilStable)
+ 			break;
+ 
+ 		size_t newSize = CodeSize::codeSizeIncludingFunctions(_ast);
+ 		if (newSize == codeSize)
+ 			break;
+ 		codeSize = newSize;
+ 	}
+ }
+
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C011","gap_exists":true,"gap_type":["entry_point","configuration","input_semantics"],"commit_induced":"YES","maintenance_needed":true,"confidence":86,"affected_functions":["OptimiserSettings::removeInvalidCharacters","LLVMFuzzerTestOneInput","OptimiserSuite::runSequence"],"reason":"S1 adds the public string-processing entry point OptimiserSettings::removeInvalidCharacters, but H0 never invokes it or supplies independently controlled optimizer-sequence text. H0 derives settings solely through randomYulOptimiserSequence(_size), limiting optimizer configuration to permutations of DefaultYulOptimiserSteps selected by the 0–600 input size. Consequently it cannot exercise removeInvalidCharacters on arbitrary bytes or deliberately target the changed unknown-abbreviation path in OptimiserSuite::runSequence. This uncovered API and its input semantics did not exist in S0, so the material gap is commit-induced.","evidence":["S1 newly defines OptimiserSettings::removeInvalidCharacters(const std::string& _input), which filters caller-controlled text using validCharacters.","H0 constructs optSequence only with OptimiserSettings::randomYulOptimiserSequence(_size) and passes it to OptimiserSettings::fuzz(optSequence); it never calls removeInvalidCharacters.","H0 rejects _size values above 600, so optimizer-sequence selection through _size has at most 601 seed values and is not byte-for-byte controlled by the fuzz input.","OptimiserSuite::runSequence changes abbreviationsToSteps to catch std::out_of_range for an abbreviation, while H0's sequence characters originate from DefaultYulOptimiserSteps rather than independently supplied sequence text.","The AsmAnalyzer::analyzeStrictAssertCorrect change only prints AsmPrinter output and does not itself require additional harness state or input control."],"recommended_action":"Extend H0 so a bounded portion of the fuzz bytes controls optimizer-sequence text, pass it through OptimiserSettings::removeInvalidCharacters, and use the resulting sequence in OptimiserSettings::fuzz while retaining the Yul program input and resource limits."}
+tokens used
+21,026

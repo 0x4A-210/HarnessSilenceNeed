@@ -1,0 +1,411 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t5-gap_only-T5027-x6ra4s7o
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08aeb-9687-75f2-9c1b-248b84b90c60
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T5027
+
+## Existing harness H0
+
+Every project-owned C/C++ path containing `fuzz` at the pre-change snapshot is shown below. Framework and build-script scaffolding are not expanded.
+
+### H0 path: `tests/fuzz_main.c`
+
+~~~~cpp
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+
+/* fuzz target entry point, works without libFuzzer */
+
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size);
+
+int main(int argc, char **argv)
+{
+    FILE *f;
+    char *buf = NULL;
+    long siz_buf;
+
+    if(argc < 2)
+    {
+        fprintf(stderr, "no input file\n");
+        goto err;
+    }
+
+    f = fopen(argv[1], "rb");
+    if(f == NULL)
+    {
+        fprintf(stderr, "error opening input file %s\n", argv[1]);
+        goto err;
+    }
+
+    fseek(f, 0, SEEK_END);
+
+    siz_buf = ftell(f);
+    rewind(f);
+
+    if(siz_buf < 1) goto err;
+
+    buf = (char*)malloc(siz_buf);
+    if(buf == NULL)
+    {
+        fprintf(stderr, "malloc() failed\n");
+        goto err;
+    }
+
+    if(fread(buf, siz_buf, 1, f) != 1)
+    {
+        fprintf(stderr, "fread() failed\n");
+        goto err;
+    }
+
+    (void)LLVMFuzzerTestOneInput((uint8_t*)buf, siz_buf);
+
+err:
+    free(buf);
+
+    return 0;
+}
+~~~~
+
+### H0 path: `tests/spng_read_fuzzer.c`
+
+~~~~cpp
+#define SPNG_UNTESTED
+#include "../spng/spng.h"
+
+#include <string.h>
+
+struct buf_state
+{
+    const uint8_t *data;
+    size_t bytes_left;
+};
+
+static int buffer_read_fn(spng_ctx *ctx, void *user, void *dest, size_t length)
+{
+    struct buf_state *state = (struct buf_state*)user;
+
+    if(length > state->bytes_left) return SPNG_IO_EOF;
+
+    memcpy(dest, state->data, length);
+
+    state->bytes_left -= length;
+    state->data += length;
+
+    return 0;
+}
+
+#ifdef __cplusplus
+extern "C"
+#endif
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+    if(size < 4) return 0;
+
+    int flags = data[size - 1];
+    int fmt = data[size - 3] | (data[size - 2] << 8);
+    int stream = data[size - 4] & 1;
+    int progressive = data[size - 4] & 2;
+    int file_stream = data[size - 4] & 4;
+    int discard = data[size - 4] & 8;
+
+    size -= 4;
+
+    int ret;
+    unsigned char *out = NULL;
+    FILE *file = NULL;
+
+    spng_ctx *ctx = spng_ctx_new(SPNG_CTX_IGNORE_ADLER32);
+    if(ctx == NULL) return 0;
+
+    struct spng_ihdr ihdr;
+    struct spng_plte plte;
+    struct spng_trns trns;
+    struct spng_chrm chrm;
+    struct spng_chrm_int chrm_int;
+    double gamma;
+    struct spng_iccp iccp;
+    struct spng_sbit sbit;
+    uint8_t srgb_rendering_intent;
+    struct spng_text text[4] = {0};
+    struct spng_bkgd bkgd;
+    struct spng_hist hist;
+    struct spng_phys phys;
+    struct spng_splt splt[4] = {0};
+    struct spng_time time;
+    struct spng_unknown_chunk chunks[4] = {0};
+    uint32_t n_text = 4, n_splt = 4, n_chunks = 4;
+
+    struct buf_state state;
+    state.data = data;
+    state.bytes_left = size;
+
+    if(stream)
+    {
+        if(file_stream)
+        {
+#if defined(SPNGT_HAVE_FMEMOPEN)
+            file = fmemopen((void*)data, size, "rb");
+
+            if(file == NULL) goto err;
+#endif
+            ret = spng_set_png_file(ctx, file);
+        }
+        else ret = spng_set_png_stream(ctx, buffer_read_fn, &state);
+    }
+    else ret = spng_set_png_buffer(ctx, (void*)data, size);
+
+    if(ret) goto err;
+
+    spng_set_image_limits(ctx, 200000, 200000);
+
+    spng_set_chunk_limits(ctx, 4 * 1000 * 1000, 8 * 1000 * 1000);
+
+    spng_set_crc_action(ctx, SPNG_CRC_USE, discard ? SPNG_CRC_DISCARD : SPNG_CRC_USE);
+
+    size_t out_size;
+    if(spng_decoded_image_size(ctx, fmt, &out_size)) goto err;
+
+    if(out_size > 80000000) goto err;
+
+    out = (unsigned char*)malloc(out_size);
+    if(out == NULL) goto err;
+
+    spng_get_ihdr(ctx, &ihdr);
+    spng_get_plte(ctx, &plte);
+    spng_get_trns(ctx, &trns);
+    spng_get_chrm(ctx, &chrm);
+    spng_get_chrm_int(ctx, &chrm_int);
+    spng_get_gama(ctx, &gamma);
+    spng_get_iccp(ctx, &iccp);
+    spng_get_sbit(ctx, &sbit);
+    spng_get_srgb(ctx, &srgb_rendering_intent);
+
+    if(!spng_get_text(ctx, text, &n_text))
+    {/* Up to 4 entries were read, get the actual count */
+        spng_get_text(ctx, NULL, &n_text);
+
+        uint32_t i;
+        for(i=0; i < n_text; i++)
+        {/* All strings should be non-NULL */
+            if(text[i].text == NULL ||
+               text[i].keyword[0] == '\0' ||
+               text[i].language_tag == NULL ||
+               text[i].translated_keyword == NULL ||
+               memchr(text[i].keyword, 0, 80) == NULL)
+            {
+                spng_ctx_free(ctx);
+                free(out);
+                return 1;
+            }
+            /* This shouldn't cause issues either */
+            text[i].length = strlen(text[i].text);
+        }
+    }
+
+    spng_get_bkgd(ctx, &bkgd);
+    spng_get_hist(ctx, &hist);
+    spng_get_phys(ctx, &phys);
+
+    if(!spng_get_splt(ctx, splt, &n_splt))
+    {/* Up to 4 entries were read, get the actual count */
+        spng_get_splt(ctx, NULL, &n_splt);
+
+        uint32_t i;
+        for(i=0; i < n_splt; i++)
+        {
+            if(splt[i].name[0] == '\0' ||
+               splt[i].entries == NULL ||
+               memchr(splt[i].name, 0, 80) == NULL)
+            {
+                spng_ctx_free(ctx);
+                free(out);
+                return 1;
+            }
+        }
+    }
+
+    if(!spng_get_unknown_chunks(ctx, chunks, &n_chunks))
+    {
+        spng_get_unknown_chunks(ctx, NULL, &n_chunks);
+
+        uint32_t i;
+        for(i=0; i < n_chunks; i++)
+        {
+            if( (chunks[i].length && !chunks[i].data) ||
+                (!chunks[i].length && chunks[i].data) )
+            {
+                spng_ctx_free(ctx);
+                free(out);
+                return 1;
+            }
+        }
+    }
+
+    if(progressive)
+    {
+        if(spng_decode_image(ctx, NULL, 0, fmt, flags | SPNG_DECODE_PROGRESSIVE)) goto err;
+
+        size_t ioffset, out_width = out_size / ihdr.height;
+        struct spng_row_info ri;
+
+        do
+        {
+            if(spng_get_row_info(ctx, &ri)) break;
+
+            ioffset = ri.row_num * out_width;
+
+        }while(!spng_decode_row(ctx, out + ioffset, out_size));
+    }
+    else if(spng_decode_image(ctx, out, out_size, fmt, flags)) goto err;
+
+    spng_get_time(ctx, &time);
+
+err:
+    spng_ctx_free(ctx);
+    free(out);
+    if(file != NULL) fclose(file);
+
+    return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed C/C++ production paths and all hunks are included. Function-context mode expands changed C/C++ function bodies; tests, examples, documentation, build files, and Harness files are excluded by the frozen rule.
+
+~~~~diff
+diff --git a/spng/spng.c b/spng/spng.c
+index 4e7420e..17b057b 100644
+--- a/spng/spng.c
++++ b/spng/spng.c
+@@ -3547,6 +3547,16 @@ int spng_decode_row(spng_ctx *ctx, void *out, size_t len)
+     return 0;
+ }
+ 
++int spng_decode_chunks(spng_ctx *ctx)
++{
++    if(ctx == NULL) return 1;
++    if(ctx->encode_only) return SPNG_ECTXTYPE;
++    if(ctx->state < SPNG_STATE_INPUT) return SPNG_ENOSRC;
++    if(ctx->state == SPNG_STATE_IEND) return 0;
++
++    return read_chunks(ctx, 0);
++}
++
+ int spng_decode_image(spng_ctx *ctx, void *out, size_t len, int fmt, int flags)
+ {
+     if(ctx == NULL) return 1;
+diff --git a/spng/spng.h b/spng/spng.h
+index 25f8234..b5f9f15 100644
+--- a/spng/spng.h
++++ b/spng/spng.h
+@@ -468,6 +468,7 @@ SPNG_API int spng_decode_image(spng_ctx *ctx, void *out, size_t len, int fmt, in
+ /* Progressive decode */
+ SPNG_API int spng_decode_scanline(spng_ctx *ctx, void *out, size_t len);
+ SPNG_API int spng_decode_row(spng_ctx *ctx, void *out, size_t len);
++SPNG_API int spng_decode_chunks(spng_ctx *ctx);
+ 
+ /* Encode/decode */
+ SPNG_API int spng_get_row_info(spng_ctx *ctx, struct spng_row_info *row_info);
+~~~~
+
+## Uniform selected declaration context
+
+The same mechanical rule is used for every case: in lexicographic changed-production-path order, show +/-24 lines around the first literal identity match in each snapshot.
+
+### S0
+
+~~~~text
+<no matching declaration in the selected production files>
+~~~~
+
+### S1
+
+Path: `spng/spng.c`; lines 3526-3574
+
+~~~~text
+003526:                 size_t ioffset = adam7_x_start[pass] + k * adam7_x_delta[pass];
+003527: 
+003528:                 sample = sample << (iter.initial_shift - ioffset * ihdr->bit_depth % 8);
+003529: 
+003530:                 ioffset /= samples_per_byte;
+003531: 
+003532:                 outptr[ioffset] |= sample;
+003533:             }
+003534: 
+003535:             return 0;
+003536:         }
+003537:         else pixel_size = ctx->bytes_per_pixel;
+003538:     }
+003539: 
+003540:     for(k=0; k < ctx->subimage[pass].width; k++)
+003541:     {
+003542:         size_t ioffset = (adam7_x_start[pass] + (size_t) k * adam7_x_delta[pass]) * pixel_size;
+003543: 
+003544:         memcpy(outptr + ioffset, ctx->row + k * pixel_size, pixel_size);
+003545:     }
+003546: 
+003547:     return 0;
+003548: }
+003549: 
+003550: int spng_decode_chunks(spng_ctx *ctx)
+003551: {
+003552:     if(ctx == NULL) return 1;
+003553:     if(ctx->encode_only) return SPNG_ECTXTYPE;
+003554:     if(ctx->state < SPNG_STATE_INPUT) return SPNG_ENOSRC;
+003555:     if(ctx->state == SPNG_STATE_IEND) return 0;
+003556: 
+003557:     return read_chunks(ctx, 0);
+003558: }
+003559: 
+003560: int spng_decode_image(spng_ctx *ctx, void *out, size_t len, int fmt, int flags)
+003561: {
+003562:     if(ctx == NULL) return 1;
+003563:     if(ctx->encode_only) return SPNG_ECTXTYPE;
+003564:     if(ctx->state >= SPNG_STATE_EOI) return SPNG_EOI;
+003565: 
+003566:     int ret = spng_decoded_image_size(ctx, fmt, &ctx->total_out_size);
+003567:     if(ret) return decode_err(ctx, ret);
+003568: 
+003569:     ret = read_chunks(ctx, 0);
+003570:     if(ret) return ret;
+003571: 
+003572:     if( !(flags & SPNG_DECODE_PROGRESSIVE) )
+003573:     {
+003574:         if(out == NULL) return 1;
+~~~~
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T5027","gap_exists":true,"gap_type":["entry_point","API_protocol","state"],"confidence":98,"affected_functions":["spng_decode_chunks","read_chunks"],"reason":"S1 exposes the new public entry point spng_decode_chunks(), but H0 never calls it. The function has its own state-sensitive protocol—rejecting encode-only contexts, contexts before SPNG_STATE_INPUT, accepting SPNG_STATE_IEND, and otherwise invoking read_chunks(ctx, 0)—that is not exercised through this API by the existing image-decoding workflow.","evidence":["spng/spng.h adds SPNG_API int spng_decode_chunks(spng_ctx *ctx).","spng_decode_chunks() branches on ctx == NULL, ctx->encode_only, ctx->state < SPNG_STATE_INPUT, and ctx->state == SPNG_STATE_IEND before calling read_chunks(ctx, 0).","tests/spng_read_fuzzer.c calls spng_decoded_image_size(), chunk getters, spng_decode_image(), spng_decode_row(), and spng_get_row_info(), but contains no call to spng_decode_chunks().","H0 always creates a decode context and sets a PNG buffer, stream, or file before parsing, so it does not test the new API's no-source or alternate-state call protocol."],"recommended_action":"Add a fuzz-controlled spng_decode_chunks() route that invokes it across buffer and stream inputs, before source assignment, after source assignment, repeatedly after successful or failed chunk parsing, and after reaching IEND; check stable return behavior and sanitizer findings."}
+tokens used
+6,670

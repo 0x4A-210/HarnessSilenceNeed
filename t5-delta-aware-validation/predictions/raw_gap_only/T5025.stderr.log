@@ -1,0 +1,1117 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t5-gap_only-T5025-fxuzpo5n
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08aeb-60bb-76c2-8e92-9e077e738943
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T5025
+
+## Existing harness H0
+
+Every project-owned C/C++ path containing `fuzz` at the pre-change snapshot is shown below. Framework and build-script scaffolding are not expanded.
+
+### H0 path: `test/ares-fuzz.c`
+
+~~~~cpp
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+/*
+ * General driver to allow command-line fuzzer (i.e. afl) to
+ * exercise the libFuzzer entrypoint.
+ */
+#include <stdio.h>
+
+#include <sys/types.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef WIN32
+#  include <io.h>
+#else
+#  include <unistd.h>
+#endif
+
+#include "ares.h"
+
+#define kMaxAflInputSize (1 << 20)
+static unsigned char afl_buffer[kMaxAflInputSize];
+
+#ifdef __AFL_LOOP
+/* If we are built with afl-clang-fast, use persistent mode */
+#  define KEEP_FUZZING(count) __AFL_LOOP(1000)
+#else
+/* If we are built with afl-clang, execute each input once */
+#  define KEEP_FUZZING(count) ((count) < 1)
+#endif
+
+/* In ares-test-fuzz.c and ares-test-fuzz-name.c: */
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+static void ProcessFile(int fd)
+{
+  ares_ssize_t count = read(fd, afl_buffer, kMaxAflInputSize);
+  /*
+   * Make a copy of the data so that it's not part of a larger
+   * buffer (where buffer overflows would go unnoticed).
+   */
+  if (count > 0) {
+    unsigned char *copied_data = (unsigned char *)malloc((size_t)count);
+    memcpy(copied_data, afl_buffer, (size_t)count);
+    LLVMFuzzerTestOneInput(copied_data, (size_t)count);
+    free(copied_data);
+  }
+}
+
+int main(int argc, char *argv[])
+{
+  if (argc == 1) {
+    int count = 0;
+    while (KEEP_FUZZING(count)) {
+#ifndef STDIN_FILENO
+      ProcessFile(fileno(stdin));
+#else
+      ProcessFile(STDIN_FILENO);
+#endif
+      count++;
+    }
+  } else {
+    int ii;
+    for (ii = 1; ii < argc; ++ii) {
+      int fd = open(argv[ii], O_RDONLY);
+      if (fd < 0) {
+        fprintf(stderr, "Failed to open '%s'\n", argv[ii]);
+        continue;
+      }
+      ProcessFile(fd);
+      close(fd);
+    }
+  }
+  return 0;
+}
+~~~~
+
+### H0 path: `test/ares-test-fuzz-name.c`
+
+~~~~cpp
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "ares.h"
+/* Include ares internal file for DNS protocol constants */
+#include "ares_nameser.h"
+
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+/* Entrypoint for Clang's libfuzzer, exercising query creation. */
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+  /* Null terminate the data. */
+  char          *name   = malloc(size + 1);
+  unsigned char *buf    = NULL;
+  int            buflen = 0;
+  name[size]            = '\0';
+  memcpy(name, data, size);
+
+  ares_create_query(name, C_IN, T_AAAA, 1234, 0, &buf, &buflen, 1024);
+  free(buf);
+  free(name);
+  return 0;
+}
+~~~~
+
+### H0 path: `test/ares-test-fuzz.c`
+
+~~~~cpp
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#include <stddef.h>
+#include <stdio.h>
+#include "ares.h"
+#include "include/ares_buf.h"
+#include "include/ares_mem.h"
+
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+#ifdef USE_LEGACY_PARSERS
+
+/* This implementation calls the legacy c-ares parsers, which historically
+ * all used different logic and parsing.  As of c-ares 1.21.0 these are
+ * simply wrappers around a single parser, and simply convert the parsed
+ * DNS response into the data structures the legacy parsers used which is a
+ * small amount of code and not likely going to vary based on the input data.
+ *
+ * Instead, these days, it makes more sense to test the new parser directly
+ * instead of calling it 10 or 11 times with the same input data to speed up
+ * the number of iterations per second the fuzzer can perform.
+ *
+ * We are keeping this legacy fuzzer test for historic reasons or if someone
+ * finds them of use.
+ */
+
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+  /* Feed the data into each of the ares_parse_*_reply functions. */
+  struct hostent          *host = NULL;
+  struct ares_addrttl      info[5];
+  struct ares_addr6ttl     info6[5];
+  unsigned char            addrv4[4] = { 0x10, 0x20, 0x30, 0x40 };
+  struct ares_srv_reply   *srv       = NULL;
+  struct ares_mx_reply    *mx        = NULL;
+  struct ares_txt_reply   *txt       = NULL;
+  struct ares_soa_reply   *soa       = NULL;
+  struct ares_naptr_reply *naptr     = NULL;
+  struct ares_caa_reply   *caa       = NULL;
+  struct ares_uri_reply   *uri       = NULL;
+  int                      count     = 5;
+  ares_parse_a_reply(data, (int)size, &host, info, &count);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  host  = NULL;
+  count = 5;
+  ares_parse_aaaa_reply(data, (int)size, &host, info6, &count);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  host = NULL;
+  ares_parse_ptr_reply(data, (int)size, addrv4, sizeof(addrv4), AF_INET, &host);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  host = NULL;
+  ares_parse_ns_reply(data, (int)size, &host);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  ares_parse_srv_reply(data, (int)size, &srv);
+  if (srv) {
+    ares_free_data(srv);
+  }
+
+  ares_parse_mx_reply(data, (int)size, &mx);
+  if (mx) {
+    ares_free_data(mx);
+  }
+
+  ares_parse_txt_reply(data, (int)size, &txt);
+  if (txt) {
+    ares_free_data(txt);
+  }
+
+  ares_parse_soa_reply(data, (int)size, &soa);
+  if (soa) {
+    ares_free_data(soa);
+  }
+
+  ares_parse_naptr_reply(data, (int)size, &naptr);
+  if (naptr) {
+    ares_free_data(naptr);
+  }
+
+  ares_parse_caa_reply(data, (int)size, &caa);
+  if (caa) {
+    ares_free_data(caa);
+  }
+
+  ares_parse_uri_reply(data, (int)size, &uri);
+  if (uri) {
+    ares_free_data(uri);
+  }
+
+  return 0;
+}
+
+#else
+
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+  ares_dns_record_t *dnsrec    = NULL;
+  char              *printdata = NULL;
+  ares_buf_t        *printmsg  = NULL;
+  size_t             i;
+  unsigned char     *datadup     = NULL;
+  size_t             datadup_len = 0;
+
+  /* There is never a reason to have a size > 65535, it is immediately
+   * rejected by the parser */
+  if (size > 65535) {
+    return -1;
+  }
+
+  if (ares_dns_parse(data, size, 0, &dnsrec) != ARES_SUCCESS) {
+    goto done;
+  }
+
+  /* Lets test the message fetchers */
+  printmsg = ares_buf_create();
+  if (printmsg == NULL) {
+    goto done;
+  }
+
+  ares_buf_append_str(printmsg, ";; ->>HEADER<<- opcode: ");
+  ares_buf_append_str(
+    printmsg, ares_dns_opcode_tostr(ares_dns_record_get_opcode(dnsrec)));
+  ares_buf_append_str(printmsg, ", status: ");
+  ares_buf_append_str(printmsg,
+                      ares_dns_rcode_tostr(ares_dns_record_get_rcode(dnsrec)));
+  ares_buf_append_str(printmsg, ", id: ");
+  ares_buf_append_num_dec(printmsg, (size_t)ares_dns_record_get_id(dnsrec), 0);
+  ares_buf_append_str(printmsg, "\n;; flags: ");
+  ares_buf_append_num_hex(printmsg, (size_t)ares_dns_record_get_flags(dnsrec),
+                          0);
+  ares_buf_append_str(printmsg, "; QUERY: ");
+  ares_buf_append_num_dec(printmsg, ares_dns_record_query_cnt(dnsrec), 0);
+  ares_buf_append_str(printmsg, ", ANSWER: ");
+  ares_buf_append_num_dec(
+    printmsg, ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_ANSWER), 0);
+  ares_buf_append_str(printmsg, ", AUTHORITY: ");
+  ares_buf_append_num_dec(
+    printmsg, ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_AUTHORITY), 0);
+  ares_buf_append_str(printmsg, ", ADDITIONAL: ");
+  ares_buf_append_num_dec(
+    printmsg, ares_dns_record_rr_cnt(dnsrec, ARES_SECTION_ADDITIONAL), 0);
+  ares_buf_append_str(printmsg, "\n\n");
+  ares_buf_append_str(printmsg, ";; QUESTION SECTION:\n");
+  for (i = 0; i < ares_dns_record_query_cnt(dnsrec); i++) {
+    const char         *name;
+    ares_dns_rec_type_t qtype;
+    ares_dns_class_t    qclass;
+
+    if (ares_dns_record_query_get(dnsrec, i, &name, &qtype, &qclass) !=
+        ARES_SUCCESS) {
+      goto done;
+    }
+
+    ares_buf_append_str(printmsg, ";");
+    ares_buf_append_str(printmsg, name);
+    ares_buf_append_str(printmsg, ".\t\t\t");
+    ares_buf_append_str(printmsg, ares_dns_class_tostr(qclass));
+    ares_buf_append_str(printmsg, "\t");
+    ares_buf_append_str(printmsg, ares_dns_rec_type_tostr(qtype));
+    ares_buf_append_str(printmsg, "\n");
+  }
+  ares_buf_append_str(printmsg, "\n");
+  for (i = ARES_SECTION_ANSWER; i < ARES_SECTION_ADDITIONAL + 1; i++) {
+    size_t j;
+
+    ares_buf_append_str(printmsg, ";; ");
+    ares_buf_append_str(printmsg,
+                        ares_dns_section_tostr((ares_dns_section_t)i));
+    ares_buf_append_str(printmsg, " SECTION:\n");
+    for (j = 0; j < ares_dns_record_rr_cnt(dnsrec, (ares_dns_section_t)i);
+         j++) {
+      size_t                   keys_cnt = 0;
+      const ares_dns_rr_key_t *keys     = NULL;
+      ares_dns_rr_t           *rr       = NULL;
+      size_t                   k;
+
+      rr = ares_dns_record_rr_get(dnsrec, (ares_dns_section_t)i, j);
+      ares_buf_append_str(printmsg, ares_dns_rr_get_name(rr));
+      ares_buf_append_str(printmsg, ".\t\t\t");
+      ares_buf_append_str(printmsg,
+                          ares_dns_class_tostr(ares_dns_rr_get_class(rr)));
+      ares_buf_append_str(printmsg, "\t");
+      ares_buf_append_str(printmsg,
+                          ares_dns_rec_type_tostr(ares_dns_rr_get_type(rr)));
+      ares_buf_append_str(printmsg, "\t");
+      ares_buf_append_num_dec(printmsg, ares_dns_rr_get_ttl(rr), 0);
+      ares_buf_append_str(printmsg, "\t");
+
+      keys = ares_dns_rr_get_keys(ares_dns_rr_get_type(rr), &keys_cnt);
+      for (k = 0; k < keys_cnt; k++) {
+        char buf[256] = "";
+
+        ares_buf_append_str(printmsg, ares_dns_rr_key_tostr(keys[k]));
+        ares_buf_append_str(printmsg, "=");
+        switch (ares_dns_rr_key_datatype(keys[k])) {
+          case ARES_DATATYPE_INADDR:
+            ares_inet_ntop(AF_INET, ares_dns_rr_get_addr(rr, keys[k]), buf,
+                           sizeof(buf));
+            ares_buf_append_str(printmsg, buf);
+            break;
+          case ARES_DATATYPE_INADDR6:
+            ares_inet_ntop(AF_INET6, ares_dns_rr_get_addr6(rr, keys[k]), buf,
+                           sizeof(buf));
+            ares_buf_append_str(printmsg, buf);
+            break;
+          case ARES_DATATYPE_U8:
+            ares_buf_append_num_dec(printmsg, ares_dns_rr_get_u8(rr, keys[k]),
+                                    0);
+            break;
+          case ARES_DATATYPE_U16:
+            ares_buf_append_num_dec(printmsg, ares_dns_rr_get_u16(rr, keys[k]),
+                                    0);
+            break;
+          case ARES_DATATYPE_U32:
+            ares_buf_append_num_dec(printmsg, ares_dns_rr_get_u32(rr, keys[k]),
+                                    0);
+            break;
+          case ARES_DATATYPE_NAME:
+          case ARES_DATATYPE_STR:
+            ares_buf_append_byte(printmsg, '"');
+            ares_buf_append_str(printmsg, ares_dns_rr_get_str(rr, keys[k]));
+            ares_buf_append_byte(printmsg, '"');
+            break;
+          case ARES_DATATYPE_BIN:
+            /* TODO */
+            break;
+          case ARES_DATATYPE_BINP:
+            {
+              size_t templen;
+              ares_buf_append_byte(printmsg, '"');
+              ares_buf_append_str(printmsg, (const char *)ares_dns_rr_get_bin(
+                                              rr, keys[k], &templen));
+              ares_buf_append_byte(printmsg, '"');
+            }
+            break;
+          case ARES_DATATYPE_ABINP:
+            {
+              size_t a;
+              for (a = 0; a < ares_dns_rr_get_abin_cnt(rr, keys[k]); a++) {
+                size_t templen;
+
+                if (a != 0) {
+                  ares_buf_append_byte(printmsg, ' ');
+                }
+                ares_buf_append_byte(printmsg, '"');
+                ares_buf_append_str(
+                  printmsg,
+                  (const char *)ares_dns_rr_get_abin(rr, keys[k], a, &templen));
+                ares_buf_append_byte(printmsg, '"');
+              }
+            }
+            break;
+          case ARES_DATATYPE_OPT:
+            /* TODO */
+            break;
+        }
+        ares_buf_append_str(printmsg, " ");
+      }
+      ares_buf_append_str(printmsg, "\n");
+    }
+  }
+  ares_buf_append_str(printmsg, ";; SIZE: ");
+  ares_buf_append_num_dec(printmsg, size, 0);
+  ares_buf_append_str(printmsg, "\n\n");
+
+  printdata = ares_buf_finish_str(printmsg, NULL);
+  printmsg  = NULL;
+
+  /* Write it back out as a dns message to test writer */
+  if (ares_dns_write(dnsrec, &datadup, &datadup_len) != ARES_SUCCESS) {
+    goto done;
+  }
+
+done:
+  ares_dns_record_destroy(dnsrec);
+  ares_buf_destroy(printmsg);
+  ares_free(printdata);
+  ares_free(datadup);
+  return 0;
+}
+
+#endif
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed C/C++ production paths and all hunks are included. Function-context mode expands changed C/C++ function bodies; tests, examples, documentation, build files, and Harness files are excluded by the frozen rule.
+
+~~~~diff
+diff --git a/include/ares.h b/include/ares.h
+index d7ae236..04179f3 100644
+--- a/include/ares.h
++++ b/include/ares.h
+@@ -663,9 +663,47 @@ CARES_EXTERN struct timeval *ares_timeout(const ares_channel_t *channel,
+                                           struct timeval       *maxtv,
+                                           struct timeval       *tv);
+ 
+-CARES_EXTERN CARES_DEPRECATED_FOR(ares_process_fd) void ares_process(
++CARES_EXTERN CARES_DEPRECATED_FOR(ares_process_fds) void ares_process(
+   ares_channel_t *channel, fd_set *read_fds, fd_set *write_fds);
+ 
++/*! Events used by ares_fd_events_t */
++typedef enum {
++  ARES_FD_EVENT_NONE  = 0,      /*!< No events */
++  ARES_FD_EVENT_READ  = 1 << 0, /*!< Read event (including disconnect/error) */
++  ARES_FD_EVENT_WRITE = 1 << 1  /*!< Write event */
++} ares_fd_eventflag_t;
++
++/*! Type holding a file descriptor and mask of events, used by
++ *  ares_process_fds() */
++typedef struct {
++  ares_socket_t fd;     /*!< File descriptor */
++  unsigned int  events; /*!< Mask of ares_fd_eventflag_t */
++} ares_fd_events_t;
++
++/*! Flags used by ares_process_fds() */
++typedef enum {
++  ARES_PROCESS_FLAG_NONE        = 0,     /*!< No flag value */
++  ARES_PROCESS_FLAG_SKIP_NON_FD = 1 << 0 /*!< skip any processing unrelated to
++                                          *   the file descriptor events passed
++                                          *    in */
++} ares_process_flag_t;
++
++/*! Process events on multiple file descriptors based on the event mask
++ *  associated with each file descriptor.  Recommended over calling
++ *  ares_process_fd() multiple times since it would trigger additional logic
++ *  such as timeout processing on each call.
++ *
++ *  \param[in] channel  Initialized ares channel
++ *  \param[in] events   Array of file descriptors with events.  May be NULL if
++ *                      no events, but may have timeouts to process.
++ *  \param[in] nevents  Number of elements in the events array.  May be 0 if
++ *                      no events, but may have timeouts to process.
++ *  \param[in] flags    Flags to alter behavior of the process command.
++ */
++CARES_EXTERN void ares_process_fds(ares_channel_t         *channel,
++                                   const ares_fd_events_t *events,
++                                   size_t nevents, unsigned int flags);
++
+ CARES_EXTERN void ares_process_fd(ares_channel_t *channel,
+                                   ares_socket_t   read_fd,
+                                   ares_socket_t   write_fd);
+diff --git a/src/lib/ares_process.c b/src/lib/ares_process.c
+index a4c07d6..6c5a74b 100644
+--- a/src/lib/ares_process.c
++++ b/src/lib/ares_process.c
+@@ -46,10 +46,10 @@
+ 
+ 
+ static void timeadd(ares_timeval_t *now, size_t millisecs);
+-static void process_write(const ares_channel_t *channel, fd_set *write_fds,
+-                          ares_socket_t write_fd);
+-static void process_read(const ares_channel_t *channel, fd_set *read_fds,
+-                         ares_socket_t read_fd, const ares_timeval_t *now);
++static void process_write(const ares_channel_t *channel,
++                          ares_socket_t         write_fd);
++static void process_read(const ares_channel_t *channel, ares_socket_t read_fd,
++                         const ares_timeval_t *now);
+ static void process_timeouts(ares_channel_t       *channel,
+                              const ares_timeval_t *now);
+ static ares_status_t process_answer(ares_channel_t      *channel,
+@@ -178,166 +178,205 @@ ares_bool_t ares_timedout(const ares_timeval_t *now,
+ /* add the specific number of milliseconds to the time in the first argument */
+ static void timeadd(ares_timeval_t *now, size_t millisecs)
+ {
+   now->sec  += (ares_int64_t)millisecs / 1000;
+   now->usec += (unsigned int)((millisecs % 1000) * 1000);
+ 
+   if (now->usec >= 1000000) {
+     now->sec  += now->usec / 1000000;
+     now->usec %= 1000000;
+   }
+ }
+ 
+-/*
+- * generic process function
+- */
+-static void processfds(ares_channel_t *channel, fd_set *read_fds,
+-                       ares_socket_t read_fd, fd_set *write_fds,
+-                       ares_socket_t write_fd)
++static void ares_process_fds_nolock(ares_channel_t         *channel,
++                                    const ares_fd_events_t *events,
++                                    size_t nevents, unsigned int flags)
+ {
+   ares_timeval_t now;
++  size_t         i;
+ 
+-  if (channel == NULL) {
++  if (channel == NULL || (events == NULL && nevents != 0)) {
+     return; /* LCOV_EXCL_LINE: DefensiveCoding */
+   }
+ 
+-  ares_channel_lock(channel);
+   ares_tvnow(&now);
+-  process_read(channel, read_fds, read_fd, &now);
+-  process_timeouts(channel, &now);
+-  process_write(channel, write_fds, write_fd);
+ 
+-  /* See if any connections should be cleaned up */
+-  ares_check_cleanup_conns(channel);
+-  ares_channel_unlock(channel);
++  /* Process read events */
++  for (i = 0; i < nevents; i++) {
++    if (events[i].fd == ARES_SOCKET_BAD ||
++        !(events[i].events & ARES_FD_EVENT_READ)) {
++      continue;
++    }
++    process_read(channel, events[i].fd, &now);
++  }
++
++  /* Process write events */
++  for (i = 0; i < nevents; i++) {
++    if (events[i].fd == ARES_SOCKET_BAD ||
++        !(events[i].events & ARES_FD_EVENT_WRITE)) {
++      continue;
++    }
++    process_write(channel, events[i].fd);
++  }
++
++  if (!(flags & ARES_PROCESS_FLAG_SKIP_NON_FD)) {
++    ares_check_cleanup_conns(channel);
++    process_timeouts(channel, &now);
++  }
+ }
+ 
+-/* Something interesting happened on the wire, or there was a timeout.
+- * See what's up and respond accordingly.
+- */
+-void ares_process(ares_channel_t *channel, fd_set *read_fds, fd_set *write_fds)
++void ares_process_fds(ares_channel_t *channel, const ares_fd_events_t *events,
++                      size_t nevents, unsigned int flags)
+ {
+-  processfds(channel, read_fds, ARES_SOCKET_BAD, write_fds, ARES_SOCKET_BAD);
++  if (channel == NULL) {
++    return;
++  }
++
++  ares_channel_lock(channel);
++  ares_process_fds_nolock(channel, events, nevents, flags);
++  ares_channel_unlock(channel);
+ }
+ 
+-/* Something interesting happened on the wire, or there was a timeout.
+- * See what's up and respond accordingly.
+- */
+-void ares_process_fd(ares_channel_t *channel,
+-                     ares_socket_t   read_fd, /* use ARES_SOCKET_BAD or valid
+-                                                 file descriptors */
+-                     ares_socket_t   write_fd)
++void ares_process_fd(ares_channel_t *channel, ares_socket_t read_fd,
++                     ares_socket_t write_fd)
+ {
+-  processfds(channel, NULL, read_fd, NULL, write_fd);
++  ares_fd_events_t events[2];
++  size_t           nevents = 0;
++
++  memset(events, 0, sizeof(events));
++
++  if (read_fd != ARES_SOCKET_BAD) {
++    nevents++;
++    events[nevents - 1].fd      = read_fd;
++    events[nevents - 1].events |= ARES_FD_EVENT_READ;
++  }
++
++  if (write_fd != ARES_SOCKET_BAD) {
++    if (write_fd != read_fd) {
++      nevents++;
++    }
++    events[nevents - 1].fd      = read_fd;
++    events[nevents - 1].events |= ARES_FD_EVENT_WRITE;
++  }
++
++  ares_process_fds(channel, events, nevents, ARES_PROCESS_FLAG_NONE);
+ }
+ 
+ static ares_socket_t *channel_socket_list(const ares_channel_t *channel,
+                                           size_t               *num)
+ {
+   ares_slist_node_t *snode;
+   ares_array_t      *arr = ares_array_create(sizeof(ares_socket_t), NULL);
+ 
+   *num = 0;
+ 
+   if (arr == NULL) {
+     return NULL; /* LCOV_EXCL_LINE: OutOfMemory */
+   }
+ 
+   for (snode = ares_slist_node_first(channel->servers); snode != NULL;
+        snode = ares_slist_node_next(snode)) {
+     ares_server_t     *server = ares_slist_node_val(snode);
+     ares_llist_node_t *node;
+ 
+     for (node = ares_llist_node_first(server->connections); node != NULL;
+          node = ares_llist_node_next(node)) {
+       const ares_conn_t *conn = ares_llist_node_val(node);
+       ares_socket_t     *sptr;
+       ares_status_t      status;
+ 
+       if (conn->fd == ARES_SOCKET_BAD) {
+         continue;
+       }
+ 
+       status = ares_array_insert_last((void **)&sptr, arr);
+       if (status != ARES_SUCCESS) {
+         ares_array_destroy(arr); /* LCOV_EXCL_LINE: OutOfMemory */
+         return NULL;             /* LCOV_EXCL_LINE: OutOfMemory */
+       }
+       *sptr = conn->fd;
+     }
+   }
+ 
+   return ares_array_finish(arr, num);
+ }
+ 
+-/* If any TCP sockets select true for writing, write out queued data
+- * we have for them.
++/* Something interesting happened on the wire, or there was a timeout.
++ * See what's up and respond accordingly.
+  */
+-static void ares_notify_write(ares_conn_t *conn)
+-{
+-  ares_status_t status;
+-
+-  /* Mark as connected if we got here and TFO Initial not set */
+-  if (!(conn->flags & ARES_CONN_FLAG_TFO_INITIAL)) {
+-    conn->state_flags |= ARES_CONN_STATE_CONNECTED;
+-  }
+-
+-  status = ares_conn_flush(conn);
+-  if (status != ARES_SUCCESS) {
+-    handle_conn_error(conn, ARES_TRUE, status);
+-  }
+-}
+-
+-static void process_write(const ares_channel_t *channel, fd_set *write_fds,
+-                          ares_socket_t write_fd)
++void ares_process(ares_channel_t *channel, fd_set *read_fds, fd_set *write_fds)
+ {
+-  size_t             i;
+-  ares_socket_t     *socketlist  = NULL;
+-  size_t             num_sockets = 0;
+-  ares_llist_node_t *node        = NULL;
++  size_t            i;
++  size_t            num_sockets;
++  ares_socket_t    *socketlist;
++  ares_fd_events_t *events  = NULL;
++  size_t            nevents = 0;
+ 
+-  if (!write_fds && write_fd == ARES_SOCKET_BAD) {
+-    /* no possible action */
++  if (channel == NULL) {
+     return;
+   }
+ 
+-  /* Single socket specified */
+-  if (!write_fds) {
+-    node = ares_htable_asvp_get_direct(channel->connnode_by_socket, write_fd);
+-    if (node == NULL) {
+-      return;
+-    }
+-
+-    ares_notify_write(ares_llist_node_val(node));
+-    return;
+-  }
++  ares_channel_lock(channel);
+ 
+   /* There is no good way to iterate across an fd_set, instead we must pull a
+    * list of all known fds, and iterate across that checking against the fd_set.
+    */
+   socketlist = channel_socket_list(channel, &num_sockets);
+ 
++  /* Lets create an events array, maximum number is the number of sockets in
++   * the list, so we'll use that and just track entries with nevents */
++  if (num_sockets) {
++    events = ares_malloc_zero(sizeof(*events) * num_sockets);
++    if (events == NULL) {
++      goto done;
++    }
++  }
++
+   for (i = 0; i < num_sockets; i++) {
+-    if (!FD_ISSET(socketlist[i], write_fds)) {
+-      continue;
++    ares_bool_t had_read = ARES_FALSE;
++    if (read_fds && FD_ISSET(socketlist[i], read_fds)) {
++      nevents++;
++      events[nevents - 1].fd      = socketlist[i];
++      events[nevents - 1].events |= ARES_FD_EVENT_READ;
++      had_read                    = ARES_TRUE;
++    }
++    if (write_fds && FD_ISSET(socketlist[i], write_fds)) {
++      if (!had_read) {
++        nevents++;
++      }
++      events[nevents - 1].fd      = socketlist[i];
++      events[nevents - 1].events |= ARES_FD_EVENT_WRITE;
+     }
++  }
+ 
+-    /* If there's an error and we close this socket, then open
+-     * another with the same fd to talk to another server, then we
+-     * don't want to think that it was the new socket that was
+-     * ready. This is not disastrous, but is likely to result in
+-     * extra system calls and confusion. */
+-    FD_CLR(socketlist[i], write_fds);
++done:
++  ares_process_fds_nolock(channel, events, nevents, ARES_PROCESS_FLAG_NONE);
++  ares_free(events);
++  ares_free(socketlist);
++  ares_channel_unlock(channel);
++}
+ 
+-    node =
+-      ares_htable_asvp_get_direct(channel->connnode_by_socket, socketlist[i]);
+-    if (node == NULL) {
+-      return;
+-    }
++static void process_write(const ares_channel_t *channel, ares_socket_t write_fd)
++{
++  ares_llist_node_t *node;
++  ares_conn_t       *conn;
++  ares_status_t      status;
+ 
+-    ares_notify_write(ares_llist_node_val(node));
++  node = ares_htable_asvp_get_direct(channel->connnode_by_socket, write_fd);
++  if (node == NULL) {
++    return;
+   }
+ 
+-  ares_free(socketlist);
++  conn = ares_llist_node_val(node);
++
++  /* Mark as connected if we got here and TFO Initial not set */
++  if (!(conn->flags & ARES_CONN_FLAG_TFO_INITIAL)) {
++    conn->state_flags |= ARES_CONN_STATE_CONNECTED;
++  }
++
++  status = ares_conn_flush(conn);
++  if (status != ARES_SUCCESS) {
++    handle_conn_error(conn, ARES_TRUE, status);
++  }
+ }
+ 
+ void ares_process_pending_write(ares_channel_t *channel)
+@@ -502,71 +541,29 @@ static void read_answers(ares_conn_t *conn, const ares_timeval_t *now)
+   }
+ }
+ 
+-static void read_conn(ares_conn_t *conn, const ares_timeval_t *now)
++static void process_read(const ares_channel_t *channel, ares_socket_t read_fd,
++                         const ares_timeval_t *now)
+ {
++  ares_llist_node_t *node;
++  ares_conn_t       *conn;
++
++  node = ares_htable_asvp_get_direct(channel->connnode_by_socket, read_fd);
++  if (node == NULL) {
++    return;
++  }
++
++  conn = ares_llist_node_val(node);
++
+   /* TODO: There might be a potential issue here where there was a read that
+    *       read some data, then looped and read again and got a disconnect.
+    *       Right now, that would cause a resend instead of processing the data
+    *       we have.  This is fairly unlikely to occur due to only looping if
+    *       a full buffer of 65535 bytes was read. */
+   if (read_conn_packets(conn) != ARES_SUCCESS) {
+     return;
+   }
+-  read_answers(conn, now);
+-}
+-
+-static void process_read(const ares_channel_t *channel, fd_set *read_fds,
+-                         ares_socket_t read_fd, const ares_timeval_t *now)
+-{
+-  size_t             i;
+-  ares_socket_t     *socketlist  = NULL;
+-  size_t             num_sockets = 0;
+-  ares_llist_node_t *node        = NULL;
+-
+-  if (!read_fds && (read_fd == ARES_SOCKET_BAD)) {
+-    /* no possible action */
+-    return;
+-  }
+-
+-  /* Single socket specified */
+-  if (!read_fds) {
+-    node = ares_htable_asvp_get_direct(channel->connnode_by_socket, read_fd);
+-    if (node == NULL) {
+-      return;
+-    }
+-
+-    read_conn(ares_llist_node_val(node), now);
+-
+-    return;
+-  }
+-
+-  /* There is no good way to iterate across an fd_set, instead we must pull a
+-   * list of all known fds, and iterate across that checking against the fd_set.
+-   */
+-  socketlist = channel_socket_list(channel, &num_sockets);
+-
+-  for (i = 0; i < num_sockets; i++) {
+-    if (!FD_ISSET(socketlist[i], read_fds)) {
+-      continue;
+-    }
+-
+-    /* If there's an error and we close this socket, then open
+-     * another with the same fd to talk to another server, then we
+-     * don't want to think that it was the new socket that was
+-     * ready. This is not disastrous, but is likely to result in
+-     * extra system calls and confusion. */
+-    FD_CLR(socketlist[i], read_fds);
+-
+-    node =
+-      ares_htable_asvp_get_direct(channel->connnode_by_socket, socketlist[i]);
+-    if (node == NULL) {
+-      return;
+-    }
+-
+-    read_conn(ares_llist_node_val(node), now);
+-  }
+ 
+-  ares_free(socketlist);
++  read_answers(conn, now);
+ }
+ 
+ /* If any queries have timed out, note the timeout and move them on. */
+diff --git a/src/lib/event/ares_event_thread.c b/src/lib/event/ares_event_thread.c
+index b826b83..24b55d6 100644
+--- a/src/lib/event/ares_event_thread.c
++++ b/src/lib/event/ares_event_thread.c
+@@ -188,12 +188,19 @@ done:
+ static void ares_event_thread_process_fd(ares_event_thread_t *e,
+                                          ares_socket_t fd, void *data,
+                                          ares_event_flags_t flags)
+ {
++  ares_fd_events_t event;
+   (void)data;
+ 
+-  ares_process_fd(e->channel,
+-                  (flags & ARES_EVENT_FLAG_READ) ? fd : ARES_SOCKET_BAD,
+-                  (flags & ARES_EVENT_FLAG_WRITE) ? fd : ARES_SOCKET_BAD);
++  event.fd     = fd;
++  event.events = 0;
++  if (flags & ARES_EVENT_FLAG_READ) {
++    event.events |= ARES_FD_EVENT_READ;
++  }
++  if (flags & ARES_EVENT_FLAG_WRITE) {
++    event.events |= ARES_FD_EVENT_WRITE;
++  }
++  ares_process_fds(e->channel, &event, 1, ARES_PROCESS_FLAG_SKIP_NON_FD);
+ }
+ 
+ static void ares_event_thread_sockstate_cb(void *data, ares_socket_t socket_fd,
+@@ -315,51 +322,52 @@ static void ares_event_thread_cleanup(ares_event_thread_t *e)
+ static void *ares_event_thread(void *arg)
+ {
+   ares_event_thread_t *e = arg;
+   ares_thread_mutex_lock(e->mutex);
+ 
+   while (e->isup) {
+     struct timeval        tv;
+     const struct timeval *tvout;
+     unsigned long         timeout_ms = 0; /* 0 = unlimited */
+     ares_bool_t           process_pending_write;
+ 
+     ares_event_process_updates(e);
+ 
+     /* Don't hold a mutex while waiting on events or calling into anything
+      * that might require a c-ares channel lock since a callback could be
+      * triggered cross-thread */
+     ares_thread_mutex_unlock(e->mutex);
+ 
+     tvout = ares_timeout(e->channel, NULL, &tv);
+     if (tvout != NULL) {
+       timeout_ms =
+         (unsigned long)((tvout->tv_sec * 1000) + (tvout->tv_usec / 1000) + 1);
+     }
+ 
+     e->ev_sys->wait(e, timeout_ms);
+ 
+     /* Process pending write operation */
+     ares_thread_mutex_lock(e->mutex);
+     process_pending_write    = e->process_pending_write;
+     e->process_pending_write = ARES_FALSE;
+     ares_thread_mutex_unlock(e->mutex);
+     if (process_pending_write) {
+       ares_process_pending_write(e->channel);
+     }
+ 
+-    /* Each iteration should do timeout processing */
++    /* Each iteration should do timeout processing and any other cleanup
++     * that may not have been performed */
+     if (e->isup) {
+-      ares_process_fd(e->channel, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
++      ares_process_fds(e->channel, NULL, 0, ARES_PROCESS_FLAG_NONE);
+     }
+ 
+     /* Relock before we loop again */
+     ares_thread_mutex_lock(e->mutex);
+   }
+ 
+   /* Lets cleanup while we're in the thread itself */
+   ares_event_thread_cleanup(e);
+ 
+   ares_thread_mutex_unlock(e->mutex);
+ 
+   return NULL;
+ }
+~~~~
+
+## Uniform selected declaration context
+
+The same mechanical rule is used for every case: in lexicographic changed-production-path order, show +/-24 lines around the first literal identity match in each snapshot.
+
+### S0
+
+~~~~text
+<no matching declaration in the selected production files>
+~~~~
+
+### S1
+
+Path: `include/ares.h`; lines 642-690
+
+~~~~text
+000642: 
+000643: CARES_EXTERN void ares_gethostbyaddr(ares_channel_t *channel, const void *addr,
+000644:                                      int addrlen, int family,
+000645:                                      ares_host_callback callback, void *arg);
+000646: 
+000647: CARES_EXTERN void ares_getnameinfo(ares_channel_t        *channel,
+000648:                                    const struct sockaddr *sa,
+000649:                                    ares_socklen_t salen, int flags,
+000650:                                    ares_nameinfo_callback callback, void *arg);
+000651: 
+000652: CARES_EXTERN      CARES_DEPRECATED_FOR(
+000653:   ARES_OPT_EVENT_THREAD or
+000654:   ARES_OPT_SOCK_STATE_CB) int ares_fds(const ares_channel_t *channel,
+000655:                                             fd_set *read_fds, fd_set *write_fds);
+000656: 
+000657: CARES_EXTERN CARES_DEPRECATED_FOR(
+000658:   ARES_OPT_EVENT_THREAD or
+000659:   ARES_OPT_SOCK_STATE_CB) int ares_getsock(const ares_channel_t *channel,
+000660:                                            ares_socket_t *socks, int numsocks);
+000661: 
+000662: CARES_EXTERN struct timeval *ares_timeout(const ares_channel_t *channel,
+000663:                                           struct timeval       *maxtv,
+000664:                                           struct timeval       *tv);
+000665: 
+000666: CARES_EXTERN CARES_DEPRECATED_FOR(ares_process_fds) void ares_process(
+000667:   ares_channel_t *channel, fd_set *read_fds, fd_set *write_fds);
+000668: 
+000669: /*! Events used by ares_fd_events_t */
+000670: typedef enum {
+000671:   ARES_FD_EVENT_NONE  = 0,      /*!< No events */
+000672:   ARES_FD_EVENT_READ  = 1 << 0, /*!< Read event (including disconnect/error) */
+000673:   ARES_FD_EVENT_WRITE = 1 << 1  /*!< Write event */
+000674: } ares_fd_eventflag_t;
+000675: 
+000676: /*! Type holding a file descriptor and mask of events, used by
+000677:  *  ares_process_fds() */
+000678: typedef struct {
+000679:   ares_socket_t fd;     /*!< File descriptor */
+000680:   unsigned int  events; /*!< Mask of ares_fd_eventflag_t */
+000681: } ares_fd_events_t;
+000682: 
+000683: /*! Flags used by ares_process_fds() */
+000684: typedef enum {
+000685:   ARES_PROCESS_FLAG_NONE        = 0,     /*!< No flag value */
+000686:   ARES_PROCESS_FLAG_SKIP_NON_FD = 1 << 0 /*!< skip any processing unrelated to
+000687:                                           *   the file descriptor events passed
+000688:                                           *    in */
+000689: } ares_process_flag_t;
+000690: 
+~~~~
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T5025","gap_exists":true,"gap_type":["entry_point","stateful_api_protocol","input_semantics","configuration"],"confidence":99,"affected_functions":["ares_process_fds","ares_process_fds_nolock","ares_process_fd","ares_process","process_read","process_write","ares_event_thread_process_fd"],"reason":"H0 only fuzzes DNS query creation and parsing/writing; it never initializes an ares_channel_t, creates live connection/socket state, or invokes the new event-processing API. The supplied change introduces a fuzz-worthy stateful interface whose behavior depends on event-array contents, nevents consistency, per-FD READ/WRITE masks, duplicate or unknown descriptors, and ARES_PROCESS_FLAG_SKIP_NON_FD. The compatibility wrapper ares_process_fd is especially implicated because its write branch assigns events[nevents - 1].fd = read_fd, so write-only and distinct-read/write combinations require direct coverage.","evidence":["test/ares-test-fuzz-name.c calls only ares_create_query with fixed C_IN, T_AAAA, id 1234, flags 0, and max_udp_size 1024.","test/ares-test-fuzz.c feeds bytes to ares_dns_parse and, after successful parsing, exercises record getters and ares_dns_write; its USE_LEGACY_PARSERS branch only calls ares_parse_*_reply functions.","No H0 path calls ares_process_fds, ares_process_fd, ares_process, process_read, process_write, or configures ares_channel_t connection state.","include/ares.h exposes ares_process_fds(channel, events, nevents, flags), with events optionally NULL only when nevents is 0, event bits ARES_FD_EVENT_READ and ARES_FD_EVENT_WRITE, and ARES_PROCESS_FLAG_SKIP_NON_FD.","ares_process_fds_nolock iterates the same event array separately for reads and writes, ignores ARES_SOCKET_BAD, looks descriptors up through process_read/process_write, and conditionally runs ares_check_cleanup_conns and process_timeouts based on flags.","ares_process_fd constructs up to two ares_fd_events_t entries, merges equal descriptors, and in the write branch visibly stores read_fd rather than write_fd.","ares_event_thread_process_fd maps ARES_EVENT_FLAG_READ/WRITE into the new mask and calls ares_process_fds with ARES_PROCESS_FLAG_SKIP_NON_FD, while the event loop separately calls it with NULL, 0, and ARES_PROCESS_FLAG_NONE."],"recommended_action":"Add a stateful harness that initializes an ares_channel_t with controlled socket/connection I/O and decodes fuzz input into event arrays, nevents, masks, descriptor relationships, and process flags. Exercise ares_process_fds plus ares_process_fd with read-only, write-only, combined, distinct, duplicate, unknown, and ARES_SOCKET_BAD descriptors; include NULL/zero versus inconsistent NULL/nonzero arrays, SKIP_NON_FD versus NONE, repeated calls, timeout/cleanup transitions, and readable data or disconnect/error outcomes."}
+tokens used
+13,998

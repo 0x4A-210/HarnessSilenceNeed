@@ -1,0 +1,141 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/maintenance-gap_only-C003-39v99ebq
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08637-d9e3-7850-b070-33106201307f
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C003
+
+## Existing Fuzz Harness H0
+
+### `c/fuzz/decode_fuzzer.c`
+
+~~~~c
+// Copyright 2015 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#include <brotli/decode.h>
+
+// Entry point for LibFuzzer.
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  size_t addend = 0;
+  if (size > 0)
+    addend = data[size - 1] & 7;
+  const uint8_t* next_in = data;
+
+  const int kBufferSize = 1024;
+  uint8_t* buffer = (uint8_t*) malloc(kBufferSize);
+  if (!buffer) {
+    // OOM is out-of-scope here.
+    return 0;
+  }
+  /* The biggest "magic number" in brotli is 16MiB - 16, so no need to check
+     the cases with much longer output. */
+  const size_t total_out_limit = (addend == 0) ? (1 << 26) : (1 << 24);
+  size_t total_out = 0;
+
+  BrotliDecoderState* state = BrotliDecoderCreateInstance(0, 0, 0);
+
+  if (addend == 0)
+    addend = size;
+  /* Test both fast (addend == size) and slow (addend <= 7) decoding paths. */
+  for (size_t i = 0; i < size;) {
+    size_t next_i = i + addend;
+    if (next_i > size)
+      next_i = size;
+    size_t avail_in = next_i - i;
+    i = next_i;
+    BrotliDecoderResult result = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
+    while (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
+      size_t avail_out = kBufferSize;
+      uint8_t* next_out = buffer;
+      result = BrotliDecoderDecompressStream(
+          state, &avail_in, &next_in, &avail_out, &next_out, &total_out);
+      if (total_out > total_out_limit)
+        break;
+    }
+    if (total_out > total_out_limit)
+      break;
+    if (result != BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT)
+      break;
+  }
+
+  BrotliDecoderDestroyInstance(state);
+  free(buffer);
+  return 0;
+}
+~~~~
+
+## Production Source Change (S0 -> S1)
+
+Harness changes, commit messages, tests, outcomes, and future evidence are excluded. The source diff is complete.
+
+~~~~diff
+diff --git a/c/common/platform.h b/c/common/platform.h
+index f1c1dc7..7406f3f 100644
+--- a/c/common/platform.h
++++ b/c/common/platform.h
+@@ -209,8 +209,13 @@ OR:
+ #define BROTLI_TARGET_RISCV64
+ #endif
+ 
++#if defined(__loongarch_lp64)
++#define BROTLI_TARGET_LOONGARCH64
++#endif
++
+ #if defined(BROTLI_TARGET_X64) || defined(BROTLI_TARGET_ARMV8_64) || \
+-    defined(BROTLI_TARGET_POWERPC64) || defined(BROTLI_TARGET_RISCV64)
++    defined(BROTLI_TARGET_POWERPC64) || defined(BROTLI_TARGET_RISCV64) || \
++    defined(BROTLI_TARGET_LOONGARCH64)
+ #define BROTLI_TARGET_64_BITS 1
+ #else
+ #define BROTLI_TARGET_64_BITS 0
+@@ -269,7 +274,7 @@ OR:
+ #define BROTLI_UNALIGNED_READ_FAST (!!0)
+ #elif defined(BROTLI_TARGET_X86) || defined(BROTLI_TARGET_X64) ||       \
+     defined(BROTLI_TARGET_ARMV7) || defined(BROTLI_TARGET_ARMV8_ANY) || \
+-    defined(BROTLI_TARGET_RISCV64)
++    defined(BROTLI_TARGET_RISCV64) || defined(BROTLI_TARGET_LOONGARCH64)
+ /* These targets are known to generate efficient code for unaligned reads
+  * (e.g. a single instruction, not multiple 1-byte loads, shifted and or'd
+  * together). */
+~~~~
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C003","gap_exists":true,"gap_type":["compile-time architecture configuration","platform-specific unaligned-read path"],"confidence":96,"affected_functions":["LLVMFuzzerTestOneInput","BrotliDecoderDecompressStream"],"reason":"S1 introduces the compile-time target BROTLI_TARGET_LOONGARCH64, classifies it under BROTLI_TARGET_64_BITS, and enables BROTLI_UNALIGNED_READ_FAST for it. H0 sends arbitrary compressed input through BrotliDecoderDecompressStream, but input bytes cannot select these compile-time platform branches. Unless H0 is separately built and executed with __loongarch_lp64, it misses the newly implicated LoongArch64-specific decoding configuration, including alignment-sensitive inputs exercising fast unaligned reads.","evidence":["platform.h defines BROTLI_TARGET_LOONGARCH64 only when __loongarch_lp64 is defined.","BROTLI_TARGET_LOONGARCH64 is newly included in the condition defining BROTLI_TARGET_64_BITS as 1.","BROTLI_TARGET_LOONGARCH64 is newly included among targets enabling BROTLI_UNALIGNED_READ_FAST.","LLVMFuzzerTestOneInput varies input chunk size via addend and calls BrotliDecoderDecompressStream, but it contains no mechanism to vary architecture macros or build configuration."],"recommended_action":"Build and run H0 with sanitizers on native or emulated LoongArch64 so __loongarch_lp64 selects BROTLI_TARGET_LOONGARCH64; retain corpus cases with varied input and output alignment and both the fast and incremental decoding paths."}
+tokens used
+15,502

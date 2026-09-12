@@ -1,0 +1,357 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/delta-dev-C032-zsv4a7cf
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08ab5-cfc2-7020-b911-572e803b429a
+--------
+user
+You are evaluating whether one production-source commit creates a fuzz-harness
+maintenance need. Use only the anonymous case below. Do not use tools, files,
+the network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+Follow this order exactly and keep one stable comparison scope throughout:
+
+1. Identify the commit's fuzz-relevant impact scope from the S0-to-S1 source
+   diff. Anchor it in concrete files, functions, states, configurations, input
+   semantics, or entry points. Do not search the rest of the project for an
+   unrelated harness omission.
+2. For that same scope, decide whether S0 + H0 has a material harness gap.
+3. For that identical scope, decide whether S1 + H0 has a material harness gap.
+4. Identify whether the commit creates a concrete new harness obligation: a
+   new entry/call, caller-supplied argument or buffer, call-order transition,
+   configuration action, compile-time enablement, or input construction that
+   H0 did not need in S0.
+5. Derive exactly one delta: NEW, AGGRAVATED, UNCHANGED, REMOVED, or NONE.
+6. Apply the fixed final rule.
+
+A harness gap concerns exposure or controllability, not the mere existence of
+changed lines. More internal code, a replacement algorithm, validation, error
+handling, a CPU fast path, or implementation state is not by itself an
+aggravation. If an existing public entry/API is omitted by the unchanged H0 on
+both sides and its caller-facing exposure requirement is unchanged, then the
+gap existed before and after: classify UNCHANGED even when the commit changes
+behavior inside that entry. Conversely, a genuinely new public entry, format,
+configuration, state protocol, or caller obligation that H0 cannot exercise is
+NEW (or AGGRAVATED when a demonstrably weaker same-scope gap already existed).
+
+AGGRAVATED requires concrete comparative evidence that S1 adds a harness action
+or reachability/control requirement absent in S0. Do not infer AGGRAVATED only
+from added LOC, a changed file, additional internal branches, or the fact that
+H0 omits the whole subsystem on both sides.
+
+Use this truth table unless concrete aggravation/removal evidence is present:
+
+- before=false, after=true  -> NEW
+- before=true,  after=true  -> UNCHANGED
+- before=true,  after=false -> REMOVED
+- before=false, after=false -> NONE
+
+Set maintenance_needed=true only if explicit_failure=true or delta_attribution
+is NEW or AGGRAVATED. Otherwise set it false. Return exactly one JSON object
+matching the schema. Give separate S0 and S1 evidence and do not collapse the
+two judgments into one narrative.
+
+--- BEGIN DEVELOPMENT CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+C032
+
+## Existing harness H0
+
+The complete project-owned harness translation unit is shown below. Framework
+main/CLI scaffolding is not expanded; directly included semantic helper files
+are shown separately under the fixed context rule.
+
+Path: `fuzz/c/std/bzip2_fuzzer.c`
+
+```c
+// Copyright 2022 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN bzip2_fuzzer.c
+./a.out ../../../test/data/*.bzip2
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__BZIP2
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+
+#define DST_BUFFER_ARRAY_SIZE 65536
+
+// Wuffs allows either statically or dynamically allocated work buffers. This
+// program exercises static allocation.
+#define WORK_BUFFER_ARRAY_SIZE \
+  WUFFS_BZIP2__DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE
+#if WORK_BUFFER_ARRAY_SIZE > 0
+uint8_t g_work_buffer_array[WORK_BUFFER_ARRAY_SIZE];
+#else
+// Not all C/C++ compilers support 0-length arrays.
+uint8_t g_work_buffer_array[1];
+#endif
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_bzip2__decoder dec;
+  wuffs_base__status status = wuffs_bzip2__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+
+  // Ignore the checksum for 99.99%-ish of all input. When fuzzers generate
+  // random input, the checkum is very unlikely to match. Still, it's useful to
+  // verify that checksumming does not lead to e.g. buffer overflows.
+  wuffs_bzip2__decoder__set_quirk(&dec, WUFFS_BASE__QUIRK_IGNORE_CHECKSUM,
+                                  hash & 0xFFFE);
+
+  uint8_t dst_buffer[DST_BUFFER_ARRAY_SIZE];
+  wuffs_base__io_buffer dst =
+      wuffs_base__ptr_u8__writer(&dst_buffer[0], DST_BUFFER_ARRAY_SIZE);
+
+  while (true) {
+    dst.meta.wi = 0;
+    status = wuffs_bzip2__decoder__transform_io(
+        &dec, &dst, src,
+        wuffs_base__make_slice_u8(g_work_buffer_array, WORK_BUFFER_ARRAY_SIZE));
+    if (status.repr != wuffs_base__suspension__short_write) {
+      break;
+    }
+    if (dst.meta.wi == 0) {
+      fprintf(stderr, "wuffs_bzip2__decoder__transform_io made no progress\n");
+      intentional_segfault();
+    }
+  }
+  return wuffs_base__status__message(&status);
+}
+```
+
+No semantic helper beyond the generic runner is directly included.
+
+## Complete S0 -> S1 hand-written production-source diff
+
+The fixed rule includes every changed `std/**/*.wuffs` production file. It
+excludes generated release snapshots, tests, docs, examples, and commit text.
+
+```diff
+diff --git a/std/bzip2/decode_bzip2.wuffs b/std/bzip2/decode_bzip2.wuffs
+index 36a1990d..471dbc82 100644
+--- a/std/bzip2/decode_bzip2.wuffs
++++ b/std/bzip2/decode_bzip2.wuffs
+@@ -98,24 +98,27 @@ pub struct decoder? implements base.io_transformer(
+         huffman_tables : array[6] array[256] base.u16,
+ 
+         // bwt is the Burrows Wheeler Transform state. Per the README.md file, each
+         // entry is a row with the low 8 bits holding the L column and the high 20
+         // bits holding the U column. The middle 4 bits are unused.
+         //
+         // The read_code_lengths and build_huffman_tree methods also re-purpose
+         // this buffer to temporarily hold up to 258 symbols' code lengths.
+         bwt : array[1_048576] base.u32,
+ )
+ 
+ pub func decoder.get_quirk(key: base.u32) base.u64 {
++    if (args.key == base.QUIRK_IGNORE_CHECKSUM) and this.ignore_checksum {
++        return 1
++    }
+     return 0
+ }
+ 
+ pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+     if args.key == base.QUIRK_IGNORE_CHECKSUM {
+         this.ignore_checksum = args.value > 0
+         return ok
+     }
+     return base."#unsupported option"
+ }
+ 
+ pub func decoder.history_retain_length() base.optional_u63 {
+```
+
+## Uniform selected declaration context
+
+This same mechanically selected S0/S1 context is supplied for every case.
+
+### S0
+
+```text
+lines 84-132
+000084:         // branch nodes is +1.
+000085:         //
+000086:         // Since num_symbols' inclusive maximum is 258 (for RUNA, RUNB, 255 × mXYZ,
+000087:         // EOB), there are at most 257 branch nodes.
+000088:         huffman_trees : array[6] array[257] array[2] base.u16,
+000089: 
+000090:         // huffman_tables[which] caches the result of walking huffman_trees[which]
+000091:         // for each possible 8-bit input. The base.u16 value decomposes as:
+000092:         //  - The low 10 bits are the final node, where finality comes either from
+000093:         //    hitting a leaf node or from spending all 8 bits of the input. As per
+000094:         //    the build_huffman_tree method, a value of 0x100 = 256 or less means
+000095:         //    a branch node and 0x201 = 513 or more means a leaf node.
+000096:         //  - The middle 2 bits are unused.
+000097:         //  - The high 4 bits are the number of input bits spent.
+000098:         huffman_tables : array[6] array[256] base.u16,
+000099: 
+000100:         // bwt is the Burrows Wheeler Transform state. Per the README.md file, each
+000101:         // entry is a row with the low 8 bits holding the L column and the high 20
+000102:         // bits holding the U column. The middle 4 bits are unused.
+000103:         //
+000104:         // The read_code_lengths and build_huffman_tree methods also re-purpose
+000105:         // this buffer to temporarily hold up to 258 symbols' code lengths.
+000106:         bwt : array[1_048576] base.u32,
+000107: )
+000108: 
+000109: pub func decoder.get_quirk(key: base.u32) base.u64 {
+000110:     return 0
+000111: }
+000112: 
+000113: pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+000114:     if args.key == base.QUIRK_IGNORE_CHECKSUM {
+000115:         this.ignore_checksum = args.value > 0
+000116:         return ok
+000117:     }
+000118:     return base."#unsupported option"
+000119: }
+000120: 
+000121: pub func decoder.history_retain_length() base.optional_u63 {
+000122:     return this.util.make_optional_u63(has_value: true, value: 0)
+000123: }
+000124: 
+000125: pub func decoder.workbuf_len() base.range_ii_u64 {
+000126:     return this.util.make_range_ii_u64(
+000127:             min_incl: DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE,
+000128:             max_incl: DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE)
+000129: }
+000130: 
+000131: pub func decoder.transform_io?(dst: base.io_writer, src: base.io_reader, workbuf: slice base.u8) {
+000132:     var status : base.status
+```
+
+### S1
+
+```text
+lines 84-132
+000084:         // branch nodes is +1.
+000085:         //
+000086:         // Since num_symbols' inclusive maximum is 258 (for RUNA, RUNB, 255 × mXYZ,
+000087:         // EOB), there are at most 257 branch nodes.
+000088:         huffman_trees : array[6] array[257] array[2] base.u16,
+000089: 
+000090:         // huffman_tables[which] caches the result of walking huffman_trees[which]
+000091:         // for each possible 8-bit input. The base.u16 value decomposes as:
+000092:         //  - The low 10 bits are the final node, where finality comes either from
+000093:         //    hitting a leaf node or from spending all 8 bits of the input. As per
+000094:         //    the build_huffman_tree method, a value of 0x100 = 256 or less means
+000095:         //    a branch node and 0x201 = 513 or more means a leaf node.
+000096:         //  - The middle 2 bits are unused.
+000097:         //  - The high 4 bits are the number of input bits spent.
+000098:         huffman_tables : array[6] array[256] base.u16,
+000099: 
+000100:         // bwt is the Burrows Wheeler Transform state. Per the README.md file, each
+000101:         // entry is a row with the low 8 bits holding the L column and the high 20
+000102:         // bits holding the U column. The middle 4 bits are unused.
+000103:         //
+000104:         // The read_code_lengths and build_huffman_tree methods also re-purpose
+000105:         // this buffer to temporarily hold up to 258 symbols' code lengths.
+000106:         bwt : array[1_048576] base.u32,
+000107: )
+000108: 
+000109: pub func decoder.get_quirk(key: base.u32) base.u64 {
+000110:     if (args.key == base.QUIRK_IGNORE_CHECKSUM) and this.ignore_checksum {
+000111:         return 1
+000112:     }
+000113:     return 0
+000114: }
+000115: 
+000116: pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+000117:     if args.key == base.QUIRK_IGNORE_CHECKSUM {
+000118:         this.ignore_checksum = args.value > 0
+000119:         return ok
+000120:     }
+000121:     return base."#unsupported option"
+000122: }
+000123: 
+000124: pub func decoder.history_retain_length() base.optional_u63 {
+000125:     return this.util.make_optional_u63(has_value: true, value: 0)
+000126: }
+000127: 
+000128: pub func decoder.workbuf_len() base.range_ii_u64 {
+000129:     return this.util.make_range_ii_u64(
+000130:             min_incl: DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE,
+000131:             max_incl: DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE)
+000132: }
+```
+
+--- END DEVELOPMENT CASE ---
+
+codex
+{"case_id":"C032","impact_scope":[{"type":"api_protocol_change","files":["std/bzip2/decode_bzip2.wuffs"],"functions":["decoder.get_quirk","decoder.set_quirk!"],"description":"The existing get_quirk API changes from always returning 0 to reporting whether the existing IGNORE_CHECKSUM quirk is enabled, creating an observable set-then-get state protocol."},{"type":"state_change","files":["std/bzip2/decode_bzip2.wuffs"],"functions":["decoder.get_quirk"],"description":"The return value now depends on the decoder's ignore_checksum state for base.QUIRK_IGNORE_CHECKSUM."}],"gap_before":{"exists":false,"type":"none","evidence":["In S0, decoder.get_quirk always returns 0, so H0's omission of get_quirk does not miss any observable quirk-state behavior.","H0 already calls decoder.set_quirk! for WUFFS_BASE__QUIRK_IGNORE_CHECKSUM, exercising the existing configuration action relevant to decoding."]},"gap_after":{"exists":true,"type":"missing state-query protocol coverage","evidence":["In S1, decoder.get_quirk returns 1 when queried with base.QUIRK_IGNORE_CHECKSUM after ignore_checksum has been enabled.","H0 sets the quirk but never calls decoder.get_quirk, so it cannot exercise or verify the newly observable enabled-state result."]},"new_harness_obligation":{"exists":true,"description":"Exercise the new observable state protocol by calling decoder.get_quirk for QUIRK_IGNORE_CHECKSUM after configuring the quirk, with values that cover enabled and disabled state.","evidence":["S1 adds a state-dependent branch and nonzero result to decoder.get_quirk that did not exist in S0.","Reaching the new result requires a concrete get_quirk call, and meaningful coverage includes the existing set_quirk!-then-get_quirk call order; H0 performs only the setter."]},"explicit_failure":false,"delta_attribution":"NEW","maintenance_needed":true,"confidence":98,"reason":"For the stable scope of IGNORE_CHECKSUM quirk-state observation, S0 had no material omission because get_quirk exposed no state and always returned 0. S1 makes that existing API report mutable decoder state, while unchanged H0 never queries it. This creates a concrete new call and call-order obligation, so the harness gap is NEW."}
+tokens used
+18,476

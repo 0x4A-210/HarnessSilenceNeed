@@ -1,0 +1,164 @@
+# Case ID
+
+C057
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `c/fuzz/decode_fuzzer.c`
+
+~~~~c
+// Copyright 2015 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#include <brotli/decode.h>
+
+// Entry point for LibFuzzer.
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  size_t addend = 0;
+  if (size > 0)
+    addend = data[size - 1] & 7;
+  const uint8_t* next_in = data;
+
+  const int kBufferSize = 1024;
+  uint8_t* buffer = (uint8_t*) malloc(kBufferSize);
+  if (!buffer) {
+    // OOM is out-of-scope here.
+    return 0;
+  }
+  /* The biggest "magic number" in brotli is 16MiB - 16, so no need to check
+     the cases with much longer output. */
+  const size_t total_out_limit = (addend == 0) ? (1 << 26) : (1 << 24);
+  size_t total_out = 0;
+
+  BrotliDecoderState* state = BrotliDecoderCreateInstance(0, 0, 0);
+
+  if (addend == 0)
+    addend = size;
+  /* Test both fast (addend == size) and slow (addend <= 7) decoding paths. */
+  for (size_t i = 0; i < size;) {
+    size_t next_i = i + addend;
+    if (next_i > size)
+      next_i = size;
+    size_t avail_in = next_i - i;
+    i = next_i;
+    BrotliDecoderResult result = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
+    while (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
+      size_t avail_out = kBufferSize;
+      uint8_t* next_out = buffer;
+      result = BrotliDecoderDecompressStream(
+          state, &avail_in, &next_in, &avail_out, &next_out, &total_out);
+      if (total_out > total_out_limit)
+        break;
+    }
+    if (total_out > total_out_limit)
+      break;
+    if (result != BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT)
+      break;
+  }
+
+  BrotliDecoderDestroyInstance(state);
+  free(buffer);
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/brotli/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2016 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+cmake . -DBUILD_TESTING=OFF
+make clean
+make -j$(nproc) brotlidec-static
+
+$CC $CFLAGS -c -std=c99 -I. -I./c/include c/fuzz/decode_fuzzer.c 
+
+$CXX $CXXFLAGS ./decode_fuzzer.o  -o $OUT/decode_fuzzer \
+    $LIB_FUZZING_ENGINE ./libbrotlidec-static.a ./libbrotlicommon-static.a
+
+cp java/org/brotli/integration/fuzz_data.zip $OUT/decode_fuzzer_seed_corpus.zip
+chmod a-x $OUT/decode_fuzzer_seed_corpus.zip # we will try to run it otherwise
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `c/dec/decode.c`
+- `c/enc/encode.c`
+
+~~~~diff
+diff --git a/c/dec/decode.c b/c/dec/decode.c
+--- a/c/dec/decode.c
++++ b/c/dec/decode.c
+@@ -2030,14 +2030,16 @@ static BROTLI_NOINLINE BrotliDecoderErrorCode ProcessCommands(
+ static BROTLI_NOINLINE BrotliDecoderErrorCode SafeProcessCommands(
+     BrotliDecoderState* s) {
+   return ProcessCommandsInternal(1, s);
+ }
+ 
+ BrotliDecoderResult BrotliDecoderDecompress(
+-    size_t encoded_size, const uint8_t* encoded_buffer, size_t* decoded_size,
+-    uint8_t* decoded_buffer) {
++    size_t encoded_size,
++    const uint8_t encoded_buffer[BROTLI_ARRAY_PARAM(encoded_size)],
++    size_t* decoded_size,
++    uint8_t decoded_buffer[BROTLI_ARRAY_PARAM(*decoded_size)]) {
+   BrotliDecoderState s;
+   BrotliDecoderResult result;
+   size_t total_out = 0;
+   size_t available_in = encoded_size;
+   const uint8_t* next_in = encoded_buffer;
+   size_t available_out = *decoded_size;
+diff --git a/c/enc/encode.c b/c/enc/encode.c
+--- a/c/enc/encode.c
++++ b/c/enc/encode.c
+@@ -1467,14 +1467,15 @@ static size_t MakeUncompressedStream(
+   output[result++] = 3;
+   return result;
+ }
+ 
+ BROTLI_BOOL BrotliEncoderCompress(
+     int quality, int lgwin, BrotliEncoderMode mode, size_t input_size,
+-    const uint8_t* input_buffer, size_t* encoded_size,
+-    uint8_t* encoded_buffer) {
++    const uint8_t input_buffer[BROTLI_ARRAY_PARAM(input_size)],
++    size_t* encoded_size,
++    uint8_t encoded_buffer[BROTLI_ARRAY_PARAM(*encoded_size)]) {
+   BrotliEncoderState* s;
+   size_t out_size = *encoded_size;
+   const uint8_t* input_start = input_buffer;
+   uint8_t* output_start = encoded_buffer;
+   size_t max_out_size = BrotliEncoderMaxCompressedSize(input_size);
+   if (out_size == 0) {
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.

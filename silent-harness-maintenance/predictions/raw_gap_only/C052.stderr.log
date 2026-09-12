@@ -1,0 +1,429 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/silent-maintenance-gap_only-C052-2bpzq0hc
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0899a-7b8f-74b1-9b97-f3b7c644c690
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous Fuzz-Harness Maintenance Case
+
+Case ID
+
+C052
+
+## Evidence boundary
+
+The material below contains only the complete existing harness H0 and the complete production source diff from S0 to S1. No developer-updated harness, commit message, build result, coverage result, reachability result, or label is supplied.
+
+## Existing Harness H0
+
+### `fuzz/c/std/gif_fuzzer.c`
+
+```text
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a sanity check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN gif_fuzzer.c
+./a.out ../../../test/data/*.gif
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+// If building this program in an environment that doesn't easily accomodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.h"
+#include "../fuzzlib/fuzzlib.c"
+
+const char* fuzz(wuffs_base__io_reader src_reader, uint32_t hash) {
+  const char* ret = NULL;
+  void* pixbuf = NULL;
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_base__status s = 0;
+    wuffs_gif__decoder dec = ((wuffs_gif__decoder){});
+    wuffs_gif__decoder__check_wuffs_version(&dec, sizeof dec, WUFFS_VERSION);
+
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    s = wuffs_gif__decoder__decode_image_config(&dec, &ic, src_reader);
+    if (s) {
+      ret = wuffs_gif__status__string(s);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    size_t pixbuf_size = wuffs_base__pixel_config__pixbuf_size(
+        wuffs_base__image_config__pixel_config(&ic));
+    // Don't try to allocate more than 64 MiB.
+    if (pixbuf_size > 64 * 1024 * 1024) {
+      ret = "image too large";
+      goto exit;
+    }
+    pixbuf = malloc(pixbuf_size);
+    if (!pixbuf) {
+      ret = "out of memory";
+      goto exit;
+    }
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    s = wuffs_base__pixel_buffer__set_from_slice(
+        &pb, wuffs_base__image_config__pixel_config(&ic),
+        ((wuffs_base__slice_u8){.ptr = pixbuf, .len = pixbuf_size}));
+    if (s) {
+      ret = wuffs_gif__status__string(s);
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      s = wuffs_gif__decoder__decode_frame(&dec, &pb, 0, 0, src_reader,
+                                           ((wuffs_base__slice_u8){}));
+      if (s) {
+        if ((s == WUFFS_BASE__SUSPENSION_END_OF_DATA) && seen_ok) {
+          s = WUFFS_BASE__STATUS_OK;
+        }
+        ret = wuffs_gif__status__string(s);
+        goto exit;
+      }
+      seen_ok = true;
+    }
+  }
+
+exit:
+  if (pixbuf) {
+    free(pixbuf);
+  }
+  return ret;
+}
+
+```
+
+### `fuzz/c/std/zlib_fuzzer.c`
+
+```text
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a sanity check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN zlib_fuzzer.c
+./a.out ../../../test/data/*.zlib
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+// If building this program in an environment that doesn't easily accomodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.h"
+#include "../fuzzlib/fuzzlib.c"
+
+const char* fuzz(wuffs_base__io_reader src_reader, uint32_t hash) {
+  const char* ret = NULL;
+  wuffs_base__status s = 0;
+  wuffs_zlib__decoder dec = ((wuffs_zlib__decoder){});
+  wuffs_zlib__decoder__check_wuffs_version(&dec, sizeof dec, WUFFS_VERSION);
+
+  // Ignore the checksum for 99.99%-ish of all input. When fuzzers generate
+  // random input, the checkum is very unlikely to match. Still, it's useful to
+  // verify that checksumming does not lead to e.g. buffer overflows.
+  wuffs_zlib__decoder__set_ignore_checksum(&dec, hash & 0xFFFF);
+
+  const size_t dstbuf_size = 65536;
+  uint8_t dstbuf[dstbuf_size];
+  wuffs_base__io_buffer dst = {.ptr = dstbuf, .len = dstbuf_size};
+  wuffs_base__io_writer dst_writer = wuffs_base__io_buffer__writer(&dst);
+
+  while (true) {
+    dst.wi = 0;
+    s = wuffs_zlib__decoder__decode(&dec, dst_writer, src_reader);
+    if (s != WUFFS_BASE__SUSPENSION_SHORT_WRITE) {
+      ret = wuffs_zlib__status__string(s);
+      break;
+    }
+    if (dst.wi == 0) {
+      fprintf(stderr, "wuffs_zlib__decoder__decode made no progress\n");
+      intentional_segfault();
+    }
+  }
+  return ret;
+}
+
+```
+
+## Complete production source diff S0 -> S1
+
+The fixed `--function-context` rule includes the complete diff and expanded changed-function bodies where Git recognizes them.
+
+```diff
+diff --git a/script/bench-c-deflate-fragmentation.c b/script/bench-c-deflate-fragmentation.c
+index 8c0ba5c24cb92226d949635765f2f822615457b8..e33322a18f1e6096bc8bf8bc75fbcca66535b4a6 100644
+--- a/script/bench-c-deflate-fragmentation.c
++++ b/script/bench-c-deflate-fragmentation.c
+@@ -1,75 +1,75 @@
+ // Copyright 2018 The Wuffs Authors.
+ //
+ // Licensed under the Apache License, Version 2.0 (the "License");
+ // you may not use this file except in compliance with the License.
+ // You may obtain a copy of the License at
+ //
+ //    https://www.apache.org/licenses/LICENSE-2.0
+ //
+ // Unless required by applicable law or agreed to in writing, software
+ // distributed under the License is distributed on an "AS IS" BASIS,
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+ // This file contains a hand-written C benchmark of different strategies for
+ // decoding PNG data.
+ //
+ // For a PNG image with width W and height H, the H rows can be decompressed
+ // one-at-a-time or all-at-once. Roughly speaking, this corresponds to H versus
+ // 1 call into the zlib decoder. The former (call it "fragmented dst") requires
+ // less scratch-space memory than the latter ("full dst"): 2 * bytes_per_row
+ // instead of H * bytes_per row, but the latter can be faster.
+ //
+ // The zlib-compressed data can be split into multiple IDAT chunks. Similarly,
+ // these chunks can be decompressed separately ("fragmented IDAT") or together
+ // ("full IDAT"), again providing a memory vs speed trade-off.
+ //
+ // This program reports the speed of combining the independent frag/full dst
+ // and frag/full IDAT techniques.
+ //
+ // For example, with gcc 7.3 (and -O3) as of April 2018:
+ //
+ // On ../test/data/hat.png (90 × 112 pixels):
+ // name                 time/op     relative
+ // FragDstFragIDAT/gcc  203µs ± 1%  1.00x
+ // FragDstFullIDAT/gcc  203µs ± 0%  1.00x
+ // FullDstFragIDAT/gcc  170µs ± 0%  1.19x
+ // FullDstFullIDAT/gcc  147µs ± 0%  1.38x
+ //
+ // On ../test/data/hibiscus.png (312 × 442 pixels):
+ // name                 time/op      relative
+ // FragDstFragIDAT/gcc  2.62ms ± 1%  1.00x
+ // FragDstFullIDAT/gcc  2.61ms ± 1%  1.00x
+ // FullDstFragIDAT/gcc  2.44ms ± 0%  1.07x
+ // FullDstFullIDAT/gcc  2.03ms ± 1%  1.29x
+ //
+ // On ../test/data/harvesters.png (1165 × 859 pixels):
+ // name                 time/op      relative
+ // FragDstFragIDAT/gcc  18.3ms ± 0%  1.00x
+ // FragDstFullIDAT/gcc  18.3ms ± 1%  1.00x
+ // FullDstFragIDAT/gcc  17.1ms ± 0%  1.07x
+ // FullDstFullIDAT/gcc  13.9ms ± 0%  1.32x
+ 
+ #include <errno.h>
+ #include <inttypes.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <sys/time.h>
+ #include <unistd.h>
+ 
+ // Wuffs ships as a "single file C library" or "header file library" as per
+ // https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+ //
+ // To use that single file as a "foo.c"-like implementation, instead of a
+ // "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+ // compiling it.
+ #define WUFFS_IMPLEMENTATION
+ 
+-// If building this program in an environment that doesn't easily accomodate
++// If building this program in an environment that doesn't easily accommodate
+ // relative includes, you can use the script/inline-c-relative-includes.go
+ // program to generate a stand-alone C file.
+ #include "../release/c/wuffs-unsupported-snapshot.h"
+ 
+ // The order matters here. Clang also defines "__GNUC__".
+ #if defined(__clang__)
+diff --git a/std/gif/decode_gif.wuffs b/std/gif/decode_gif.wuffs
+index 896c4d250b1b28a41f0a7cb51b3004b4d8d263c3..f1662c58dc33541ea54d709819894428b0cf471e 100644
+--- a/std/gif/decode_gif.wuffs
++++ b/std/gif/decode_gif.wuffs
+@@ -537,87 +537,87 @@ pri func decoder.decode_id_part0?(src base.io_reader)() {
+ pri func decoder.decode_id_part1?(dst ptr base.pixel_buffer, src base.io_reader)() {
+ 	if this.gc_has_transparent_index {
+ 		if not this.use_local_palette {
+ 			this.palettes[1][:].copy_from_slice(s:this.palettes[0][:])
+ 		}
+ 
+ 		// Set the gc_transparent_index palette entry to transparent black.
+ 		this.palettes[1][(4 * (this.gc_transparent_index as base.u32)) + 0] = 0x00
+ 		this.palettes[1][(4 * (this.gc_transparent_index as base.u32)) + 1] = 0x00
+ 		this.palettes[1][(4 * (this.gc_transparent_index as base.u32)) + 2] = 0x00
+ 		this.palettes[1][(4 * (this.gc_transparent_index as base.u32)) + 3] = 0x00
+ 	}
+ 	in.dst.set_palette!(palette:this.palettes[this.which_palette & 1][:])
+ 
+ 	// Other GIF implementations accept GIF files that aren't completely spec
+ 	// compliant. For example, the test/data/gifplayer-muybridge.gif file
+ 	// (created by the gifsicle program) is accepted by other GIF decoders.
+ 	// However, in that file, frame #61's embedded LZW data is truncated,
+ 	// finishing with only 8 of the 9 bits required of the LZW end code. The
+ 	// end code itself, 0x81, is representable in only 8 bits, but the number
+ 	// of bits for the decoder to read has ticked over from 8 to 9 just before
+ 	// that end code is encountered.
+ 	//
+-	// To accomodate such malformed GIFs, we detect when the previous frame's
++	// To accommodate such malformed GIFs, we detect when the previous frame's
+ 	// LZW decoding ended abruptly. The previous LZW decode 'works', in that it
+ 	// decodes as much pixel data as is available, but without seeing that end
+ 	// code (i.e. returning the "ok" status code), the LZW decoder is stuck in
+ 	// a coroutine-in-progress lzw_decoder.decode call, still waiting for that
+ 	// end code. To cancel that coroutine, we reset the LZW decoder.
+ 	if this.previous_lzw_decode_ended_abruptly {
+ 		this.lzw.reset()
+ 	}
+ 
+ 	var lw base.u8 = in.src.read_u8?()
+ 	if (lw < 2) or (8 < lw) {
+ 		return error "bad literal width"
+ 	}
+ 	this.lzw.set_literal_width!(lw:lw as base.u32)
+ 
+ 	this.previous_lzw_decode_ended_abruptly = true
+ 	while true {
+ 		var block_size base.u64 = in.src.read_u8?() as base.u64
+ 		if block_size == 0 {
+ 			break
+ 		}
+ 		this.previous_lzw_decode_ended_abruptly = true
+ 
+ 		while:inner true {
+ 			var w base.io_writer
+ 			io_bind (in.src, w) {
+ 				w.set!(s:this.uncompressed[this.uncompressed_wi:])
+ 				// TODO: enforce that calling r.set_limit has a precondition
+ 				// that r.is_bound(), and that you can't suspend inside an
+ 				// io_bind? Otherwise, the cgen implementation becomes more
+ 				// complicated if we must save and re-apply limits.
+ 				//
+ 				// Should calling r.set_mark also require r.is_bound()?
+ 				in.src.set_limit!(l:block_size)
+ 				in.src.set_mark!()
+ 				var z base.status = try this.lzw.decode?(dst:w, src:in.src)
+ 				this.uncompressed_wi = 4096 - (w.available().min(x:4096) as base.u32)
+ 				block_size ~sat-= in.src.since_mark().length()
+ 			}
+ 
+ 			if z.is_ok() or (z == suspension "short write") {
+ 				this.copy_to_image_buffer?(pb:in.dst)
+ 
+ 				if z == suspension "short write" {
+ 					continue:inner
+ 				}
+ 				// TODO: check that block_size is zero?
+ 				this.previous_lzw_decode_ended_abruptly = false
+ 				break:inner
+ 			}
+ 			if (block_size == 0) and (z == suspension "short read") {
+ 				break:inner
+ 			}
+ 			yield z
+ 		}
+ 	}
+ 
+ 	if this.uncompressed_ri != this.uncompressed_wi {
+ 		this.copy_to_image_buffer?(pb:in.dst)
+ 	}
+ 
+ 	// TODO: check for "not enough pixel data".
+ }
+
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C052","gap_exists":false,"gap_type":[],"confidence":99,"affected_functions":[],"reason":"The only S0-to-S1 changes replace the misspelling \"accomodate\" with \"accommodate\" in comments. No executable behavior, API protocol, state, configuration, input semantics, or attack surface changes are visible. The existing GIF harness already exercises wuffs_gif__decoder__decode_image_config and repeated wuffs_gif__decoder__decode_frame calls, including malformed/truncated input paths relevant to decoder.decode_id_part1.","evidence":["script/bench-c-deflate-fragmentation.c changes only a comment associated with relative includes.","std/gif/decode_gif.wuffs changes only a comment describing malformed GIF handling in decoder.decode_id_part1.","No statements, conditions, calls, data structures, or function signatures change in the supplied production diff.","fuzz/c/std/gif_fuzzer.c feeds fuzz input through wuffs_gif__decoder__decode_image_config and wuffs_gif__decoder__decode_frame until a terminal status."],"recommended_action":"No harness maintenance is warranted for this source change."}
+tokens used
+7,602

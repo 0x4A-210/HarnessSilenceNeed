@@ -1,0 +1,368 @@
+diff --git a/libsolc/libsolc.cpp b/libsolc/libsolc.cpp
+index 89859458c13abad97c96b3d9a1cd1dde7d1886e1..060baaa2ac96b0790f1c915afc1d495597107635 100644
+--- a/libsolc/libsolc.cpp
++++ b/libsolc/libsolc.cpp
+@@ -21,10 +21,11 @@
+  */
+ 
+ #include <libsolc/libsolc.h>
+-#include <libdevcore/Common.h>
+-#include <libdevcore/JSON.h>
+ #include <libsolidity/interface/StandardCompiler.h>
+ #include <libsolidity/interface/Version.h>
++#include <libyul/YulString.h>
++#include <libdevcore/Common.h>
++#include <libdevcore/JSON.h>
+ 
+ #include <string>
+ 
+@@ -100,6 +101,9 @@ extern char const* solidity_compile(char const* _input, CStyleReadFileCallback _
+ }
+ extern void solidity_free() noexcept
+ {
++	// This is called right before each compilation, but not at the end, so additional memory
++	// can be freed here.
++	yul::YulStringRepository::reset();
+ 	s_outputBuffer.clear();
+ }
+ }
+diff --git a/libsolidity/interface/StandardCompiler.cpp b/libsolidity/interface/StandardCompiler.cpp
+index 6ab9789fc4ea8386fcacb5671effa8de70620130..8cd8dea8aaa7050e56d349541c7d32521da9c4db 100644
+--- a/libsolidity/interface/StandardCompiler.cpp
++++ b/libsolidity/interface/StandardCompiler.cpp
+@@ -965,6 +965,8 @@ Json::Value StandardCompiler::compileYul(InputsAndSettings _inputsAndSettings)
+ 
+ Json::Value StandardCompiler::compile(Json::Value const& _input) noexcept
+ {
++	YulStringRepository::reset();
++
+ 	try
+ 	{
+ 		auto parsed = parseInput(_input);
+diff --git a/libyul/YulString.h b/libyul/YulString.h
+index 47fb960a9d44dabba3e98e8fd8b293e6b3449c0b..ae35d3ecd879b54fc8ec54dce6ba2072754b17d9 100644
+--- a/libyul/YulString.h
++++ b/libyul/YulString.h
+@@ -26,6 +26,7 @@
+ #include <memory>
+ #include <vector>
+ #include <string>
++#include <functional>
+ 
+ namespace yul
+ {
+@@ -34,7 +35,7 @@ namespace yul
+ /// Owns the string data for all YulStrings, which can be referenced by a Handle.
+ /// A Handle consists of an ID (that depends on the insertion order of YulStrings and is potentially
+ /// non-deterministic) and a deterministic string hash.
+-class YulStringRepository: boost::noncopyable
++class YulStringRepository
+ {
+ public:
+ 	struct Handle
+@@ -43,13 +44,12 @@ public:
+ 		std::uint64_t hash;
+ 	};
+ 
+-	YulStringRepository() = default;
+-
+ 	static YulStringRepository& instance()
+ 	{
+ 		static YulStringRepository inst;
+ 		return inst;
+ 	}
++
+ 	Handle stringToHandle(std::string const& _string)
+ 	{
+ 		if (_string.empty())
+@@ -62,6 +62,7 @@ public:
+ 		m_strings.emplace_back(std::make_shared<std::string>(_string));
+ 		size_t id = m_strings.size() - 1;
+ 		m_hashToID.emplace_hint(range.second, std::make_pair(h, id));
++
+ 		return Handle{id, h};
+ 	}
+ 	std::string const& idToString(size_t _id) const	{ return *m_strings.at(_id); }
+@@ -79,8 +80,39 @@ public:
+ 		return hash;
+ 	}
+ 	static constexpr std::uint64_t emptyHash() { return 14695981039346656037u; }
++	/// Clear the repository.
++	/// Use with care - there cannot be any dangling YulString references.
++	/// If references need to be cleared manually, register the callback via
++	/// resetCallback.
++	static void reset()
++	{
++		for (auto const& cb: resetCallbacks())
++			cb();
++		instance() = YulStringRepository{};
++	}
++	/// Struct that registers a reset callback as a side-effect of its construction.
++	/// Useful as static local variable to register a reset callback once.
++	struct ResetCallback
++	{
++		ResetCallback(std::function<void()> _fun)
++		{
++			YulStringRepository::resetCallbacks().emplace_back(std::move(_fun));
++		}
++	};
+ 
+ private:
++	YulStringRepository() = default;
++	YulStringRepository(YulStringRepository const&) = delete;
++	YulStringRepository(YulStringRepository&&) = default;
++	YulStringRepository& operator=(YulStringRepository const& _rhs) = delete;
++	YulStringRepository& operator=(YulStringRepository&& _rhs) = default;
++
++	static std::vector<std::function<void()>>& resetCallbacks()
++	{
++		static std::vector<std::function<void()>> callbacks;
++		return callbacks;
++	}
++
+ 	std::vector<std::shared_ptr<std::string>> m_strings = {std::make_shared<std::string>()};
+ 	std::unordered_multimap<std::uint64_t, size_t> m_hashToID = {{emptyHash(), 0}};
+ };
+diff --git a/libyul/backends/evm/EVMDialect.cpp b/libyul/backends/evm/EVMDialect.cpp
+index 36244d576106badf1daa2d168b8748a477e0a5e0..ffc96eb8356c4919d50544e9f6132efd1f06c999 100644
+--- a/libyul/backends/evm/EVMDialect.cpp
++++ b/libyul/backends/evm/EVMDialect.cpp
+@@ -182,6 +182,7 @@ BuiltinFunctionForEVM const* EVMDialect::builtin(YulString _name) const
+ EVMDialect const& EVMDialect::looseAssemblyForEVM(langutil::EVMVersion _version)
+ {
+ 	static map<langutil::EVMVersion, unique_ptr<EVMDialect const>> dialects;
++	static YulStringRepository::ResetCallback callback{[&] { dialects.clear(); }};
+ 	if (!dialects[_version])
+ 		dialects[_version] = make_unique<EVMDialect>(AsmFlavour::Loose, false, _version);
+ 	return *dialects[_version];
+@@ -190,6 +191,7 @@ EVMDialect const& EVMDialect::looseAssemblyForEVM(langutil::EVMVersion _version)
+ EVMDialect const& EVMDialect::strictAssemblyForEVM(langutil::EVMVersion _version)
+ {
+ 	static map<langutil::EVMVersion, unique_ptr<EVMDialect const>> dialects;
++	static YulStringRepository::ResetCallback callback{[&] { dialects.clear(); }};
+ 	if (!dialects[_version])
+ 		dialects[_version] = make_unique<EVMDialect>(AsmFlavour::Strict, false, _version);
+ 	return *dialects[_version];
+@@ -198,6 +200,7 @@ EVMDialect const& EVMDialect::strictAssemblyForEVM(langutil::EVMVersion _version
+ EVMDialect const& EVMDialect::strictAssemblyForEVMObjects(langutil::EVMVersion _version)
+ {
+ 	static map<langutil::EVMVersion, unique_ptr<EVMDialect const>> dialects;
++	static YulStringRepository::ResetCallback callback{[&] { dialects.clear(); }};
+ 	if (!dialects[_version])
+ 		dialects[_version] = make_unique<EVMDialect>(AsmFlavour::Strict, true, _version);
+ 	return *dialects[_version];
+@@ -206,6 +209,7 @@ EVMDialect const& EVMDialect::strictAssemblyForEVMObjects(langutil::EVMVersion _
+ EVMDialect const& EVMDialect::yulForEVM(langutil::EVMVersion _version)
+ {
+ 	static map<langutil::EVMVersion, unique_ptr<EVMDialect const>> dialects;
++	static YulStringRepository::ResetCallback callback{[&] { dialects.clear(); }};
+ 	if (!dialects[_version])
+ 		dialects[_version] = make_unique<EVMDialect>(AsmFlavour::Yul, false, _version);
+ 	return *dialects[_version];
+diff --git a/libyul/backends/wasm/WasmDialect.cpp b/libyul/backends/wasm/WasmDialect.cpp
+index 8b6ff0e738c5637c46b69215a66b3c8cc90755ef..4a8b077cb95d98e679e09856e69c463f2c2c6507 100644
+--- a/libyul/backends/wasm/WasmDialect.cpp
++++ b/libyul/backends/wasm/WasmDialect.cpp
+@@ -63,6 +63,15 @@ BuiltinFunction const* WasmDialect::builtin(YulString _name) const
+ 		return nullptr;
+ }
+ 
++WasmDialect const& WasmDialect::instance()
++{
++	static std::unique_ptr<WasmDialect> dialect;
++	static YulStringRepository::ResetCallback callback{[&] { dialect.reset(); }};
++	if (!dialect)
++		dialect = make_unique<WasmDialect>();
++	return *dialect;
++}
++
+ void WasmDialect::addFunction(string _name, size_t _params, size_t _returns)
+ {
+ 	YulString name{move(_name)};
+diff --git a/libyul/backends/wasm/WasmDialect.h b/libyul/backends/wasm/WasmDialect.h
+index 54bb768743cd3323679ea3416025b9b9ca6577e8..0948a80494866eab59d99036655fc8e2bd2f0b11 100644
+--- a/libyul/backends/wasm/WasmDialect.h
++++ b/libyul/backends/wasm/WasmDialect.h
+@@ -42,17 +42,13 @@ struct Object;
+  */
+ struct WasmDialect: public Dialect
+ {
+-	BuiltinFunction const* builtin(YulString _name) const override;
++	WasmDialect();
+ 
+-	static WasmDialect const& instance()
+-	{
+-		static WasmDialect dialect;
+-		return dialect;
+-	}
++	BuiltinFunction const* builtin(YulString _name) const override;
+ 
+-protected:
+-	WasmDialect();
++	static WasmDialect const& instance();
+ 
++private:
+ 	void addFunction(std::string _name, size_t _params, size_t _returns);
+ 
+ 	std::map<YulString, BuiltinFunction> m_functions;
+diff --git a/libyul/optimiser/DataFlowAnalyzer.cpp b/libyul/optimiser/DataFlowAnalyzer.cpp
+index 86011ffd108b3c28dab96cc35507d0243c039cb9..63b1f9e8aeb3ce1f240d1cb61f30a43cffd5b9cf 100644
+--- a/libyul/optimiser/DataFlowAnalyzer.cpp
++++ b/libyul/optimiser/DataFlowAnalyzer.cpp
+@@ -142,7 +142,6 @@ void DataFlowAnalyzer::operator()(Block& _block)
+ 
+ void DataFlowAnalyzer::handleAssignment(set<YulString> const& _variables, Expression* _value)
+ {
+-	static Expression const zero{Literal{{}, LiteralKind::Number, YulString{"0"}, {}}};
+ 	clearValues(_variables);
+ 
+ 	MovableChecker movableChecker{m_dialect};
+@@ -150,7 +149,7 @@ void DataFlowAnalyzer::handleAssignment(set<YulString> const& _variables, Expres
+ 		movableChecker.visit(*_value);
+ 	else
+ 		for (auto const& var: _variables)
+-			m_value[var] = &zero;
++			m_value[var] = &m_zero;
+ 
+ 	if (_value && _variables.size() == 1)
+ 	{
+diff --git a/libyul/optimiser/DataFlowAnalyzer.h b/libyul/optimiser/DataFlowAnalyzer.h
+index 100a38665c027b8f3435370f3be89c803af4c815..78d8fa7e2e2cb47319273b2bc270362abb68782d 100644
+--- a/libyul/optimiser/DataFlowAnalyzer.h
++++ b/libyul/optimiser/DataFlowAnalyzer.h
+@@ -24,6 +24,7 @@
+ 
+ #include <libyul/optimiser/ASTWalker.h>
+ #include <libyul/YulString.h>
++#include <libyul/AsmData.h>
+ 
+ #include <map>
+ #include <set>
+@@ -85,6 +86,9 @@ protected:
+ 		std::set<YulString> variables;
+ 		bool isFunction;
+ 	};
++	/// Special expression whose address will be used in m_value.
++	/// YulString does not need to be reset because DataFlowAnalyzer is short-lived.
++	Expression const m_zero{Literal{{}, LiteralKind::Number, YulString{"0"}, {}}};
+ 	/// List of scopes.
+ 	std::vector<Scope> m_variableScopes;
+ 	Dialect const& m_dialect;
+diff --git a/libyul/optimiser/FullInliner.cpp b/libyul/optimiser/FullInliner.cpp
+index 4ab22544f7f6c412567f30ba773b656c08ec8f52..f764b0b1ef560bed9a964d4b23ed79a7591949b0 100644
+--- a/libyul/optimiser/FullInliner.cpp
++++ b/libyul/optimiser/FullInliner.cpp
+@@ -179,8 +179,6 @@ vector<Statement> InlineModifier::performInline(Statement& _statement, FunctionC
+ 
+ 	m_driver.tentativelyUpdateCodeSize(function->name, m_currentFunction);
+ 
+-	static Expression const zero{Literal{{}, LiteralKind::Number, YulString{"0"}, {}}};
+-
+ 	// helper function to create a new variable that is supposed to model
+ 	// an existing variable.
+ 	auto newVariable = [&](TypedName const& _existingVariable, Expression* _value) {
+@@ -190,7 +188,7 @@ vector<Statement> InlineModifier::performInline(Statement& _statement, FunctionC
+ 		if (_value)
+ 			varDecl.value = make_unique<Expression>(std::move(*_value));
+ 		else
+-			varDecl.value = make_unique<Expression>(zero);
++			varDecl.value = make_unique<Expression>(Literal{{}, LiteralKind::Number, YulString{"0"}, {}});
+ 		newStatements.emplace_back(std::move(varDecl));
+ 	};
+ 
+diff --git a/libyul/optimiser/SSAValueTracker.cpp b/libyul/optimiser/SSAValueTracker.cpp
+index 23eb9ec2858f127c3bf6e430fbec5384fcabccf2..d4feacbd9b8f7c57b3babb559ba8482721418d72 100644
+--- a/libyul/optimiser/SSAValueTracker.cpp
++++ b/libyul/optimiser/SSAValueTracker.cpp
+@@ -56,8 +56,7 @@ void SSAValueTracker::setValue(YulString _name, Expression const* _value)
+ 		OptimizerException,
+ 		"Source needs to be disambiguated."
+ 	);
+-	static Expression const zero{Literal{{}, LiteralKind::Number, YulString{"0"}, {}}};
+ 	if (!_value)
+-		_value = &zero;
++		_value = &m_zero;
+ 	m_values[_name] = _value;
+ }
+diff --git a/libyul/optimiser/SSAValueTracker.h b/libyul/optimiser/SSAValueTracker.h
+index 0680485f861b65e9352d0f52a0fc15fddbed603c..1062ca8e7c5bcbf5e41e63186ddc9647ebbd9f8c 100644
+--- a/libyul/optimiser/SSAValueTracker.h
++++ b/libyul/optimiser/SSAValueTracker.h
+@@ -22,6 +22,7 @@
+ #pragma once
+ 
+ #include <libyul/optimiser/ASTWalker.h>
++#include <libyul/AsmData.h>
+ 
+ #include <map>
+ #include <set>
+@@ -51,6 +52,9 @@ public:
+ private:
+ 	void setValue(YulString _name, Expression const* _value);
+ 
++	/// Special expression whose address will be used in m_values.
++	/// YulString does not need to be reset because SSAValueTracker is short-lived.
++	Expression const m_zero{Literal{{}, LiteralKind::Number, YulString{"0"}, {}}};
+ 	std::map<YulString, Expression const*> m_values;
+ };
+ 
+diff --git a/libyul/optimiser/StructuralSimplifier.cpp b/libyul/optimiser/StructuralSimplifier.cpp
+index 867f670ca5c8bdb33cbdff044df160018a9f9e7e..98e70a3ee40ea0cf7240566d8d9e600240a36fef 100644
+--- a/libyul/optimiser/StructuralSimplifier.cpp
++++ b/libyul/optimiser/StructuralSimplifier.cpp
+@@ -131,9 +131,8 @@ bool StructuralSimplifier::expressionAlwaysTrue(Expression const& _expression)
+ 			return false;
+ 		},
+ 		[](Literal const& _literal) -> bool {
+-			static YulString const trueString("true");
+ 			return
+-				(_literal.kind == LiteralKind::Boolean && _literal.value == trueString) ||
++				(_literal.kind == LiteralKind::Boolean && _literal.value == "true"_yulstring) ||
+ 				(_literal.kind == LiteralKind::Number && valueOfNumberLiteral(_literal) != u256(0))
+ 			;
+ 		}
+@@ -149,9 +148,8 @@ bool StructuralSimplifier::expressionAlwaysFalse(Expression const& _expression)
+ 			return false;
+ 		},
+ 		[](Literal const& _literal) -> bool {
+-			static YulString const falseString("false");
+ 			return
+-				(_literal.kind == LiteralKind::Boolean && _literal.value == falseString) ||
++				(_literal.kind == LiteralKind::Boolean && _literal.value == "false"_yulstring) ||
+ 				(_literal.kind == LiteralKind::Number && valueOfNumberLiteral(_literal) == u256(0))
+ 			;
+ 		}
+diff --git a/libyul/optimiser/VarDeclInitializer.cpp b/libyul/optimiser/VarDeclInitializer.cpp
+index 7009cc9b2d28499cb75cc36684825ed5c91ceffc..5a18dfa32a1e3ada627fe9a30073afc9657ef769 100644
+--- a/libyul/optimiser/VarDeclInitializer.cpp
++++ b/libyul/optimiser/VarDeclInitializer.cpp
+@@ -29,17 +29,16 @@ void VarDeclInitializer::operator()(Block& _block)
+ {
+ 	ASTModifier::operator()(_block);
+ 
+-	static Expression const zero{Literal{{}, LiteralKind::Number, YulString{"0"}, {}}};
+-
+ 	using OptionalStatements = boost::optional<vector<Statement>>;
+ 	GenericFallbackReturnsVisitor<OptionalStatements, VariableDeclaration> visitor{
+ 		[](VariableDeclaration& _varDecl) -> OptionalStatements
+ 		{
+ 			if (_varDecl.value)
+ 				return {};
+-			else if (_varDecl.variables.size() == 1)
++			Literal zero{{}, LiteralKind::Number, YulString{"0"}, {}};
++			if (_varDecl.variables.size() == 1)
+ 			{
+-				_varDecl.value = make_unique<Expression>(zero);
++				_varDecl.value = make_unique<Expression>(std::move(zero));
+ 				return {};
+ 			}
+ 			else
+@@ -47,7 +46,7 @@ void VarDeclInitializer::operator()(Block& _block)
+ 				OptionalStatements ret{vector<Statement>{}};
+ 				langutil::SourceLocation loc{std::move(_varDecl.location)};
+ 				for (auto& var: _varDecl.variables)
+-					ret->push_back(VariableDeclaration{loc, {std::move(var)}, make_unique<Expression>(zero)});
++					ret->emplace_back(VariableDeclaration{loc, {std::move(var)}, make_unique<Expression>(zero)});
+ 				return ret;
+ 			}
+ 		}

@@ -1,0 +1,828 @@
+PROJECT c-ares
+COMMIT df1cbdccf748993ac57b9cafb83127a345afaac3
+PARENT 0a89b8c62f59a2f11380becc8934b125d91e2e11
+SUBJECT OPT RR should support parsing key/value options (#602)
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/src/lib/ares__buf.c b/src/lib/ares__buf.c
+index b3786653..8dd61e4b 100644
+--- a/src/lib/ares__buf.c
++++ b/src/lib/ares__buf.c
+@@ -558,6 +558,7 @@ ares_status_t ares__buf_fetch_bytes(ares__buf_t *buf, unsigned char *bytes,
+ }
+ 
+ ares_status_t ares__buf_fetch_bytes_dup(ares__buf_t *buf, size_t len,
++                                        ares_bool_t null_term,
+                                         unsigned char **bytes)
+ {
+   size_t               remaining_len;
+@@ -567,12 +568,15 @@ ares_status_t ares__buf_fetch_bytes_dup(ares__buf_t *buf, size_t len,
+     return ARES_EBADRESP;
+   }
+ 
+-  *bytes = ares_malloc(len);
++  *bytes = ares_malloc(null_term?len+1:len);
+   if (*bytes == NULL) {
+     return ARES_ENOMEM;
+   }
+ 
+   memcpy(*bytes, ptr, len);
++  if (null_term) {
++    (*bytes)[len] = 0;
++  }
+   return ares__buf_consume(buf, len);
+ }
+ 
+diff --git a/src/lib/ares__buf.h b/src/lib/ares__buf.h
+index 7ab46188..0c2826dc 100644
+--- a/src/lib/ares__buf.h
++++ b/src/lib/ares__buf.h
+@@ -290,12 +290,16 @@ ares_status_t ares__buf_fetch_bytes(ares__buf_t *buf, unsigned char *bytes,
+ /*! Fetch the requested number of bytes and return a new buffer that must be
+  *  ares_free()'d by the caller.
+  *
+- *  \param[in]  buf     Initialized buffer object
+- *  \param[in]  len     Requested number of bytes (must be > 0)
+- *  \param[out] bytes   Pointer passed by reference. Will be allocated.
++ *  \param[in]  buf       Initialized buffer object
++ *  \param[in]  len       Requested number of bytes (must be > 0)
++ *  \param[in]  null_term Even though this is considered binary data, the user
++ *                        knows it may be a vald string, so add a null
++ *                        terminator.
++ *  \param[out] bytes     Pointer passed by reference. Will be allocated.
+  *  \return ARES_SUCCESS or one of the c-ares error codes
+  */
+ ares_status_t ares__buf_fetch_bytes_dup(ares__buf_t *buf, size_t len,
++                                        ares_bool_t null_term,
+                                         unsigned char **bytes);
+ 
+ /*! Fetch the requested number of bytes and place them into the provided
+@@ -452,8 +456,8 @@ ares_status_t ares__buf_parse_dns_str(ares__buf_t *buf, size_t remaining_len,
+                                       char **name, ares_bool_t allow_multiple);
+ 
+ /*! Parse a character-string as defined in RFC1035, as binary, however for
+- *  convenience this does guarantee a NULL terminator (that is not included)
+- *  in the returned length.
++ *  convenience this does guarantee a NULL terminator (that is not included
++ *  in the returned length).
+  *
+  *  \param[in]  buf            initialized buffer object
+  *  \param[in]  remaining_len  maximum length that should be used for parsing
+diff --git a/src/lib/ares_dns_mapping.c b/src/lib/ares_dns_mapping.c
+index 26d6e509..88bed782 100644
+--- a/src/lib/ares_dns_mapping.c
++++ b/src/lib/ares_dns_mapping.c
+@@ -343,6 +343,9 @@ const char *ares_dns_rr_key_tostr(ares_dns_rr_key_t key)
+     case ARES_RR_OPT_FLAGS:
+       return "FLAGS";
+ 
++    case ARES_RR_OPT_OPTIONS:
++      return "OPTIONS";
++
+     case ARES_RR_TLSA_CERT_USAGE:
+       return "CERT_USAGE";
+ 
+@@ -437,11 +440,16 @@ ares_dns_datatype_t ares_dns_rr_key_datatype(ares_dns_rr_key_t key)
+     case ARES_RR_CAA_CRITICAL:
+       return ARES_DATATYPE_U8;
+ 
+-    case ARES_RR_TLSA_DATA:
+     case ARES_RR_CAA_VALUE:
+     case ARES_RR_TXT_DATA:
++      return ARES_DATATYPE_BINP;
++
++    case ARES_RR_TLSA_DATA:
+     case ARES_RR_RAW_RR_DATA:
+       return ARES_DATATYPE_BIN;
++
++    case ARES_RR_OPT_OPTIONS:
++      return ARES_DATATYPE_OPT;
+   }
+ 
+   return 0;
+@@ -472,7 +480,8 @@ static const ares_dns_rr_key_t rr_naptr_keys[] = {
+ static const ares_dns_rr_key_t rr_opt_keys[]    = { ARES_RR_OPT_UDP_SIZE,
+                                                     ARES_RR_OPT_EXT_RCODE,
+                                                     ARES_RR_OPT_VERSION,
+-                                                    ARES_RR_OPT_FLAGS };
++                                                    ARES_RR_OPT_FLAGS,
++                                                    ARES_RR_OPT_OPTIONS };
+ static const ares_dns_rr_key_t rr_tlsa_keys[]   = { ARES_RR_TLSA_CERT_USAGE,
+                                                     ARES_RR_TLSA_SELECTOR,
+                                                     ARES_RR_TLSA_MATCH,
+diff --git a/src/lib/ares_dns_parse.c b/src/lib/ares_dns_parse.c
+index 55dc05f4..1e9223c1 100644
+--- a/src/lib/ares_dns_parse.c
++++ b/src/lib/ares_dns_parse.c
+@@ -391,8 +391,7 @@ static ares_status_t ares_dns_parse_rr_opt(ares__buf_t *buf, ares_dns_rr_t *rr,
+                                            unsigned int   raw_ttl)
+ {
+   ares_status_t status;
+-
+-  (void)rdlength;
++  size_t        orig_len = ares__buf_len(buf);
+ 
+   status = ares_dns_rr_set_u16(rr, ARES_RR_OPT_UDP_SIZE, raw_class);
+   if (status != ARES_SUCCESS) {
+@@ -417,8 +416,37 @@ static ares_status_t ares_dns_parse_rr_opt(ares__buf_t *buf, ares_dns_rr_t *rr,
+     return status;
+   }
+ 
+-  /* XXX: Support additional message here */
+-  (void)buf;
++  /* Parse options */
++  while (ares_dns_rr_remaining_len(buf, orig_len, rdlength)) {
++    unsigned short opt = 0;
++    unsigned short len = 0;
++    unsigned char *val = NULL;
++
++    /* Fetch be16 option */
++    status = ares__buf_fetch_be16(buf, &opt);
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++
++    /* Fetch be16 length */
++    status = ares__buf_fetch_be16(buf, &len);
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++
++    if (len) {
++      status = ares__buf_fetch_bytes_dup(buf, len, ARES_TRUE, &val);
++      if (status != ARES_SUCCESS) {
++        return status;
++      }
++    }
++
++    status = ares_dns_rr_set_opt_own(rr, ARES_RR_OPT_OPTIONS, opt, val, len);
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++  }
++
+   return ARES_SUCCESS;
+ }
+ 
+@@ -450,7 +478,7 @@ static ares_status_t ares_dns_parse_rr_tlsa(ares__buf_t *buf, ares_dns_rr_t *rr,
+     return ARES_EBADRESP;
+   }
+ 
+-  status = ares__buf_fetch_bytes_dup(buf, len, &data);
++  status = ares__buf_fetch_bytes_dup(buf, len, ARES_FALSE, &data);
+   if (status != ARES_SUCCESS) {
+     return status;
+   }
+@@ -536,7 +564,7 @@ static ares_status_t ares_dns_parse_rr_caa(ares__buf_t *buf, ares_dns_rr_t *rr,
+     status = ARES_EBADRESP;
+     return status;
+   }
+-  status = ares__buf_fetch_bytes_dup(buf, data_len, &data);
++  status = ares__buf_fetch_bytes_dup(buf, data_len, ARES_TRUE, &data);
+   if (status != ARES_SUCCESS) {
+     return status;
+   }
+@@ -563,7 +591,7 @@ static ares_status_t ares_dns_parse_rr_raw_rr(ares__buf_t   *buf,
+     return ARES_SUCCESS;
+   }
+ 
+-  status = ares__buf_fetch_bytes_dup(buf, rdlength, &bytes);
++  status = ares__buf_fetch_bytes_dup(buf, rdlength, ARES_FALSE, &bytes);
+   if (status != ARES_SUCCESS) {
+     return status;
+   }
+diff --git a/src/lib/ares_dns_record.c b/src/lib/ares_dns_record.c
+index fc7fec0a..db78b9f7 100644
+--- a/src/lib/ares_dns_record.c
++++ b/src/lib/ares_dns_record.c
+@@ -93,6 +93,20 @@ ares_dns_rcode_t ares_dns_record_get_rcode(const ares_dns_record_t *dnsrec)
+   return dnsrec->rcode;
+ }
+ 
++static void ares__dns_options_free(ares__dns_options_t *options)
++{
++  size_t i;
++
++  if (options == NULL)
++    return;
++
++  for (i=0; i<options->cnt; i++) {
++    ares_free(options->optval[i].val);
++  }
++  ares_free(options->optval);
++  ares_free(options);
++}
++
+ static void ares__dns_rr_free(ares_dns_rr_t *rr)
+ {
+   ares_free(rr->name);
+@@ -146,7 +160,7 @@ static void ares__dns_rr_free(ares_dns_rr_t *rr)
+       break;
+ 
+     case ARES_REC_TYPE_OPT:
+-      /* Once we support the attribute/values, we need to free here */
++      ares__dns_options_free(rr->r.opt.options);
+       break;
+ 
+     case ARES_REC_TYPE_TLSA:
+@@ -624,6 +638,9 @@ static void *ares_dns_rr_data_ptr(ares_dns_rr_t *dns_rr, ares_dns_rr_key_t key,
+     case ARES_RR_OPT_FLAGS:
+       return &dns_rr->r.opt.flags;
+ 
++    case ARES_RR_OPT_OPTIONS:
++      return &dns_rr->r.opt.options;
++
+     case ARES_RR_TLSA_CERT_USAGE:
+       return &dns_rr->r.tlsa.cert_usage;
+ 
+@@ -776,7 +793,8 @@ const unsigned char *ares_dns_rr_get_bin(const ares_dns_rr_t *dns_rr,
+   unsigned char * const *bin     = NULL;
+   size_t const          *bin_len = NULL;
+ 
+-  if (ares_dns_rr_key_datatype(key) != ARES_DATATYPE_BIN || len == NULL) {
++  if ((ares_dns_rr_key_datatype(key) != ARES_DATATYPE_BIN &&
++       ares_dns_rr_key_datatype(key) != ARES_DATATYPE_BINP) || len == NULL) {
+     return NULL;
+   }
+ 
+@@ -812,6 +830,100 @@ const char *ares_dns_rr_get_str(const ares_dns_rr_t *dns_rr,
+   return *str;
+ }
+ 
++size_t ares_dns_rr_get_opt_cnt(const ares_dns_rr_t *dns_rr,
++                               ares_dns_rr_key_t key)
++{
++  const ares__dns_options_t *opts;
++
++  if (ares_dns_rr_key_datatype(key) != ARES_DATATYPE_OPT) {
++    return 0;
++  }
++
++  opts = ares_dns_rr_data_ptr_const(dns_rr, key, NULL);
++  if (opts == NULL) {
++    return 0;
++  }
++
++  return opts->cnt;
++}
++
++unsigned short ares_dns_rr_get_opt(const ares_dns_rr_t *dns_rr,
++                                   ares_dns_rr_key_t key,
++                                   size_t idx,
++                                   const unsigned char **val,
++                                   size_t *val_len)
++{
++  const ares__dns_options_t *opts;
++
++  if (val)
++    *val = NULL;
++  if (val_len)
++    *val_len = 0;
++
++  if (ares_dns_rr_key_datatype(key) != ARES_DATATYPE_OPT) {
++    return 65535;
++  }
++
++  opts = ares_dns_rr_data_ptr_const(dns_rr, key, NULL);
++  if (opts == NULL) {
++    return 65535;
++  }
++
++  if (idx >= opts->cnt) {
++    return 65535;
++  }
++
++  if (val) {
++    *val = opts->optval[idx].val;
++  }
++  if (val_len) {
++    *val_len = opts->optval[idx].val_len;
++  }
++
++  return opts->optval[idx].opt;
++}
++
++ares_bool_t ares_dns_rr_get_opt_byid(const ares_dns_rr_t *dns_rr,
++                                     ares_dns_rr_key_t key,
++                                     unsigned short opt,
++                                     const unsigned char **val,
++                                     size_t *val_len)
++{
++  const ares__dns_options_t *opts;
++  size_t                     i;
++
++  if (val)
++    *val = NULL;
++  if (val_len)
++    *val_len = 0;
++
++  if (ares_dns_rr_key_datatype(key) != ARES_DATATYPE_OPT) {
++    return ARES_FALSE;
++  }
++
++  opts = ares_dns_rr_data_ptr_const(dns_rr, key, NULL);
++  if (opts == NULL) {
++    return ARES_FALSE;
++  }
++
++  for (i=0; i<opts->cnt; i++) {
++    if (opts->optval[i].opt == opt) {
++      break;
++    }
++  }
++
++  if (i >= opts->cnt)
++    return ARES_FALSE;
++
++  if (val) {
++    *val = opts->optval[i].val;
++  }
++  if (val_len) {
++    *val_len = opts->optval[i].val_len;
++  }
++  return ARES_TRUE;
++}
++
+ ares_status_t ares_dns_rr_set_addr(ares_dns_rr_t *dns_rr, ares_dns_rr_key_t key,
+                                    const struct in_addr *addr)
+ {
+@@ -910,7 +1022,8 @@ ares_status_t ares_dns_rr_set_bin_own(ares_dns_rr_t    *dns_rr,
+   unsigned char **bin;
+   size_t         *bin_len = NULL;
+ 
+-  if (ares_dns_rr_key_datatype(key) != ARES_DATATYPE_BIN) {
++  if (ares_dns_rr_key_datatype(key) != ARES_DATATYPE_BIN &&
++      ares_dns_rr_key_datatype(key) != ARES_DATATYPE_BINP) {
+     return ARES_EFORMERR;
+   }
+ 
+@@ -931,8 +1044,10 @@ ares_status_t ares_dns_rr_set_bin_own(ares_dns_rr_t    *dns_rr,
+ ares_status_t ares_dns_rr_set_bin(ares_dns_rr_t *dns_rr, ares_dns_rr_key_t key,
+                                   const unsigned char *val, size_t len)
+ {
+-  ares_status_t  status;
+-  unsigned char *temp = ares_malloc(len);
++  ares_status_t       status;
++  ares_dns_datatype_t datatype = ares_dns_rr_key_datatype(key);
++  size_t              alloclen = (datatype == ARES_DATATYPE_BINP)?len+1:len;
++  unsigned char      *temp     = ares_malloc(alloclen);
+ 
+   if (temp == NULL) {
+     return ARES_ENOMEM;
+@@ -940,6 +1055,11 @@ ares_status_t ares_dns_rr_set_bin(ares_dns_rr_t *dns_rr, ares_dns_rr_key_t key,
+ 
+   memcpy(temp, val, len);
+ 
++  /* NULL-term BINP */
++  if (datatype == ARES_DATATYPE_BINP) {
++    temp[len] = 0;
++  }
++
+   status = ares_dns_rr_set_bin_own(dns_rr, key, temp, len);
+   if (status != ARES_SUCCESS) {
+     ares_free(temp);
+@@ -990,3 +1110,99 @@ ares_status_t ares_dns_rr_set_str(ares_dns_rr_t *dns_rr, ares_dns_rr_key_t key,
+ 
+   return status;
+ }
++
++
++ares_status_t ares_dns_rr_set_opt_own(ares_dns_rr_t *dns_rr,
++                                      ares_dns_rr_key_t key,
++                                      unsigned short opt,
++                                      unsigned char *val,
++                                      size_t val_len)
++{
++  ares__dns_options_t **options;
++  size_t                idx;
++
++  if (ares_dns_rr_key_datatype(key) != ARES_DATATYPE_OPT) {
++    return ARES_EFORMERR;
++  }
++
++  options = ares_dns_rr_data_ptr(dns_rr, key, NULL);
++  if (options == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  if (*options == NULL) {
++    *options = ares_malloc_zero(sizeof(**options));
++  }
++  if (*options == NULL) {
++    return ARES_ENOMEM;
++  }
++
++  for (idx=0; idx<(*options)->cnt; idx++) {
++    if ((*options)->optval[idx].opt == opt)
++      break;
++  }
++
++  /* Duplicate entry, replace */
++  if (idx != (*options)->cnt) {
++    goto done;
++  }
++
++  idx = (*options)->cnt;
++
++  /* Expand by powers of 2 */
++  if (idx >= (*options)->alloc) {
++    size_t alloc_size = (*options)->alloc;
++    void  *temp;
++
++    if (alloc_size == 0) {
++      alloc_size = 1;
++    } else {
++      alloc_size <<= 1;
++    }
++
++    temp = ares_realloc_zero((*options)->optval,
++                             (*options)->alloc * sizeof(*(*options)->optval),
++                             alloc_size * sizeof(*(*options)->optval));
++    if (temp == NULL) {
++      return ARES_ENOMEM;
++    }
++
++    (*options)->optval = temp;
++    (*options)->alloc  = alloc_size;
++  }
++
++  (*options)->cnt++;
++
++done:
++  ares_free((*options)->optval[idx].val);
++  (*options)->optval[idx].val     = val;
++  (*options)->optval[idx].val_len = val_len;
++
++  return ARES_SUCCESS;
++}
++
++ares_status_t ares_dns_rr_set_opt(ares_dns_rr_t *dns_rr,
++                                  ares_dns_rr_key_t key,
++                                  unsigned short opt,
++                                  const unsigned char *val,
++                                  size_t val_len)
++{
++  unsigned char *temp = NULL;
++  ares_status_t  status;
++
++  if (val != NULL) {
++    temp = ares_malloc(val_len + 1);
++    if (temp == NULL) {
++      return ARES_ENOMEM;
++    }
++    memcpy(temp, val, val_len);
++    temp[val_len] = 0;
++  }
++
++  status = ares_dns_rr_set_opt_own(dns_rr, key, opt, temp, val_len);
++  if (status != ARES_SUCCESS) {
++    ares_free(temp);
++  }
++
++  return status;
++}
+diff --git a/src/lib/ares_dns_record.h b/src/lib/ares_dns_record.h
+index 412b0646..a986913b 100644
+--- a/src/lib/ares_dns_record.h
++++ b/src/lib/ares_dns_record.h
+@@ -150,7 +150,13 @@ typedef enum {
+   ARES_DATATYPE_U16     = 4, /*!< 16bit unsigned integer */
+   ARES_DATATYPE_U32     = 5, /*!< 32bit unsigned integer */
+   ARES_DATATYPE_STR     = 6, /*!< Null-terminated string */
+-  ARES_DATATYPE_BIN     = 7  /*!< Binary data */
++  ARES_DATATYPE_BIN     = 7, /*!< Binary data */
++  ARES_DATATYPE_BINP    = 8, /*!< Officially defined as binary data, but likely
++                              *   printable. Guaranteed to have a NULL
++                              *   terminator for convenience (not included in
++                              *   length) */
++  ARES_DATATYPE_OPT     = 9, /*!< Array of options.  16bit identifier, BINP
++                              *   data. */
+ } ares_dns_datatype_t;
+ 
+ /*! Keys used for all RR Types.  We take the record type and multiply by 100
+@@ -159,89 +165,91 @@ typedef enum {
+ typedef enum {
+   /*! A Record. Address. Datatype: INADDR */
+   ARES_RR_A_ADDR = (ARES_REC_TYPE_A * 100) + 1,
+-  /*! NS Record. Name. Datatype: String */
++  /*! NS Record. Name. Datatype: STR */
+   ARES_RR_NS_NSDNAME = (ARES_REC_TYPE_NS * 100) + 1,
+-  /*! CNAME Record. CName. Datatype: String */
++  /*! CNAME Record. CName. Datatype: STR */
+   ARES_RR_CNAME_CNAME = (ARES_REC_TYPE_CNAME * 100) + 1,
+-  /*! SOA Record. MNAME, Primary Source of Data. Datatype: String */
++  /*! SOA Record. MNAME, Primary Source of Data. Datatype: STR */
+   ARES_RR_SOA_MNAME = (ARES_REC_TYPE_SOA * 100) + 1,
+-  /*! SOA Record. RNAME, Mailbox of person responsible. Datatype: String */
++  /*! SOA Record. RNAME, Mailbox of person responsible. Datatype: STR */
+   ARES_RR_SOA_RNAME = (ARES_REC_TYPE_SOA * 100) + 2,
+-  /*! SOA Record. Serial, version. Datatype: u32 */
++  /*! SOA Record. Serial, version. Datatype: U32 */
+   ARES_RR_SOA_SERIAL = (ARES_REC_TYPE_SOA * 100) + 3,
+-  /*! SOA Record. Refresh, zone refersh interval. Datatype: u32 */
++  /*! SOA Record. Refresh, zone refersh interval. Datatype: U32 */
+   ARES_RR_SOA_REFRESH = (ARES_REC_TYPE_SOA * 100) + 4,
+-  /*! SOA Record. Retry, failed refresh retry interval. Datatype: u32 */
++  /*! SOA Record. Retry, failed refresh retry interval. Datatype: U32 */
+   ARES_RR_SOA_RETRY = (ARES_REC_TYPE_SOA * 100) + 5,
+-  /*! SOA Record. Expire, upper limit on authority. Datatype: u32 */
++  /*! SOA Record. Expire, upper limit on authority. Datatype: U32 */
+   ARES_RR_SOA_EXPIRE = (ARES_REC_TYPE_SOA * 100) + 6,
+-  /*! SOA Record. Minimum, RR TTL. Datatype: u32 */
++  /*! SOA Record. Minimum, RR TTL. Datatype: U32 */
+   ARES_RR_SOA_MINIMUM = (ARES_REC_TYPE_SOA * 100) + 7,
+-  /*! PTR Record. DNAME, pointer domain. Datatype: string */
++  /*! PTR Record. DNAME, pointer domain. Datatype: STR */
+   ARES_RR_PTR_DNAME = (ARES_REC_TYPE_PTR * 100) + 1,
+-  /*! HINFO Record. CPU. Datatype: string */
++  /*! HINFO Record. CPU. Datatype: STR */
+   ARES_RR_HINFO_CPU = (ARES_REC_TYPE_HINFO * 100) + 1,
+-  /*! HINFO Record. OS. Datatype: string */
++  /*! HINFO Record. OS. Datatype: STR */
+   ARES_RR_HINFO_OS = (ARES_REC_TYPE_HINFO * 100) + 2,
+-  /*! MX Record. Preference. Datatype: u16 */
++  /*! MX Record. Preference. Datatype: U16 */
+   ARES_RR_MX_PREFERENCE = (ARES_REC_TYPE_MX * 100) + 1,
+-  /*! MX Record. Exchange, domain. Datatype: string */
++  /*! MX Record. Exchange, domain. Datatype: STR */
+   ARES_RR_MX_EXCHANGE = (ARES_REC_TYPE_MX * 100) + 2,
+-  /*! TXT Record. Data. Datatype: binary */
++  /*! TXT Record. Data. Datatype: BINP */
+   ARES_RR_TXT_DATA = (ARES_REC_TYPE_TXT * 100) + 1,
+   /*! AAAA Record. Address. Datatype: INADDR6 */
+   ARES_RR_AAAA_ADDR = (ARES_REC_TYPE_AAAA * 100) + 1,
+-  /*! SRV Record. Priority. Datatype: u16 */
++  /*! SRV Record. Priority. Datatype: U16 */
+   ARES_RR_SRV_PRIORITY = (ARES_REC_TYPE_SRV * 100) + 2,
+-  /*! SRV Record. Weight. Datatype: u16 */
++  /*! SRV Record. Weight. Datatype: U16 */
+   ARES_RR_SRV_WEIGHT = (ARES_REC_TYPE_SRV * 100) + 3,
+-  /*! SRV Record. Port. Datatype: u16 */
++  /*! SRV Record. Port. Datatype: U16 */
+   ARES_RR_SRV_PORT = (ARES_REC_TYPE_SRV * 100) + 4,
+-  /*! SRV Record. Target domain. Datatype: string */
++  /*! SRV Record. Target domain. Datatype: STR */
+   ARES_RR_SRV_TARGET = (ARES_REC_TYPE_SRV * 100) + 5,
+-  /*! NAPTR Record. Order. Datatype: u16 */
++  /*! NAPTR Record. Order. Datatype: U16 */
+   ARES_RR_NAPTR_ORDER = (ARES_REC_TYPE_NAPTR * 100) + 1,
+-  /*! NAPTR Record. Preference. Datatype: u16 */
++  /*! NAPTR Record. Preference. Datatype: U16 */
+   ARES_RR_NAPTR_PREFERENCE = (ARES_REC_TYPE_NAPTR * 100) + 2,
+-  /*! NAPTR Record. Flags. Datatype: string */
++  /*! NAPTR Record. Flags. Datatype: STR */
+   ARES_RR_NAPTR_FLAGS = (ARES_REC_TYPE_NAPTR * 100) + 3,
+-  /*! NAPTR Record. Services. Datatype: string */
++  /*! NAPTR Record. Services. Datatype: STR */
+   ARES_RR_NAPTR_SERVICES = (ARES_REC_TYPE_NAPTR * 100) + 4,
+-  /*! NAPTR Record. Regexp. Datatype: string */
++  /*! NAPTR Record. Regexp. Datatype: STR */
+   ARES_RR_NAPTR_REGEXP = (ARES_REC_TYPE_NAPTR * 100) + 5,
+-  /*! NAPTR Record. Replacement. Datatype: string */
++  /*! NAPTR Record. Replacement. Datatype: STR */
+   ARES_RR_NAPTR_REPLACEMENT = (ARES_REC_TYPE_NAPTR * 100) + 6,
+-  /*! OPT Record. UDP Size. Datatype: u16 */
++  /*! OPT Record. UDP Size. Datatype: U16 */
+   ARES_RR_OPT_UDP_SIZE = (ARES_REC_TYPE_OPT * 100) + 1,
+-  /*! OPT Record. Extended RCode. Datatype: u8 */
++  /*! OPT Record. Extended RCode. Datatype: U8 */
+   ARES_RR_OPT_EXT_RCODE = (ARES_REC_TYPE_OPT * 100) + 2,
+-  /*! OPT Record. Version. Datatype: u8 */
++  /*! OPT Record. Version. Datatype: U8 */
+   ARES_RR_OPT_VERSION = (ARES_REC_TYPE_OPT * 100) + 3,
+-  /*! OPT Record. Flags. Datatype: u16 */
++  /*! OPT Record. Flags. Datatype: U16 */
+   ARES_RR_OPT_FLAGS = (ARES_REC_TYPE_OPT * 100) + 4,
+-  /*! TLSA Record. Certificate Usage. Datatype: u8 */
++  /*! OPT Record. Options. Datatype: OPT */
++  ARES_RR_OPT_OPTIONS = (ARES_REC_TYPE_OPT * 100) + 5,
++  /*! TLSA Record. Certificate Usage. Datatype: U8 */
+   ARES_RR_TLSA_CERT_USAGE = (ARES_REC_TYPE_TLSA * 100) + 1,
+-  /*! TLSA Record. Selector. Datatype: u8 */
++  /*! TLSA Record. Selector. Datatype: U8 */
+   ARES_RR_TLSA_SELECTOR = (ARES_REC_TYPE_TLSA * 100) + 2,
+-  /*! TLSA Record. Matching Type. Datatype: u8 */
++  /*! TLSA Record. Matching Type. Datatype: U8 */
+   ARES_RR_TLSA_MATCH = (ARES_REC_TYPE_TLSA * 100) + 3,
+-  /*! TLSA Record. Certificate Association Data. Datatype: bin */
++  /*! TLSA Record. Certificate Association Data. Datatype: BIN */
+   ARES_RR_TLSA_DATA = (ARES_REC_TYPE_TLSA * 100) + 4,
+-  /*! URI Record. Priority. Datatype: u16 */
++  /*! URI Record. Priority. Datatype: U16 */
+   ARES_RR_URI_PRIORITY = (ARES_REC_TYPE_URI * 100) + 1,
+-  /*! URI Record. Weight. Datatype: u16 */
++  /*! URI Record. Weight. Datatype: U16 */
+   ARES_RR_URI_WEIGHT = (ARES_REC_TYPE_URI * 100) + 2,
+-  /*! URI Record. Target domain. Datatype: string */
++  /*! URI Record. Target domain. Datatype: STR */
+   ARES_RR_URI_TARGET = (ARES_REC_TYPE_URI * 100) + 3,
+-  /*! CAA Record. Critical flag. Datatype: u8 */
++  /*! CAA Record. Critical flag. Datatype: U8 */
+   ARES_RR_CAA_CRITICAL = (ARES_REC_TYPE_CAA * 100) + 1,
+-  /*! CAA Record. Tag/Property. Datatype: string */
++  /*! CAA Record. Tag/Property. Datatype: STR */
+   ARES_RR_CAA_TAG = (ARES_REC_TYPE_CAA * 100) + 2,
+-  /*! CAA Record. Value. Datatype: binary */
++  /*! CAA Record. Value. Datatype: BINP */
+   ARES_RR_CAA_VALUE = (ARES_REC_TYPE_CAA * 100) + 3,
+-  /*! RAW Record. RR Type. Datatype: u16 */
++  /*! RAW Record. RR Type. Datatype: U16 */
+   ARES_RR_RAW_RR_TYPE = (ARES_REC_TYPE_RAW_RR * 100) + 1,
+-  /*! RAW Record. RR Data. Datatype: binary */
++  /*! RAW Record. RR Data. Datatype: BIN */
+   ARES_RR_RAW_RR_DATA = (ARES_REC_TYPE_RAW_RR * 100) + 2,
+ } ares_dns_rr_key_t;
+ 
+@@ -577,8 +585,8 @@ ares_status_t ares_dns_rr_set_u16(ares_dns_rr_t *dns_rr, ares_dns_rr_key_t key,
+ ares_status_t ares_dns_rr_set_u32(ares_dns_rr_t *dns_rr, ares_dns_rr_key_t key,
+                                   unsigned int val);
+ 
+-/*! Set binary data for specified resource record and key.  Can
+- *  only be used on keys with datatype ARES_DATATYPE_BIN
++/*! Set binary (BIN or BINP) data for specified resource record and key.  Can
++ *  only be used on keys with datatype ARES_DATATYPE_BIN or ARES_DATATYPE_BINP.
+  *
+  *  \param[in] dns_rr Pointer to resource record
+  *  \param[in] key    DNS Resource Record Key
+@@ -589,6 +597,18 @@ ares_status_t ares_dns_rr_set_u32(ares_dns_rr_t *dns_rr, ares_dns_rr_key_t key,
+ ares_status_t ares_dns_rr_set_bin(ares_dns_rr_t *dns_rr, ares_dns_rr_key_t key,
+                                   const unsigned char *val, size_t len);
+ 
++/*! Set the option for the RR
++ *
++ *  \param[in]  dns_rr   Pointer to resource record
++ *  \param[in]  key      DNS Resource Record Key
++ *  \param[in]  opt      Option record key id.
++ *  \param[out] val      Optional. Value to associate with option.
++ *  \param[out] val_len  Length of value passed.
++ *  \return ARES_SUCCESS on success
++ */
++ares_status_t ares_dns_rr_set_opt(ares_dns_rr_t *dns_rr, ares_dns_rr_key_t key,
++                                  unsigned short opt, const unsigned char *val,
++                                  size_t val_len);
+ 
+ /*! Retrieve a pointer to the ipv4 address.  Can only be used on keys with
+  *  datatype ARES_DATATYPE_INADDR.
+@@ -651,7 +671,8 @@ unsigned int                ares_dns_rr_get_u32(const ares_dns_rr_t *dns_rr,
+                                                 ares_dns_rr_key_t    key);
+ 
+ /*! Retrieve a pointer to the binary data.  Can only be used on keys with
+- *  datatype ARES_DATATYPE_BIN.
++ *  datatype ARES_DATATYPE_BIN or ARES_DATATYPE_BINP.  If BINP, the data is
++ *  guaranteed to have a NULL terminator which is NOT included in the length.
+  *
+  *  \param[in]  dns_rr Pointer to resource record
+  *  \param[in]  key    DNS Resource Record Key
+@@ -659,8 +680,53 @@ unsigned int                ares_dns_rr_get_u32(const ares_dns_rr_t *dns_rr,
+  *  \return pointer binary data or NULL on error
+  */
+ const unsigned char        *ares_dns_rr_get_bin(const ares_dns_rr_t *dns_rr,
+-                                                ares_dns_rr_key_t key, size_t *len);
++                                                ares_dns_rr_key_t key,
++                                                size_t *len);
+ 
++/*! Retrieve the number of options stored for the RR.
++ *
++ *  \param[in] dns_rr Pointer to resource record
++ *  \param[in] key    DNS Resource Record Key
++ *  \return count, or 0 if none.
++ */
++size_t ares_dns_rr_get_opt_cnt(const ares_dns_rr_t *dns_rr,
++                               ares_dns_rr_key_t key);
++
++/*! Retrieve the option for the RR by index.
++ *
++ *  \param[in]  dns_rr  Pointer to resource record
++ *  \param[in]  key     DNS Resource Record Key
++ *  \param[in]  idx     Index of option record
++ *  \param[out] val     Optional. Pointer passed by reference to hold value.
++ *                      Options may not have values.  Value if returned is
++ *                      likely printable and guaranteed to be NULL terminated.
++ *  \param[out] val_len Optional. Pointer passed by reference to hold value
++ *                      length.
++ *  \return option key/id on success, 65535 on misuse.
++ */
++unsigned short ares_dns_rr_get_opt(const ares_dns_rr_t *dns_rr,
++                                   ares_dns_rr_key_t key,
++                                   size_t idx,
++                                   const unsigned char **val,
++                                   size_t *val_len);
++
++/*! Retrieve the option for the RR by the option key/id.
++ *
++ *  \param[in]  dns_rr  Pointer to resource record
++ *  \param[in]  key     DNS Resource Record Key
++ *  \param[in]  opt     Option record key id (this is not the index).
++ *  \param[out] val     Optional. Pointer passed by reference to hold value.
++ *                      Options may not have values. Value if returned is
++ *                      likely printable and guaranteed to be NULL terminated.
++ *  \param[out] val_len Optional. Pointer passed by reference to hold value
++ *                      length.
++ *  \return ARES_TRUE on success, ARES_FALSE on misuse.
++ */
++ares_bool_t ares_dns_rr_get_opt_byid(const ares_dns_rr_t *dns_rr,
++                                     ares_dns_rr_key_t key,
++                                     unsigned short opt,
++                                     const unsigned char **val,
++                                     size_t *val_len);
+ 
+ /*! Parse a complete DNS message.
+  *
+@@ -701,6 +767,11 @@ ares_status_t ares_dns_rr_set_str_own(ares_dns_rr_t    *dns_rr,
+ ares_status_t ares_dns_rr_set_bin_own(ares_dns_rr_t    *dns_rr,
+                                       ares_dns_rr_key_t key, unsigned char *val,
+                                       size_t len);
++ares_status_t ares_dns_rr_set_opt_own(ares_dns_rr_t *dns_rr,
++                                      ares_dns_rr_key_t key,
++                                      unsigned short opt,
++                                      unsigned char *val,
++                                      size_t val_len);
+ ares_status_t ares_dns_record_rr_prealloc(ares_dns_record_t *dnsrec,
+                                           ares_dns_section_t sect, size_t cnt);
+ 
+@@ -772,14 +843,25 @@ typedef struct {
+ } ares__dns_naptr_t;
+ 
+ typedef struct {
+-  unsigned short udp_size;  /*!< taken from class */
+-  unsigned char  ext_rcode; /*!< Taken from first 8 bits of ttl */
+-  unsigned char  version;   /*!< taken from bits 8-16 of ttl */
+-  unsigned short flags;     /*!< Flags, remaining 16 bits, though only 1
+-                             *   currently defined */
+-  /* Remaining data can be multiple:
+-   *   16bit attribute/code, 16bit length, data
+-   * not currently supported */
++  unsigned short opt;
++  unsigned char *val;
++  size_t         val_len;
++} ares__dns_optval_t;
++
++typedef struct {
++  ares__dns_optval_t  *optval; /*!< Attribute/value pairs */
++  size_t               cnt;    /*!< Count of Attribute/Value pairs */
++  size_t               alloc;  /*!< Allocated count of attribute/value
++                                *   pairs */
++} ares__dns_options_t;
++
++typedef struct {
++  unsigned short       udp_size;  /*!< taken from class */
++  unsigned char        ext_rcode; /*!< Taken from first 8 bits of ttl */
++  unsigned char        version;   /*!< taken from bits 8-16 of ttl */
++  unsigned short       flags;     /*!< Flags, remaining 16 bits, though only
++                                   *   1 currently defined */
++  ares__dns_options_t *options;   /*!< Attribute/Value pairs */
+ } ares__dns_opt_t;
+ 
+ typedef struct {
+diff --git a/src/lib/ares_dns_write.c b/src/lib/ares_dns_write.c
+index 77254c7a..161499ac 100644
+--- a/src/lib/ares_dns_write.c
++++ b/src/lib/ares_dns_write.c
+@@ -507,6 +507,7 @@ static ares_status_t ares_dns_write_rr_opt(ares__buf_t         *buf,
+   size_t        len = ares__buf_len(buf);
+   ares_status_t status;
+   unsigned int  ttl = 0;
++  size_t        i;
+ 
+   (void)namelist;
+ 
+@@ -541,7 +542,35 @@ static ares_status_t ares_dns_write_rr_opt(ares__buf_t         *buf,
+     return status;
+   }
+ 
+-  /* TODO: handle additional opt messages here */
++  /* Append Options */
++  for (i=0; i<ares_dns_rr_get_opt_cnt(rr, ARES_RR_OPT_OPTIONS); i++) {
++    unsigned short       opt;
++    size_t               val_len;
++    const unsigned char *val;
++
++    opt = ares_dns_rr_get_opt(rr, ARES_RR_OPT_OPTIONS, i, &val, &val_len);
++
++    /* BE16 option */
++    status = ares__buf_append_be16(buf, opt);
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++
++    /* BE16 length */
++    status = ares__buf_append_be16(buf, (unsigned short)(val_len & 0xFFFF));
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++
++    /* Value */
++    if (val && val_len) {
++      status = ares__buf_append(buf, val, val_len);
++      if (status != ARES_SUCCESS) {
++        return status;
++      }
++    }
++  }
++
+   return ARES_SUCCESS;
+ }
+ 
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===

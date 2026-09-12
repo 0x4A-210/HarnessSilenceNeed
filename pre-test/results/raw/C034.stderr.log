@@ -1,0 +1,351 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-blind-run-40ko0e9q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08550-1518-72d3-9223-55dc4684ea8c
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C034
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `test/ares-test-fuzz.c`
+
+~~~~c
+#include <stddef.h>
+
+#include "ares.h"
+
+// Entrypoint for Clang's libfuzzer
+int LLVMFuzzerTestOneInput(const unsigned char *data,
+                           unsigned long size) {
+  // Feed the data into each of the ares_parse_*_reply functions.
+  struct hostent *host = NULL;
+  struct ares_addrttl info[5];
+  int count = 5;
+  ares_parse_a_reply(data, size, &host, info, &count);
+  if (host) ares_free_hostent(host);
+
+  host = NULL;
+  struct ares_addr6ttl info6[5];
+  count = 5;
+  ares_parse_aaaa_reply(data, size, &host, info6, &count);
+  if (host) ares_free_hostent(host);
+
+  host = NULL;
+  unsigned char addrv4[4] = {0x10, 0x20, 0x30, 0x40};
+  ares_parse_ptr_reply(data, size, addrv4, sizeof(addrv4), AF_INET, &host);
+  if (host) ares_free_hostent(host);
+
+  host = NULL;
+  ares_parse_ns_reply(data, size, &host);
+  if (host) ares_free_hostent(host);
+
+  struct ares_srv_reply* srv = NULL;
+  ares_parse_srv_reply(data, size, &srv);
+  if (srv) ares_free_data(srv);
+
+  struct ares_mx_reply* mx = NULL;
+  ares_parse_mx_reply(data, size, &mx);
+  if (mx) ares_free_data(mx);
+
+  struct ares_txt_reply* txt = NULL;
+  ares_parse_txt_reply(data, size, &txt);
+  if (txt) ares_free_data(txt);
+
+  struct ares_soa_reply* soa = NULL;
+  ares_parse_soa_reply(data, size, &soa);
+  if (soa) ares_free_data(soa);
+
+  struct ares_naptr_reply* naptr = NULL;
+  ares_parse_naptr_reply(data, size, &naptr);
+  if (naptr) ares_free_data(naptr);
+
+  return 0;
+}
+~~~~
+
+### `test/ares-test-fuzz-name.c`
+
+~~~~c
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "ares.h"
+// Include ares internal file for DNS protocol constants
+#include "nameser.h"
+
+// Entrypoint for Clang's libfuzzer, exercising query creation.
+int LLVMFuzzerTestOneInput(const unsigned char *data,
+                           unsigned long size) {
+  // Null terminate the data.
+  char *name = malloc(size + 1);
+  name[size] = '\0';
+  memcpy(name, data, size);
+
+  unsigned char *buf = NULL;
+  int buflen = 0;
+  ares_create_query(name, ns_c_in, ns_t_aaaa, 1234, 0, &buf, &buflen, 1024);
+  free(buf);
+  free(name);
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/c-ares/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2016 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+# Remove -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION from CFLAGS
+# as a workaround for https://github.com/google/oss-fuzz/issues/413.
+# It's unclear why the c-ares configure is that picky;
+# a better fix would probably be in the c-ares build system.
+CFLAGS=$(for f in $CFLAGS; do [ $f != "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION" ] && echo $f; done);
+
+# Build the project.
+./buildconf
+./configure --enable-debug
+make clean
+make -j$(nproc) V=1 all
+
+# Build the fuzzers.
+$CC $CFLAGS -I. -c $SRC/c-ares/test/ares-test-fuzz.c -o $WORK/ares-test-fuzz.o
+$CXX $CXXFLAGS -std=c++11 $WORK/ares-test-fuzz.o \
+    -o $OUT/ares_parse_reply_fuzzer \
+    $LIB_FUZZING_ENGINE $SRC/c-ares/.libs/libcares.a
+
+$CC $CFLAGS -I. -c $SRC/c-ares/test/ares-test-fuzz-name.c \
+    -o $WORK/ares-test-fuzz-name.o
+$CXX $CXXFLAGS -std=c++11 $WORK/ares-test-fuzz-name.o \
+    -o $OUT/ares_create_query_fuzzer \
+    $LIB_FUZZING_ENGINE $SRC/c-ares/.libs/libcares.a
+
+# Archive and copy to $OUT seed corpus if the build succeeded.
+zip -j $OUT/ares_parse_reply_fuzzer_seed_corpus.zip $SRC/c-ares/test/fuzzinput/*
+zip -j $OUT/ares_create_query_fuzzer_seed_corpus.zip \
+    $SRC/c-ares/test/fuzznames/*
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `ares__get_hostent.c`
+- `ares__readaddrinfo.c`
+- `ares_getaddrinfo.c`
+- `ares_gethostbyname.c`
+- `ares_init.c`
+
+~~~~diff
+diff --git a/ares__get_hostent.c b/ares__get_hostent.c
+--- a/ares__get_hostent.c
++++ b/ares__get_hostent.c
+@@ -135,14 +135,13 @@ int ares__get_hostent(FILE *fp, int family, struct hostent **host)
+       /* Convert address string to network address for the requested family. */
+       addrlen = 0;
+       addr.family = AF_UNSPEC;
+       addr.addrV4.s_addr = INADDR_NONE;
+       if ((family == AF_INET) || (family == AF_UNSPEC))
+         {
+-          addr.addrV4.s_addr = inet_addr(txtaddr);
+-          if (addr.addrV4.s_addr != INADDR_NONE)
++          if (ares_inet_pton(AF_INET, txtaddr, &addr.addrV4) > 0)
+             {
+               /* Actual network address family and length. */
+               addr.family = AF_INET;
+               addrlen = sizeof(addr.addrV4);
+             }
+         }
+diff --git a/ares__readaddrinfo.c b/ares__readaddrinfo.c
+--- a/ares__readaddrinfo.c
++++ b/ares__readaddrinfo.c
+@@ -167,14 +167,13 @@ int ares__readaddrinfo(FILE *fp,
+        * Convert address string to network address for the requested families.
+        * Actual address family possible values are AF_INET and AF_INET6 only.
+        */
+       if ((hints->ai_family == AF_INET) || (hints->ai_family == AF_UNSPEC))
+         {
+           addr.sa4.sin_port = htons(port);
+-          addr.sa4.sin_addr.s_addr = inet_addr(txtaddr);
+-          if (addr.sa4.sin_addr.s_addr != INADDR_NONE)
++          if (ares_inet_pton(AF_INET, txtaddr, &addr.sa4.sin_addr) > 0)
+             {
+               node = ares__append_addrinfo_node(&nodes);
+               if(!node)
+                 {
+                   goto enomem;
+                 }
+diff --git a/ares_getaddrinfo.c b/ares_getaddrinfo.c
+--- a/ares_getaddrinfo.c
++++ b/ares_getaddrinfo.c
+@@ -310,20 +310,19 @@ static int fake_addrinfo(const char *name,
+             }
+         }
+ 
+       memset(&addr, 0, sizeof(addr));
+ 
+       /* if we don't have 3 dots, it is illegal
+-       * (although inet_addr doesn't think so).
++       * (although inet_pton doesn't think so).
+        */
+       if (numdots != 3 || !valid)
+         result = 0;
+       else
+         result =
+-            ((addr.sa4.sin_addr.s_addr = inet_addr(name)) == INADDR_NONE ? 0
+-                                                                         : 1);
++            (ares_inet_pton(AF_INET, name, &addr.sa4.sin_addr) < 1 ? 0 : 1);
+ 
+       if (result)
+         {
+           family = addr.sa.sa_family = AF_INET;
+           addr.sa4.sin_port = htons(port);
+           addrlen = sizeof(addr.sa4);
+diff --git a/ares_gethostbyname.c b/ares_gethostbyname.c
+--- a/ares_gethostbyname.c
++++ b/ares_gethostbyname.c
+@@ -210,13 +210,13 @@ static void host_callback(void *arg, int status, int timeouts,
+           }
+           if (host && channel->nsort)
+             sort6_addresses(host, channel->sortlist, channel->nsort);
+         }
+       if (status == ARES_SUCCESS && host && host->h_addr_list[0] == NULL)
+       {
+-        /* The query returned something but had no A/AAAA record 
++        /* The query returned something but had no A/AAAA record
+            (even after potentially retrying AAAA with A)
+            so we should treat this as an error */
+         status = ARES_ENODATA;
+       }
+       end_hquery(hquery, status, host);
+     }
+@@ -271,18 +271,18 @@ static int fake_hostent(const char *name, int family,
+           } else if (*p == '.') {
+             numdots++;
+           }
+         }
+ 
+       /* if we don't have 3 dots, it is illegal
+-       * (although inet_addr doesn't think so).
++       * (although inet_pton doesn't think so).
+        */
+       if (numdots != 3 || !valid)
+         result = 0;
+       else
+-        result = ((in.s_addr = inet_addr(name)) == INADDR_NONE ? 0 : 1);
++        result = (ares_inet_pton(AF_INET, name, &in) < 1 ? 0 : 1);
+ 
+       if (result)
+         family = AF_INET;
+     }
+   if (family == AF_INET6)
+     result = (ares_inet_pton(AF_INET6, name, &in6) < 1 ? 0 : 1);
+diff --git a/ares_init.c b/ares_init.c
+--- a/ares_init.c
++++ b/ares_init.c
+@@ -2294,13 +2294,13 @@ static int set_search(ares_channel channel, const char *str)
+     /* if we already have some domains present, free them first */
+     ares_strsplit_free(channel->domains, channel->ndomains);
+     channel->domains = NULL;
+     channel->ndomains = -1;
+   } /* LCOV_EXCL_STOP */
+ 
+-  channel->domains  = ares_strsplit(str, ", ", 1, &cnt); 
++  channel->domains  = ares_strsplit(str, ", ", 1, &cnt);
+   channel->ndomains = (int)cnt;
+   if (channel->domains == NULL || channel->ndomains == 0) {
+     channel->domains  = NULL;
+     channel->ndomains = -1;
+   }
+ 
+@@ -2420,15 +2420,15 @@ static int ip_addr(const char *ipbuf, ares_ssize_t len, struct in_addr *addr)
+ {
+ 
+   /* Four octets and three periods yields at most 15 characters. */
+   if (len > 15)
+     return -1;
+ 
+-  addr->s_addr = inet_addr(ipbuf);
+-  if (addr->s_addr == INADDR_NONE && strcmp(ipbuf, "255.255.255.255") != 0)
++  if (ares_inet_pton(AF_INET, ipbuf, addr) < 1)
+     return -1;
++
+   return 0;
+ }
+ 
+ static void natural_mask(struct apattern *pat)
+ {
+   struct in_addr addr;
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C034","maintenance_needed":false,"confidence":97,"change_types":["internal parsing implementation change","IPv4 validation behavior change","formatting-only cleanup"],"affected_functions":["ares__get_hostent","ares__readaddrinfo","fake_addrinfo","fake_hostent","ip_addr"],"reason":"The commit replaces inet_addr-based IPv4 parsing with ares_inet_pton and includes whitespace-only edits. It introduces no new public entry point, protocol, initialization requirement, configuration requirement, or harness input contract. The existing fuzzers continue to invoke their original high-level targets—ares_parse_*_reply and ares_create_query—with valid setup. Although those harnesses do not directly exercise the changed host lookup, address-info, and initialization paths, that was already true before the commit; this internal parsing/validation change alone does not make the existing harness inadequate for its intended targets.","evidence":["test/ares-test-fuzz.c continues to cover the ares_parse_*_reply family using arbitrary input data and performs the corresponding frees.","test/ares-test-fuzz-name.c continues to pass a NUL-terminated fuzz-controlled name to ares_create_query; the commit does not alter that API or its requirements.","ares__get_hostent, ares__readaddrinfo, fake_addrinfo, fake_hostent, and ip_addr only replace inet_addr calls with ares_inet_pton(AF_INET, ...).","The remaining edits in ares_gethostbyname.c and ares_init.c remove trailing whitespace or update comments; they do not alter harness-facing behavior."],"recommended_action":"Keep the existing fuzz harness and OSS-Fuzz wiring unchanged for this commit; any separate expansion to fuzz host lookup or configuration parsing would be optional coverage work, not required maintenance."}
+tokens used
+6,643

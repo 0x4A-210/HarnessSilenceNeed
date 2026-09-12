@@ -1,0 +1,177 @@
+PROJECT solidity
+COMMIT 3e7c68d9b09b59a959f32975f21ba3ec19152afa
+PARENT 9e62f21b2586afb6544f6a03d9c4c2f088dd94f7
+SUBJECT Merge identifier query methods into one
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/libsolidity/interface/CompilerStack.cpp b/libsolidity/interface/CompilerStack.cpp
+index a1c26ab37..acf193295 100644
+--- a/libsolidity/interface/CompilerStack.cpp
++++ b/libsolidity/interface/CompilerStack.cpp
+@@ -1014,46 +1014,31 @@ Json::Value const& CompilerStack::natspecDev(Contract const& _contract) const
+ 	return _contract.devDocumentation.init([&]{ return Natspec::devDocumentation(*_contract.contract); });
+ }
+ 
+-Json::Value CompilerStack::methodIdentifiers(string const& _contractName) const
++Json::Value CompilerStack::contractIdentifiers(string const& _contractName) const
+ {
+ 	if (m_stackState < AnalysisPerformed)
+ 		solThrow(CompilerError, "Analysis was not successful.");
+ 
+-	Json::Value methodIdentifiers(Json::objectValue);
+-	for (auto const& it: contractDefinition(_contractName).interfaceFunctions())
+-		methodIdentifiers[it.second->externalSignature()] = it.first.hex();
+-	return methodIdentifiers;
+-}
++	Json::Value contractIdentifiers(Json::objectValue);
++	// Always have a methods object
++	contractIdentifiers["methods"] = Json::objectValue;
+ 
+-Json::Value CompilerStack::errorIdentifiers(string const& _contractName) const
+-{
+-	if (m_stackState < AnalysisPerformed)
+-		solThrow(CompilerError, "Analysis was not successful.");
+-
+-	Json::Value errorIdentifiers(Json::objectValue);
++	for (auto const& it: contractDefinition(_contractName).interfaceFunctions())
++		contractIdentifiers["methods"][it.second->externalSignature()] = it.first.hex();
+ 	for (ErrorDefinition const* error: contractDefinition(_contractName).interfaceErrors())
+ 	{
+ 		string signature = error->functionType(true)->externalSignature();
+-		errorIdentifiers[signature] = toHex(toCompactBigEndian(selectorFromSignature32(signature), 4));
++		contractIdentifiers["errors"][signature] = toHex(toCompactBigEndian(selectorFromSignature32(signature), 4));
+ 	}
+ 
+-	return errorIdentifiers;
+-}
+-
+-Json::Value CompilerStack::eventIdentifiers(string const& _contractName) const
+-{
+-	if (m_stackState < AnalysisPerformed)
+-		solThrow(CompilerError, "Analysis was not successful.");
+-
+-	Json::Value eventIdentifiers(Json::objectValue);
+ 	for (EventDefinition const* event: contractDefinition(_contractName).interfaceEvents())
+ 		if (!event->isAnonymous())
+ 		{
+ 			string signature = event->functionType(true)->externalSignature();
+-			eventIdentifiers[signature] = toHex(u256(h256::Arith(keccak256(signature))));
++			contractIdentifiers["events"][signature] = toHex(u256(h256::Arith(keccak256(signature))));
+ 		}
+ 
+-	return eventIdentifiers;
++	return contractIdentifiers;
+ }
+ 
+ bytes CompilerStack::cborMetadata(string const& _contractName, bool _forIR) const
+diff --git a/libsolidity/interface/CompilerStack.h b/libsolidity/interface/CompilerStack.h
+index 2e1e687f7..b1f85dd4d 100644
+--- a/libsolidity/interface/CompilerStack.h
++++ b/libsolidity/interface/CompilerStack.h
+@@ -327,14 +327,8 @@ public:
+ 	/// Prerequisite: Successful call to parse or compile.
+ 	Json::Value const& natspecDev(std::string const& _contractName) const;
+ 
+-	/// @returns a JSON representing a map of method identifiers (hashes) to function names.
+-	Json::Value methodIdentifiers(std::string const& _contractName) const;
+-
+-	/// @returns a JSON representing a map of error identifiers (hashes) to error names.
+-	Json::Value errorIdentifiers(std::string const& _contractName) const;
+-
+-	/// @returns a JSON representing a map of event identifiers (hashes) to event names.
+-	Json::Value eventIdentifiers(std::string const& _contractName) const;
++	/// @returns a JSON object with the three members ``methods``, ``events``, ``errors``. Each is a map, mapping identifiers (hashes) to function names.
++	Json::Value contractIdentifiers(std::string const& _contractName) const;
+ 
+ 	/// @returns the Contract Metadata matching the pipeline selected using the viaIR setting.
+ 	std::string const& metadata(std::string const& _contractName) const { return metadata(contract(_contractName)); }
+diff --git a/libsolidity/interface/StandardCompiler.cpp b/libsolidity/interface/StandardCompiler.cpp
+index 5ccf2d447..0e5b8aba4 100644
+--- a/libsolidity/interface/StandardCompiler.cpp
++++ b/libsolidity/interface/StandardCompiler.cpp
+@@ -1298,7 +1298,7 @@ Json::Value StandardCompiler::compileSolidity(StandardCompiler::InputsAndSetting
+ 		if (compilationSuccess && isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "evm.legacyAssembly", wildcardMatchesExperimental))
+ 			evmData["legacyAssembly"] = compilerStack.assemblyJSON(contractName);
+ 		if (isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "evm.methodIdentifiers", wildcardMatchesExperimental))
+-			evmData["methodIdentifiers"] = compilerStack.methodIdentifiers(contractName);
++			evmData["methodIdentifiers"] = compilerStack.contractIdentifiers(contractName)["methods"];
+ 		if (compilationSuccess && isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "evm.gasEstimates", wildcardMatchesExperimental))
+ 			evmData["gasEstimates"] = compilerStack.gasEstimates(contractName);
+ 
+diff --git a/solc/CommandLineInterface.cpp b/solc/CommandLineInterface.cpp
+index d96460fa1..ba557918c 100644
+--- a/solc/CommandLineInterface.cpp
++++ b/solc/CommandLineInterface.cpp
+@@ -270,25 +270,23 @@ void CommandLineInterface::handleSignatureHashes(string const& _contract)
+ 	if (!m_options.compiler.outputs.signatureHashes)
+ 		return;
+ 
+-	Json::Value methodIdentifiers = m_compiler->methodIdentifiers(_contract);
++	Json::Value contractIdentifiers = m_compiler->contractIdentifiers(_contract);
+ 	string out = "Function signatures:\n";
+-	for (auto const& name: methodIdentifiers.getMemberNames())
+-		out += methodIdentifiers[name].asString() + ": " + name + "\n";
++	for (auto const& name: contractIdentifiers["methods"].getMemberNames())
++		out += contractIdentifiers["methods"][name].asString() + ": " + name + "\n";
+ 
+-	Json::Value errorIdentifiers = m_compiler->errorIdentifiers(_contract);
+-	if (!errorIdentifiers.empty())
++	if (contractIdentifiers.isMember("errors"))
+ 	{
+ 		out += "\nError signatures:\n";
+-		for (auto const& name: errorIdentifiers.getMemberNames())
+-			out += errorIdentifiers[name].asString() + ": " + name + "\n";
++		for (auto const& name: contractIdentifiers["errors"].getMemberNames())
++			out += contractIdentifiers["errors"][name].asString() + ": " + name + "\n";
+ 	}
+ 
+-	Json::Value eventIdentifiers = m_compiler->eventIdentifiers(_contract);
+-	if (!eventIdentifiers.empty())
++	if (contractIdentifiers.isMember("events"))
+ 	{
+ 		out += "\nEvent signatures:\n";
+-		for (auto const& name: eventIdentifiers.getMemberNames())
+-			out += eventIdentifiers[name].asString() + ": " + name + "\n";
++		for (auto const& name: contractIdentifiers["events"].getMemberNames())
++			out += contractIdentifiers["events"][name].asString() + ": " + name + "\n";
+ 	}
+ 
+ 	if (!m_options.output.dir.empty())
+@@ -838,7 +836,7 @@ void CommandLineInterface::handleCombinedJSON()
+ 				m_compiler->runtimeObject(contractName).functionDebugData
+ 			);
+ 		if (m_options.compiler.combinedJsonRequests->signatureHashes)
+-			contractData[g_strSignatureHashes] = m_compiler->methodIdentifiers(contractName);
++			contractData[g_strSignatureHashes] = m_compiler->contractIdentifiers(contractName)["methods"];
+ 		if (m_options.compiler.combinedJsonRequests->natspecDev)
+ 			contractData[g_strNatspecDev] = m_compiler->natspecDev(contractName);
+ 		if (m_options.compiler.combinedJsonRequests->natspecUser)
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/test/tools/ossfuzz/SolidityEvmoneInterface.cpp b/test/tools/ossfuzz/SolidityEvmoneInterface.cpp
+index 4d536183c..49b17930a 100644
+--- a/test/tools/ossfuzz/SolidityEvmoneInterface.cpp
++++ b/test/tools/ossfuzz/SolidityEvmoneInterface.cpp
+@@ -58,7 +58,7 @@ optional<CompilerOutput> SolidityCompilationFramework::compileContract()
+ 		else
+ 			contractName = m_compilerInput.contractName;
+ 		evmasm::LinkerObject obj = m_compiler.object(contractName);
+-		Json::Value methodIdentifiers = m_compiler.methodIdentifiers(contractName);
++		Json::Value methodIdentifiers = m_compiler.contractIdentifiers(contractName)["methods"];
+ 		return CompilerOutput{obj.bytecode, methodIdentifiers};
+ 	}
+ }
+diff --git a/test/tools/ossfuzz/SolidityEvmoneInterface.h b/test/tools/ossfuzz/SolidityEvmoneInterface.h
+index 980eb9a84..51f6d5bdc 100644
+--- a/test/tools/ossfuzz/SolidityEvmoneInterface.h
++++ b/test/tools/ossfuzz/SolidityEvmoneInterface.h
+@@ -91,7 +91,7 @@ public:
+ 	/// @returns method identifiers in contract called @param _contractName.
+ 	Json::Value methodIdentifiers(std::string const& _contractName)
+ 	{
+-		return m_compiler.methodIdentifiers(_contractName);
++		return m_compiler.contractIdentifiers(_contractName)["methods"];
+ 	}
+ 	/// @returns Compilation output comprising EVM bytecode and list of
+ 	/// method identifiers in contract if compilation is successful,

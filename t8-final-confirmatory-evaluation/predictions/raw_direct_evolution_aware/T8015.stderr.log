@@ -1,0 +1,1306 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-direct_evolution_aware-T8015-y6tnuhxv
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a09402-be4f-7f32-bf24-f54edbbfd2f4
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8015
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `fuzz/fuzz.c`
+
+~~~~cpp
+/*
+ * fuzz.c: Common functions for fuzzing.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+#include <libxml/hash.h>
+#include <libxml/parser.h>
+#include <libxml/parserInternals.h>
+#include <libxml/tree.h>
+#include <libxml/xmlIO.h>
+#include "fuzz.h"
+
+typedef struct {
+    const char *data;
+    size_t size;
+} xmlFuzzEntityInfo;
+
+/* Single static instance for now */
+static struct {
+    /* Original data */
+    const char *data;
+    size_t size;
+
+    /* Remaining data */
+    const char *ptr;
+    size_t remaining;
+
+    /* Buffer for unescaped strings */
+    char *outBuf;
+    char *outPtr; /* Free space at end of buffer */
+
+    xmlHashTablePtr entities; /* Maps URLs to xmlFuzzEntityInfos */
+
+    /* The first entity is the main entity. */
+    const char *mainUrl;
+    xmlFuzzEntityInfo *mainEntity;
+} fuzzData;
+
+size_t fuzzNumAllocs;
+size_t fuzzMaxAllocs;
+int fuzzAllocFailed;
+
+/**
+ * xmlFuzzErrorFunc:
+ *
+ * An error function that simply discards all errors.
+ */
+void
+xmlFuzzErrorFunc(void *ctx ATTRIBUTE_UNUSED, const char *msg ATTRIBUTE_UNUSED,
+                 ...) {
+}
+
+/*
+ * Malloc failure injection.
+ *
+ * To debug issues involving malloc failures, it's often helpful to set
+ * MALLOC_ABORT to 1. This should provide a backtrace of the failed
+ * allocation.
+ */
+
+#define XML_FUZZ_MALLOC_ABORT   0
+
+static void *
+xmlFuzzMalloc(size_t size) {
+    if (fuzzMaxAllocs > 0) {
+        fuzzNumAllocs += 1;
+        if (fuzzNumAllocs == fuzzMaxAllocs) {
+#if XML_FUZZ_MALLOC_ABORT
+            abort();
+#endif
+            fuzzAllocFailed = 1;
+            return(NULL);
+        }
+    }
+    return malloc(size);
+}
+
+static void *
+xmlFuzzRealloc(void *ptr, size_t size) {
+    if (fuzzMaxAllocs > 0) {
+        fuzzNumAllocs += 1;
+        if (fuzzNumAllocs == fuzzMaxAllocs) {
+#if XML_FUZZ_MALLOC_ABORT
+            abort();
+#endif
+            fuzzAllocFailed = 1;
+            return(NULL);
+        }
+    }
+    return realloc(ptr, size);
+}
+
+void
+xmlFuzzMemSetup(void) {
+    xmlMemSetup(free, xmlFuzzMalloc, xmlFuzzRealloc, xmlMemStrdup);
+}
+
+void
+xmlFuzzMemSetLimit(size_t limit) {
+    fuzzNumAllocs = 0;
+    fuzzMaxAllocs = limit;
+    fuzzAllocFailed = 0;
+}
+
+int
+xmlFuzzMallocFailed(void) {
+    return fuzzAllocFailed;
+}
+
+void
+xmlFuzzResetMallocFailed(void) {
+    fuzzAllocFailed = 0;
+}
+
+void
+xmlFuzzCheckMallocFailure(const char *func, int expect) {
+    if (fuzzAllocFailed != expect) {
+        fprintf(stderr, "%s: malloc failure %s reported\n",
+                func, fuzzAllocFailed ? "not" : "erroneously");
+        abort();
+    }
+}
+
+/**
+ * xmlFuzzDataInit:
+ *
+ * Initialize fuzz data provider.
+ */
+void
+xmlFuzzDataInit(const char *data, size_t size) {
+    fuzzData.data = data;
+    fuzzData.size = size;
+    fuzzData.ptr = data;
+    fuzzData.remaining = size;
+
+    fuzzData.outBuf = xmlMalloc(size + 1);
+    fuzzData.outPtr = fuzzData.outBuf;
+
+    fuzzData.entities = xmlHashCreate(8);
+    fuzzData.mainUrl = NULL;
+    fuzzData.mainEntity = NULL;
+}
+
+/**
+ * xmlFuzzDataFree:
+ *
+ * Cleanup fuzz data provider.
+ */
+void
+xmlFuzzDataCleanup(void) {
+    xmlFree(fuzzData.outBuf);
+    xmlHashFree(fuzzData.entities, xmlHashDefaultDeallocator);
+}
+
+/**
+ * xmlFuzzWriteInt:
+ * @out:  output file
+ * @v:  integer to write
+ * @size:  size of integer in bytes
+ *
+ * Write an integer to the fuzz data.
+ */
+void
+xmlFuzzWriteInt(FILE *out, size_t v, int size) {
+    int shift;
+
+    while (size > (int) sizeof(size_t)) {
+        putc(0, out);
+        size--;
+    }
+
+    shift = size * 8;
+    while (shift > 0) {
+        shift -= 8;
+        putc((v >> shift) & 255, out);
+    }
+}
+
+/**
+ * xmlFuzzReadInt:
+ * @size:  size of integer in bytes
+ *
+ * Read an integer from the fuzz data.
+ */
+size_t
+xmlFuzzReadInt(int size) {
+    size_t ret = 0;
+
+    while ((size > 0) && (fuzzData.remaining > 0)) {
+        unsigned char c = (unsigned char) *fuzzData.ptr++;
+        fuzzData.remaining--;
+        ret = (ret << 8) | c;
+        size--;
+    }
+
+    return ret;
+}
+
+/**
+ * xmlFuzzReadRemaining:
+ * @size:  size of string in bytes
+ *
+ * Read remaining bytes from fuzz data.
+ */
+const char *
+xmlFuzzReadRemaining(size_t *size) {
+    const char *ret = fuzzData.ptr;
+
+    *size = fuzzData.remaining;
+    fuzzData.ptr += fuzzData.remaining;
+    fuzzData.remaining = 0;
+
+    return(ret);
+}
+
+/*
+ * xmlFuzzWriteString:
+ * @out:  output file
+ * @str:  string to write
+ *
+ * Write a random-length string to file in a format similar to
+ * FuzzedDataProvider. Backslash followed by newline marks the end of the
+ * string. Two backslashes are used to escape a backslash.
+ */
+void
+xmlFuzzWriteString(FILE *out, const char *str) {
+    for (; *str; str++) {
+        int c = (unsigned char) *str;
+        putc(c, out);
+        if (c == '\\')
+            putc(c, out);
+    }
+    putc('\\', out);
+    putc('\n', out);
+}
+
+/**
+ * xmlFuzzReadString:
+ * @size:  size of string in bytes
+ *
+ * Read a random-length string from the fuzz data.
+ *
+ * The format is similar to libFuzzer's FuzzedDataProvider but treats
+ * backslash followed by newline as end of string. This makes the fuzz data
+ * more readable. A backslash character is escaped with another backslash.
+ *
+ * Returns a zero-terminated string or NULL if the fuzz data is exhausted.
+ */
+const char *
+xmlFuzzReadString(size_t *size) {
+    const char *out = fuzzData.outPtr;
+
+    while (fuzzData.remaining > 0) {
+        int c = *fuzzData.ptr++;
+        fuzzData.remaining--;
+
+        if ((c == '\\') && (fuzzData.remaining > 0)) {
+            int c2 = *fuzzData.ptr;
+
+            if (c2 == '\n') {
+                fuzzData.ptr++;
+                fuzzData.remaining--;
+                if (size != NULL)
+                    *size = fuzzData.outPtr - out;
+                *fuzzData.outPtr++ = '\0';
+                return(out);
+            }
+            if (c2 == '\\') {
+                fuzzData.ptr++;
+                fuzzData.remaining--;
+            }
+        }
+
+        *fuzzData.outPtr++ = c;
+    }
+
+    if (fuzzData.outPtr > out) {
+        if (size != NULL)
+            *size = fuzzData.outPtr - out;
+        *fuzzData.outPtr++ = '\0';
+        return(out);
+    }
+
+    if (size != NULL)
+        *size = 0;
+    return(NULL);
+}
+
+/**
+ * xmlFuzzReadEntities:
+ *
+ * Read entities like the main XML file, external DTDs, external parsed
+ * entities from fuzz data.
+ */
+void
+xmlFuzzReadEntities(void) {
+    size_t num = 0;
+
+    while (1) {
+        const char *url, *entity;
+        size_t urlSize, entitySize;
+        xmlFuzzEntityInfo *entityInfo;
+
+        url = xmlFuzzReadString(&urlSize);
+        if (url == NULL) break;
+
+        entity = xmlFuzzReadString(&entitySize);
+        if (entity == NULL) break;
+
+        /*
+         * Cap URL size to avoid quadratic behavior when generating
+         * error messages or looking up entities.
+         */
+        if (urlSize < 50 &&
+            xmlHashLookup(fuzzData.entities, (xmlChar *)url) == NULL) {
+            entityInfo = xmlMalloc(sizeof(xmlFuzzEntityInfo));
+            if (entityInfo == NULL)
+                break;
+            entityInfo->data = entity;
+            entityInfo->size = entitySize;
+
+            xmlHashAddEntry(fuzzData.entities, (xmlChar *)url, entityInfo);
+
+            if (num == 0) {
+                fuzzData.mainUrl = url;
+                fuzzData.mainEntity = entityInfo;
+            }
+
+            num++;
+        }
+    }
+}
+
+/**
+ * xmlFuzzMainUrl:
+ *
+ * Returns the main URL.
+ */
+const char *
+xmlFuzzMainUrl(void) {
+    return(fuzzData.mainUrl);
+}
+
+/**
+ * xmlFuzzMainEntity:
+ * @size:  size of the main entity in bytes
+ *
+ * Returns the main entity.
+ */
+const char *
+xmlFuzzMainEntity(size_t *size) {
+    if (fuzzData.mainEntity == NULL)
+        return(NULL);
+    *size = fuzzData.mainEntity->size;
+    return(fuzzData.mainEntity->data);
+}
+
+/**
+ * xmlFuzzEntityLoader:
+ *
+ * The entity loader for fuzz data.
+ */
+xmlParserInputPtr
+xmlFuzzEntityLoader(const char *URL, const char *ID ATTRIBUTE_UNUSED,
+                    xmlParserCtxtPtr ctxt) {
+    xmlParserInputPtr input;
+    xmlFuzzEntityInfo *entity;
+
+    if (URL == NULL)
+        return(NULL);
+    entity = xmlHashLookup(fuzzData.entities, (xmlChar *) URL);
+    if (entity == NULL)
+        return(NULL);
+
+    input = xmlNewInputStream(ctxt);
+    if (input == NULL)
+        return(NULL);
+    input->filename = (char *) xmlCharStrdup(URL);
+    if (input->filename == NULL) {
+        xmlCtxtErrMemory(ctxt);
+        xmlFreeInputStream(input);
+        return(NULL);
+    }
+    input->buf = xmlParserInputBufferCreateMem(entity->data, entity->size,
+                                               XML_CHAR_ENCODING_NONE);
+    if (input->buf == NULL) {
+        xmlCtxtErrMemory(ctxt);
+        xmlFreeInputStream(input);
+        return(NULL);
+    }
+    input->base = input->cur = xmlBufContent(input->buf->buffer);
+    input->end = input->base + xmlBufUse(input->buf->buffer);
+
+    return input;
+}
+
+char *
+xmlSlurpFile(const char *path, size_t *sizeRet) {
+    FILE *file;
+    struct stat statbuf;
+    char *data;
+    size_t size;
+
+    if ((stat(path, &statbuf) != 0) || (!S_ISREG(statbuf.st_mode)))
+        return(NULL);
+    size = statbuf.st_size;
+    file = fopen(path, "rb");
+    if (file == NULL)
+        return(NULL);
+    data = xmlMalloc(size + 1);
+    if (data != NULL) {
+        if (fread(data, 1, size, file) != size) {
+            xmlFree(data);
+            data = NULL;
+        } else {
+            data[size] = 0;
+            if (sizeRet != NULL)
+                *sizeRet = size;
+        }
+    }
+    fclose(file);
+
+    return(data);
+}
+~~~~
+
+### H0 path: `fuzz/fuzz.h`
+
+~~~~cpp
+/*
+ * fuzz.h: Common functions and macros for fuzzing.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#ifndef __XML_FUZZERCOMMON_H__
+#define __XML_FUZZERCOMMON_H__
+
+#include <stddef.h>
+#include <stdio.h>
+#include <libxml/parser.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#if defined(LIBXML_HTML_ENABLED)
+  #define HAVE_HTML_FUZZER
+#endif
+#if defined(LIBXML_REGEXP_ENABLED)
+  #define HAVE_REGEXP_FUZZER
+#endif
+#if defined(LIBXML_SCHEMAS_ENABLED)
+  #define HAVE_SCHEMA_FUZZER
+#endif
+#if 1
+  #define HAVE_URI_FUZZER
+#endif
+#if defined(LIBXML_VALID_ENABLED)
+  #define HAVE_VALID_FUZZER
+#endif
+#if defined(LIBXML_XINCLUDE_ENABLED)
+  #define HAVE_XINCLUDE_FUZZER
+#endif
+#if 1
+  #define HAVE_XML_FUZZER
+#endif
+#if defined(LIBXML_XPTR_ENABLED)
+  #define HAVE_XPATH_FUZZER
+#endif
+
+int
+LLVMFuzzerInitialize(int *argc, char ***argv);
+
+int
+LLVMFuzzerTestOneInput(const char *data, size_t size);
+
+void
+xmlFuzzErrorFunc(void *ctx ATTRIBUTE_UNUSED, const char *msg ATTRIBUTE_UNUSED,
+                 ...);
+
+void
+xmlFuzzMemSetup(void);
+
+void
+xmlFuzzMemSetLimit(size_t limit);
+
+int
+xmlFuzzMallocFailed(void);
+
+void
+xmlFuzzResetMallocFailed(void);
+
+void
+xmlFuzzCheckMallocFailure(const char *func, int expect);
+
+void
+xmlFuzzDataInit(const char *data, size_t size);
+
+void
+xmlFuzzDataCleanup(void);
+
+void
+xmlFuzzWriteInt(FILE *out, size_t v, int size);
+
+size_t
+xmlFuzzReadInt(int size);
+
+const char *
+xmlFuzzReadRemaining(size_t *size);
+
+void
+xmlFuzzWriteString(FILE *out, const char *str);
+
+const char *
+xmlFuzzReadString(size_t *size);
+
+void
+xmlFuzzReadEntities(void);
+
+const char *
+xmlFuzzMainUrl(void);
+
+const char *
+xmlFuzzMainEntity(size_t *size);
+
+xmlParserInputPtr
+xmlFuzzEntityLoader(const char *URL, const char *ID, xmlParserCtxtPtr ctxt);
+
+char *
+xmlSlurpFile(const char *path, size_t *size);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* __XML_FUZZERCOMMON_H__ */
+~~~~
+
+### H0 path: `fuzz/html.c`
+
+~~~~cpp
+/*
+ * html.c: a libFuzzer target to test several HTML parser interfaces.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#include <libxml/HTMLparser.h>
+#include <libxml/HTMLtree.h>
+#include <libxml/catalog.h>
+#include "fuzz.h"
+
+int
+LLVMFuzzerInitialize(int *argc ATTRIBUTE_UNUSED,
+                     char ***argv ATTRIBUTE_UNUSED) {
+    xmlFuzzMemSetup();
+    xmlInitParser();
+#ifdef LIBXML_CATALOG_ENABLED
+    xmlInitializeCatalog();
+    xmlCatalogSetDefaults(XML_CATA_ALLOW_NONE);
+#endif
+    xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+
+    return 0;
+}
+
+int
+LLVMFuzzerTestOneInput(const char *data, size_t size) {
+    xmlParserCtxtPtr ctxt;
+    htmlDocPtr doc;
+    const char *docBuffer;
+    size_t maxAlloc, docSize;
+    int opts;
+
+    xmlFuzzDataInit(data, size);
+    opts = (int) xmlFuzzReadInt(4);
+    maxAlloc = xmlFuzzReadInt(4) % (size + 100);
+
+    docBuffer = xmlFuzzReadRemaining(&docSize);
+    if (docBuffer == NULL) {
+        xmlFuzzDataCleanup();
+        return(0);
+    }
+
+    /* Pull parser */
+
+    xmlFuzzMemSetLimit(maxAlloc);
+    ctxt = htmlNewParserCtxt();
+    if (ctxt != NULL) {
+        doc = htmlCtxtReadMemory(ctxt, docBuffer, docSize, NULL, NULL, opts);
+        xmlFuzzCheckMallocFailure("htmlCtxtReadMemory",
+                                  ctxt->errNo == XML_ERR_NO_MEMORY);
+
+        if (doc != NULL) {
+            xmlDocPtr copy;
+
+#ifdef LIBXML_OUTPUT_ENABLED
+            xmlOutputBufferPtr out;
+            const xmlChar *content;
+
+            /*
+             * Also test the serializer. Call htmlDocContentDumpOutput with our
+             * own buffer to avoid encoding the output. The HTML encoding is
+             * excruciatingly slow (see htmlEntityValueLookup).
+             */
+            xmlFuzzResetMallocFailed();
+            out = xmlAllocOutputBuffer(NULL);
+            htmlDocContentDumpOutput(out, doc, NULL);
+            content = xmlOutputBufferGetContent(out);
+            xmlFuzzCheckMallocFailure("htmlDocContentDumpOutput",
+                                      content == NULL);
+            xmlOutputBufferClose(out);
+#endif
+
+            xmlFuzzResetMallocFailed();
+            copy = xmlCopyDoc(doc, 1);
+            xmlFuzzCheckMallocFailure("xmlCopyNode", copy == NULL);
+            xmlFreeDoc(copy);
+
+            xmlFreeDoc(doc);
+        }
+
+        htmlFreeParserCtxt(ctxt);
+    }
+
+
+    /* Push parser */
+
+#ifdef LIBXML_PUSH_ENABLED
+    {
+        static const size_t maxChunkSize = 128;
+        size_t consumed, chunkSize;
+
+        xmlFuzzMemSetLimit(maxAlloc);
+        ctxt = htmlCreatePushParserCtxt(NULL, NULL, NULL, 0, NULL,
+                                        XML_CHAR_ENCODING_NONE);
+
+        if (ctxt != NULL) {
+            htmlCtxtUseOptions(ctxt, opts);
+
+            for (consumed = 0; consumed < docSize; consumed += chunkSize) {
+                chunkSize = docSize - consumed;
+                if (chunkSize > maxChunkSize)
+                    chunkSize = maxChunkSize;
+                htmlParseChunk(ctxt, docBuffer + consumed, chunkSize, 0);
+            }
+
+            htmlParseChunk(ctxt, NULL, 0, 1);
+            xmlFuzzCheckMallocFailure("htmlParseChunk",
+                                      ctxt->errNo == XML_ERR_NO_MEMORY);
+            xmlFreeDoc(ctxt->myDoc);
+            htmlFreeParserCtxt(ctxt);
+        }
+    }
+#endif
+
+    /* Cleanup */
+
+    xmlFuzzMemSetLimit(0);
+    xmlFuzzDataCleanup();
+    xmlResetLastError();
+
+    return(0);
+}
+~~~~
+
+### H0 path: `fuzz/xinclude.c`
+
+~~~~cpp
+/*
+ * xinclude.c: a libFuzzer target to test the XInclude engine.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#include <libxml/catalog.h>
+#include <libxml/parser.h>
+#include <libxml/tree.h>
+#include <libxml/xmlerror.h>
+#include <libxml/xinclude.h>
+#include <libxml/xmlreader.h>
+#include "fuzz.h"
+
+int
+LLVMFuzzerInitialize(int *argc ATTRIBUTE_UNUSED,
+                     char ***argv ATTRIBUTE_UNUSED) {
+    xmlFuzzMemSetup();
+    xmlInitParser();
+#ifdef LIBXML_CATALOG_ENABLED
+    xmlInitializeCatalog();
+    xmlCatalogSetDefaults(XML_CATA_ALLOW_NONE);
+#endif
+    xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+    xmlSetExternalEntityLoader(xmlFuzzEntityLoader);
+
+    return 0;
+}
+
+int
+LLVMFuzzerTestOneInput(const char *data, size_t size) {
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr doc;
+    const char *docBuffer, *docUrl;
+    size_t maxAlloc, docSize;
+    int opts;
+
+    xmlFuzzDataInit(data, size);
+    opts = (int) xmlFuzzReadInt(4);
+    opts |= XML_PARSE_XINCLUDE;
+    maxAlloc = xmlFuzzReadInt(4) % (size + 100);
+
+    xmlFuzzReadEntities();
+    docBuffer = xmlFuzzMainEntity(&docSize);
+    docUrl = xmlFuzzMainUrl();
+    if (docBuffer == NULL)
+        goto exit;
+
+    /* Pull parser */
+
+    xmlFuzzMemSetLimit(maxAlloc);
+    ctxt = xmlNewParserCtxt();
+    if (ctxt != NULL) {
+        xmlXIncludeCtxtPtr xinc;
+        xmlDocPtr copy;
+
+        doc = xmlCtxtReadMemory(ctxt, docBuffer, docSize, docUrl, NULL, opts);
+        xmlFuzzCheckMallocFailure("xmlCtxtReadMemory",
+                                  ctxt->errNo == XML_ERR_NO_MEMORY);
+
+        xmlFuzzResetMallocFailed();
+        xinc = xmlXIncludeNewContext(doc);
+        xmlXIncludeSetFlags(xinc, opts);
+        xmlXIncludeProcessNode(xinc, (xmlNodePtr) doc);
+        if (doc != NULL) {
+            xmlFuzzCheckMallocFailure("xmlXIncludeProcessNode",
+                    xinc == NULL ||
+                    xmlXIncludeGetLastError(xinc) == XML_ERR_NO_MEMORY);
+        }
+        xmlXIncludeFreeContext(xinc);
+
+        xmlFuzzResetMallocFailed();
+        copy = xmlCopyDoc(doc, 1);
+        if (doc != NULL)
+            xmlFuzzCheckMallocFailure("xmlCopyNode", copy == NULL);
+        xmlFreeDoc(copy);
+
+        xmlFreeDoc(doc);
+        xmlFreeParserCtxt(ctxt);
+    }
+
+    /* Reader */
+
+#ifdef LIBXML_READER_ENABLED
+    {
+        xmlTextReaderPtr reader;
+        int j;
+
+        xmlFuzzMemSetLimit(maxAlloc);
+        reader = xmlReaderForMemory(docBuffer, docSize, NULL, NULL, opts);
+        if (reader == NULL)
+            goto exit;
+        while (xmlTextReaderRead(reader) == 1) {
+            if (xmlTextReaderNodeType(reader) == XML_ELEMENT_NODE) {
+                int i, n = xmlTextReaderAttributeCount(reader);
+                for (i=0; i<n; i++) {
+                    xmlTextReaderMoveToAttributeNo(reader, i);
+                    while (xmlTextReaderReadAttributeValue(reader) == 1);
+                }
+            }
+        }
+        for (j = 0; j < 10; j++)
+            xmlTextReaderRead(reader);
+        xmlFreeTextReader(reader);
+    }
+#endif
+
+exit:
+    xmlFuzzMemSetLimit(0);
+    xmlFuzzDataCleanup();
+    xmlResetLastError();
+    return(0);
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/entities.c b/entities.c
+index dbe2e629..c679cb3a 100644
+--- a/entities.c
++++ b/entities.c
+@@ -536,156 +536,151 @@ static xmlChar *
+ xmlEncodeEntitiesInternal(xmlDocPtr doc, const xmlChar *input, int attr) {
+     const xmlChar *cur = input;
+     xmlChar *buffer = NULL;
+     xmlChar *out = NULL;
+     size_t buffer_size = 0;
+     int html = 0;
+ 
+     if (input == NULL) return(NULL);
+     if (doc != NULL)
+         html = (doc->type == XML_HTML_DOCUMENT_NODE);
+ 
+     /*
+      * allocate an translation buffer.
+      */
+     buffer_size = 1000;
+     buffer = (xmlChar *) xmlMalloc(buffer_size);
+     if (buffer == NULL)
+ 	return(NULL);
+     out = buffer;
+ 
+     while (*cur != '\0') {
+         size_t indx = out - buffer;
+         if (indx + 100 > buffer_size) {
+ 
+ 	    growBufferReentrant();
+ 	    out = &buffer[indx];
+ 	}
+ 
+ 	/*
+ 	 * By default one have to encode at least '<', '>', '"' and '&' !
+ 	 */
+ 	if (*cur == '<') {
+ 	    const xmlChar *end;
+ 
+ 	    /*
+ 	     * Special handling of server side include in HTML attributes
+ 	     */
+ 	    if (html && attr &&
+ 	        (cur[1] == '!') && (cur[2] == '-') && (cur[3] == '-') &&
+ 	        ((end = xmlStrstr(cur, BAD_CAST "-->")) != NULL)) {
+ 	        while (cur != end) {
+ 		    *out++ = *cur++;
+ 		    indx = out - buffer;
+ 		    if (indx + 100 > buffer_size) {
+ 			growBufferReentrant();
+ 			out = &buffer[indx];
+ 		    }
+ 		}
+ 		*out++ = *cur++;
+ 		*out++ = *cur++;
+ 		*out++ = *cur++;
+ 		continue;
+ 	    }
+ 	    *out++ = '&';
+ 	    *out++ = 'l';
+ 	    *out++ = 't';
+ 	    *out++ = ';';
+ 	} else if (*cur == '>') {
+ 	    *out++ = '&';
+ 	    *out++ = 'g';
+ 	    *out++ = 't';
+ 	    *out++ = ';';
+ 	} else if (*cur == '&') {
+ 	    /*
+ 	     * Special handling of &{...} construct from HTML 4, see
+ 	     * http://www.w3.org/TR/html401/appendix/notes.html#h-B.7.1
+ 	     */
+ 	    if (html && attr && (cur[1] == '{') &&
+ 	        (strchr((const char *) cur, '}'))) {
+ 	        while (*cur != '}') {
+ 		    *out++ = *cur++;
+ 		    indx = out - buffer;
+ 		    if (indx + 100 > buffer_size) {
+ 			growBufferReentrant();
+ 			out = &buffer[indx];
+ 		    }
+ 		}
+ 		*out++ = *cur++;
+ 		continue;
+ 	    }
+ 	    *out++ = '&';
+ 	    *out++ = 'a';
+ 	    *out++ = 'm';
+ 	    *out++ = 'p';
+ 	    *out++ = ';';
+ 	} else if (((*cur >= 0x20) && (*cur < 0x80)) ||
+ 	    (*cur == '\n') || (*cur == '\t') || ((html) && (*cur == '\r'))) {
+ 	    /*
+ 	     * default case, just copy !
+ 	     */
+ 	    *out++ = *cur;
+ 	} else if (*cur >= 0x80) {
+ 	    if (((doc != NULL) && (doc->encoding != NULL)) || (html)) {
+ 		/*
+ 		 * Bjørn Reese <br@sseusa.com> provided the patch
+ 	        xmlChar xc;
+ 	        xc = (*cur & 0x3F) << 6;
+ 	        if (cur[1] != 0) {
+ 		    xc += *(++cur) & 0x3F;
+ 		    *out++ = xc;
+ 	        } else
+ 		 */
+ 		*out++ = *cur;
+ 	    } else {
+ 		/*
+ 		 * We assume we have UTF-8 input.
+ 		 * It must match either:
+ 		 *   110xxxxx 10xxxxxx
+ 		 *   1110xxxx 10xxxxxx 10xxxxxx
+ 		 *   11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+ 		 * That is:
+ 		 *   cur[0] is 11xxxxxx
+ 		 *   cur[1] is 10xxxxxx
+ 		 *   cur[2] is 10xxxxxx if cur[0] is 111xxxxx
+ 		 *   cur[3] is 10xxxxxx if cur[0] is 1111xxxx
+ 		 *   cur[0] is not 11111xxx
+ 		 */
+ 		char buf[13], *ptr;
+ 		int val, l;
+ 
+                 l = 4;
+                 val = xmlGetUTF8Char(cur, &l);
+                 if (val < 0) {
+-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+-                    fprintf(stderr, "xmlEncodeEntitiesInternal: "
+-                            "invalid UTF-8\n");
+-                    abort();
+-#endif
+                     val = 0xFFFD;
+                     cur++;
+                 } else {
+                     if (!IS_CHAR(val))
+                         val = 0xFFFD;
+                     cur += l;
+ 		}
+ 		/*
+ 		 * We could do multiple things here. Just save as a char ref
+ 		 */
+ 		snprintf(buf, sizeof(buf), "&#x%X;", val);
+ 		buf[sizeof(buf) - 1] = 0;
+ 		ptr = buf;
+ 		while (*ptr != 0) *out++ = *ptr++;
+ 		continue;
+ 	    }
+ 	} else if (IS_BYTE_CHAR(*cur)) {
+ 	    char buf[11], *ptr;
+ 
+ 	    snprintf(buf, sizeof(buf), "&#%d;", *cur);
+ 	    buf[sizeof(buf) - 1] = 0;
+             ptr = buf;
+ 	    while (*ptr != 0) *out++ = *ptr++;
+ 	}
+ 	cur++;
+     }
+     *out = 0;
+     return(buffer);
+diff --git a/error.c b/error.c
+index a89302e2..f47edb6d 100644
+--- a/error.c
++++ b/error.c
+@@ -686,82 +686,81 @@ int
+ xmlVRaiseError(xmlStructuredErrorFunc schannel,
+                xmlGenericErrorFunc channel, void *data, void *ctx,
+                xmlNode *node, int domain, int code, xmlErrorLevel level,
+                const char *file, int line, const char *str1,
+                const char *str2, const char *str3, int int1, int col,
+                const char *msg, va_list ap)
+ {
+     xmlParserCtxtPtr ctxt = NULL;
+     /* xmlLastError is a macro retrieving the per-thread global. */
+     xmlErrorPtr lastError = &xmlLastError;
+     xmlErrorPtr to = lastError;
+ 
+     if (code == XML_ERR_OK)
+         return(0);
+ #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+-    if ((code == XML_ERR_INTERNAL_ERROR) ||
+-        (code == XML_ERR_ARGUMENT)) {
++    if (code == XML_ERR_INTERNAL_ERROR) {
+         fprintf(stderr, "Unexpected error: %d\n", code);
+         abort();
+     }
+ #endif
+     if ((xmlGetWarningsDefaultValue == 0) && (level == XML_ERR_WARNING))
+         return(0);
+ 
+     if ((domain == XML_FROM_PARSER) || (domain == XML_FROM_HTML) ||
+         (domain == XML_FROM_DTD) || (domain == XML_FROM_NAMESPACE) ||
+ 	(domain == XML_FROM_IO) || (domain == XML_FROM_VALID)) {
+ 	ctxt = (xmlParserCtxtPtr) ctx;
+ 
+         if (ctxt != NULL)
+             to = &ctxt->lastError;
+     }
+ 
+     if (xmlVUpdateError(to, ctxt, node, domain, code, level, file, line,
+                         str1, str2, str3, int1, col, msg, ap))
+         return(-1);
+ 
+     if (to != lastError) {
+         if (xmlCopyError(to, lastError) < 0)
+             return(-1);
+     }
+ 
+     if (schannel != NULL) {
+ 	schannel(data, to);
+     } else if (xmlStructuredError != NULL) {
+         xmlStructuredError(xmlStructuredErrorContext, to);
+     } else if (channel != NULL) {
+         if ((ctxt == NULL) && (channel == xmlGenericErrorDefaultFunc))
+             xmlFormatError(to, xmlGenericError, xmlGenericErrorContext);
+         else
+ 	    channel(data, "%s", to->message);
+     }
+ 
+     return(0);
+ }
+ 
+ /**
+  * __xmlRaiseError:
+  * @schannel: the structured callback channel
+  * @channel: the old callback channel
+  * @data: the callback data
+  * @ctx: the parser context or NULL
+  * @nod: the node or NULL
+  * @domain: the domain for the error
+  * @code: the code for the error
+  * @level: the xmlErrorLevel for the error
+  * @file: the file source of the error (or NULL)
+  * @line: the line of the error or 0 if N/A
+  * @str1: extra string info
+  * @str2: extra string info
+  * @str3: extra string info
+  * @int1: extra int info
+  * @col: column number of the error or 0 if N/A
+  * @msg:  the message to display/transmit
+  * @...:  extra parameters for the message display
+  *
+  * Update the appropriate global or contextual error structure,
+  * then forward the error message down the parser or generic
+  * error callback handler
+  *
+  * Returns 0 on success, -1 if a memory allocation failed.
+  */
+diff --git a/xmlsave.c b/xmlsave.c
+index 7f15b016..b5f78c63 100644
+--- a/xmlsave.c
++++ b/xmlsave.c
+@@ -185,99 +185,95 @@ static int
+ xmlEscapeEntities(unsigned char* out, int *outlen,
+                  const xmlChar* in, int *inlen) {
+     unsigned char* outstart = out;
+     const unsigned char* base = in;
+     unsigned char* outend = out + *outlen;
+     const unsigned char* inend;
+     int val;
+ 
+     inend = in + (*inlen);
+ 
+     while ((in < inend) && (out < outend)) {
+ 	if (*in == '<') {
+ 	    if (outend - out < 4) break;
+ 	    *out++ = '&';
+ 	    *out++ = 'l';
+ 	    *out++ = 't';
+ 	    *out++ = ';';
+ 	    in++;
+ 	    continue;
+ 	} else if (*in == '>') {
+ 	    if (outend - out < 4) break;
+ 	    *out++ = '&';
+ 	    *out++ = 'g';
+ 	    *out++ = 't';
+ 	    *out++ = ';';
+ 	    in++;
+ 	    continue;
+ 	} else if (*in == '&') {
+ 	    if (outend - out < 5) break;
+ 	    *out++ = '&';
+ 	    *out++ = 'a';
+ 	    *out++ = 'm';
+ 	    *out++ = 'p';
+ 	    *out++ = ';';
+ 	    in++;
+ 	    continue;
+ 	} else if (*in == 0xD) {
+ 	    if (outend - out < 5) break;
+ 	    *out++ = '&';
+ 	    *out++ = '#';
+ 	    *out++ = 'x';
+ 	    *out++ = 'D';
+ 	    *out++ = ';';
+ 	    in++;
+ 	} else if (((*in >= 0x20) && (*in < 0x80)) ||
+ 	           (*in == 0xA) || (*in == 0x9)) {
+ 	    /*
+ 	     * default case, just copy !
+ 	     */
+ 	    *out++ = *in++;
+ 	    continue;
+ 	} else if (*in < 0x80) {
+             /* invalid control char */
+ 	    if (outend - out < 8) break;
+ 	    out = xmlSerializeHexCharRef(out, 0xFFFD);
+ 	    in++;
+ 	} else {
+             int len;
+ 
+ 	    if (outend - out < 11) break;
+ 
+             len = inend - in;
+             val = xmlGetUTF8Char(in, &len);
+ 
+             if (val < 0) {
+-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+-                fprintf(stderr, "xmlEscapeEntities: invalid UTF-8\n");
+-                abort();
+-#endif
+                 val = 0xFFFD;
+                 in++;
+             } else {
+                 if (!IS_CHAR(val))
+                     val = 0xFFFD;
+                 in += len;
+             }
+ 
+ 	    /*
+ 	     * We could do multiple things here. Just save as a char ref
+ 	     */
+ 	    out = xmlSerializeHexCharRef(out, val);
+ 	}
+     }
+     *outlen = out - outstart;
+     *inlen = in - base;
+     return(0);
+ }
+ 
+ /************************************************************************
+  *									*
+  *			Allocation and deallocation			*
+  *									*
+  ************************************************************************/
+ /**
+  * xmlSaveCtxtInit:
+  * @ctxt: the saving context
+  *
+  * Initialize a saving context
+  */
+@@ -2297,100 +2293,96 @@ void
+ xmlBufAttrSerializeTxtContent(xmlOutputBufferPtr buf, xmlDocPtr doc,
+                               const xmlChar *string)
+ {
+     const xmlChar *base, *cur;
+ 
+     if (string == NULL)
+         return;
+     base = cur = string;
+     while (*cur != 0) {
+         if (*cur == '\n') {
+             if (base != cur)
+                 xmlOutputBufferWrite(buf, cur - base, (const char *) base);
+             xmlOutputBufferWrite(buf, 5, "&#10;");
+             cur++;
+             base = cur;
+         } else if (*cur == '\r') {
+             if (base != cur)
+                 xmlOutputBufferWrite(buf, cur - base, (const char *) base);
+             xmlOutputBufferWrite(buf, 5, "&#13;");
+             cur++;
+             base = cur;
+         } else if (*cur == '\t') {
+             if (base != cur)
+                 xmlOutputBufferWrite(buf, cur - base, (const char *) base);
+             xmlOutputBufferWrite(buf, 4, "&#9;");
+             cur++;
+             base = cur;
+         } else if (*cur == '"') {
+             if (base != cur)
+                 xmlOutputBufferWrite(buf, cur - base, (const char *) base);
+             xmlOutputBufferWrite(buf, 6, "&quot;");
+             cur++;
+             base = cur;
+         } else if (*cur == '<') {
+             if (base != cur)
+                 xmlOutputBufferWrite(buf, cur - base, (const char *) base);
+             xmlOutputBufferWrite(buf, 4, "&lt;");
+             cur++;
+             base = cur;
+         } else if (*cur == '>') {
+             if (base != cur)
+                 xmlOutputBufferWrite(buf, cur - base, (const char *) base);
+             xmlOutputBufferWrite(buf, 4, "&gt;");
+             cur++;
+             base = cur;
+         } else if (*cur == '&') {
+             if (base != cur)
+                 xmlOutputBufferWrite(buf, cur - base, (const char *) base);
+             xmlOutputBufferWrite(buf, 5, "&amp;");
+             cur++;
+             base = cur;
+         } else if ((*cur >= 0x80) && (cur[1] != 0) &&
+ 	           ((doc == NULL) || (doc->encoding == NULL))) {
+             /*
+              * We assume we have UTF-8 content.
+              */
+             unsigned char tmp[12];
+             int val = 0, l = 4;
+ 
+             if (base != cur)
+                 xmlOutputBufferWrite(buf, cur - base, (const char *) base);
+ 
+             val = xmlGetUTF8Char(cur, &l);
+             if (val < 0) {
+-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+-                fprintf(stderr, "xmlEscapeEntities: invalid UTF-8\n");
+-                abort();
+-#endif
+                 val = 0xFFFD;
+                 cur++;
+             } else {
+                 if (!IS_CHAR(val))
+                     val = 0xFFFD;
+                 cur += l;
+             }
+ 
+             /*
+              * We could do multiple things here. Just save
+              * as a char ref
+              */
+ 	    xmlSerializeHexCharRef(tmp, val);
+             xmlOutputBufferWriteString(buf, (const char *) tmp);
+             base = cur;
+         } else {
+             cur++;
+         }
+     }
+     if (base != cur)
+         xmlOutputBufferWrite(buf, cur - base, (const char *) base);
+ }
+ 
+ /**
+  * xmlAttrSerializeTxtContent:
+  * @buf:  the XML buffer output
+  * @doc:  the document
+  * @attr: the attribute node
+  * @string: the text content
+  *
+  * Serialize text attribute values to an xml simple buffer
+  */
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8015","gap_exists":false,"gap_type":[],"commit_induced":"NO","maintenance_needed":false,"confidence":98,"affected_functions":["xmlEncodeEntitiesInternal","xmlVRaiseError","xmlEscapeEntities","xmlBufAttrSerializeTxtContent","LLVMFuzzerTestOneInput"],"reason":"The commit only removes fuzz-build abort behavior for invalid UTF-8 and XML_ERR_ARGUMENT. It introduces no new entry point, API protocol, state, configuration, input semantics, or attack surface. H0 already supplies arbitrary bytes and parser options, and its HTML target invokes htmlDocContentDumpOutput, exercising serialization behavior. The changes therefore relax error handling without creating or materially aggravating a harness gap.","evidence":["entities.c removes the FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION fprintf/abort block from xmlEncodeEntitiesInternal while preserving replacement with 0xFFFD.","xmlsave.c removes equivalent invalid-UTF-8 abort blocks from xmlEscapeEntities and xmlBufAttrSerializeTxtContent while preserving their existing replacement-character handling.","error.c narrows the fuzz-only abort condition in xmlVRaiseError from XML_ERR_INTERNAL_ERROR or XML_ERR_ARGUMENT to XML_ERR_INTERNAL_ERROR only.","fuzz/html.c LLVMFuzzerTestOneInput passes arbitrary docBuffer bytes and fuzz-derived opts to htmlCtxtReadMemory and invokes htmlDocContentDumpOutput on produced documents.","No changed function adds a callable interface, required setup state, configuration mode, or new input field that H0 cannot control."],"recommended_action":"No harness maintenance is needed for this commit."}
+tokens used
+12,484

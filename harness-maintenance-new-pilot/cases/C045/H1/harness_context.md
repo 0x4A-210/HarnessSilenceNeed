@@ -1,0 +1,85 @@
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `tests/spng_read_fuzzer.cc`
+
+~~~~cpp
+#define SPNG_UNTESTED
+#include "../spng.h"
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+    unsigned char *out = NULL;
+    int flags;
+
+    spng_ctx *ctx = spng_ctx_new(0);
+    if(ctx == NULL) return 0;
+
+    if(spng_set_png_buffer(ctx, (void*)data, size)) goto err;
+
+    spng_set_image_limits(ctx, 200000, 200000);
+    
+    spng_set_chunk_limits(ctx, 4 * 1000 * 1000, 8 * 1000 * 1000);
+
+    spng_set_crc_action(ctx, SPNG_CRC_USE, SPNG_CRC_USE);
+
+    size_t out_size;
+    if(spng_decoded_image_size(ctx, SPNG_FMT_RGBA8, &out_size)) goto err;
+
+    if(out_size > 80000000) goto err;
+
+    out = (unsigned char*)malloc(out_size);
+    if(out == NULL) goto err;
+
+    flags = SPNG_DECODE_USE_TRNS | SPNG_DECODE_USE_GAMA | SPNG_DECODE_USE_SBIT;
+    if(spng_decode_image(ctx, out, out_size, SPNG_FMT_RGBA8, flags)) goto err;
+
+err:
+    spng_ctx_free(ctx);
+    if(out != NULL) free(out);
+
+    return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/libspng/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2018 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+mkdir build
+meson --buildtype=plain --default-library static build
+ninja -C build
+
+$CXX $CXXFLAGS -std=c++11 -I. \
+    $SRC/libspng/tests/spng_read_fuzzer.cc \
+    -o $OUT/spng_read_fuzzer \
+    $LIB_FUZZING_ENGINE $SRC/libspng/build/libspng.a -lz
+
+$CXX $CXXFLAGS -std=c++11 -I. \
+    $SRC/libspng/tests/spng_read_fuzzer.cc \
+    -o $OUT/spng_read_fuzzer_structure_aware \
+    -include ../fuzzer-test-suite/libpng-1.2.56/png_mutator.h \
+    -D PNG_MUTATOR_DEFINE_LIBFUZZER_CUSTOM_MUTATOR \
+    $LIB_FUZZING_ENGINE $SRC/libspng/build/libspng.a -lz
+
+find $SRC/libspng/tests/images -name "*.png" | \
+     xargs zip $OUT/spng_read_fuzzer_seed_corpus.zip
+
+cp $SRC/libspng/tests/spng.dict \
+   $SRC/libspng/tests/spng_read_fuzzer.options $OUT/
+~~~~

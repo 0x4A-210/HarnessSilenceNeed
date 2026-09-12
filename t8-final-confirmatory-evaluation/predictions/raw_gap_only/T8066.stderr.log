@@ -1,0 +1,445 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8066-pgl2x3hd
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fc-4782-7ee3-89d8-d30fb90a0669
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8066
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `fuzz/xml.c`
+
+~~~~cpp
+/*
+ * xml.c: a libFuzzer target to test several XML parser interfaces.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <libxml/catalog.h>
+#include <libxml/parser.h>
+#include <libxml/tree.h>
+#include <libxml/xmlerror.h>
+#include <libxml/xmlsave.h>
+#include "fuzz.h"
+
+int
+LLVMFuzzerInitialize(int *argc ATTRIBUTE_UNUSED,
+                     char ***argv ATTRIBUTE_UNUSED) {
+    xmlFuzzMemSetup();
+    xmlInitParser();
+#ifdef LIBXML_CATALOG_ENABLED
+    xmlInitializeCatalog();
+    xmlCatalogSetDefaults(XML_CATA_ALLOW_NONE);
+#endif
+
+    return 0;
+}
+
+int
+LLVMFuzzerTestOneInput(const char *data, size_t size) {
+    xmlParserCtxtPtr ctxt;
+    xmlDocPtr doc;
+    const char *docBuffer, *docUrl;
+    size_t failurePos, docSize, maxChunkSize;
+    int opts;
+    int errorCode;
+#ifdef LIBXML_OUTPUT_ENABLED
+    xmlBufferPtr outbuf = NULL;
+    const char *saveEncoding;
+    int saveOpts;
+#endif
+
+    xmlFuzzDataInit(data, size);
+    opts = (int) xmlFuzzReadInt(4);
+    /*
+     * Disable options that are known to cause timeouts
+     */
+    opts &= ~XML_PARSE_DTDVALID &
+            ~XML_PARSE_SAX1;
+    failurePos = xmlFuzzReadInt(4) % (size + 100);
+
+    maxChunkSize = xmlFuzzReadInt(4) % (size + size / 8 + 1);
+    if (maxChunkSize == 0)
+        maxChunkSize = 1;
+
+#ifdef LIBXML_OUTPUT_ENABLED
+    /* TODO: Take from fuzz data */
+    saveOpts = 0;
+    saveEncoding = NULL;
+#endif
+
+    xmlFuzzReadEntities();
+    docBuffer = xmlFuzzMainEntity(&docSize);
+    docUrl = xmlFuzzMainUrl();
+    if (docBuffer == NULL)
+        goto exit;
+
+    /* Pull parser */
+
+    xmlFuzzInjectFailure(failurePos);
+    ctxt = xmlNewParserCtxt();
+    if (ctxt == NULL) {
+        errorCode = XML_ERR_NO_MEMORY;
+    } else {
+        xmlCtxtSetErrorHandler(ctxt, xmlFuzzSErrorFunc, NULL);
+        xmlCtxtSetResourceLoader(ctxt, xmlFuzzResourceLoader, NULL);
+        doc = xmlCtxtReadMemory(ctxt, docBuffer, docSize, docUrl, NULL, opts);
+        errorCode = ctxt->errNo;
+        xmlFuzzCheckFailureReport("xmlCtxtReadMemory",
+                doc == NULL && errorCode == XML_ERR_NO_MEMORY,
+                doc == NULL && errorCode == XML_IO_EIO);
+
+        if (doc != NULL) {
+#ifdef LIBXML_OUTPUT_ENABLED
+            xmlSaveCtxtPtr save;
+
+            outbuf = xmlBufferCreate();
+
+            /* Also test the serializer. */
+            save = xmlSaveToBuffer(outbuf, saveEncoding, saveOpts);
+
+            if (save == NULL) {
+                xmlBufferFree(outbuf);
+                outbuf = NULL;
+            } else {
+                int saveErr;
+
+                xmlSaveDoc(save, doc);
+                saveErr = xmlSaveFinish(save);
+                xmlFuzzCheckFailureReport("xmlSaveToBuffer",
+                                          saveErr == XML_ERR_NO_MEMORY,
+                                          saveErr == XML_IO_EIO);
+                if (saveErr != XML_ERR_OK) {
+                    xmlBufferFree(outbuf);
+                    outbuf = NULL;
+                }
+            }
+#endif
+            xmlFreeDoc(doc);
+        }
+
+        xmlFreeParserCtxt(ctxt);
+    }
+
+    /* Push parser */
+
+#ifdef LIBXML_PUSH_ENABLED
+    xmlFuzzInjectFailure(failurePos);
+    /*
+     * FIXME: xmlCreatePushParserCtxt can still report OOM errors
+     * to stderr.
+     */
+    xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+    ctxt = xmlCreatePushParserCtxt(NULL, NULL, NULL, 0, docUrl);
+    xmlSetGenericErrorFunc(NULL, NULL);
+
+    if (ctxt != NULL) {
+        size_t consumed;
+        int errorCodePush, numChunks, maxChunks;
+
+        xmlCtxtSetErrorHandler(ctxt, xmlFuzzSErrorFunc, NULL);
+        xmlCtxtSetResourceLoader(ctxt, xmlFuzzResourceLoader, NULL);
+        xmlCtxtUseOptions(ctxt, opts);
+
+        consumed = 0;
+        numChunks = 0;
+        maxChunks = 50 + docSize / 100;
+        while (numChunks == 0 ||
+               (consumed < docSize && numChunks < maxChunks)) {
+            size_t chunkSize;
+            int terminate;
+
+            numChunks += 1;
+            chunkSize = docSize - consumed;
+
+            if (numChunks < maxChunks && chunkSize > maxChunkSize) {
+                chunkSize = maxChunkSize;
+                terminate = 0;
+            } else {
+                terminate = 1;
+            }
+
+            xmlParseChunk(ctxt, docBuffer + consumed, chunkSize, terminate);
+            consumed += chunkSize;
+        }
+
+        errorCodePush = ctxt->errNo;
+        xmlFuzzCheckFailureReport("xmlParseChunk",
+                                  errorCodePush == XML_ERR_NO_MEMORY,
+                                  errorCodePush == XML_IO_EIO);
+        doc = ctxt->myDoc;
+
+        /*
+         * Push and pull parser differ in when exactly they
+         * stop parsing, and the error code is the *last* error
+         * reported, so we can't check whether the codes match.
+         */
+        if (errorCode != XML_ERR_NO_MEMORY &&
+            errorCode != XML_IO_EIO &&
+            errorCodePush != XML_ERR_NO_MEMORY &&
+            errorCodePush != XML_IO_EIO &&
+            (errorCode == XML_ERR_OK) != (errorCodePush == XML_ERR_OK)) {
+            fprintf(stderr, "pull/push parser error mismatch: %d != %d\n",
+                    errorCode, errorCodePush);
+#if 0
+            FILE *f = fopen("c.xml", "wb");
+            fwrite(docBuffer, docSize, 1, f);
+            fclose(f);
+#endif
+            abort();
+        }
+
+#ifdef LIBXML_OUTPUT_ENABLED
+        /*
+         * Verify that pull and push parser produce the same result.
+         *
+         * The NOBLANKS option doesn't work reliably in push mode.
+         */
+        if ((opts & XML_PARSE_NOBLANKS) == 0 &&
+            errorCode == XML_ERR_OK &&
+            errorCodePush == XML_ERR_OK &&
+            outbuf != NULL) {
+            xmlBufferPtr outbufPush;
+            xmlSaveCtxtPtr save;
+
+            outbufPush = xmlBufferCreate();
+
+            save = xmlSaveToBuffer(outbufPush, saveEncoding, saveOpts);
+
+            if (save != NULL) {
+                int saveErr;
+
+                xmlSaveDoc(save, doc);
+                saveErr = xmlSaveFinish(save);
+
+                if (saveErr == XML_ERR_OK) {
+                    int outbufSize = xmlBufferLength(outbuf);
+
+                    if (outbufSize != xmlBufferLength(outbufPush) ||
+                        memcmp(xmlBufferContent(outbuf),
+                               xmlBufferContent(outbufPush),
+                               outbufSize) != 0) {
+                        fprintf(stderr, "pull/push parser roundtrip "
+                                "mismatch\n");
+#if 0
+                        FILE *f = fopen("c.xml", "wb");
+                        fwrite(docBuffer, docSize, 1, f);
+                        fclose(f);
+                        fprintf(stderr, "opts: %X\n", opts);
+                        fprintf(stderr, "---\n%s\n---\n%s\n---\n",
+                                xmlBufferContent(outbuf),
+                                xmlBufferContent(outbufPush));
+#endif
+                        abort();
+                    }
+                }
+            }
+
+            xmlBufferFree(outbufPush);
+        }
+#endif
+
+        xmlFreeDoc(doc);
+        xmlFreeParserCtxt(ctxt);
+    }
+#endif
+
+exit:
+#ifdef LIBXML_OUTPUT_ENABLED
+    xmlBufferFree(outbuf);
+#endif
+    xmlFuzzInjectFailure(0);
+    xmlFuzzDataCleanup();
+    xmlResetLastError();
+    return(0);
+}
+
+size_t
+LLVMFuzzerCustomMutator(char *data, size_t size, size_t maxSize,
+                        unsigned seed) {
+    static const xmlFuzzChunkDesc chunks[] = {
+        { 4, XML_FUZZ_PROB_ONE / 10 }, /* opts */
+        { 4, XML_FUZZ_PROB_ONE / 10 }, /* failurePos */
+        { 4, XML_FUZZ_PROB_ONE / 10 }, /* maxChunkSize */
+        { 0, 0 }
+    };
+
+    return xmlFuzzMutateChunks(chunks, data, size, maxSize, seed,
+                               LLVMFuzzerMutate);
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/catalog.c b/catalog.c
+index 448c88a5..2a080f87 100644
+--- a/catalog.c
++++ b/catalog.c
+@@ -1265,118 +1265,118 @@ static void
+ xmlParseXMLCatalogNode(xmlNodePtr cur, xmlCatalogPrefer prefer,
+ 	               xmlCatalogEntryPtr parent, xmlCatalogEntryPtr cgroup)
+ {
+     xmlChar *base = NULL;
+     xmlCatalogEntryPtr entry = NULL;
+ 
+     if (cur == NULL)
+         return;
+     if (xmlStrEqual(cur->name, BAD_CAST "group")) {
+         xmlChar *prop;
+ 	xmlCatalogPrefer pref = XML_CATA_PREFER_NONE;
+ 
+         prop = xmlGetProp(cur, BAD_CAST "prefer");
+         if (prop != NULL) {
+             if (xmlStrEqual(prop, BAD_CAST "system")) {
+                 prefer = XML_CATA_PREFER_SYSTEM;
+             } else if (xmlStrEqual(prop, BAD_CAST "public")) {
+                 prefer = XML_CATA_PREFER_PUBLIC;
+             } else {
+ 		xmlCatalogErr(parent, cur, XML_CATALOG_PREFER_VALUE,
+                               "Invalid value for prefer: '%s'\n",
+ 			      prop, NULL, NULL);
+             }
+             xmlFree(prop);
+ 	    pref = prefer;
+         }
+ 	prop = xmlGetProp(cur, BAD_CAST "id");
+ 	base = xmlGetNsProp(cur, BAD_CAST "base", XML_XML_NAMESPACE);
+ 	entry = xmlNewCatalogEntry(XML_CATA_GROUP, prop, base, NULL, pref, cgroup);
+ 	xmlFree(prop);
+     } else if (xmlStrEqual(cur->name, BAD_CAST "public")) {
+ 	entry = xmlParseXMLCatalogOneNode(cur, XML_CATA_PUBLIC,
+ 		BAD_CAST "public", BAD_CAST "publicId", BAD_CAST "uri", prefer, cgroup);
+     } else if (xmlStrEqual(cur->name, BAD_CAST "system")) {
+ 	entry = xmlParseXMLCatalogOneNode(cur, XML_CATA_SYSTEM,
+ 		BAD_CAST "system", BAD_CAST "systemId", BAD_CAST "uri", prefer, cgroup);
+     } else if (xmlStrEqual(cur->name, BAD_CAST "rewriteSystem")) {
+ 	entry = xmlParseXMLCatalogOneNode(cur, XML_CATA_REWRITE_SYSTEM,
+ 		BAD_CAST "rewriteSystem", BAD_CAST "systemIdStartString",
+ 		BAD_CAST "rewritePrefix", prefer, cgroup);
+     } else if (xmlStrEqual(cur->name, BAD_CAST "delegatePublic")) {
+ 	entry = xmlParseXMLCatalogOneNode(cur, XML_CATA_DELEGATE_PUBLIC,
+ 		BAD_CAST "delegatePublic", BAD_CAST "publicIdStartString",
+ 		BAD_CAST "catalog", prefer, cgroup);
+     } else if (xmlStrEqual(cur->name, BAD_CAST "delegateSystem")) {
+ 	entry = xmlParseXMLCatalogOneNode(cur, XML_CATA_DELEGATE_SYSTEM,
+ 		BAD_CAST "delegateSystem", BAD_CAST "systemIdStartString",
+ 		BAD_CAST "catalog", prefer, cgroup);
+     } else if (xmlStrEqual(cur->name, BAD_CAST "uri")) {
+ 	entry = xmlParseXMLCatalogOneNode(cur, XML_CATA_URI,
+ 		BAD_CAST "uri", BAD_CAST "name",
+ 		BAD_CAST "uri", prefer, cgroup);
+     } else if (xmlStrEqual(cur->name, BAD_CAST "rewriteURI")) {
+ 	entry = xmlParseXMLCatalogOneNode(cur, XML_CATA_REWRITE_URI,
+ 		BAD_CAST "rewriteURI", BAD_CAST "uriStartString",
+ 		BAD_CAST "rewritePrefix", prefer, cgroup);
+     } else if (xmlStrEqual(cur->name, BAD_CAST "delegateURI")) {
+ 	entry = xmlParseXMLCatalogOneNode(cur, XML_CATA_DELEGATE_URI,
+ 		BAD_CAST "delegateURI", BAD_CAST "uriStartString",
+ 		BAD_CAST "catalog", prefer, cgroup);
+     } else if (xmlStrEqual(cur->name, BAD_CAST "nextCatalog")) {
+ 	xmlCatalogEntryPtr prev = parent->children;
+ 
+ 	entry = xmlParseXMLCatalogOneNode(cur, XML_CATA_NEXT_CATALOG,
+ 		BAD_CAST "nextCatalog", NULL,
+ 		BAD_CAST "catalog", prefer, cgroup);
+ 	/* Avoid duplication of nextCatalog */
+-	while (prev != NULL) {
++	while ((entry != NULL) && (prev != NULL)) {
+ 	    if ((prev->type == XML_CATA_NEXT_CATALOG) &&
+ 		(xmlStrEqual (prev->URL, entry->URL)) &&
+ 		(prev->prefer == entry->prefer) &&
+ 		(prev->group == entry->group)) {
+ 		    if (xmlDebugCatalogs)
+ 			xmlCatalogPrintDebug(
+ 			    "Ignoring repeated nextCatalog %s\n", entry->URL);
+ 		    xmlFreeCatalogEntry(entry, NULL);
+ 		    entry = NULL;
+ 		    break;
+ 	    }
+ 	    prev = prev->next;
+ 	}
+     }
+     if (entry != NULL) {
+         if (parent != NULL) {
+ 	    entry->parent = parent;
+ 	    if (parent->children == NULL)
+ 		parent->children = entry;
+ 	    else {
+ 		xmlCatalogEntryPtr prev;
+ 
+ 		prev = parent->children;
+ 		while (prev->next != NULL)
+ 		    prev = prev->next;
+ 		prev->next = entry;
+ 	    }
+ 	}
+ 	if (entry->type == XML_CATA_GROUP) {
+ 	    /*
+ 	     * Recurse to propagate prefer to the subtree
+ 	     * (xml:base handling is automated)
+ 	     */
+             xmlParseXMLCatalogNodeList(cur->children, prefer, parent, entry);
+ 	}
+     }
+     if (base != NULL)
+ 	xmlFree(base);
+ }
+ 
+ /**
+  * Examines a list of XML sibling nodes of a catalog and build
+  * a list of Catalog entry from it adding it to the parent.
+  * The examination will recurse to examine node subtrees.
+  *
+  * @param cur  the XML node list of siblings
+  * @param prefer  the PUBLIC vs. SYSTEM current preference value
+  * @param parent  the parent Catalog entry
+  * @param cgroup  the group which includes this list
+  */
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8066","gap_exists":true,"gap_type":["fuzz-worthy entry point","XML catalog input semantics","catalog parser state"],"confidence":96,"affected_functions":["xmlParseXMLCatalogNode","LLVMFuzzerTestOneInput"],"reason":"S1 changes XML catalog parsing for `nextCatalog`, specifically guarding the duplicate-entry loop when `xmlParseXMLCatalogOneNode` returns `NULL`. H0 initializes catalog support but only fuzzes ordinary XML pull/push parsing and serialization; it does not load or parse an XML catalog into catalog entries. Therefore it does not deliberately reach the changed `xmlParseXMLCatalogNode` logic or exercise nullable `nextCatalog` entries.","evidence":["The changed branch recognizes `cur->name` equal to `nextCatalog` and obtains `entry` from `xmlParseXMLCatalogOneNode`.","The new condition `while ((entry != NULL) && (prev != NULL))` shows that catalog input can produce a `NULL` entry while prior catalog children exist.","H0 calls `xmlInitializeCatalog` and `xmlCatalogSetDefaults(XML_CATA_ALLOW_NONE)`, but `LLVMFuzzerTestOneInput` calls only `xmlCtxtReadMemory`, `xmlCreatePushParserCtxt`/`xmlParseChunk`, and serialization functions.","H0 supplies `xmlFuzzResourceLoader` to both parser modes and contains no call that parses the fuzz input as an XML catalog or constructs catalog-entry state.","The relevant semantics include `nextCatalog` attributes, repeated entries, `parent->children`, `prefer`, and `group`, none of which H0 varies through a catalog API."],"recommended_action":"Add a catalog-focused fuzz target that feeds generated XML catalog documents into the catalog-loading/parsing path reaching `xmlParseXMLCatalogNode`. Include malformed or incomplete `nextCatalog` elements that make `xmlParseXMLCatalogOneNode` return `NULL`, preceded by existing catalog children, plus duplicate `nextCatalog` entries and variations in `prefer` and nested `group` state."}
+tokens used
+18,095

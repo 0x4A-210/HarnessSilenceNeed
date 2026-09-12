@@ -1,0 +1,93 @@
+PROJECT simdjson
+COMMIT 0b39e3a6cfe99c878d99d0a377812dea68287c2a
+PARENT 924ad2d5922a16a8a70a002476879b45035372fa
+SUBJECT add fuzzer for padded_string (#1312)
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/include/simdjson/padded_string-inl.h b/include/simdjson/padded_string-inl.h
+index 7f40995f..215c46e6 100644
+--- a/include/simdjson/padded_string-inl.h
++++ b/include/simdjson/padded_string-inl.h
+@@ -19,7 +19,18 @@ namespace internal {
+ // The length parameter is the maximum size in bytes of the string.
+ // The caller is responsible to free the memory (e.g., delete[] (...)).
+ inline char *allocate_padded_buffer(size_t length) noexcept {
+-  size_t totalpaddedlength = length + SIMDJSON_PADDING;
++  const size_t totalpaddedlength = length + SIMDJSON_PADDING;
++  if(totalpaddedlength<length) {
++    // overflow
++    return nullptr;
++  }
++#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
++  // avoid getting out of memory
++  if (totalpaddedlength>(1UL<<20)) {
++    return nullptr;
++  }
++#endif
++
+   char *padded_buffer = new (std::nothrow) char[totalpaddedlength];
+   if (padded_buffer == nullptr) {
+     return nullptr;
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/fuzz/fuzz_padded.cpp b/fuzz/fuzz_padded.cpp
+new file mode 100644
+index 00000000..642d33f5
+--- /dev/null
++++ b/fuzz/fuzz_padded.cpp
+@@ -0,0 +1,54 @@
++#include "FuzzUtils.h"
++#include "simdjson.h"
++#include <cstddef>
++#include <cstdint>
++#include <fstream>
++#include <string>
++
++extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
++  FuzzData fd(Data, Size);
++
++  const int action = fd.getInt<0, 10>();
++
++  const auto s1 = fd.get<size_t>();
++  const auto s2 = fd.get<size_t>();
++  switch (action) {
++  case 0: {
++    simdjson_unused simdjson::padded_string p(s1);
++  } break;
++  case 1: {
++    // operator== with temp value
++    simdjson_unused simdjson::padded_string p1(s1);
++    simdjson_unused simdjson::padded_string p2(s2);
++    p1 = std::move(p2);
++  } break;
++  case 2: {
++    // swap
++    simdjson_unused simdjson::padded_string p1(s1);
++    simdjson_unused simdjson::padded_string p2(s2);
++    p1.swap(p2);
++  } break;
++  case 3: {
++    simdjson_unused simdjson::padded_string p(s1);
++    p.data();
++  } break;
++  case 4: {
++    simdjson::padded_string p(s1);
++    simdjson_unused auto sv = static_cast<std::string_view>(p);
++  } break;
++  case 5: {
++    // load from file.
++    const std::string filename = "/dev/shm/fuzz_padded.tmp";
++    {
++      std::ofstream file(filename);
++      assert(file);
++      const long ssize = static_cast<long>(fd.Size);
++      file.write(fd.chardata(), ssize);
++      assert(file.tellp() == ssize);
++    }
++    simdjson_unused auto data = simdjson::padded_string::load(filename);
++  } break;
++  default:;
++  }
++  return 0;
++}

@@ -1,0 +1,1877 @@
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C113
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `fuzz/bplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * bplist_fuzzer.cc
+ * binary plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_bin(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+### `fuzz/xplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * xplist_fuzzer.cc
+ * XML plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_xml(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/libplist/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+#
+# Copyright 2016 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+./autogen.sh --without-cython --enable-debug
+make -j$(nproc) clean
+make -j$(nproc) all
+
+for fuzzer in bplist_fuzzer xplist_fuzzer jplist_fuzzer oplist_fuzzer; do
+  $CXX $CXXFLAGS -std=c++11 -Iinclude/ \
+      fuzz/$fuzzer.cc -o $OUT/$fuzzer \
+      $LIB_FUZZING_ENGINE src/.libs/libplist-2.0.a
+done
+
+zip -j $OUT/bplist_fuzzer_seed_corpus.zip test/data/*.bplist
+zip -j $OUT/xplist_fuzzer_seed_corpus.zip test/data/*.plist
+zip -j $OUT/jplist_fuzzer_seed_corpus.zip test/data/*.json
+zip -j $OUT/oplist_fuzzer_seed_corpus.zip test/data/*.ostep
+
+cp fuzz/*.dict fuzz/*.options $OUT/
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `include/plist/plist.h`
+- `src/bytearray.c`
+- `src/bytearray.h`
+- `src/out-default.c`
+- `src/out-limd.c`
+- `src/out-plutil.c`
+- `src/plist.c`
+- `src/plist.h`
+- `src/strbuf.h`
+- `tools/plistutil.c`
+
+~~~~diff
+diff --git a/include/plist/plist.h b/include/plist/plist.h
+--- a/include/plist/plist.h
++++ b/include/plist/plist.h
+@@ -72,12 +72,13 @@ extern "C"
+   #define PLIST_WARN_DEPRECATED(x)
+   #pragma message("WARNING: You need to implement DEPRECATED for this compiler")
+ #endif
+ 
+ #include <sys/types.h>
+ #include <stdarg.h>
++#include <stdio.h>
+ 
+     /**
+      * \mainpage libplist : A library to handle Apple Property Lists
+      * \defgroup PublicAPI Public libplist API
+      */
+     /*@{*/
+@@ -100,24 +101,24 @@ extern "C"
+ 
+     /**
+      * The enumeration of plist node types.
+      */
+     typedef enum
+     {
++        PLIST_NONE =-1, /**< No type */
+         PLIST_BOOLEAN,  /**< Boolean, scalar type */
+         PLIST_INT,      /**< Integer, scalar type */
+         PLIST_REAL,     /**< Real, scalar type */
+         PLIST_STRING,   /**< ASCII string, scalar type */
+         PLIST_ARRAY,    /**< Ordered array, structured type */
+         PLIST_DICT,     /**< Unordered dictionary (key/value pair), structured type */
+         PLIST_DATE,     /**< Date, scalar type */
+         PLIST_DATA,     /**< Binary data, scalar type */
+         PLIST_KEY,      /**< Key in dictionaries (ASCII String), scalar type */
+         PLIST_UID,      /**< Special type used for 'keyed encoding' */
+         PLIST_NULL,     /**< NULL type */
+-        PLIST_NONE      /**< No type */
+     } plist_type;
+ 
+     /* for backwards compatibility */
+     #define PLIST_UINT PLIST_INT
+ 
+     /**
+@@ -127,15 +128,46 @@ extern "C"
+     {
+         PLIST_ERR_SUCCESS      =  0,  /**< operation successful */
+         PLIST_ERR_INVALID_ARG  = -1,  /**< one or more of the parameters are invalid */
+         PLIST_ERR_FORMAT       = -2,  /**< the plist contains nodes not compatible with the output format */
+         PLIST_ERR_PARSE        = -3,  /**< parsing of the input format failed */
+         PLIST_ERR_NO_MEM       = -4,  /**< not enough memory to handle the operation */
++        PLIST_ERR_IO           = -5,  /**< I/O error */
+         PLIST_ERR_UNKNOWN      = -255 /**< an unspecified error occurred */
+     } plist_err_t;
+ 
++    /**
++     * libplist format types
++     */
++    typedef enum
++    {
++        PLIST_FORMAT_XML     = 1,  /**< XML format */
++        PLIST_FORMAT_BINARY  = 2,  /**< bplist00 format */
++        PLIST_FORMAT_JSON    = 3,  /**< JSON format */
++        PLIST_FORMAT_OSTEP   = 4,  /**< OpenStep "old-style" plist format */
++        /* 5-9 are reserved for possible future use */
++        PLIST_FORMAT_PRINT   = 10, /**< human-readable output-only format */
++        PLIST_FORMAT_LIMD    = 11, /**< "libimobiledevice" output-only format (ideviceinfo) */
++        PLIST_FORMAT_PLUTIL  = 12, /**< plutil-style output-only format */
++    } plist_format_t;
++
++    /**
++     * libplist write options
++     */
++    typedef enum
++    {
++        PLIST_OPT_COMPACT   = 1 << 0, /**< Use a compact representation (non-prettified). Only valid for #PLIST_FORMAT_JSON and #PLIST_FORMAT_OSTEP. */
++        PLIST_OPT_PARTIAL_DATA = 1 << 1, /**< Print 24 bytes maximum of #PLIST_DATA values. If the data is longer than 24 bytes,  the first 16 and last 8 bytes will be written. Only valid for #PLIST_FORMAT_PRINT. */
++        PLIST_OPT_NO_NEWLINE = 1 << 2, /**< Do not print a final newline character. Only valid for #PLIST_FORMAT_PRINT, #PLIST_FORMAT_LIMD, and #PLIST_FORMAT_PLUTIL. */
++        PLIST_OPT_INDENT = 1 << 3, /**< Indent each line of output. Currently only #PLIST_FORMAT_PRINT and #PLIST_FORMAT_LIMD are supported. Use #PLIST_OPT_INDENT_BY() macro to specify the level of indentation. */
++    } plist_write_options_t;
++
++    /** To be used with #PLIST_OPT_INDENT. Encodes the level of indentation for OR'ing it into the #plist_write_options_t bitfield. */
++    #define PLIST_OPT_INDENT_BY(x) ((x & 0xFF) << 24)
++
++
+     /********************************************
+      *                                          *
+      *          Creation & Destruction          *
+      *                                          *
+      ********************************************/
+ 
+@@ -785,27 +817,78 @@ extern "C"
+      */
+     plist_err_t plist_from_openstep(const char *openstep, uint32_t length, plist_t * plist);
+ 
+     /**
+      * Import the #plist_t structure from memory data.
+      * This method will look at the first bytes of plist_data
+-     * to determine if plist_data contains a binary, JSON, or XML plist
++     * to determine if plist_data contains a binary, JSON, OpenStep, or XML plist
+      * and tries to parse the data in the appropriate format.
+      * @note This is just a convenience function and the format detection is
+      *     very basic. It checks with plist_is_binary() if the data supposedly
+-     *     contains binary plist data, if not it checks if the first byte is
+-     *     either '{' or '[' and assumes JSON format, otherwise it will try
+-     *     to parse the data as XML.
++     *     contains binary plist data, if not it checks if the first bytes have
++     *     either '{' or '[' and assumes JSON format, and XML tags will result
++     *     in parsing as XML, otherwise it will try to parse as OpenStep.
+      *
+-     * @param plist_data a pointer to the memory buffer containing plist data.
+-     * @param length length of the buffer to read.
+-     * @param plist a pointer to the imported plist.
++     * @param plist_data A pointer to the memory buffer containing plist data.
++     * @param length Length of the buffer to read.
++     * @param plist A pointer to the imported plist.
+      * @return PLIST_ERR_SUCCESS on success or a #plist_err_t on failure
+      */
+     plist_err_t plist_from_memory(const char *plist_data, uint32_t length, plist_t * plist);
+ 
++    /**
++     * Write the #plist_t structure to a NULL-terminated string using the given format and options.
++     *
++     * @param plist The input plist structure
++     * @param output Pointer to a char* buffer. This function allocates the memory,
++     *     caller is responsible for freeing it.
++     * @param length A pointer to a uint32_t value that will receive the lenght of the allocated buffer.
++     * @param format A #plist_format_t value that specifies the output format to use.
++     * @param options One or more bitwise ORed values of #plist_write_options_t.
++     * @return PLIST_ERR_SUCCESS on success or a #plist_err_t on failure.
++     * @note Use plist_mem_free() to free the allocated memory.
++     * @note #PLIST_FORMAT_BINARY is not supported by this function.
++     */
++    plist_err_t plist_write_to_string(plist_t plist, char **output, uint32_t* length, plist_format_t format, plist_write_options_t options);
++
++    /**
++     * Write the #plist_t structure to a FILE* stream using the given format and options.
++     *
++     * @param plist The input plist structure
++     * @param stream A writeable FILE* stream that the data will be written to.
++     * @param format A #plist_format_t value that specifies the output format to use.
++     * @param options One or more bitwise ORed values of #plist_write_options_t.
++     * @return PLIST_ERR_SUCCESS on success or a #plist_err_t on failure.
++     * @note While this function allows all formats to be written to the given stream,
++     *     only the formats #PLIST_FORMAT_PRINT, #PLIST_FORMAT_LIMD, and #PLIST_FORMAT_PLUTIL
++     *     (basically all output-only formats) are directly and efficiently written to the stream;
++     *     the other formats are written to a memory buffer first.
++     */
++    plist_err_t plist_write_to_stream(plist_t plist, FILE* stream, plist_format_t format, plist_write_options_t options);
++
++    /**
++     * Write the #plist_t structure to a file at given path using the given format and options.
++     *
++     * @param plist The input plist structure
++     * @param filename The file name of the file to write to. Existing files will be overwritten.
++     * @param format A #plist_format_t value that specifies the output format to use.
++     * @param options One or more bitwise ORed values of #plist_write_options_t.
++     * @return PLIST_ERR_SUCCESS on success or a #plist_err_t on failure.
++     * @note Use plist_mem_free() to free the allocated memory.
++     */
++    plist_err_t plist_write_to_file(plist_t plist, const char *filename, plist_format_t format, plist_write_options_t options);
++
++    /**
++     * Print the given plist in human-readable format to standard output.
++     * This is equivalent to
++     * <code>plist_write_to_stream(plist, stdout, PLIST_FORMAT_PRINT, PLIST_OPT_PARTIAL_DATA);</code>
++     * @param plist The #plist_t structure to print
++     * @note For #PLIST_DATA nodes, only a maximum of 24 bytes (first 16 and last 8) are written.
++     */
++    void plist_print(plist_t plist);
++
+     /**
+      * Test if in-memory plist data is in binary format.
+      * This function will look at the first bytes of plist_data to determine
+      * if it supposedly contains a binary plist.
+      * @note The function is not validating the whole memory buffer to check
+      * if the content is truly a plist, it is only using some heuristic on
+diff --git a/src/out-default.c b/src/out-default.c
+new file mode 100644
+--- /dev/null
++++ b/src/out-default.c
+@@ -0,0 +1,491 @@
++/*
++ * out-default.c
++ * libplist default *output-only* format - NOT for machine parsing
++ *
++ * Copyright (c) 2022-2023 Nikias Bassen All Rights Reserved.
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
++ */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <string.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <time.h>
++
++#include <inttypes.h>
++#include <ctype.h>
++#include <math.h>
++#include <limits.h>
++
++#include <node.h>
++
++#include "plist.h"
++#include "strbuf.h"
++#include "time64.h"
++
++#define MAC_EPOCH 978307200
++
++static size_t dtostr(char *buf, size_t bufsize, double realval)
++{
++    size_t len = 0;
++    if (isnan(realval)) {
++        len = snprintf(buf, bufsize, "nan");
++    } else if (isinf(realval)) {
++        len = snprintf(buf, bufsize, "%cinfinity", (realval > 0.0) ? '+' : '-');
++    } else if (realval == 0.0f) {
++        len = snprintf(buf, bufsize, "0.0");
++    } else {
++        size_t i = 0;
++        len = snprintf(buf, bufsize, "%.*g", 17, realval);
++        for (i = 0; buf && i < len; i++) {
++            if (buf[i] == ',') {
++                buf[i] = '.';
++                break;
++            } else if (buf[i] == '.') {
++                break;
++            }
++        }
++    }
++    return len;
++}
++
++static int node_to_string(node_t node, bytearray_t **outbuf, uint32_t depth, uint32_t indent, int partial_data)
++{
++    plist_data_t node_data = NULL;
++
++    char *val = NULL;
++    size_t val_len = 0;
++
++    uint32_t i = 0;
++
++    if (!node)
++        return PLIST_ERR_INVALID_ARG;
++
++    node_data = plist_get_data(node);
++
++    switch (node_data->type)
++    {
++    case PLIST_BOOLEAN:
++    {
++        if (node_data->boolval) {
++            str_buf_append(*outbuf, "true", 4);
++        } else {
++            str_buf_append(*outbuf, "false", 5);
++        }
++    }
++    break;
++
++    case PLIST_NULL:
++        str_buf_append(*outbuf, "null", 4);
++	break;
++
++    case PLIST_INT:
++        val = (char*)malloc(64);
++        if (node_data->length == 16) {
++            val_len = snprintf(val, 64, "%"PRIu64, node_data->intval);
++        } else {
++            val_len = snprintf(val, 64, "%"PRIi64, node_data->intval);
++        }
++        str_buf_append(*outbuf, val, val_len);
++        free(val);
++        break;
++
++    case PLIST_REAL:
++        val = (char*)malloc(64);
++        val_len = dtostr(val, 64, node_data->realval);
++        str_buf_append(*outbuf, val, val_len);
++        free(val);
++        break;
++
++    case PLIST_STRING:
++    case PLIST_KEY: {
++        const char *charmap[32] = {
++            "\\u0000", "\\u0001", "\\u0002", "\\u0003", "\\u0004", "\\u0005", "\\u0006", "\\u0007",
++            "\\b",     "\\t",     "\\n",     "\\u000b", "\\f",     "\\r",     "\\u000e", "\\u000f",
++            "\\u0010", "\\u0011", "\\u0012", "\\u0013", "\\u0014", "\\u0015", "\\u0016", "\\u0017",
++            "\\u0018", "\\u0019", "\\u001a", "\\u001b", "\\u001c", "\\u001d", "\\u001e", "\\u001f",
++        };
++        size_t j = 0;
++        size_t len = 0;
++        off_t start = 0;
++        off_t cur = 0;
++
++        str_buf_append(*outbuf, "\"", 1);
++
++        len = node_data->length;
++        for (j = 0; j < len; j++) {
++            unsigned char ch = (unsigned char)node_data->strval[j];
++            if (ch < 0x20) {
++                str_buf_append(*outbuf, node_data->strval + start, cur - start);
++                str_buf_append(*outbuf, charmap[ch], (charmap[ch][1] == 'u') ? 6 : 2);
++                start = cur+1;
++            } else if (ch == '"') {
++                str_buf_append(*outbuf, node_data->strval + start, cur - start);
++                str_buf_append(*outbuf, "\\\"", 2);
++                start = cur+1;
++            }
++            cur++;
++        }
++        str_buf_append(*outbuf, node_data->strval + start, cur - start);
++
++        str_buf_append(*outbuf, "\"", 1);
++        } break;
++
++    case PLIST_ARRAY: {
++        str_buf_append(*outbuf, "[", 1);
++        node_t ch;
++        uint32_t cnt = 0;
++        for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
++            if (cnt > 0) {
++                str_buf_append(*outbuf, ",", 1);
++            }
++            str_buf_append(*outbuf, "\n", 1);
++            for (i = 0; i <= depth+indent; i++) {
++                str_buf_append(*outbuf, "  ", 2);
++            }
++            int res = node_to_string(ch, outbuf, depth+1, indent, partial_data);
++            if (res < 0) {
++                return res;
++            }
++            cnt++;
++        }
++        if (cnt > 0) {
++            str_buf_append(*outbuf, "\n", 1);
++            for (i = 0; i < depth+indent; i++) {
++                str_buf_append(*outbuf, "  ", 2);
++            }
++        }
++        str_buf_append(*outbuf, "]", 1);
++        } break;
++    case PLIST_DICT: {
++        str_buf_append(*outbuf, "{", 1);
++        node_t ch;
++        uint32_t cnt = 0;
++        for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
++            if (cnt > 0 && cnt % 2 == 0) {
++                str_buf_append(*outbuf, ",", 1);
++            }
++            if (cnt % 2 == 0) {
++                str_buf_append(*outbuf, "\n", 1);
++                for (i = 0; i <= depth+indent; i++) {
++                    str_buf_append(*outbuf, "  ", 2);
++                }
++            }
++            int res = node_to_string(ch, outbuf, depth+1, indent, partial_data);
++            if (res < 0) {
++                return res;
++            }
++            if (cnt % 2 == 0) {
++                str_buf_append(*outbuf, ": ", 2);
++            }
++            cnt++;
++        }
++        if (cnt > 0) {
++            str_buf_append(*outbuf, "\n", 1);
++            for (i = 0; i < depth+indent; i++) {
++                str_buf_append(*outbuf, "  ", 2);
++            }
++        }
++        str_buf_append(*outbuf, "}", 1);
++        } break;
++    case PLIST_DATA:
++        {
++            str_buf_append(*outbuf, "<", 1);
++            size_t len = node_data->length;
++            char charb[4];
++            if (!partial_data || len <= 24) {
++                for (i = 0; i < len; i++) {
++                    if (i > 0 && (i % 4 == 0))
++                        str_buf_append(*outbuf, " ", 1);
++                    sprintf(charb, "%02x", (unsigned char)node_data->buff[i]);
++                    str_buf_append(*outbuf, charb, 2);
++                }
++            } else {
++                for (i = 0; i < 16; i++) {
++                    if (i > 0 && (i % 4 == 0))
++                        str_buf_append(*outbuf, " ", 1);
++                    sprintf(charb, "%02x", (unsigned char)node_data->buff[i]);
++                    str_buf_append(*outbuf, charb, 2);
++                }
++                str_buf_append(*outbuf, " ... ", 5);
++                for (i = len - 8; i < len; i++) {
++                    sprintf(charb, "%02x", (unsigned char)node_data->buff[i]);
++                    str_buf_append(*outbuf, charb, 2);
++                    if (i > 0 && i < len-1 && (i % 4 == 0))
++                        str_buf_append(*outbuf, " ", 1);
++                }
++            }
++            str_buf_append(*outbuf, ">", 1);
++        }
++        break;
++    case PLIST_DATE:
++        {
++            Time64_T timev = (Time64_T)node_data->realval + MAC_EPOCH;
++            struct TM _btime;
++            struct TM *btime = gmtime64_r(&timev, &_btime);
++            if (btime) {
++                val = (char*)calloc(1, 26);
++                struct tm _tmcopy;
++                copy_TM64_to_tm(btime, &_tmcopy);
++                val_len = strftime(val, 26, "%Y-%m-%d %H:%M:%S +0000", &_tmcopy);
++                if (val_len > 0) {
++                    str_buf_append(*outbuf, val, val_len);
++                }
++                free(val);
++                val = NULL;
++            }
++        }
++        break;
++    case PLIST_UID:
++        {
++            str_buf_append(*outbuf, "CF$UID:", 7);
++            val = (char*)malloc(64);
++            if (node_data->length == 16) {
++                val_len = snprintf(val, 64, "%"PRIu64, node_data->intval);
++            } else {
++                val_len = snprintf(val, 64, "%"PRIi64, node_data->intval);
++            }
++            str_buf_append(*outbuf, val, val_len);
++            free(val);
++        }
++        break;
++    default:
++        return PLIST_ERR_UNKNOWN;
++    }
++
++    return PLIST_ERR_SUCCESS;
++}
++
++#define PO10i_LIMIT (INT64_MAX/10)
++
++/* based on https://stackoverflow.com/a/4143288 */
++static int num_digits_i(int64_t i)
++{
++    int n;
++    int64_t po10;
++    n=1;
++    if (i < 0) {
++        i = (i == INT64_MIN) ? INT64_MAX : -i;
++        n++;
++    }
++    po10=10;
++    while (i>=po10) {
++        n++;
++        if (po10 > PO10i_LIMIT) break;
++        po10*=10;
++    }
++    return n;
++}
++
++#define PO10u_LIMIT (UINT64_MAX/10)
++
++/* based on https://stackoverflow.com/a/4143288 */
++static int num_digits_u(uint64_t i)
++{
++    int n;
++    uint64_t po10;
++    n=1;
++    po10=10;
++    while (i>=po10) {
++        n++;
++        if (po10 > PO10u_LIMIT) break;
++        po10*=10;
++    }
++    return n;
++}
++
++static int node_estimate_size(node_t node, uint64_t *size, uint32_t depth, uint32_t indent, int partial_data)
++{
++    plist_data_t data;
++    if (!node) {
++        return PLIST_ERR_INVALID_ARG;
++    }
++    data = plist_get_data(node);
++    if (node->children) {
++        node_t ch;
++        unsigned int n_children = node_n_children(node);
++        for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
++            int res = node_estimate_size(ch, size, depth + 1, indent, partial_data);
++            if (res < 0) {
++                return res;
++            }
++        }
++        switch (data->type) {
++        case PLIST_DICT:
++            *size += 2; // '{' and '}'
++            *size += n_children-1; // number of ':' and ','
++            *size += n_children; // number of '\n' and extra space
++            *size += (uint64_t)n_children * (depth+indent+1); // indent for every 2nd child
++            *size += indent+1; // additional '\n'
++            break;
++        case PLIST_ARRAY:
++            *size += 2; // '[' and ']'
++            *size += n_children-1; // number of ','
++            *size += n_children; // number of '\n'
++            *size += (uint64_t)n_children * ((depth+indent+1)<<1); // indent for every child
++            *size += indent+1; // additional '\n'
++            break;
++        default:
++            break;
++	}
++        *size += ((depth+indent) << 1); // indent for {} and []
++    } else {
++        switch (data->type) {
++        case PLIST_STRING:
++        case PLIST_KEY:
++            *size += data->length;
++            *size += 2;
++            break;
++        case PLIST_INT:
++            if (data->length == 16) {
++                *size += num_digits_u(data->intval);
++            } else {
++                *size += num_digits_i((int64_t)data->intval);
++            }
++            break;
++        case PLIST_REAL:
++            *size += dtostr(NULL, 0, data->realval);
++            break;
++        case PLIST_BOOLEAN:
++            *size += ((data->boolval) ? 4 : 5);
++            break;
++        case PLIST_NULL:
++            *size += 4;
++            break;
++        case PLIST_DICT:
++        case PLIST_ARRAY:
++            *size += 2;
++            break;
++        case PLIST_DATA:
++            *size += 2; // < and >
++            if (partial_data) {
++                *size += 58;
++            } else {
++                *size += data->length * 2;
++                *size += data->length / 4; // space between 4 byte groups
++            }
++            break;
++        case PLIST_DATE:
++            *size += 25;
++            break;
++        case PLIST_UID:
++            *size += 7; // "CF$UID:"
++            *size += num_digits_u(data->intval);
++            break;
++        default:
++#ifdef DEBUG
++            fprintf(stderr, "%s: invalid node type encountered\n", __func__);
++#endif
++            return PLIST_ERR_UNKNOWN;
++        }
++    }
++    if (depth == 0) {
++        *size += 1; // final newline
++    }
++    return PLIST_ERR_SUCCESS;
++}
++
++static plist_err_t _plist_write_to_strbuf(plist_t plist, strbuf_t *outbuf, plist_write_options_t options)
++{
++    uint8_t indent = 0;
++    if (options & PLIST_OPT_INDENT) {
++        indent = (options >> 24) & 0xFF;
++    }
++    uint8_t i;
++    for (i = 0; i < indent; i++) {
++        str_buf_append(outbuf, "  ", 2);
++    }
++    int res = node_to_string(plist, &outbuf, 0, indent, options & PLIST_OPT_PARTIAL_DATA);
++    if (res < 0) {
++        return res;
++    }
++    if (!(options & PLIST_OPT_NO_NEWLINE)) {
++        str_buf_append(outbuf, "\n", 1);
++    }
++    return res;
++}
++
++plist_err_t plist_write_to_string_default(plist_t plist, char **output, uint32_t* length, plist_write_options_t options)
++{
++    uint64_t size = 0;
++    int res;
++
++    if (!plist || !output || !length) {
++        return PLIST_ERR_INVALID_ARG;
++    }
++
++    uint8_t indent = 0;
++    if (options & PLIST_OPT_INDENT) {
++        indent = (options >> 24) & 0xFF;
++    }
++
++    res = node_estimate_size(plist, &size, 0, indent, options & PLIST_OPT_PARTIAL_DATA);
++    if (res < 0) {
++        return res;
++    }
++
++    strbuf_t *outbuf = str_buf_new(size);
++    if (!outbuf) {
++#if DEBUG
++        fprintf(stderr, "%s: Could not allocate output buffer\n", __func__);
++#endif
++        return PLIST_ERR_NO_MEM;
++    }
++
++    res = _plist_write_to_strbuf(plist, outbuf, options);
++    if (res < 0) {
++        str_buf_free(outbuf);
++        *output = NULL;
++        *length = 0;
++        return res;
++    }
++    str_buf_append(outbuf, "\0", 1);
++
++    *output = outbuf->data;
++    *length = outbuf->len - 1;
++
++    outbuf->data = NULL;
++    str_buf_free(outbuf);
++
++    return PLIST_ERR_SUCCESS;
++}
++
++plist_err_t plist_write_to_stream_default(plist_t plist, FILE *stream, plist_write_options_t options)
++{
++    if (!plist || !stream) {
++        return PLIST_ERR_INVALID_ARG;
++    }
++    strbuf_t *outbuf = str_buf_new_for_stream(stream);
++    if (!outbuf) {
++#if DEBUG
++        fprintf(stderr, "%s: Could not allocate output buffer\n", __func__);
++#endif
++        return PLIST_ERR_NO_MEM;
++    }
++
++    int res = _plist_write_to_strbuf(plist, outbuf, options);
++    if (res < 0) {
++        str_buf_free(outbuf);
++        return res;
++    }
++
++    str_buf_free(outbuf);
++
++    return PLIST_ERR_SUCCESS;
++}
+diff --git a/src/out-limd.c b/src/out-limd.c
+new file mode 100644
+--- /dev/null
++++ b/src/out-limd.c
+@@ -0,0 +1,449 @@
++/*
++ * out-limd.c
++ * libplist *output-only* format introduced by libimobiledevice/ideviceinfo
++ *  - NOT for machine parsing
++ *
++ * Copyright (c) 2022-2023 Nikias Bassen All Rights Reserved.
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
++ */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <string.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <time.h>
++
++#include <inttypes.h>
++#include <ctype.h>
++#include <math.h>
++#include <limits.h>
++
++#include <node.h>
++
++#include "plist.h"
++#include "strbuf.h"
++#include "time64.h"
++#include "base64.h"
++
++#define MAC_EPOCH 978307200
++
++static size_t dtostr(char *buf, size_t bufsize, double realval)
++{
++    size_t len = 0;
++    if (isnan(realval)) {
++        len = snprintf(buf, bufsize, "nan");
++    } else if (isinf(realval)) {
++        len = snprintf(buf, bufsize, "%cinfinity", (realval > 0.0) ? '+' : '-');
++    } else if (realval == 0.0f) {
++        len = snprintf(buf, bufsize, "0.0");
++    } else {
++        size_t i = 0;
++        len = snprintf(buf, bufsize, "%.*g", 17, realval);
++        for (i = 0; buf && i < len; i++) {
++            if (buf[i] == ',') {
++                buf[i] = '.';
++                break;
++            } else if (buf[i] == '.') {
++                break;
++            }
++        }
++    }
++    return len;
++}
++
++static int node_to_string(node_t node, bytearray_t **outbuf, uint32_t depth, uint32_t indent)
++{
++    plist_data_t node_data = NULL;
++
++    char *val = NULL;
++    size_t val_len = 0;
++    char buf[16];
++
++    uint32_t i = 0;
++
++    if (!node)
++        return PLIST_ERR_INVALID_ARG;
++
++    node_data = plist_get_data(node);
++
++    switch (node_data->type)
++    {
++    case PLIST_BOOLEAN:
++    {
++        if (node_data->boolval) {
++            str_buf_append(*outbuf, "true", 4);
++        } else {
++            str_buf_append(*outbuf, "false", 5);
++        }
++    }
++    break;
++
++    case PLIST_NULL:
++        str_buf_append(*outbuf, "null", 4);
++	break;
++
++    case PLIST_INT:
++        val = (char*)malloc(64);
++        if (node_data->length == 16) {
++            val_len = snprintf(val, 64, "%"PRIu64, node_data->intval);
++        } else {
++            val_len = snprintf(val, 64, "%"PRIi64, node_data->intval);
++        }
++        str_buf_append(*outbuf, val, val_len);
++        free(val);
++        break;
++
++    case PLIST_REAL:
++        val = (char*)malloc(64);
++        val_len = dtostr(val, 64, node_data->realval);
++        str_buf_append(*outbuf, val, val_len);
++        free(val);
++        break;
++
++    case PLIST_STRING:
++    case PLIST_KEY: {
++        const char *charmap[32] = {
++            "\\u0000", "\\u0001", "\\u0002", "\\u0003", "\\u0004", "\\u0005", "\\u0006", "\\u0007",
++            "\\b",     "\\t",     "\\n",     "\\u000b", "\\f",     "\\r",     "\\u000e", "\\u000f",
++            "\\u0010", "\\u0011", "\\u0012", "\\u0013", "\\u0014", "\\u0015", "\\u0016", "\\u0017",
++            "\\u0018", "\\u0019", "\\u001a", "\\u001b", "\\u001c", "\\u001d", "\\u001e", "\\u001f",
++        };
++        size_t j = 0;
++        size_t len = 0;
++        off_t start = 0;
++        off_t cur = 0;
++
++        len = node_data->length;
++        for (j = 0; j < len; j++) {
++            unsigned char ch = (unsigned char)node_data->strval[j];
++            if (ch < 0x20) {
++                str_buf_append(*outbuf, node_data->strval + start, cur - start);
++                str_buf_append(*outbuf, charmap[ch], (charmap[ch][1] == 'u') ? 6 : 2);
++                start = cur+1;
++            }
++            cur++;
++        }
++        str_buf_append(*outbuf, node_data->strval + start, cur - start);
++        } break;
++
++    case PLIST_ARRAY: {
++        node_t ch;
++        uint32_t cnt = 0;
++        for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
++            if (cnt > 0 || (cnt == 0 && node->parent != NULL)) {
++                str_buf_append(*outbuf, "\n", 1);
++                for (i = 0; i < depth+indent; i++) {
++                    str_buf_append(*outbuf, " ", 1);
++                }
++            }
++            size_t sl = sprintf(buf, "%u: ", cnt);
++            str_buf_append(*outbuf, buf, sl);
++            int res = node_to_string(ch, outbuf, depth+1, indent);
++            if (res < 0) {
++                return res;
++            }
++            cnt++;
++        }
++        } break;
++    case PLIST_DICT: {
++        node_t ch;
++        uint32_t cnt = 0;
++        for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
++            if (cnt > 0 && cnt % 2 == 0) {
++                str_buf_append(*outbuf, "\n", 1);
++                for (i = 0; i < depth+indent; i++) {
++                    str_buf_append(*outbuf, " ", 1);
++                }
++            }
++            int res = node_to_string(ch, outbuf, depth+1, indent);
++            if (res < 0) {
++                return res;
++            }
++            if (cnt % 2 == 0) {
++                plist_t valnode = (plist_t)node_next_sibling(ch);
++                if (PLIST_IS_ARRAY(valnode)) {
++                    size_t sl = sprintf(buf, "[%u]:", plist_array_get_size(valnode));
++                    str_buf_append(*outbuf, buf, sl);
++                } else {
++                    str_buf_append(*outbuf, ": ", 2);
++                }
++            }
++            cnt++;
++        }
++        } break;
++    case PLIST_DATA:
++        {
++            val = (char*)malloc(4096);
++            size_t done = 0;
++            while (done < node_data->length) {
++                size_t amount = node_data->length - done;
++                if (amount > 3072) {
++                    amount = 3072;
++                }
++                size_t bsize = base64encode(val, node_data->buff + done, amount);
++                str_buf_append(*outbuf, val, bsize);
++                done += amount;
++            }
++        }
++        break;
++    case PLIST_DATE:
++        {
++            Time64_T timev = (Time64_T)node_data->realval + MAC_EPOCH;
++            struct TM _btime;
++            struct TM *btime = gmtime64_r(&timev, &_btime);
++            if (btime) {
++                val = (char*)calloc(1, 24);
++                struct tm _tmcopy;
++                copy_TM64_to_tm(btime, &_tmcopy);
++                val_len = strftime(val, 24, "%Y-%m-%dT%H:%M:%SZ", &_tmcopy);
++                if (val_len > 0) {
++                    str_buf_append(*outbuf, val, val_len);
++                }
++                free(val);
++                val = NULL;
++            }
++        }
++        break;
++    case PLIST_UID:
++        {
++            str_buf_append(*outbuf, "CF$UID:", 7);
++            val = (char*)malloc(64);
++            if (node_data->length == 16) {
++                val_len = snprintf(val, 64, "%"PRIu64, node_data->intval);
++            } else {
++                val_len = snprintf(val, 64, "%"PRIi64, node_data->intval);
++            }
++            str_buf_append(*outbuf, val, val_len);
++            free(val);
++        }
++        break;
++    default:
++        return PLIST_ERR_UNKNOWN;
++    }
++
++    return PLIST_ERR_SUCCESS;
++}
++
++#define PO10i_LIMIT (INT64_MAX/10)
++
++/* based on https://stackoverflow.com/a/4143288 */
++static int num_digits_i(int64_t i)
++{
++    int n;
++    int64_t po10;
++    n=1;
++    if (i < 0) {
++        i = (i == INT64_MIN) ? INT64_MAX : -i;
++        n++;
++    }
++    po10=10;
++    while (i>=po10) {
++        n++;
++        if (po10 > PO10i_LIMIT) break;
++        po10*=10;
++    }
++    return n;
++}
++
++#define PO10u_LIMIT (UINT64_MAX/10)
++
++/* based on https://stackoverflow.com/a/4143288 */
++static int num_digits_u(uint64_t i)
++{
++    int n;
++    uint64_t po10;
++    n=1;
++    po10=10;
++    while (i>=po10) {
++        n++;
++        if (po10 > PO10u_LIMIT) break;
++        po10*=10;
++    }
++    return n;
++}
++
++static int node_estimate_size(node_t node, uint64_t *size, uint32_t depth, uint32_t indent)
++{
++    plist_data_t data;
++    if (!node) {
++        return PLIST_ERR_INVALID_ARG;
++    }
++    data = plist_get_data(node);
++    if (node->children) {
++        node_t ch;
++        unsigned int n_children = node_n_children(node);
++        for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
++            int res = node_estimate_size(ch, size, depth + 1, indent);
++            if (res < 0) {
++                return res;
++            }
++        }
++        switch (data->type) {
++        case PLIST_DICT:
++            *size += n_children-1; // number of ':' and ' '
++            *size += n_children; // number of '\n' and extra space
++            *size += (uint64_t)n_children * (depth+indent+1); // indent for every 2nd child
++            *size += indent+1; // additional '\n'
++            break;
++        case PLIST_ARRAY:
++            *size += n_children-1; // number of ','
++            *size += n_children; // number of '\n'
++            *size += (uint64_t)n_children * ((depth+indent+1)<<1); // indent for every child
++            *size += indent+1; // additional '\n'
++            break;
++        default:
++            break;
++	}
++    } else {
++        switch (data->type) {
++        case PLIST_STRING:
++        case PLIST_KEY:
++            *size += data->length;
++            break;
++        case PLIST_INT:
++            if (data->length == 16) {
++                *size += num_digits_u(data->intval);
++            } else {
++                *size += num_digits_i((int64_t)data->intval);
++            }
++            break;
++        case PLIST_REAL:
++            *size += dtostr(NULL, 0, data->realval);
++            break;
++        case PLIST_BOOLEAN:
++            *size += ((data->boolval) ? 4 : 5);
++            break;
++        case PLIST_NULL:
++            *size += 4;
++            break;
++        case PLIST_DICT:
++        case PLIST_ARRAY:
++            *size += 3;
++            break;
++        case PLIST_DATA:
++            *size += (data->length / 3) * 4 + 4;
++            break;
++        case PLIST_DATE:
++            *size += 23;
++            break;
++        case PLIST_UID:
++            *size += 7; // "CF$UID:"
++            *size += num_digits_u(data->intval);
++            break;
++        default:
++#ifdef DEBUG
++            fprintf(stderr, "%s: invalid node type encountered\n", __func__);
++#endif
++            return PLIST_ERR_UNKNOWN;
++        }
++    }
++    if (depth == 0) {
++        *size += 1; // final newline
++    }
++    return PLIST_ERR_SUCCESS;
++}
++
++static plist_err_t _plist_write_to_strbuf(plist_t plist, strbuf_t *outbuf, plist_write_options_t options)
++{
++    uint8_t indent = 0;
++    if (options & PLIST_OPT_INDENT) {
++        indent = (options >> 24) & 0xFF;
++    }
++    uint8_t i;
++    for (i = 0; i < indent; i++) {
++        str_buf_append(outbuf, " ", 1);
++    }
++    int res = node_to_string(plist, &outbuf, 0, indent);
++    if (res < 0) {
++        return res;
++    }
++    if (!(options & PLIST_OPT_NO_NEWLINE)) {
++        str_buf_append(outbuf, "\n", 1);
++    }
++    return res;
++}
++
++plist_err_t plist_write_to_string_limd(plist_t plist, char **output, uint32_t* length, plist_write_options_t options)
++{
++    uint64_t size = 0;
++    int res;
++
++    if (!plist || !output || !length) {
++        return PLIST_ERR_INVALID_ARG;
++    }
++
++    uint8_t indent = 0;
++    if (options & PLIST_OPT_INDENT) {
++        indent = (options >> 24) & 0xFF;
++    }
++
++    res = node_estimate_size(plist, &size, 0, indent);
++    if (res < 0) {
++        return res;
++    }
++
++    strbuf_t *outbuf = str_buf_new(size);
++    if (!outbuf) {
++#if DEBUG
++        fprintf(stderr, "%s: Could not allocate output buffer\n", __func__);
++#endif
++        return PLIST_ERR_NO_MEM;
++    }
++
++    res = _plist_write_to_strbuf(plist, outbuf, options);
++    if (res < 0) {
++        str_buf_free(outbuf);
++        *output = NULL;
++        *length = 0;
++        return res;
++    }
++    str_buf_append(outbuf, "\0", 1);
++
++    *output = outbuf->data;
++    *length = outbuf->len - 1;
++
++    outbuf->data = NULL;
++    str_buf_free(outbuf);
++
++    return PLIST_ERR_SUCCESS;
++}
++
++plist_err_t plist_write_to_stream_limd(plist_t plist, FILE *stream, plist_write_options_t options)
++{
++    if (!plist || !stream) {
++        return PLIST_ERR_INVALID_ARG;
++    }
++    strbuf_t *outbuf = str_buf_new_for_stream(stream);
++    if (!outbuf) {
++#if DEBUG
++        fprintf(stderr, "%s: Could not allocate output buffer\n", __func__);
++#endif
++        return PLIST_ERR_NO_MEM;
++    }
++
++    int res = _plist_write_to_strbuf(plist, outbuf, options);
++    if (res < 0) {
++        str_buf_free(outbuf);
++        return res;
++    }
++
++    str_buf_free(outbuf);
++
++    return PLIST_ERR_SUCCESS;
++}
+diff --git a/src/out-plutil.c b/src/out-plutil.c
+new file mode 100644
+--- /dev/null
++++ b/src/out-plutil.c
+@@ -0,0 +1,465 @@
++/*
++ * out-plutil.c
++ * plutil-like *output-only* format - NOT for machine parsing
++ *
++ * Copyright (c) 2023 Nikias Bassen All Rights Reserved.
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
++ */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <string.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <time.h>
++
++#include <inttypes.h>
++#include <ctype.h>
++#include <math.h>
++#include <limits.h>
++
++#include <node.h>
++
++#include "plist.h"
++#include "strbuf.h"
++#include "time64.h"
++
++#define MAC_EPOCH 978307200
++
++static size_t dtostr(char *buf, size_t bufsize, double realval)
++{
++    size_t len = 0;
++    if (isnan(realval)) {
++        len = snprintf(buf, bufsize, "nan");
++    } else if (isinf(realval)) {
++        len = snprintf(buf, bufsize, "%cinfinity", (realval > 0.0) ? '+' : '-');
++    } else if (realval == 0.0f) {
++        len = snprintf(buf, bufsize, "0.0");
++    } else {
++        size_t i = 0;
++        len = snprintf(buf, bufsize, "%.*g", 17, realval);
++        for (i = 0; buf && i < len; i++) {
++            if (buf[i] == ',') {
++                buf[i] = '.';
++                break;
++            } else if (buf[i] == '.') {
++                break;
++            }
++        }
++    }
++    return len;
++}
++
++static int node_to_string(node_t node, bytearray_t **outbuf, uint32_t depth)
++{
++    plist_data_t node_data = NULL;
++
++    char *val = NULL;
++    size_t val_len = 0;
++
++    uint32_t i = 0;
++
++    if (!node)
++        return PLIST_ERR_INVALID_ARG;
++
++    node_data = plist_get_data(node);
++
++    switch (node_data->type)
++    {
++    case PLIST_BOOLEAN:
++    {
++        if (node_data->boolval) {
++            str_buf_append(*outbuf, "1", 1);
++        } else {
++            str_buf_append(*outbuf, "0", 1);
++        }
++    }
++    break;
++
++    case PLIST_NULL:
++        str_buf_append(*outbuf, "<null>", 6);
++	break;
++
++    case PLIST_INT:
++        val = (char*)malloc(64);
++        if (node_data->length == 16) {
++            val_len = snprintf(val, 64, "%"PRIu64, node_data->intval);
++        } else {
++            val_len = snprintf(val, 64, "%"PRIi64, node_data->intval);
++        }
++        str_buf_append(*outbuf, val, val_len);
++        free(val);
++        break;
++
++    case PLIST_REAL:
++        val = (char*)malloc(64);
++        val_len = dtostr(val, 64, node_data->realval);
++        str_buf_append(*outbuf, val, val_len);
++        free(val);
++        break;
++
++    case PLIST_STRING:
++    case PLIST_KEY: {
++        const char *charmap[32] = {
++            "\\u0000", "\\u0001", "\\u0002", "\\u0003", "\\u0004", "\\u0005", "\\u0006", "\\u0007",
++            "\\b",     "\\t",     "\\n",     "\\u000b", "\\f",     "\\r",     "\\u000e", "\\u000f",
++            "\\u0010", "\\u0011", "\\u0012", "\\u0013", "\\u0014", "\\u0015", "\\u0016", "\\u0017",
++            "\\u0018", "\\u0019", "\\u001a", "\\u001b", "\\u001c", "\\u001d", "\\u001e", "\\u001f",
++        };
++        size_t j = 0;
++        size_t len = 0;
++        off_t start = 0;
++        off_t cur = 0;
++
++        str_buf_append(*outbuf, "\"", 1);
++
++        len = node_data->length;
++        for (j = 0; j < len; j++) {
++            unsigned char ch = (unsigned char)node_data->strval[j];
++            if (ch < 0x20) {
++                str_buf_append(*outbuf, node_data->strval + start, cur - start);
++                str_buf_append(*outbuf, charmap[ch], (charmap[ch][1] == 'u') ? 6 : 2);
++                start = cur+1;
++            } else if (ch == '"') {
++                str_buf_append(*outbuf, node_data->strval + start, cur - start);
++                str_buf_append(*outbuf, "\\\"", 2);
++                start = cur+1;
++            }
++            cur++;
++        }
++        str_buf_append(*outbuf, node_data->strval + start, cur - start);
++
++        str_buf_append(*outbuf, "\"", 1);
++        } break;
++
++    case PLIST_ARRAY: {
++        str_buf_append(*outbuf, "[", 1);
++        node_t ch;
++        uint32_t cnt = 0;
++        for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
++            str_buf_append(*outbuf, "\n", 1);
++            for (i = 0; i <= depth; i++) {
++                str_buf_append(*outbuf, "  ", 2);
++            }
++            char indexbuf[16];
++            int l = sprintf(indexbuf, "%u => ", cnt);
++            str_buf_append(*outbuf, indexbuf, l);
++            int res = node_to_string(ch, outbuf, depth+1);
++            if (res < 0) {
++                return res;
++            }
++            cnt++;
++        }
++        if (cnt > 0) {
++            str_buf_append(*outbuf, "\n", 1);
++            for (i = 0; i < depth; i++) {
++                str_buf_append(*outbuf, "  ", 2);
++            }
++        }
++        str_buf_append(*outbuf, "]", 1);
++        } break;
++    case PLIST_DICT: {
++        str_buf_append(*outbuf, "{", 1);
++        node_t ch;
++        uint32_t cnt = 0;
++        for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
++            if (cnt % 2 == 0) {
++                str_buf_append(*outbuf, "\n", 1);
++                for (i = 0; i <= depth; i++) {
++                    str_buf_append(*outbuf, "  ", 2);
++                }
++            }
++            int res = node_to_string(ch, outbuf, depth+1);
++            if (res < 0) {
++                return res;
++            }
++            if (cnt % 2 == 0) {
++                str_buf_append(*outbuf, " => ", 4);
++            }
++            cnt++;
++        }
++        if (cnt > 0) {
++            str_buf_append(*outbuf, "\n", 1);
++            for (i = 0; i < depth; i++) {
++                str_buf_append(*outbuf, "  ", 2);
++            }
++        }
++        str_buf_append(*outbuf, "}", 1);
++        } break;
++    case PLIST_DATA:
++        {
++            val = (char*)calloc(1, 48);
++            size_t len = node_data->length;
++            size_t slen = snprintf(val, 48, "{length = %" PRIu64 ", bytes = 0x", (uint64_t)len);
++            str_buf_append(*outbuf, val, slen);
++            if (len <= 24) {
++                for (i = 0; i < len; i++) {
++                    sprintf(val, "%02x", (unsigned char)node_data->buff[i]);
++                    str_buf_append(*outbuf, val, 2);
++                }
++            } else {
++                for (i = 0; i < 16; i++) {
++                    if (i > 0 && (i % 4 == 0))
++                        str_buf_append(*outbuf, " ", 1);
++                    sprintf(val, "%02x", (unsigned char)node_data->buff[i]);
++                    str_buf_append(*outbuf, val, 2);
++                }
++                str_buf_append(*outbuf, " ... ", 5);
++                for (i = len - 8; i < len; i++) {
++                    sprintf(val, "%02x", (unsigned char)node_data->buff[i]);
++                    str_buf_append(*outbuf, val, 2);
++                    if (i > 0 && (i % 4 == 0))
++                        str_buf_append(*outbuf, " ", 1);
++                }
++            }
++            free(val);
++            val = NULL;
++            str_buf_append(*outbuf, "}", 1);
++        }
++        break;
++    case PLIST_DATE:
++        {
++            Time64_T timev = (Time64_T)node_data->realval + MAC_EPOCH;
++            struct TM _btime;
++            struct TM *btime = gmtime64_r(&timev, &_btime);
++            if (btime) {
++                val = (char*)calloc(1, 26);
++                struct tm _tmcopy;
++                copy_TM64_to_tm(btime, &_tmcopy);
++                val_len = strftime(val, 26, "%Y-%m-%d %H:%M:%S +0000", &_tmcopy);
++                if (val_len > 0) {
++                    str_buf_append(*outbuf, val, val_len);
++                }
++                free(val);
++                val = NULL;
++            }
++        }
++        break;
++    case PLIST_UID:
++        {
++            val = (char*)malloc(88);
++            val_len = sprintf(val, "<CFKeyedArchiverUID %p [%p]>{value = %" PRIu64 "}", node, node_data, node_data->intval);
++            str_buf_append(*outbuf, val, val_len);
++            free(val);
++            val = NULL;
++        }
++        break;
++    default:
++        return PLIST_ERR_UNKNOWN;
++    }
++
++    return PLIST_ERR_SUCCESS;
++}
++
++#define PO10i_LIMIT (INT64_MAX/10)
++
++/* based on https://stackoverflow.com/a/4143288 */
++static int num_digits_i(int64_t i)
++{
++    int n;
++    int64_t po10;
++    n=1;
++    if (i < 0) {
++        i = (i == INT64_MIN) ? INT64_MAX : -i;
++        n++;
++    }
++    po10=10;
++    while (i>=po10) {
++        n++;
++        if (po10 > PO10i_LIMIT) break;
++        po10*=10;
++    }
++    return n;
++}
++
++#define PO10u_LIMIT (UINT64_MAX/10)
++
++/* based on https://stackoverflow.com/a/4143288 */
++static int num_digits_u(uint64_t i)
++{
++    int n;
++    uint64_t po10;
++    n=1;
++    po10=10;
++    while (i>=po10) {
++        n++;
++        if (po10 > PO10u_LIMIT) break;
++        po10*=10;
++    }
++    return n;
++}
++
++static int node_estimate_size(node_t node, uint64_t *size, uint32_t depth)
++{
++    plist_data_t data;
++    if (!node) {
++        return PLIST_ERR_INVALID_ARG;
++    }
++    data = plist_get_data(node);
++    if (node->children) {
++        node_t ch;
++        unsigned int n_children = node_n_children(node);
++        for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
++            int res = node_estimate_size(ch, size, depth + 1);
++            if (res < 0) {
++                return res;
++            }
++        }
++        switch (data->type) {
++        case PLIST_DICT:
++            *size += 2; // '{' and '}'
++            *size += n_children-1; // number of ':' and ','
++            *size += n_children; // number of '\n' and extra space
++            *size += (uint64_t)n_children * (depth+1); // indent for every 2nd child
++            *size += 1; // additional '\n'
++            break;
++        case PLIST_ARRAY:
++            *size += 2; // '[' and ']'
++            *size += n_children-1; // number of ','
++            *size += n_children; // number of '\n'
++            *size += (uint64_t)n_children * ((depth+1)<<1); // indent for every child
++            *size += 1; // additional '\n'
++            break;
++        default:
++            break;
++	}
++        *size += (depth << 1); // indent for {} and []
++    } else {
++        switch (data->type) {
++        case PLIST_STRING:
++        case PLIST_KEY:
++            *size += data->length;
++            *size += 2;
++            break;
++        case PLIST_INT:
++            if (data->length == 16) {
++                *size += num_digits_u(data->intval);
++            } else {
++                *size += num_digits_i((int64_t)data->intval);
++            }
++            break;
++        case PLIST_REAL:
++            *size += dtostr(NULL, 0, data->realval);
++            break;
++        case PLIST_BOOLEAN:
++            *size += 1;
++            break;
++        case PLIST_NULL:
++            *size += 6;
++            break;
++        case PLIST_DICT:
++        case PLIST_ARRAY:
++            *size += 2;
++            break;
++        case PLIST_DATA:
++            *size = (data->length <= 24) ? 73 : 100;
++            break;
++        case PLIST_DATE:
++            *size += 25;
++            break;
++        case PLIST_UID:
++            *size += 88;
++            break;
++        default:
++#ifdef DEBUG
++            fprintf(stderr, "invalid node type encountered\n");
++#endif
++            return PLIST_ERR_UNKNOWN;
++        }
++    }
++    if (depth == 0) {
++        *size += 1; // final newline
++    }
++    return PLIST_ERR_SUCCESS;
++}
++
++static plist_err_t _plist_write_to_strbuf(plist_t plist, strbuf_t *outbuf, plist_write_options_t options)
++{
++    int res = node_to_string(plist, &outbuf, 0);
++    if (res < 0) {
++        return res;
++    }
++    if (!(options & PLIST_OPT_NO_NEWLINE)) {
++        str_buf_append(outbuf, "\n", 1);
++    }
++    return res;
++}
++
++plist_err_t plist_write_to_string_plutil(plist_t plist, char **output, uint32_t* length, plist_write_options_t options)
++{
++    uint64_t size = 0;
++    int res;
++
++    if (!plist || !output || !length) {
++        return PLIST_ERR_INVALID_ARG;
++    }
++
++    res = node_estimate_size(plist, &size, 0);
++    if (res < 0) {
++        return res;
++    }
++
++    strbuf_t *outbuf = str_buf_new(size);
++    if (!outbuf) {
++#if DEBUG
++        fprintf(stderr, "%s: Could not allocate output buffer\n", __func__);
++#endif
++        return PLIST_ERR_NO_MEM;
++    }
++
++    res = _plist_write_to_strbuf(plist, outbuf, options);
++    if (res < 0) {
++        str_buf_free(outbuf);
++        *output = NULL;
++        *length = 0;
++        return res;
++    }
++    str_buf_append(outbuf, "\0", 1);
++
++    *output = outbuf->data;
++    *length = outbuf->len - 1;
++
++    outbuf->data = NULL;
++    str_buf_free(outbuf);
++
++    return PLIST_ERR_SUCCESS;
++}
++
++plist_err_t plist_write_to_stream_plutil(plist_t plist, FILE *stream, plist_write_options_t options)
++{
++    if (!plist || !stream) {
++        return PLIST_ERR_INVALID_ARG;
++    }
++    strbuf_t *outbuf = str_buf_new_for_stream(stream);
++    if (!outbuf) {
++#if DEBUG
++        fprintf(stderr, "%s: Could not allocate output buffer\n", __func__);
++#endif
++        return PLIST_ERR_NO_MEM;
++    }
++
++    int res = _plist_write_to_strbuf(plist, outbuf, options);
++    if (res < 0) {
++        str_buf_free(outbuf);
++        return res;
++    }
++
++    str_buf_free(outbuf);
++
++    return PLIST_ERR_SUCCESS;
++}
+diff --git a/src/plist.c b/src/plist.c
+--- a/src/plist.c
++++ b/src/plist.c
+@@ -1570,6 +1570,98 @@ PLIST_API void plist_sort(plist_t plist)
+                 cur_key = NEXT_KEY(cur_key);
+             }
+             lptr = cur_key;
+         } while (swapped);
+     }
+ }
++
++PLIST_API plist_err_t plist_write_to_string(plist_t plist, char **output, uint32_t* length, plist_format_t format, plist_write_options_t options)
++{
++    plist_err_t err = PLIST_ERR_UNKNOWN;
++    switch (format) {
++        case PLIST_FORMAT_XML:
++            err = plist_to_xml(plist, output, length);
++            break;
++        case PLIST_FORMAT_JSON:
++            err = plist_to_json(plist, output, length, ((options & PLIST_OPT_COMPACT) == 0));
++            break;
++        case PLIST_FORMAT_OSTEP:
++            err = plist_to_openstep(plist, output, length, ((options & PLIST_OPT_COMPACT) == 0));
++            break;
++        case PLIST_FORMAT_PRINT:
++            err = plist_write_to_string_default(plist, output, length, options);
++            break;
++        case PLIST_FORMAT_LIMD:
++            err = plist_write_to_string_limd(plist, output, length, options);
++            break;
++        case PLIST_FORMAT_PLUTIL:
++            err = plist_write_to_string_plutil(plist, output, length, options);
++            break;
++        default:
++            // unsupported output format
++            err = PLIST_ERR_FORMAT;
++            break;
++    }
++    return err;
++}
++
++PLIST_API plist_err_t plist_write_to_stream(plist_t plist, FILE *stream, plist_format_t format, plist_write_options_t options)
++{
++    if (!plist || !stream) {
++        return PLIST_ERR_INVALID_ARG;
++    }
++    plist_err_t err = PLIST_ERR_UNKNOWN;
++    char *output = NULL;
++    uint32_t length = 0;
++    switch (format) {
++        case PLIST_FORMAT_BINARY:
++            err = plist_to_bin(plist, &output, &length);
++            break;
++        case PLIST_FORMAT_XML:
++            err = plist_to_xml(plist, &output, &length);
++            break;
++        case PLIST_FORMAT_JSON:
++            err = plist_to_json(plist, &output, &length, ((options & PLIST_OPT_COMPACT) == 0));
++            break;
++        case PLIST_FORMAT_OSTEP:
++            err = plist_to_openstep(plist, &output, &length, ((options & PLIST_OPT_COMPACT) == 0));
++            break;
++        case PLIST_FORMAT_PRINT:
++            err = plist_write_to_stream_default(plist, stream, options);
++            break;
++        case PLIST_FORMAT_LIMD:
++            err = plist_write_to_stream_limd(plist, stream, options);
++            break;
++        case PLIST_FORMAT_PLUTIL:
++            err = plist_write_to_stream_plutil(plist, stream, options);
++            break;
++        default:
++            // unsupported output format
++            err = PLIST_ERR_FORMAT;
++            break;
++    }
++    if (output && err == PLIST_ERR_SUCCESS) {
++        if (fwrite(output, 1, length, stream) < length) {
++            err = PLIST_ERR_IO;
++        }
++    }
++    return err;
++}
++
++PLIST_API plist_err_t plist_write_to_file(plist_t plist, const char* filename, plist_format_t format, plist_write_options_t options)
++{
++    if (!plist || !filename) {
++        return PLIST_ERR_INVALID_ARG;
++    }
++    FILE* f = fopen(filename, "wb");
++    if (!f) {
++        return PLIST_ERR_IO;
++    }
++    plist_err_t err = plist_write_to_stream(plist, f, format, options);
++    fclose(f);
++    return err;
++}
++
++PLIST_API void plist_print(plist_t plist)
++{
++     plist_write_to_stream(plist, stdout, PLIST_FORMAT_PRINT, PLIST_OPT_PARTIAL_DATA);
++}
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---

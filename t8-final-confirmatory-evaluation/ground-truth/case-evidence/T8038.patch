@@ -1,0 +1,219 @@
+PROJECT solidity
+COMMIT a48b743e246575a7ef10e024c68ca00f01ff6c3d
+PARENT c7532dc5e80e5953cf7b9399688d5086d8110b09
+SUBJECT Implementation of `SLOTNUM` support in the solidity syntax, inline assembly and yul.
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/libevmasm/Instruction.cpp b/libevmasm/Instruction.cpp
+index cc02286c8..f106f62b1 100644
+--- a/libevmasm/Instruction.cpp
++++ b/libevmasm/Instruction.cpp
+@@ -85,6 +85,7 @@ std::map<std::string, Instruction, std::less<>> const solidity::evmasm::c_instru
+ 	{ "SELFBALANCE", Instruction::SELFBALANCE },
+ 	{ "BASEFEE", Instruction::BASEFEE },
+ 	{ "BLOBBASEFEE", Instruction::BLOBBASEFEE },
++	{ "SLOTNUM", Instruction::SLOTNUM },
+ 	{ "POP", Instruction::POP },
+ 	{ "MLOAD", Instruction::MLOAD },
+ 	{ "MSTORE", Instruction::MSTORE },
+@@ -240,6 +241,7 @@ static std::map<Instruction, InstructionInfo> const c_instructionInfo =
+ 	{Instruction::SELFBALANCE,    {"SELFBALANCE",     0,  0,   1,  false,      Tier::Low}},
+ 	{Instruction::BASEFEE,        {"BASEFEE",         0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::BLOBBASEFEE,    {"BLOBBASEFEE",     0,  0,   1,  false,      Tier::Base}},
++	{Instruction::SLOTNUM,        {"SLOTNUM",         0,  0,   1,  false,      Tier::Base}},
+ 	{Instruction::POP,            {"POP",             0,  1,   0,  false,      Tier::Base}},
+ 	{Instruction::MLOAD,          {"MLOAD",           0,  1,   1,  true,       Tier::VeryLow}},
+ 	{Instruction::MSTORE,         {"MSTORE",          0,  2,   0,  true,       Tier::VeryLow}},
+diff --git a/libevmasm/Instruction.h b/libevmasm/Instruction.h
+index d5ebfa31d..755fce5c9 100644
+--- a/libevmasm/Instruction.h
++++ b/libevmasm/Instruction.h
+@@ -93,6 +93,7 @@ enum class Instruction: uint8_t
+ 	BASEFEE,                  ///< get the block's basefee
+ 	BLOBHASH = 0x49,          ///< get a versioned hash of one of the blobs associated with the transaction
+ 	BLOBBASEFEE = 0x4a,       ///< get the block's blob basefee
++	SLOTNUM = 0x4b,           ///< get the current beacon chain slot number
+ 
+ 	POP = 0x50,               ///< remove item from stack
+ 	MLOAD,                    ///< load word from memory
+diff --git a/libevmasm/SemanticInformation.cpp b/libevmasm/SemanticInformation.cpp
+index 5f5a2279b..c8653b443 100644
+--- a/libevmasm/SemanticInformation.cpp
++++ b/libevmasm/SemanticInformation.cpp
+@@ -561,6 +561,7 @@ bool SemanticInformation::invalidInPureFunctions(Instruction _instruction)
+ 	case Instruction::CHAINID:
+ 	case Instruction::BASEFEE:
+ 	case Instruction::BLOBBASEFEE:
++	case Instruction::SLOTNUM:
+ 	case Instruction::GAS:
+ 	case Instruction::GASPRICE:
+ 	case Instruction::EXTCODESIZE:
+diff --git a/libevmasm/SimplificationRule.h b/libevmasm/SimplificationRule.h
+index ea1baa9e5..552ab3290 100644
+--- a/libevmasm/SimplificationRule.h
++++ b/libevmasm/SimplificationRule.h
+@@ -131,6 +131,7 @@ struct EVMBuiltins
+ 	static auto constexpr SELFBALANCE = PatternGenerator<Instruction::SELFBALANCE>{};
+ 	static auto constexpr BASEFEE = PatternGenerator<Instruction::BASEFEE>{};
+ 	static auto constexpr BLOBBASEFEE = PatternGenerator<Instruction::BLOBBASEFEE>{};
++	static auto constexpr SLOTNUM = PatternGenerator<Instruction::SLOTNUM>{};
+ 	static auto constexpr POP = PatternGenerator<Instruction::POP>{};
+ 	static auto constexpr MLOAD = PatternGenerator<Instruction::MLOAD>{};
+ 	static auto constexpr MSTORE = PatternGenerator<Instruction::MSTORE>{};
+diff --git a/liblangutil/EVMVersion.cpp b/liblangutil/EVMVersion.cpp
+index 84a3d479c..23f769cea 100644
+--- a/liblangutil/EVMVersion.cpp
++++ b/liblangutil/EVMVersion.cpp
+@@ -55,6 +55,8 @@ bool EVMVersion::hasOpcode(Instruction _opcode) const
+ 		return hasBlobHash();
+ 	case Instruction::BLOBBASEFEE:
+ 		return hasBlobBaseFee();
++	case Instruction::SLOTNUM:
++		return hasSlotNum();
+ 	case Instruction::MCOPY:
+ 		return hasMcopy();
+ 	case Instruction::TSTORE:
+diff --git a/liblangutil/EVMVersion.h b/liblangutil/EVMVersion.h
+index 1b8a3dc46..66895f23f 100644
+--- a/liblangutil/EVMVersion.h
++++ b/liblangutil/EVMVersion.h
+@@ -143,6 +143,7 @@ public:
+ 	bool hasBlobHash() const { return *this >= cancun(); }
+ 	bool hasMcopy() const { return *this >= cancun(); }
+ 	bool supportsTransientStorage() const { return *this >= cancun(); }
++	bool hasSlotNum() const { return *this >= amsterdam(); }
+ 	constexpr size_t reachableStackDepth() const { return 16; }
+ 
+ 	bool hasOpcode(evmasm::Instruction _opcode) const;
+diff --git a/liblangutil/Token.cpp b/liblangutil/Token.cpp
+index 0a75e06d3..1ca5339aa 100644
+--- a/liblangutil/Token.cpp
++++ b/liblangutil/Token.cpp
+@@ -179,6 +179,7 @@ bool isFutureYulReservedIdentifier(std::string_view const _literal)
+ 		_literal == "mcopy" ||
+ 		_literal == "memoryguard" ||
+ 		_literal == "prevrandao" ||
++		_literal == "slotnum" ||
+ 		_literal == "tload" ||
+ 		_literal == "tstore";
+ }
+diff --git a/libsolidity/analysis/TypeChecker.cpp b/libsolidity/analysis/TypeChecker.cpp
+index d211c38b9..c2c219ec2 100644
+--- a/libsolidity/analysis/TypeChecker.cpp
++++ b/libsolidity/analysis/TypeChecker.cpp
+@@ -3452,6 +3452,12 @@ bool TypeChecker::visit(MemberAccess const& _memberAccess)
+ 					_memberAccess.location(),
+ 					R"("blobbasefee" is not supported by the VM version.)"
+ 				);
++			else if (memberName == "slotnum" && !m_evmVersion.hasSlotNum())
++				m_errorReporter.typeError(
++					1048_error,
++					_memberAccess.location(),
++					R"("slotnum" is not supported by the VM version.)"
++				);
+ 			else if (memberName == "prevrandao" && !m_evmVersion.hasPrevRandao())
+ 				m_errorReporter.warning(
+ 					9432_error,
+diff --git a/libsolidity/ast/Types.cpp b/libsolidity/ast/Types.cpp
+index d8f754a95..50fa0508b 100644
+--- a/libsolidity/ast/Types.cpp
++++ b/libsolidity/ast/Types.cpp
+@@ -4191,7 +4191,8 @@ MemberList::MemberMap MagicType::nativeMembers(ASTNode const*) const
+ 			{"gaslimit", TypeProvider::uint256()},
+ 			{"chainid", TypeProvider::uint256()},
+ 			{"basefee", TypeProvider::uint256()},
+-			{"blobbasefee", TypeProvider::uint256()}
++			{"blobbasefee", TypeProvider::uint256()},
++			{"slotnum", TypeProvider::uint(64)},
+ 		});
+ 	case Kind::Message:
+ 		return MemberList::MemberMap({
+diff --git a/libsolidity/codegen/ExpressionCompiler.cpp b/libsolidity/codegen/ExpressionCompiler.cpp
+index 579f421f3..e8dd0a907 100644
+--- a/libsolidity/codegen/ExpressionCompiler.cpp
++++ b/libsolidity/codegen/ExpressionCompiler.cpp
+@@ -1992,6 +1992,8 @@ bool ExpressionCompiler::visit(MemberAccess const& _memberAccess)
+ 			m_context << Instruction::BASEFEE;
+ 		else if (member == "blobbasefee")
+ 			m_context << Instruction::BLOBBASEFEE;
++		else if (member == "slotnum")
++			m_context << Instruction::SLOTNUM;
+ 		else if (member == "data")
+ 			m_context << u256(0) << Instruction::CALLDATASIZE;
+ 		else if (member == "sig")
+diff --git a/libsolidity/codegen/ir/IRGeneratorForStatements.cpp b/libsolidity/codegen/ir/IRGeneratorForStatements.cpp
+index 61c2b96b9..426963fe2 100644
+--- a/libsolidity/codegen/ir/IRGeneratorForStatements.cpp
++++ b/libsolidity/codegen/ir/IRGeneratorForStatements.cpp
+@@ -1958,6 +1958,8 @@ void IRGeneratorForStatements::endVisit(MemberAccess const& _memberAccess)
+ 			define(_memberAccess) << "basefee()\n";
+ 		else if (member == "blobbasefee")
+ 			define(_memberAccess) << "blobbasefee()\n";
++		else if (member == "slotnum")
++			define(_memberAccess) << "slotnum()\n";
+ 		else if (member == "data")
+ 		{
+ 			IRVariable var(_memberAccess);
+diff --git a/libyul/AsmAnalysis.cpp b/libyul/AsmAnalysis.cpp
+index 3c563e44e..b8cc4f45e 100644
+--- a/libyul/AsmAnalysis.cpp
++++ b/libyul/AsmAnalysis.cpp
+@@ -753,6 +753,8 @@ bool AsmAnalyzer::validateInstructions(evmasm::Instruction _instr, SourceLocatio
+ 		errorForVM(5430_error, "only available for London-compatible");
+ 	else if (_instr == evmasm::Instruction::BLOBBASEFEE && !m_evmVersion.hasBlobBaseFee())
+ 		errorForVM(6679_error, "only available for Cancun-compatible");
++	else if (_instr == evmasm::Instruction::SLOTNUM && !m_evmVersion.hasSlotNum())
++		errorForVM(1049_error, "only available for Amsterdam-compatible");
+ 	else if (_instr == evmasm::Instruction::BLOBHASH && !m_evmVersion.hasBlobHash())
+ 		errorForVM(8314_error, "only available for Cancun-compatible");
+ 	else if (_instr == evmasm::Instruction::MCOPY && !m_evmVersion.hasMcopy())
+diff --git a/libyul/backends/evm/EVMDialect.cpp b/libyul/backends/evm/EVMDialect.cpp
+index 61ee04335..25e129bb9 100644
+--- a/libyul/backends/evm/EVMDialect.cpp
++++ b/libyul/backends/evm/EVMDialect.cpp
+@@ -132,6 +132,13 @@ std::set<std::string, std::less<>> createReservedIdentifiers(langutil::EVMVersio
+ 		return _instr == evmasm::Instruction::CLZ && !_evmVersion.hasCLZ();
+ 	};
+ 
++	// TODO remove this in 0.9.0. We allow creating functions or identifiers in Yul with the name
++	// slotnum for VMs before amsterdam.
++	auto slotNumException = [&](evmasm::Instruction _instr) -> bool
++	{
++		return _instr == evmasm::Instruction::SLOTNUM && !_evmVersion.hasSlotNum();
++	};
++
+ 	std::set<std::string, std::less<>> reserved;
+ 	for (auto const& instr: evmasm::c_instructions)
+ 	{
+@@ -143,7 +150,8 @@ std::set<std::string, std::less<>> createReservedIdentifiers(langutil::EVMVersio
+ 			!blobBaseFeeException(instr.second) &&
+ 			!mcopyException(instr.second) &&
+ 			!transientStorageException(instr.second) &&
+-			!clzException(instr.second)
++			!clzException(instr.second) &&
++			!slotNumException(instr.second)
+ 		)
+ 			reserved.emplace(name);
+ 	}
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/test/tools/ossfuzz/protoToYul.cpp b/test/tools/ossfuzz/protoToYul.cpp
+index 4ce16310d..f61cfaf93 100644
+--- a/test/tools/ossfuzz/protoToYul.cpp
++++ b/test/tools/ossfuzz/protoToYul.cpp
+@@ -802,6 +802,14 @@ void ProtoConverter::visit(NullaryOp const& _x)
+ 		else
+ 			m_output << dictionaryToken();
+ 		break;
++	case NullaryOp::SLOTNUM:
++		// Replace calls to slotnum() on unsupported EVMs with a dictionary
++		// token.
++		if (m_evmVersion.hasSlotNum())
++			m_output << "slotnum()";
++		else
++			m_output << dictionaryToken();
++		break;
+ 	}
+ }
+ 

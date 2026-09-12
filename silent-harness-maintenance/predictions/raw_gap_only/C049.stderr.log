@@ -1,0 +1,1569 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/silent-maintenance-gap_only-C049-lxm6l_rx
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0899a-1ed5-7283-8c02-8e24d6c96532
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous Fuzz-Harness Maintenance Case
+
+Case ID
+
+C049
+
+## Evidence boundary
+
+The material below contains only the complete existing harness H0 and the complete production source diff from S0 to S1. No developer-updated harness, commit message, build result, coverage result, reachability result, or label is supplied.
+
+## Existing Harness H0
+
+### `fuzz/c/std/gif_fuzzer.c`
+
+```text
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a sanity check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN gif_fuzzer.c
+./a.out ../../../test/data/*.gif
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// If building this program in an environment that doesn't easily accomodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../gen/c/base.c"
+#include "../../../gen/c/std/gif.c"
+#include "../../../gen/c/std/lzw.c"
+#include "../fuzzlib/fuzzlib.c"
+
+const char* fuzz(wuffs_base__io_reader src_reader, uint32_t hash) {
+  const char* ret = NULL;
+  void* pixbuf = NULL;
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_base__status s = 0;
+    wuffs_gif__decoder dec = ((wuffs_gif__decoder){});
+    wuffs_gif__decoder__check_wuffs_version(&dec, sizeof dec, WUFFS_VERSION);
+
+    wuffs_base__image_buffer ib = ((wuffs_base__image_buffer){});
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    s = wuffs_gif__decoder__decode_config(&dec, &ic, src_reader);
+    if (s) {
+      ret = wuffs_gif__status__string(s);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    size_t pixbuf_size = wuffs_base__image_config__pixbuf_size(&ic);
+    // Don't try to allocate more than 64 MiB.
+    if (pixbuf_size > 64 * 1024 * 1024) {
+      ret = "image too large";
+      goto exit;
+    }
+    pixbuf = malloc(pixbuf_size);
+    if (!pixbuf) {
+      ret = "out of memory";
+      goto exit;
+    }
+    // TODO: check wuffs_base__image_buffer__set_from_slice errors?
+    wuffs_base__image_buffer__set_from_slice(
+        &ib, ic, ((wuffs_base__slice_u8){.ptr = pixbuf, .len = pixbuf_size}));
+
+    bool seen_ok = false;
+    while (true) {
+      s = wuffs_gif__decoder__decode_frame(&dec, &ib, src_reader,
+                                           ((wuffs_base__slice_u8){}));
+      if (s) {
+        if ((s == WUFFS_BASE__SUSPENSION_END_OF_DATA) && seen_ok) {
+          s = WUFFS_BASE__STATUS_OK;
+        }
+        ret = wuffs_gif__status__string(s);
+        goto exit;
+      }
+      seen_ok = true;
+    }
+  }
+
+exit:
+  if (pixbuf) {
+    free(pixbuf);
+  }
+  return ret;
+}
+
+```
+
+## Complete production source diff S0 -> S1
+
+The fixed `--function-context` rule includes the complete diff and expanded changed-function bodies where Git recognizes them.
+
+```diff
+diff --git a/cmd/wuffs-c/internal/cgen/base/base-public.h b/cmd/wuffs-c/internal/cgen/base/base-public.h
+index a2c47bb2c7ae45a9009e2a44ca49f0b572972b56..eed95720f4bd23c65ef0533b31764db4bde3a550 100644
+--- a/cmd/wuffs-c/internal/cgen/base/base-public.h
++++ b/cmd/wuffs-c/internal/cgen/base/base-public.h
+@@ -1075,39 +1075,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/c/base.c b/gen/c/base.c
+index f5146c49d9991cdf4c161e4acddf6513f0de38c3..c4a95a38479b9014d5e54106b9f63511b16f9100 100644
+--- a/gen/c/base.c
++++ b/gen/c/base.c
+@@ -76,28 +76,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1105,39 +1106,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+@@ -1254,59 +1256,61 @@ static inline wuffs_base__table_u8 wuffs_base__image_buffer__plane(
+ static const char wuffs_base__status__string_data[] = {
+     0x00, 0x6F, 0x6B, 0x00, 0x65, 0x6E, 0x64, 0x20, 0x6F, 0x66, 0x20, 0x64,
+     0x61, 0x74, 0x61, 0x00, 0x73, 0x68, 0x6F, 0x72, 0x74, 0x20, 0x72, 0x65,
+     0x61, 0x64, 0x00, 0x73, 0x68, 0x6F, 0x72, 0x74, 0x20, 0x77, 0x72, 0x69,
+     0x74, 0x65, 0x00, 0x63, 0x6C, 0x6F, 0x73, 0x65, 0x64, 0x20, 0x66, 0x6F,
+     0x72, 0x20, 0x77, 0x72, 0x69, 0x74, 0x65, 0x73, 0x00, 0x75, 0x6E, 0x65,
+     0x78, 0x70, 0x65, 0x63, 0x74, 0x65, 0x64, 0x20, 0x45, 0x4F, 0x46, 0x00,
+     0x69, 0x6E, 0x76, 0x61, 0x6C, 0x69, 0x64, 0x20, 0x49, 0x2F, 0x4F, 0x20,
+     0x6F, 0x70, 0x65, 0x72, 0x61, 0x74, 0x69, 0x6F, 0x6E, 0x00, 0x63, 0x61,
+     0x6E, 0x6E, 0x6F, 0x74, 0x20, 0x72, 0x65, 0x74, 0x75, 0x72, 0x6E, 0x20,
+     0x61, 0x20, 0x73, 0x75, 0x73, 0x70, 0x65, 0x6E, 0x73, 0x69, 0x6F, 0x6E,
+     0x00, 0x69, 0x6E, 0x76, 0x61, 0x6C, 0x69, 0x64, 0x20, 0x63, 0x61, 0x6C,
+     0x6C, 0x20, 0x73, 0x65, 0x71, 0x75, 0x65, 0x6E, 0x63, 0x65, 0x00, 0x63,
+     0x68, 0x65, 0x63, 0x6B, 0x5F, 0x77, 0x75, 0x66, 0x66, 0x73, 0x5F, 0x76,
+     0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x20, 0x63, 0x61, 0x6C, 0x6C, 0x65,
+     0x64, 0x20, 0x74, 0x77, 0x69, 0x63, 0x65, 0x00, 0x63, 0x68, 0x65, 0x63,
+     0x6B, 0x5F, 0x77, 0x75, 0x66, 0x66, 0x73, 0x5F, 0x76, 0x65, 0x72, 0x73,
+     0x69, 0x6F, 0x6E, 0x20, 0x6E, 0x6F, 0x74, 0x20, 0x63, 0x61, 0x6C, 0x6C,
+     0x65, 0x64, 0x00, 0x62, 0x61, 0x64, 0x20, 0x61, 0x72, 0x67, 0x75, 0x6D,
+-    0x65, 0x6E, 0x74, 0x00, 0x62, 0x61, 0x64, 0x20, 0x72, 0x65, 0x63, 0x65,
+-    0x69, 0x76, 0x65, 0x72, 0x00, 0x62, 0x61, 0x64, 0x20, 0x73, 0x69, 0x7A,
+-    0x65, 0x6F, 0x66, 0x20, 0x72, 0x65, 0x63, 0x65, 0x69, 0x76, 0x65, 0x72,
+-    0x00, 0x62, 0x61, 0x64, 0x20, 0x77, 0x75, 0x66, 0x66, 0x73, 0x20, 0x76,
+-    0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x00,
++    0x65, 0x6E, 0x74, 0x20, 0x28, 0x6C, 0x65, 0x6E, 0x67, 0x74, 0x68, 0x20,
++    0x74, 0x6F, 0x6F, 0x20, 0x73, 0x68, 0x6F, 0x72, 0x74, 0x29, 0x00, 0x62,
++    0x61, 0x64, 0x20, 0x72, 0x65, 0x63, 0x65, 0x69, 0x76, 0x65, 0x72, 0x00,
++    0x62, 0x61, 0x64, 0x20, 0x73, 0x69, 0x7A, 0x65, 0x6F, 0x66, 0x20, 0x72,
++    0x65, 0x63, 0x65, 0x69, 0x76, 0x65, 0x72, 0x00, 0x62, 0x61, 0x64, 0x20,
++    0x77, 0x75, 0x66, 0x66, 0x73, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6F,
++    0x6E, 0x00,
+ };
+ 
+ static const uint16_t wuffs_base__status__string_offsets[] = {
+     0x0001, 0x0004, 0x0010, 0x001B, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0027,
+     0x0039, 0x0048, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x005E,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0079, 0x008F, 0x00B0, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+-    0x00CF, 0x00DC, 0x00E9, 0x00FD,
++    0x00CF, 0x00EF, 0x00FC, 0x0110,
+ };
+ 
+ const char* wuffs_base__status__string(wuffs_base__status s) {
+diff --git a/gen/c/std/adler32.c b/gen/c/std/adler32.c
+index 93f0fec8fae77f31b1111e78d4d17a2187e6fd3a..4ecd8d15d148d19e4fc67286336388d2a8247187 100644
+--- a/gen/c/std/adler32.c
++++ b/gen/c/std/adler32.c
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/c/std/crc32.c b/gen/c/std/crc32.c
+index 90bbdbfc50a9bf5900a11995783bfc34d886c9dd..50dd8f2d7c69d2f3017769b55e11142fcf7234f1 100644
+--- a/gen/c/std/crc32.c
++++ b/gen/c/std/crc32.c
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/c/std/deflate.c b/gen/c/std/deflate.c
+index 5f19f577bebc09d8f0a28450063bb34aca0264c1..c0db9a350211bdb5ddab91956398341cc6ebbf44 100644
+--- a/gen/c/std/deflate.c
++++ b/gen/c/std/deflate.c
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/c/std/gif.c b/gen/c/std/gif.c
+index 9e8d9cf937061a79ce8c47735cb71b6470d1e8e1..fc85221c3f4bb7c46ae8aa23bf3c033a542ea563 100644
+--- a/gen/c/std/gif.c
++++ b/gen/c/std/gif.c
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/c/std/gzip.c b/gen/c/std/gzip.c
+index 94396c1b3ea8fab1af699ee55980e858be4124e0..18c125f0d7477247a7036eddd99ab54f5b6dfbdc 100644
+--- a/gen/c/std/gzip.c
++++ b/gen/c/std/gzip.c
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/c/std/lzw.c b/gen/c/std/lzw.c
+index ab56e842dc3acdb41106b6c99758db7205599600..4efd214e061a7766f44080dc674d35c1ec25b48b 100644
+--- a/gen/c/std/lzw.c
++++ b/gen/c/std/lzw.c
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/c/std/zlib.c b/gen/c/std/zlib.c
+index 2f94ab3596c1cad15b315ecd06887b229d1eedbe..7ed19014868f1024bf1cb52e16dd067bc898204f 100644
+--- a/gen/c/std/zlib.c
++++ b/gen/c/std/zlib.c
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/h/std/adler32.h b/gen/h/std/adler32.h
+index 717dabe7444658e36c33bc3e182f39153176f9d1..fe3f1bcfd00fdb00b4296e5e164380220d206f4a 100644
+--- a/gen/h/std/adler32.h
++++ b/gen/h/std/adler32.h
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/h/std/crc32.h b/gen/h/std/crc32.h
+index 7c3d7c99fa7dac2d29eb5bb4c006c6465c2779d3..c5928ba6add93828766b24f124658ab0a35d3ea4 100644
+--- a/gen/h/std/crc32.h
++++ b/gen/h/std/crc32.h
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/h/std/deflate.h b/gen/h/std/deflate.h
+index eab84b54ee53587e9eb70b3adb7cb54de4d40de2..d5cb6ae308e66143d51f64694ed050b7a42d33e5 100644
+--- a/gen/h/std/deflate.h
++++ b/gen/h/std/deflate.h
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/h/std/gif.h b/gen/h/std/gif.h
+index 37b73f4bb8f8483bf75fcb4891c24f593062e870..06e6f8156555af22e374b3302221a18873187d22 100644
+--- a/gen/h/std/gif.h
++++ b/gen/h/std/gif.h
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/h/std/gzip.h b/gen/h/std/gzip.h
+index 631fe51845b9d4a03353e538673e5ae7e43d8449..351b9545ceac34862207408b2f21b8e896421c08 100644
+--- a/gen/h/std/gzip.h
++++ b/gen/h/std/gzip.h
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/h/std/lzw.h b/gen/h/std/lzw.h
+index 537ef34fb796157a1795ea22a88b7f1f967f1c55..34b0ca78532edd5ad833e6ff302b3716396e0fe9 100644
+--- a/gen/h/std/lzw.h
++++ b/gen/h/std/lzw.h
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+diff --git a/gen/h/std/zlib.h b/gen/h/std/zlib.h
+index dad8152590f793627da4bcd1f2409a432bd09793..6001f4f1a8f19c9658709bc8b37713d8ef7d54e3 100644
+--- a/gen/h/std/zlib.h
++++ b/gen/h/std/zlib.h
+@@ -65,28 +65,29 @@ typedef struct {
+ // A status code is either zero (OK), positive (a recoverable suspension or
+ // pause in processing) or negative (a non-recoverable error). Its bits:
+ //  - bit        31 (the sign bit) indicates unrecoverable-ness: an error.
+ //  - bits 30 .. 24 are a package-namespaced numeric code
+ //  - bits 23 .. 21 are reserved.
+ //  - bits 20 ..  0 are the packageid (a namespace) as a base38 value.
+ //
+ // Do not manipulate these bits directly; they are private implementation
+ // details. Use methods such as wuffs_base__status__is_error instead.
+ typedef int32_t wuffs_base__status;
+ 
+-#define WUFFS_BASE__STATUS_OK 0                          // 0x00000000
+-#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216    // 0xFF000000
+-#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432  // 0xFE000000
+-#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648         // 0xFD000000
+-#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864         // 0xFC000000
++#define WUFFS_BASE__STATUS_OK 0                                    // 0x00000000
++#define WUFFS_BASE__ERROR_BAD_WUFFS_VERSION -16777216              // 0xFF000000
++#define WUFFS_BASE__ERROR_BAD_SIZEOF_RECEIVER -33554432            // 0xFE000000
++#define WUFFS_BASE__ERROR_BAD_RECEIVER -50331648                   // 0xFD000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT -67108864                   // 0xFC000000
++#define WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT -67108864  // 0xFC000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_NOT_CALLED \
+   -268435456  // 0xF0000000
+ #define WUFFS_BASE__ERROR_CHECK_WUFFS_VERSION_CALLED_TWICE \
+   -285212672                                                     // 0xEF000000
+ #define WUFFS_BASE__ERROR_INVALID_CALL_SEQUENCE -301989888       // 0xEE000000
+ #define WUFFS_BASE__ERROR_CANNOT_RETURN_A_SUSPENSION -536870912  // 0xE0000000
+ #define WUFFS_BASE__ERROR_INVALID_I_O_OPERATION -805306368       // 0xD0000000
+ #define WUFFS_BASE__ERROR_UNEXPECTED_EOF -822083584              // 0xCF000000
+ #define WUFFS_BASE__ERROR_CLOSED_FOR_WRITES -838860800           // 0xCE000000
+ #define WUFFS_BASE__SUSPENSION_END_OF_DATA 16777216              // 0x01000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_READ 33554432               // 0x02000000
+ #define WUFFS_BASE__SUSPENSION_SHORT_WRITE 50331648              // 0x03000000
+@@ -1094,39 +1095,40 @@ typedef struct {
+   } private_impl;
+ } wuffs_base__image_buffer;
+ 
+-static inline void wuffs_base__image_buffer__set_from_pixbuf(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_pixbuf(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__pixel_buffer pixbuf) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   b->private_impl.config = config;
+   b->private_impl.pixbuf = pixbuf;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-// TODO: Should this function return bool? An error type?
+-static inline void wuffs_base__image_buffer__set_from_slice(
++static inline wuffs_base__status wuffs_base__image_buffer__set_from_slice(
+     wuffs_base__image_buffer* b,
+     wuffs_base__image_config config,
+     wuffs_base__slice_u8 pixbuf_memory) {
+   if (!b) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+   }
+   *b = ((wuffs_base__image_buffer){});
+   // TODO: don't assume 1 byte per pixel. Don't assume packed.
+   uint64_t wh = ((uint64_t)config.private_impl.width) *
+                 ((uint64_t)config.private_impl.height);
+   if (wh > pixbuf_memory.len) {
+-    return;
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+   }
+   b->private_impl.config = config;
+   wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+   tab->ptr = pixbuf_memory.ptr;
+   tab->width = config.private_impl.width;
+   tab->height = config.private_impl.height;
+   tab->stride = config.private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+ // The palette argument is ignored unless its length is exactly 1024.
+
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C049","gap_exists":true,"gap_type":["API protocol","input semantics","error-state coverage"],"confidence":98,"affected_functions":["wuffs_base__image_buffer__set_from_slice","wuffs_base__image_buffer__set_from_pixbuf","wuffs_base__status__string"],"reason":"S1 makes both image-buffer setters status-returning APIs with explicit failure behavior, but H0 exercises only wuffs_base__image_buffer__set_from_slice, ignores its returned status, supplies only a non-null receiver and an allocation sized from pixbuf_size, and never calls wuffs_base__image_buffer__set_from_pixbuf. Consequently, the new bad-receiver and too-short-buffer outcomes and their status semantics are not meaningfully fuzzed.","evidence":["H0 calls wuffs_base__image_buffer__set_from_slice(&ib, ic, ...) without assigning or checking its return value; its adjacent TODO explicitly asks whether to check errors.","S1 changes wuffs_base__image_buffer__set_from_slice from void to wuffs_base__status and returns WUFFS_BASE__ERROR_BAD_RECEIVER when b is null.","S1 adds the wh > pixbuf_memory.len branch returning WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT.","H0 allocates pixbuf_size = wuffs_base__image_config__pixbuf_size(&ic) and passes that entire length, so it does not deliberately explore lengths around the new wh boundary.","S1 changes wuffs_base__image_buffer__set_from_pixbuf to return WUFFS_BASE__ERROR_BAD_RECEIVER or WUFFS_BASE__STATUS_OK, while H0 never invokes that function.","S1 adds WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT and changes the corresponding wuffs_base__status__string data to \"bad argument (length too short)\"."],"recommended_action":"Extend the harness, or add a focused base-API harness, to vary the receiver between null and non-null, vary pixbuf_memory.len below, at, and above width*height, check the exact returned status before any decode use, and directly exercise wuffs_base__image_buffer__set_from_pixbuf; also validate the relevant wuffs_base__status__string result."}
+tokens used
+28,048

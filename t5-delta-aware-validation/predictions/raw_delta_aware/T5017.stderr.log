@@ -1,0 +1,1368 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t5-delta_aware-T5017-xc7p43_q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08af4-5365-7030-87b2-568113063c83
+--------
+user
+You are evaluating whether one production-source commit creates a fuzz-harness
+maintenance need. Use only the anonymous case below. Do not use tools, files,
+the network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+Follow this order exactly and preserve one principal comparison scope:
+
+1. Identify the smallest fuzz-relevant semantic unit introduced or changed by
+   the diff. Use the mechanically supplied S0/S1 declaration context as the
+   identity anchor when it belongs to the change. Do not combine it with an
+   older sibling API, another module, or a general project-wide omission.
+2. For that exact unit and exposure obligation, decide Gap(S0,H0).
+3. For the identical unit and exposure obligation, decide Gap(S1,H0).
+4. Compare the caller-visible harness obligations, not the amount of internal
+   implementation.
+5. Derive NEW, AGGRAVATED, UNCHANGED, REMOVED, or NONE and apply the fixed
+   maintenance rule.
+
+Identity rules:
+
+- If the anchored public declaration/configuration/module is absent in S0 and
+  introduced in S1, then its own GapBefore is false. Do not turn it into an
+  AGGRAVATED old gap merely because H0 also omitted a related module in S0.
+- If the same public declaration exists in S0 and S1 and unchanged H0 omits
+  that callable/configuration/lifecycle path on both sides, its exposure gap is
+  true before and after. A formerly constant/no-op getter or lifecycle method
+  is still the same callable surface; new behavior inside it does not create a
+  new call obligation. This comparison is UNCHANGED unless the commit changes
+  how H0 must reach or control the API.
+- If H0 already reaches the new behavior through an existing one-hop caller
+  that supplies a new internal argument/configuration automatically, that
+  internal caller-to-callee protocol is not a new H0 obligation. It cannot make
+  an already-omitted direct-API gap AGGRAVATED.
+
+A concrete new harness obligation means H0 itself must add an entry/call,
+caller-supplied value or buffer, call-order transition, runtime/compile-time
+configuration, or special input construction that was unnecessary in S0. More
+LOC, new internal state, a replacement algorithm, validation/error handling,
+CPU fast path, or state reset inside an existing omitted API is not sufficient.
+Do not infer aggravation because a whole subsystem is omitted on both sides.
+
+Use separate evidence and this default truth table:
+
+- before=false, after=true  -> NEW
+- before=true,  after=true  -> UNCHANGED
+- before=true,  after=false -> REMOVED
+- before=false, after=false -> NONE
+
+AGGRAVATED is allowed only with concrete S0-versus-S1 evidence of a new H0
+action or reduced same-scope reachability/control. Set maintenance_needed=true
+only if explicit_failure=true or the delta is NEW/AGGRAVATED. Return exactly
+one JSON object matching the schema, with separate S0 and S1 evidence.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T5017
+
+## Existing harness H0
+
+Every project-owned C/C++ path containing `fuzz` at the pre-change snapshot is shown below. Framework and build-script scaffolding are not expanded.
+
+### H0 path: `test/ares-fuzz.c`
+
+~~~~cpp
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+/*
+ * General driver to allow command-line fuzzer (i.e. afl) to
+ * exercise the libFuzzer entrypoint.
+ */
+
+#include <sys/types.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef WIN32
+#  include <io.h>
+#else
+#  include <unistd.h>
+#endif
+
+#include "ares.h"
+
+#define kMaxAflInputSize (1 << 20)
+static unsigned char afl_buffer[kMaxAflInputSize];
+
+#ifdef __AFL_LOOP
+/* If we are built with afl-clang-fast, use persistent mode */
+#  define KEEP_FUZZING(count) __AFL_LOOP(1000)
+#else
+/* If we are built with afl-clang, execute each input once */
+#  define KEEP_FUZZING(count) ((count) < 1)
+#endif
+
+/* In ares-test-fuzz.c and ares-test-fuzz-name.c: */
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+static void ProcessFile(int fd)
+{
+  ares_ssize_t count = read(fd, afl_buffer, kMaxAflInputSize);
+  /*
+   * Make a copy of the data so that it's not part of a larger
+   * buffer (where buffer overflows would go unnoticed).
+   */
+  if (count > 0) {
+    unsigned char *copied_data = (unsigned char *)malloc((size_t)count);
+    memcpy(copied_data, afl_buffer, (size_t)count);
+    LLVMFuzzerTestOneInput(copied_data, (size_t)count);
+    free(copied_data);
+  }
+}
+
+int main(int argc, char *argv[])
+{
+  if (argc == 1) {
+    int count = 0;
+    while (KEEP_FUZZING(count)) {
+      ProcessFile(fileno(stdin));
+      count++;
+    }
+  } else {
+    int ii;
+    for (ii = 1; ii < argc; ++ii) {
+      int fd = open(argv[ii], O_RDONLY);
+      if (fd < 0) {
+        fprintf(stderr, "Failed to open '%s'\n", argv[ii]);
+        continue;
+      }
+      ProcessFile(fd);
+      close(fd);
+    }
+  }
+  return 0;
+}
+~~~~
+
+### H0 path: `test/ares-test-fuzz-name.c`
+
+~~~~cpp
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "ares.h"
+// Include ares internal file for DNS protocol constants
+#include "ares_nameser.h"
+
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+// Entrypoint for Clang's libfuzzer, exercising query creation.
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+  // Null terminate the data.
+  char          *name   = malloc(size + 1);
+  unsigned char *buf    = NULL;
+  int            buflen = 0;
+  name[size]            = '\0';
+  memcpy(name, data, size);
+
+  ares_create_query(name, C_IN, T_AAAA, 1234, 0, &buf, &buflen, 1024);
+  free(buf);
+  free(name);
+  return 0;
+}
+~~~~
+
+### H0 path: `test/ares-test-fuzz.c`
+
+~~~~cpp
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#include <stddef.h>
+
+#include "ares.h"
+
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+// Entrypoint for Clang's libfuzzer
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size)
+{
+  // Feed the data into each of the ares_parse_*_reply functions.
+  struct hostent          *host = NULL;
+  struct ares_addrttl      info[5];
+  struct ares_addr6ttl     info6[5];
+  unsigned char            addrv4[4] = { 0x10, 0x20, 0x30, 0x40 };
+  struct ares_srv_reply   *srv       = NULL;
+  struct ares_mx_reply    *mx        = NULL;
+  struct ares_txt_reply   *txt       = NULL;
+  struct ares_soa_reply   *soa       = NULL;
+  struct ares_naptr_reply *naptr     = NULL;
+  struct ares_caa_reply   *caa       = NULL;
+  struct ares_uri_reply   *uri       = NULL;
+  int                      count     = 5;
+  ares_parse_a_reply(data, (int)size, &host, info, &count);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  host  = NULL;
+  count = 5;
+  ares_parse_aaaa_reply(data, (int)size, &host, info6, &count);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  host = NULL;
+  ares_parse_ptr_reply(data, (int)size, addrv4, sizeof(addrv4), AF_INET, &host);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  host = NULL;
+  ares_parse_ns_reply(data, (int)size, &host);
+  if (host) {
+    ares_free_hostent(host);
+  }
+
+  ares_parse_srv_reply(data, (int)size, &srv);
+  if (srv) {
+    ares_free_data(srv);
+  }
+
+  ares_parse_mx_reply(data, (int)size, &mx);
+  if (mx) {
+    ares_free_data(mx);
+  }
+
+  ares_parse_txt_reply(data, (int)size, &txt);
+  if (txt) {
+    ares_free_data(txt);
+  }
+
+  ares_parse_soa_reply(data, (int)size, &soa);
+  if (soa) {
+    ares_free_data(soa);
+  }
+
+  ares_parse_naptr_reply(data, (int)size, &naptr);
+  if (naptr) {
+    ares_free_data(naptr);
+  }
+
+  ares_parse_caa_reply(data, (int)size, &caa);
+  if (caa) {
+    ares_free_data(caa);
+  }
+
+  ares_parse_uri_reply(data, (int)size, &uri);
+  if (uri) {
+    ares_free_data(uri);
+  }
+
+  return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed C/C++ production paths and all hunks are included. Function-context mode expands changed C/C++ function bodies; tests, examples, documentation, build files, and Harness files are excluded by the frozen rule.
+
+~~~~diff
+diff --git a/include/ares.h b/include/ares.h
+index 475986e..1262176 100644
+--- a/include/ares.h
++++ b/include/ares.h
+@@ -206,110 +206,113 @@ typedef enum {
+ /*! Values for ARES_OPT_EVENT_THREAD */
+ typedef enum {
+   /*! Default (best choice) event system */
+   ARES_EVSYS_DEFAULT = 0,
+   /*! Win32 IOCP/AFD_POLL event system */
+   ARES_EVSYS_WIN32 = 1,
+   /*! Linux epoll */
+   ARES_EVSYS_EPOLL = 2,
+   /*! BSD/MacOS kqueue */
+   ARES_EVSYS_KQUEUE = 3,
+   /*! POSIX poll() */
+   ARES_EVSYS_POLL = 4,
+   /*! last fallback on Unix-like systems, select() */
+   ARES_EVSYS_SELECT = 5
+ } ares_evsys_t;
+ 
+ /* Flag values */
+ #define ARES_FLAG_USEVC       (1 << 0)
+ #define ARES_FLAG_PRIMARY     (1 << 1)
+ #define ARES_FLAG_IGNTC       (1 << 2)
+ #define ARES_FLAG_NORECURSE   (1 << 3)
+ #define ARES_FLAG_STAYOPEN    (1 << 4)
+ #define ARES_FLAG_NOSEARCH    (1 << 5)
+ #define ARES_FLAG_NOALIASES   (1 << 6)
+ #define ARES_FLAG_NOCHECKRESP (1 << 7)
+ #define ARES_FLAG_EDNS        (1 << 8)
+ #define ARES_FLAG_NO_DFLT_SVR (1 << 9)
+ 
+ /* Option mask values */
+ #define ARES_OPT_FLAGS           (1 << 0)
+ #define ARES_OPT_TIMEOUT         (1 << 1)
+ #define ARES_OPT_TRIES           (1 << 2)
+ #define ARES_OPT_NDOTS           (1 << 3)
+ #define ARES_OPT_UDP_PORT        (1 << 4)
+ #define ARES_OPT_TCP_PORT        (1 << 5)
+ #define ARES_OPT_SERVERS         (1 << 6)
+ #define ARES_OPT_DOMAINS         (1 << 7)
+ #define ARES_OPT_LOOKUPS         (1 << 8)
+ #define ARES_OPT_SOCK_STATE_CB   (1 << 9)
+ #define ARES_OPT_SORTLIST        (1 << 10)
+ #define ARES_OPT_SOCK_SNDBUF     (1 << 11)
+ #define ARES_OPT_SOCK_RCVBUF     (1 << 12)
+ #define ARES_OPT_TIMEOUTMS       (1 << 13)
+ #define ARES_OPT_ROTATE          (1 << 14)
+ #define ARES_OPT_EDNSPSZ         (1 << 15)
+ #define ARES_OPT_NOROTATE        (1 << 16)
+ #define ARES_OPT_RESOLVCONF      (1 << 17)
+ #define ARES_OPT_HOSTS_FILE      (1 << 18)
+ #define ARES_OPT_UDP_MAX_QUERIES (1 << 19)
+ #define ARES_OPT_MAXTIMEOUTMS    (1 << 20)
+ #define ARES_OPT_QUERY_CACHE     (1 << 21)
+ #define ARES_OPT_EVENT_THREAD    (1 << 22)
+ #define ARES_OPT_SERVER_FAILOVER (1 << 23)
+ 
+ /* Nameinfo flag values */
+ #define ARES_NI_NOFQDN        (1 << 0)
+ #define ARES_NI_NUMERICHOST   (1 << 1)
+ #define ARES_NI_NAMEREQD      (1 << 2)
+ #define ARES_NI_NUMERICSERV   (1 << 3)
+ #define ARES_NI_DGRAM         (1 << 4)
+ #define ARES_NI_TCP           0
+ #define ARES_NI_UDP           ARES_NI_DGRAM
+ #define ARES_NI_SCTP          (1 << 5)
+ #define ARES_NI_DCCP          (1 << 6)
+ #define ARES_NI_NUMERICSCOPE  (1 << 7)
+ #define ARES_NI_LOOKUPHOST    (1 << 8)
+ #define ARES_NI_LOOKUPSERVICE (1 << 9)
+ /* Reserved for future use */
+ #define ARES_NI_IDN                      (1 << 10)
+ #define ARES_NI_IDN_ALLOW_UNASSIGNED     (1 << 11)
+ #define ARES_NI_IDN_USE_STD3_ASCII_RULES (1 << 12)
+ 
+ /* Addrinfo flag values */
+ #define ARES_AI_CANONNAME   (1 << 0)
+ #define ARES_AI_NUMERICHOST (1 << 1)
+ #define ARES_AI_PASSIVE     (1 << 2)
+ #define ARES_AI_NUMERICSERV (1 << 3)
+ #define ARES_AI_V4MAPPED    (1 << 4)
+ #define ARES_AI_ALL         (1 << 5)
+ #define ARES_AI_ADDRCONFIG  (1 << 6)
+ #define ARES_AI_NOSORT      (1 << 7)
+ #define ARES_AI_ENVHOSTS    (1 << 8)
+ /* Reserved for future use */
+ #define ARES_AI_IDN                      (1 << 10)
+ #define ARES_AI_IDN_ALLOW_UNASSIGNED     (1 << 11)
+ #define ARES_AI_IDN_USE_STD3_ASCII_RULES (1 << 12)
+ #define ARES_AI_CANONIDN                 (1 << 13)
+ 
+ #define ARES_AI_MASK                                           \
+   (ARES_AI_CANONNAME | ARES_AI_NUMERICHOST | ARES_AI_PASSIVE | \
+    ARES_AI_NUMERICSERV | ARES_AI_V4MAPPED | ARES_AI_ALL | ARES_AI_ADDRCONFIG)
+ #define ARES_GETSOCK_MAXNUM                       \
+   16 /* ares_getsock() can return info about this \
+         many sockets */
+ #define ARES_GETSOCK_READABLE(bits, num) (bits & (1 << (num)))
+ #define ARES_GETSOCK_WRITABLE(bits, num) \
+   (bits & (1 << ((num) + ARES_GETSOCK_MAXNUM)))
+ 
+ /* c-ares library initialization flag values */
+ #define ARES_LIB_INIT_NONE  (0)
+ #define ARES_LIB_INIT_WIN32 (1 << 0)
+ #define ARES_LIB_INIT_ALL   (ARES_LIB_INIT_WIN32)
+ 
++/* Server state callback flag values */
++#define ARES_SERV_STATE_UDP (1 << 0) /* Query used UDP */
++#define ARES_SERV_STATE_TCP (1 << 1) /* Query used TCP */
+ 
+ /*
+  * Typedef our socket type
+  */
+ 
+ #ifndef ares_socket_typedef
+ #  ifdef WIN32
+@@ -444,6 +447,10 @@ typedef int (*ares_sock_config_callback)(ares_socket_t socket_fd, int type,
+ typedef void (*ares_addrinfo_callback)(void *arg, int status, int timeouts,
+                                        struct ares_addrinfo *res);
+ 
++typedef void (*ares_server_state_callback)(const char *server_string,
++                                           ares_bool_t success, int flags,
++                                           void *data);
++
+ CARES_EXTERN int ares_library_init(int flags);
+ 
+ CARES_EXTERN int ares_library_init_mem(int flags, void *(*amalloc)(size_t size),
+@@ -505,6 +512,9 @@ CARES_EXTERN void          ares_set_socket_callback(ares_channel_t           *ch
+ CARES_EXTERN void          ares_set_socket_configure_callback(
+            ares_channel_t *channel, ares_sock_config_callback callback, void *user_data);
+ 
++CARES_EXTERN void          ares_set_server_state_callback(
++           ares_channel_t *channel, ares_server_state_callback callback, void *user_data);
++
+ CARES_EXTERN int  ares_set_sortlist(ares_channel_t *channel,
+                                     const char     *sortstr);
+ 
+diff --git a/src/lib/ares_init.c b/src/lib/ares_init.c
+index 27147fa..eb0bfc1 100644
+--- a/src/lib/ares_init.c
++++ b/src/lib/ares_init.c
+@@ -424,77 +424,79 @@ ares_status_t ares_reinit(ares_channel_t *channel)
+ /* ares_dup() duplicates a channel handle with all its options and returns a
+    new channel handle */
+ int ares_dup(ares_channel_t **dest, ares_channel_t *src)
+ {
+   struct ares_options opts;
+   ares_status_t       rc;
+   int                 optmask;
+ 
+   if (dest == NULL || src == NULL) {
+     return ARES_EFORMERR;
+   }
+ 
+   *dest = NULL; /* in case of failure return NULL explicitly */
+ 
+   ares__channel_lock(src);
+   /* First get the options supported by the old ares_save_options() function,
+      which is most of them */
+   rc = (ares_status_t)ares_save_options(src, &opts, &optmask);
+   if (rc != ARES_SUCCESS) {
+     ares_destroy_options(&opts);
+     goto done;
+   }
+ 
+   /* Then create the new channel with those options */
+   rc = (ares_status_t)ares_init_options(dest, &opts, optmask);
+ 
+   /* destroy the options copy to not leak any memory */
+   ares_destroy_options(&opts);
+ 
+   if (rc != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+   /* Now clone the options that ares_save_options() doesn't support, but are
+    * user-provided */
+-  (*dest)->sock_create_cb      = src->sock_create_cb;
+-  (*dest)->sock_create_cb_data = src->sock_create_cb_data;
+-  (*dest)->sock_config_cb      = src->sock_config_cb;
+-  (*dest)->sock_config_cb_data = src->sock_config_cb_data;
+-  (*dest)->sock_funcs          = src->sock_funcs;
+-  (*dest)->sock_func_cb_data   = src->sock_func_cb_data;
++  (*dest)->sock_create_cb       = src->sock_create_cb;
++  (*dest)->sock_create_cb_data  = src->sock_create_cb_data;
++  (*dest)->sock_config_cb       = src->sock_config_cb;
++  (*dest)->sock_config_cb_data  = src->sock_config_cb_data;
++  (*dest)->sock_funcs           = src->sock_funcs;
++  (*dest)->sock_func_cb_data    = src->sock_func_cb_data;
++  (*dest)->server_state_cb      = src->server_state_cb;
++  (*dest)->server_state_cb_data = src->server_state_cb_data;
+ 
+   ares_strcpy((*dest)->local_dev_name, src->local_dev_name,
+               sizeof((*dest)->local_dev_name));
+   (*dest)->local_ip4 = src->local_ip4;
+   memcpy((*dest)->local_ip6, src->local_ip6, sizeof(src->local_ip6));
+ 
+ 
+   /* Servers are a bit unique as ares_init_options() only allows ipv4 servers
+    * and not a port per server, but there are other user specified ways, that
+    * too will toggle the optmask ARES_OPT_SERVERS to let us know.  If that's
+    * the case, pull them in.
+    *
+    * We don't want to clone system-configuration servers though.
+    *
+    * We must use the "csv" format to get things like link-local address support
+    */
+ 
+   if (optmask & ARES_OPT_SERVERS) {
+     char *csv = ares_get_servers_csv(src);
+     if (csv == NULL) {
+       ares_destroy(*dest);
+       *dest = NULL;
+       rc    = ARES_ENOMEM;
+       goto done;
+     }
+ 
+     rc = (ares_status_t)ares_set_servers_ports_csv(*dest, csv);
+     ares_free_string(csv);
+     if (rc != ARES_SUCCESS) {
+       ares_destroy(*dest);
+       *dest = NULL;
+       goto done;
+     }
+   }
+ 
+   rc = ARES_SUCCESS;
+diff --git a/src/lib/ares_private.h b/src/lib/ares_private.h
+index 8d6e8ba..89c5493 100644
+--- a/src/lib/ares_private.h
++++ b/src/lib/ares_private.h
+@@ -243,96 +243,100 @@ typedef struct ares_hosts_file ares_hosts_file_t;
+ struct ares_channeldata {
+   /* Configuration data */
+   unsigned int          flags;
+   size_t                timeout; /* in milliseconds */
+   size_t                tries;
+   size_t                ndots;
+   size_t                maxtimeout;              /* in milliseconds */
+   ares_bool_t           rotate;
+   unsigned short        udp_port;                /* stored in network order */
+   unsigned short        tcp_port;                /* stored in network order */
+   int                   socket_send_buffer_size; /* setsockopt takes int */
+   int                   socket_receive_buffer_size; /* setsockopt takes int */
+   char                **domains;
+   size_t                ndomains;
+   struct apattern      *sortlist;
+   size_t                nsort;
+   char                 *lookups;
+   size_t                ednspsz;
+   unsigned int          qcache_max_ttl;
+   ares_evsys_t          evsys;
+   unsigned int          optmask;
+ 
+   /* For binding to local devices and/or IP addresses.  Leave
+    * them null/zero for no binding.
+    */
+   char                  local_dev_name[32];
+   unsigned int          local_ip4;
+   unsigned char         local_ip6[16];
+ 
+   /* Thread safety lock */
+   ares__thread_mutex_t *lock;
+ 
+   /* Conditional to wake waiters when queue is empty */
+   ares__thread_cond_t  *cond_empty;
+ 
+   /* Server addresses and communications state. Sorted by least consecutive
+    * failures, followed by the configuration order if failures are equal. */
+   ares__slist_t        *servers;
+ 
+   /* random state to use when generating new ids and generating retry penalties
+    */
+   ares_rand_state      *rand_state;
+ 
+   /* All active queries in a single list */
+   ares__llist_t        *all_queries;
+   /* Queries bucketed by qid, for quickly dispatching DNS responses: */
+   ares__htable_szvp_t  *queries_by_qid;
+ 
+   /* Queries bucketed by timeout, for quickly handling timeouts: */
+   ares__slist_t        *queries_by_timeout;
+ 
+   /* Map linked list node member for connection to file descriptor.  We use
+    * the node instead of the connection object itself so we can quickly look
+    * up a connection and remove it if necessary (as otherwise we'd have to
+    * scan all connections) */
+   ares__htable_asvp_t  *connnode_by_socket;
+ 
+   ares_sock_state_cb    sock_state_cb;
+   void                 *sock_state_cb_data;
+ 
+   ares_sock_create_callback           sock_create_cb;
+   void                               *sock_create_cb_data;
+ 
+   ares_sock_config_callback           sock_config_cb;
+   void                               *sock_config_cb_data;
+ 
+   const struct ares_socket_functions *sock_funcs;
+   void                               *sock_func_cb_data;
+ 
+   /* Path for resolv.conf file, configurable via ares_options */
+   char                               *resolvconf_path;
+ 
+   /* Path for hosts file, configurable via ares_options */
+   char                               *hosts_path;
+ 
+   /* Maximum UDP queries per connection allowed */
+   size_t                              udp_max_queries;
+ 
+   /* Cache of local hosts file */
+   ares_hosts_file_t                  *hf;
+ 
+   /* Query Cache */
+   ares__qcache_t                     *qcache;
+ 
+   /* Fields controlling server failover behavior.
+    * The retry chance is the probability (1/N) by which we will retry a failed
+    * server instead of the best server when selecting a server to send queries
+    * to.
+    * The retry delay is the minimum time in milliseconds to wait between doing
+    * such retries (applied per-server).
+    */
+   unsigned short server_retry_chance;
+   size_t         server_retry_delay;
++
++  /* Callback triggered when a server has a successful or failed response */
++  ares_server_state_callback server_state_cb;
++  void                      *server_state_cb_data;
+ };
+ 
+ /* Does the domain end in ".onion" or ".onion."? Case-insensitive. */
+@@ -513,8 +517,10 @@ ares_status_t ares__sconfig_append_fromstr(ares__llist_t **sconfig,
+                                            const char     *str,
+                                            ares_bool_t     ignore_invalid);
+ ares_status_t ares_in_addr_to_server_config_llist(const struct in_addr *servers,
+                                                   size_t          nservers,
+                                                   ares__llist_t **llist);
++ares_status_t ares_get_server_addr(const struct server_state *server,
++                                   ares__buf_t               *buf);
+ 
+ struct ares_hosts_entry;
+ typedef struct ares_hosts_entry ares_hosts_entry_t;
+diff --git a/src/lib/ares_process.c b/src/lib/ares_process.c
+index 23fb678..f3ba93c 100644
+--- a/src/lib/ares_process.c
++++ b/src/lib/ares_process.c
+@@ -71,42 +71,87 @@ static ares_bool_t   same_address(const struct sockaddr  *sa,
+ static void          end_query(ares_channel_t *channel, struct query *query,
+                                ares_status_t status, const ares_dns_record_t *dnsrec);
+ 
+-static void server_increment_failures(struct server_state *server)
++/* Invoke the server state callback after a success or failure */
++static void invoke_server_state_cb(const struct server_state *server,
++                                   ares_bool_t                success,
++                                   int                        flags)
++{
++  const ares_channel_t *channel = server->channel;
++  ares__buf_t          *buf;
++  ares_status_t         status;
++  char                 *server_string;
++
++  if (channel->server_state_cb == NULL) {
++    return;
++  }
++
++  buf = ares__buf_create();
++  if (buf == NULL) {
++    return;
++  }
++
++  status = ares_get_server_addr(server, buf);
++  if (status != ARES_SUCCESS) {
++    ares__buf_destroy(buf);
++    return;
++  }
++
++  server_string = ares__buf_finish_str(buf, NULL);
++  buf = NULL;
++  if (server_string == NULL) {
++    return;
++  }
++
++  channel->server_state_cb(server_string, success, flags,
++                           channel->server_state_cb_data);
++  ares_free(server_string);
++}
++
++static void server_increment_failures(struct server_state *server,
++                                      ares_bool_t used_tcp)
+ {
+   ares__slist_node_t   *node;
+   const ares_channel_t *channel = server->channel;
+   struct timeval        next_retry_time;
+ 
+   node = ares__slist_node_find(channel->servers, server);
+   if (node == NULL) {
+     return;
+   }
+ 
+   server->consec_failures++;
+   ares__slist_node_reinsert(node);
+ 
+   next_retry_time = ares__tvnow();
+   timeadd(&next_retry_time, channel->server_retry_delay);
+   server->next_retry_time = next_retry_time;
++
++  invoke_server_state_cb(server, ARES_FALSE, used_tcp == ARES_TRUE
++                                             ? ARES_SERV_STATE_TCP
++                                             : ARES_SERV_STATE_UDP);
+ }
+ 
+-static void server_set_good(struct server_state *server)
++static void server_set_good(struct server_state *server, ares_bool_t used_tcp)
+ {
+   ares__slist_node_t   *node;
+   const ares_channel_t *channel = server->channel;
+ 
+   node = ares__slist_node_find(channel->servers, server);
+   if (node == NULL) {
+     return;
+   }
+ 
+   if (server->consec_failures > 0) {
+     server->consec_failures = 0;
+     ares__slist_node_reinsert(node);
+   }
+ 
+   server->next_retry_time.tv_sec = 0;
+   server->next_retry_time.tv_usec = 0;
++
++  invoke_server_state_cb(server, ARES_TRUE, used_tcp == ARES_TRUE
++                                            ? ARES_SERV_STATE_TCP
++                                            : ARES_SERV_STATE_UDP);
+ }
+ 
+ /* return true if now is exactly check time or later */
+@@ -552,27 +597,27 @@ static void read_packets(ares_channel_t *channel, fd_set *read_fds,
+ /* If any queries have timed out, note the timeout and move them on. */
+ static void process_timeouts(ares_channel_t *channel, struct timeval *now)
+ {
+   ares__slist_node_t *node =
+     ares__slist_node_first(channel->queries_by_timeout);
+   while (node != NULL) {
+     struct query             *query = ares__slist_node_val(node);
+     /* Node might be removed, cache next */
+     ares__slist_node_t       *next = ares__slist_node_next(node);
+     struct server_connection *conn;
+     /* Since this is sorted, as soon as we hit a query that isn't timed out,
+      * break */
+     if (!ares__timedout(now, &query->timeout)) {
+       break;
+     }
+ 
+     query->error_status = ARES_ETIMEOUT;
+     query->timeouts++;
+ 
+     conn = query->conn;
+-    server_increment_failures(conn->server);
++    server_increment_failures(conn->server, query->using_tcp);
+     ares__requeue_query(query, now);
+     ares__check_cleanup_conn(channel, conn);
+ 
+     node = next;
+   }
+ }
+@@ -620,127 +665,127 @@ done:
+ /* Handle an answer from a server. This must NEVER cleanup the
+  * server connection! Return something other than ARES_SUCCESS to cause
+  * the connection to be terminated after this call. */
+ static ares_status_t process_answer(ares_channel_t      *channel,
+                                     const unsigned char *abuf, size_t alen,
+                                     struct server_connection *conn,
+                                     ares_bool_t tcp, struct timeval *now)
+ {
+   struct query        *query;
+   /* Cache these as once ares__send_query() gets called, it may end up
+    * invalidating the connection all-together */
+   struct server_state *server  = conn->server;
+   ares_dns_record_t   *rdnsrec = NULL;
+   ares_dns_record_t   *qdnsrec = NULL;
+   ares_status_t        status;
+   ares_bool_t          is_cached = ARES_FALSE;
+ 
+   /* Parse the response */
+   status = ares_dns_parse(abuf, alen, 0, &rdnsrec);
+   if (status != ARES_SUCCESS) {
+     /* Malformations are never accepted */
+     status = ARES_EBADRESP;
+     goto cleanup;
+   }
+ 
+   /* Find the query corresponding to this packet. The queries are
+    * hashed/bucketed by query id, so this lookup should be quick.
+    */
+   query = ares__htable_szvp_get_direct(channel->queries_by_qid,
+                                        ares_dns_record_get_id(rdnsrec));
+   if (!query) {
+     /* We may have stopped listening for this query, that's ok */
+     status = ARES_SUCCESS;
+     goto cleanup;
+   }
+ 
+   /* Parse the question we sent as we use it to compare */
+   status = ares_dns_parse(query->qbuf, query->qlen, 0, &qdnsrec);
+   if (status != ARES_SUCCESS) {
+     end_query(channel, query, status, NULL);
+     goto cleanup;
+   }
+ 
+   /* Both the query id and the questions must be the same. We will drop any
+    * replies that aren't for the same query as this is considered invalid. */
+   if (!same_questions(qdnsrec, rdnsrec)) {
+     /* Possible qid conflict due to delayed response, that's ok */
+     status = ARES_SUCCESS;
+     goto cleanup;
+   }
+ 
+   /* At this point we know we've received an answer for this query, so we should
+    * remove it from the connection's queue so we can possibly invalidate the
+    * connection. Delay cleaning up the connection though as we may enqueue
+    * something new.  */
+   ares__llist_node_destroy(query->node_queries_to_conn);
+   query->node_queries_to_conn = NULL;
+ 
+   /* If we use EDNS and server answers with FORMERR without an OPT RR, the
+    * protocol extension is not understood by the responder. We must retry the
+    * query without EDNS enabled. */
+   if (ares_dns_record_get_rcode(rdnsrec) == ARES_RCODE_FORMERR &&
+       ares_dns_has_opt_rr(qdnsrec) && !ares_dns_has_opt_rr(rdnsrec)) {
+     status = rewrite_without_edns(qdnsrec, query);
+     if (status != ARES_SUCCESS) {
+       end_query(channel, query, status, NULL);
+       goto cleanup;
+     }
+ 
+     ares__send_query(query, now);
+     status = ARES_SUCCESS;
+     goto cleanup;
+   }
+ 
+   /* If we got a truncated UDP packet and are not ignoring truncation,
+    * don't accept the packet, and switch the query to TCP if we hadn't
+    * done so already.
+    */
+   if (ares_dns_record_get_flags(rdnsrec) & ARES_FLAG_TC && !tcp &&
+       !(channel->flags & ARES_FLAG_IGNTC)) {
+     query->using_tcp = ARES_TRUE;
+     ares__send_query(query, now);
+     status = ARES_SUCCESS; /* Switched to TCP is ok */
+     goto cleanup;
+   }
+ 
+   /* If we aren't passing through all error packets, discard packets
+    * with SERVFAIL, NOTIMP, or REFUSED response codes.
+    */
+   if (!(channel->flags & ARES_FLAG_NOCHECKRESP)) {
+     ares_dns_rcode_t rcode = ares_dns_record_get_rcode(rdnsrec);
+     if (rcode == ARES_RCODE_SERVFAIL || rcode == ARES_RCODE_NOTIMP ||
+         rcode == ARES_RCODE_REFUSED) {
+       switch (rcode) {
+         case ARES_RCODE_SERVFAIL:
+           query->error_status = ARES_ESERVFAIL;
+           break;
+         case ARES_RCODE_NOTIMP:
+           query->error_status = ARES_ENOTIMP;
+           break;
+         case ARES_RCODE_REFUSED:
+           query->error_status = ARES_EREFUSED;
+           break;
+         default:
+           break;
+       }
+ 
+-      server_increment_failures(server);
++      server_increment_failures(server, query->using_tcp);
+       ares__requeue_query(query, now);
+ 
+       /* Should any of these cause a connection termination?
+        * Maybe SERVER_FAILURE? */
+       status = ARES_SUCCESS;
+       goto cleanup;
+     }
+   }
+ 
+   /* If cache insertion was successful, it took ownership.  We ignore
+    * other cache insertion failures. */
+   if (ares_qcache_insert(channel, now, query, rdnsrec) == ARES_SUCCESS) {
+     is_cached = ARES_TRUE;
+   }
+ 
+-  server_set_good(server);
++  server_set_good(server, query->using_tcp);
+   end_query(channel, query, ARES_SUCCESS, rdnsrec);
+ 
+   status = ARES_SUCCESS;
+@@ -758,14 +803,14 @@ cleanup:
+ static void handle_conn_error(struct server_connection *conn,
+                               ares_bool_t               critical_failure)
+ {
+   struct server_state *server = conn->server;
+ 
+   /* Increment failures first before requeue so it is unlikely to requeue
+    * to the same server */
+   if (critical_failure) {
+-    server_increment_failures(server);
++    server_increment_failures(server, conn->is_tcp);
+   }
+ 
+   /* This will requeue any connections automatically */
+   ares__close_connection(conn);
+ }
+@@ -948,168 +993,168 @@ static size_t ares__calc_query_timeout(const struct query *query)
+ ares_status_t ares__send_query(struct query *query, struct timeval *now)
+ {
+   ares_channel_t           *channel = query->channel;
+   struct server_state      *server;
+   struct server_connection *conn;
+   size_t                    timeplus;
+   ares_status_t             status;
+   ares_bool_t               new_connection = ARES_FALSE;
+ 
+   query->conn = NULL;
+ 
+   /* Choose the server to send the query to */
+   if (channel->rotate) {
+     /* Pull random server */
+     server = ares__random_server(channel);
+   } else {
+     /* Pull server with failover behavior */
+     server = ares__failover_server(channel);
+   }
+ 
+   if (server == NULL) {
+     end_query(channel, query, ARES_ENOSERVER /* ? */, NULL);
+     return ARES_ENOSERVER;
+   }
+ 
+   if (query->using_tcp) {
+     size_t prior_len = 0;
+     /* Make sure the TCP socket for this server is set up and queue
+      * a send request.
+      */
+     if (server->tcp_conn == NULL) {
+       new_connection = ARES_TRUE;
+       status         = ares__open_connection(channel, server, ARES_TRUE);
+       switch (status) {
+         /* Good result, continue on */
+         case ARES_SUCCESS:
+           break;
+ 
+         /* These conditions are retryable as they are server-specific
+          * error codes */
+         case ARES_ECONNREFUSED:
+         case ARES_EBADFAMILY:
+-          server_increment_failures(server);
++          server_increment_failures(server, query->using_tcp);
+           query->error_status = status;
+           return ares__requeue_query(query, now);
+ 
+         /* Anything else is not retryable, likely ENOMEM */
+         default:
+           end_query(channel, query, status, NULL);
+           return status;
+       }
+     }
+ 
+     conn = server->tcp_conn;
+ 
+     prior_len = ares__buf_len(server->tcp_send);
+ 
+     status = ares__append_tcpbuf(server, query);
+     if (status != ARES_SUCCESS) {
+       end_query(channel, query, status, NULL);
+ 
+       /* Only safe to kill connection if it was new, otherwise it should be
+        * cleaned up by another process later */
+       if (new_connection) {
+         ares__close_connection(conn);
+       }
+       return status;
+     }
+ 
+     if (prior_len == 0) {
+       SOCK_STATE_CALLBACK(channel, conn->fd, 1, 1);
+     }
+ 
+   } else {
+     ares__llist_node_t *node = ares__llist_node_first(server->connections);
+ 
+     /* Don't use the found connection if we've gone over the maximum number
+      * of queries. Also, skip over the TCP connection if it is the first in
+      * the list */
+     if (node != NULL) {
+       conn = ares__llist_node_val(node);
+       if (conn->is_tcp) {
+         node = NULL;
+       } else if (channel->udp_max_queries > 0 &&
+                  conn->total_queries >= channel->udp_max_queries) {
+         node = NULL;
+       }
+     }
+ 
+     if (node == NULL) {
+       new_connection = ARES_TRUE;
+       status         = ares__open_connection(channel, server, ARES_FALSE);
+       switch (status) {
+         /* Good result, continue on */
+         case ARES_SUCCESS:
+           break;
+ 
+         /* These conditions are retryable as they are server-specific
+          * error codes */
+         case ARES_ECONNREFUSED:
+         case ARES_EBADFAMILY:
+-          server_increment_failures(server);
++          server_increment_failures(server, query->using_tcp);
+           query->error_status = status;
+           return ares__requeue_query(query, now);
+ 
+         /* Anything else is not retryable, likely ENOMEM */
+         default:
+           end_query(channel, query, status, NULL);
+           return status;
+       }
+       node = ares__llist_node_first(server->connections);
+     }
+ 
+     conn = ares__llist_node_val(node);
+     if (ares__socket_write(channel, conn->fd, query->qbuf, query->qlen) == -1) {
+       /* FIXME: Handle EAGAIN here since it likely can happen. */
+-      server_increment_failures(server);
++      server_increment_failures(server, query->using_tcp);
+       status = ares__requeue_query(query, now);
+ 
+       /* Only safe to kill connection if it was new, otherwise it should be
+        * cleaned up by another process later */
+       if (new_connection) {
+         ares__close_connection(conn);
+       }
+ 
+       return status;
+     }
+   }
+ 
+   timeplus = ares__calc_query_timeout(query);
+   /* Keep track of queries bucketed by timeout, so we can process
+    * timeout events quickly.
+    */
+   ares__slist_node_destroy(query->node_queries_by_timeout);
+   query->timeout = *now;
+   timeadd(&query->timeout, timeplus);
+   query->node_queries_by_timeout =
+     ares__slist_insert(channel->queries_by_timeout, query);
+   if (!query->node_queries_by_timeout) {
+     end_query(channel, query, ARES_ENOMEM, NULL);
+     /* Only safe to kill connection if it was new, otherwise it should be
+      * cleaned up by another process later */
+     if (new_connection) {
+       ares__close_connection(conn);
+     }
+     return ARES_ENOMEM;
+   }
+ 
+   /* Keep track of queries bucketed by connection, so we can process errors
+    * quickly. */
+   ares__llist_node_destroy(query->node_queries_to_conn);
+   query->node_queries_to_conn =
+     ares__llist_insert_last(conn->queries_to_conn, query);
+ 
+   if (query->node_queries_to_conn == NULL) {
+     end_query(channel, query, ARES_ENOMEM, NULL);
+     /* Only safe to kill connection if it was new, otherwise it should be
+      * cleaned up by another process later */
+     if (new_connection) {
+       ares__close_connection(conn);
+     }
+     return ARES_ENOMEM;
+   }
+ 
+   query->conn = conn;
+   conn->total_queries++;
+   return ARES_SUCCESS;
+ }
+diff --git a/src/lib/ares_update_servers.c b/src/lib/ares_update_servers.c
+index b8e26fc..36ebbaa 100644
+--- a/src/lib/ares_update_servers.c
++++ b/src/lib/ares_update_servers.c
+@@ -910,6 +910,62 @@ fail:
+   return ARES_ENOMEM;
+ }
+ 
++/* Write out the details of a server to a buffer */
++ares_status_t ares_get_server_addr(const struct server_state *server,
++                                   ares__buf_t               *buf)
++{
++  ares_status_t status;
++  char          addr[INET6_ADDRSTRLEN];
++
++  /* ipv4addr or [ipv6addr] */
++  if (server->addr.family == AF_INET6) {
++    status = ares__buf_append_byte(buf, '[');
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++  }
++
++  ares_inet_ntop(server->addr.family, &server->addr.addr, addr, sizeof(addr));
++
++  status = ares__buf_append_str(buf, addr);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  if (server->addr.family == AF_INET6) {
++    status = ares__buf_append_byte(buf, ']');
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++  }
++
++  /* :port */
++  status = ares__buf_append_byte(buf, ':');
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  status = ares__buf_append_num_dec(buf, server->udp_port, 0);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  /* %iface */
++  if (ares_strlen(server->ll_iface)) {
++    status = ares__buf_append_byte(buf, '%');
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++
++    status = ares__buf_append_str(buf, server->ll_iface);
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++  }
++
++  return ARES_SUCCESS;
++}
++
+ int ares_get_servers(ares_channel_t *channel, struct ares_addr_node **servers)
+ {
+   struct ares_addr_node *srvr_head = NULL;
+@@ -1115,75 +1171,33 @@ int ares_set_servers_ports_csv(ares_channel_t *channel, const char *_csv)
+ char *ares_get_servers_csv(ares_channel_t *channel)
+ {
+   ares__buf_t        *buf = NULL;
+   char               *out = NULL;
+   ares__slist_node_t *node;
+ 
+   ares__channel_lock(channel);
+ 
+   buf = ares__buf_create();
+   if (buf == NULL) {
+     goto done;
+   }
+ 
+   for (node = ares__slist_node_first(channel->servers); node != NULL;
+        node = ares__slist_node_next(node)) {
+     ares_status_t              status;
+     const struct server_state *server = ares__slist_node_val(node);
+-    char                       addr[64];
+ 
+     if (ares__buf_len(buf)) {
+       status = ares__buf_append_byte(buf, ',');
+       if (status != ARES_SUCCESS) {
+         goto done;
+       }
+     }
+ 
+-    /* ipv4addr or [ipv6addr] */
+-    if (server->addr.family == AF_INET6) {
+-      status = ares__buf_append_byte(buf, '[');
+-      if (status != ARES_SUCCESS) {
+-        goto done;
+-      }
+-    }
+-
+-    ares_inet_ntop(server->addr.family, &server->addr.addr, addr, sizeof(addr));
+-
+-    status = ares__buf_append_str(buf, addr);
+-    if (status != ARES_SUCCESS) {
+-      goto done;
+-    }
+-
+-    if (server->addr.family == AF_INET6) {
+-      status = ares__buf_append_byte(buf, ']');
+-      if (status != ARES_SUCCESS) {
+-        goto done;
+-      }
+-    }
+-
+-    /* :port */
+-    status = ares__buf_append_byte(buf, ':');
++    status = ares_get_server_addr(server, buf);
+     if (status != ARES_SUCCESS) {
+       goto done;
+     }
+-
+-    status = ares__buf_append_num_dec(buf, server->udp_port, 0);
+-    if (status != ARES_SUCCESS) {
+-      goto done;
+-    }
+-
+-    /* %iface */
+-    if (ares_strlen(server->ll_iface)) {
+-      status = ares__buf_append_byte(buf, '%');
+-      if (status != ARES_SUCCESS) {
+-        goto done;
+-      }
+-
+-      status = ares__buf_append_str(buf, server->ll_iface);
+-      if (status != ARES_SUCCESS) {
+-        goto done;
+-      }
+-    }
+   }
+ 
+   out = ares__buf_finish_str(buf, NULL);
+   buf = NULL;
+@@ -1193,3 +1207,14 @@ done:
+   ares__buf_destroy(buf);
+   return out;
+ }
++
++void ares_set_server_state_callback(ares_channel_t            *channel,
++                                    ares_server_state_callback cb,
++                                    void                      *data)
++{
++  if (channel == NULL) {
++    return;
++  }
++  channel->server_state_cb      = cb;
++  channel->server_state_cb_data = data;
++}
+~~~~
+
+## Uniform selected declaration context
+
+The same mechanical rule is used for every case: in lexicographic changed-production-path order, show +/-24 lines around the first literal identity match in each snapshot.
+
+### S0
+
+~~~~text
+<no matching declaration in the selected production files>
+~~~~
+
+### S1
+
+Path: `include/ares.h`; lines 491-539
+
+~~~~text
+000491: CARES_EXTERN void          ares_cancel(ares_channel_t *channel);
+000492: 
+000493: /* These next 3 configure local binding for the out-going socket
+000494:  * connection.  Use these to specify source IP and/or network device
+000495:  * on multi-homed systems.
+000496:  */
+000497: CARES_EXTERN void          ares_set_local_ip4(ares_channel_t *channel,
+000498:                                               unsigned int    local_ip);
+000499: 
+000500: /* local_ip6 should be 16 bytes in length */
+000501: CARES_EXTERN void          ares_set_local_ip6(ares_channel_t      *channel,
+000502:                                               const unsigned char *local_ip6);
+000503: 
+000504: /* local_dev_name should be null terminated. */
+000505: CARES_EXTERN void          ares_set_local_dev(ares_channel_t *channel,
+000506:                                               const char     *local_dev_name);
+000507: 
+000508: CARES_EXTERN void          ares_set_socket_callback(ares_channel_t           *channel,
+000509:                                                     ares_sock_create_callback callback,
+000510:                                                     void                     *user_data);
+000511: 
+000512: CARES_EXTERN void          ares_set_socket_configure_callback(
+000513:            ares_channel_t *channel, ares_sock_config_callback callback, void *user_data);
+000514: 
+000515: CARES_EXTERN void          ares_set_server_state_callback(
+000516:            ares_channel_t *channel, ares_server_state_callback callback, void *user_data);
+000517: 
+000518: CARES_EXTERN int  ares_set_sortlist(ares_channel_t *channel,
+000519:                                     const char     *sortstr);
+000520: 
+000521: CARES_EXTERN void ares_getaddrinfo(ares_channel_t *channel, const char *node,
+000522:                                    const char                       *service,
+000523:                                    const struct ares_addrinfo_hints *hints,
+000524:                                    ares_addrinfo_callback callback, void *arg);
+000525: 
+000526: CARES_EXTERN void ares_freeaddrinfo(struct ares_addrinfo *ai);
+000527: 
+000528: /*
+000529:  * Virtual function set to have user-managed socket IO.
+000530:  * Note that all functions need to be defined, and when
+000531:  * set, the library will not do any bind nor set any
+000532:  * socket options, assuming the client handles these
+000533:  * through either socket creation or the
+000534:  * ares_sock_config_callback call.
+000535:  */
+000536: struct iovec;
+000537: 
+000538: struct ares_socket_functions {
+000539:   ares_socket_t (*asocket)(int, int, int, void *);
+~~~~
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T5017","impact_scope":[{"type":"new_entry_point","files":["include/ares.h","src/lib/ares_update_servers.c"],"functions":["ares_set_server_state_callback"],"description":"S1 introduces a public API for registering a caller-provided callback that reports server success or failure, including transport flags and user data."}],"gap_before":{"exists":false,"type":"absent_unit","evidence":["S0 has no matching declaration for ares_set_server_state_callback in the selected production files.","Because this anchored public API is absent in S0, its own exposure obligation does not yet exist."]},"gap_after":{"exists":true,"type":"unexposed_new_public_api","evidence":["S1 declares and implements ares_set_server_state_callback(ares_channel_t *, ares_server_state_callback, void *).","H0 only fuzzes query creation and reply parsers; it does not initialize a channel, register this callback, or drive server success/failure events that invoke it."]},"new_harness_obligation":{"exists":true,"description":"H0 must add a channel-based path that registers a caller-supplied server-state callback and drives query processing to exercise success or failure notification, including the UDP/TCP flag and user-data delivery.","evidence":["The new setter requires H0 to supply a callback and user-data value, an action unnecessary in S0.","Callback invocation occurs during server success and failure processing, so exercising the new API requires a query lifecycle beyond H0's existing standalone parsing and query-construction calls."]},"explicit_failure":false,"delta_attribution":"NEW","maintenance_needed":true,"confidence":99,"reason":"The identity-anchored public callback-registration API is absent in S0 and introduced in S1. Therefore its same-scope gap is false before and true after. The unchanged harness does not register or trigger the callback, creating a concrete new caller-visible harness obligation; internal helper and state changes are supporting implementation, not separate comparison scopes."}
+tokens used
+15,921

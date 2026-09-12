@@ -1,0 +1,222 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-blind-run-40ko0e9q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08553-98d6-7d61-ab2d-7bca4098b24b
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C071
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `fuzz/bplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * bplist_fuzzer.cc
+ * binary plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_bin(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+### `fuzz/xplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * xplist_fuzzer.cc
+ * XML plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_xml(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/libplist/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+#
+# Copyright 2016 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+./autogen.sh --without-cython --enable-debug
+make -j$(nproc) clean
+make -j$(nproc) all
+
+for fuzzer in bplist_fuzzer xplist_fuzzer jplist_fuzzer oplist_fuzzer; do
+  $CXX $CXXFLAGS -std=c++11 -Iinclude/ \
+      fuzz/$fuzzer.cc -o $OUT/$fuzzer \
+      $LIB_FUZZING_ENGINE src/.libs/libplist-2.0.a
+done
+
+zip -j $OUT/bplist_fuzzer_seed_corpus.zip test/data/*.bplist
+zip -j $OUT/xplist_fuzzer_seed_corpus.zip test/data/*.plist
+zip -j $OUT/jplist_fuzzer_seed_corpus.zip test/data/*.json
+zip -j $OUT/oplist_fuzzer_seed_corpus.zip test/data/*.ostep
+
+cp fuzz/*.dict fuzz/*.options $OUT/
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `src/bplist.c`
+- `src/plist.c`
+
+~~~~diff
+diff --git a/src/bplist.c b/src/bplist.c
+--- a/src/bplist.c
++++ b/src/bplist.c
+@@ -893,12 +893,13 @@ static unsigned int plist_data_hash(const void* key)
+     char *buff = NULL;
+     unsigned int size = 0;
+ 
+     switch (data->type)
+     {
+     case PLIST_BOOLEAN:
++    case PLIST_NULL:
+     case PLIST_INT:
+     case PLIST_REAL:
+     case PLIST_DATE:
+     case PLIST_UID:
+         buff = (char *) &data->intval;	//works also for real as we use an union
+         size = 8;
+diff --git a/src/plist.c b/src/plist.c
+--- a/src/plist.c
++++ b/src/plist.c
+@@ -1127,12 +1127,13 @@ int plist_data_compare(const void *a, const void *b)
+     if (val_a->type != val_b->type)
+         return FALSE;
+ 
+     switch (val_a->type)
+     {
+     case PLIST_BOOLEAN:
++    case PLIST_NULL:
+     case PLIST_INT:
+     case PLIST_REAL:
+     case PLIST_DATE:
+     case PLIST_UID:
+         if (val_a->length != val_b->length)
+             return FALSE;
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C071","maintenance_needed":false,"confidence":97,"change_types":["bug_fix","internal_type_handling"],"affected_functions":["plist_data_hash","plist_data_compare"],"reason":"The commit only adds the existing PLIST_NULL type to two internal switch branches for hashing and comparison. It introduces no new entry point, parser protocol, initialization requirement, configuration, or input constraint. The existing bplist and xplist harnesses continue to pass fully fuzzer-controlled bytes and sizes through the public plist_from_bin and plist_from_xml parsing paths, so no harness change is justified by this diff.","evidence":["src/bplist.c adds only `case PLIST_NULL:` alongside scalar types in `plist_data_hash`.","src/plist.c adds only `case PLIST_NULL:` alongside scalar types in `plist_data_compare`.","The public APIs used by the harnesses—`plist_from_bin` and `plist_from_xml`—are unchanged.","Both harnesses already provide arbitrary input data and size and free the resulting root node; the diff adds no new state or setup requirement."],"recommended_action":"Keep the existing fuzz harnesses unchanged."}
+tokens used
+4,978

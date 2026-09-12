@@ -1,0 +1,1136 @@
+PROJECT simdjson
+COMMIT c6f9c93c33b403f3b4e06bb2f0753dfbaf277107
+PARENT 3a93e45dd166d8e614a33b0ba4da39c1a01660b7
+SUBJECT Use static variables to enforce initialization order. (#1773) (#1777)
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/include/simdjson/dom/parser-inl.h b/include/simdjson/dom/parser-inl.h
+index fa1ed790..9ed01b0a 100644
+--- a/include/simdjson/dom/parser-inl.h
++++ b/include/simdjson/dom/parser-inl.h
+@@ -176,7 +176,7 @@ inline error_code parser::allocate(size_t capacity, size_t max_depth) noexcept {
+   if (implementation) {
+     err = implementation->allocate(capacity, max_depth);
+   } else {
+-    err = simdjson::active_implementation->create_dom_parser_implementation(capacity, max_depth, implementation);
++    err = simdjson::get_active_implementation()->create_dom_parser_implementation(capacity, max_depth, implementation);
+   }
+   if (err) { return err; }
+   return SUCCESS;
+diff --git a/include/simdjson/generic/ondemand/parser-inl.h b/include/simdjson/generic/ondemand/parser-inl.h
+index f961f370..4587607a 100644
+--- a/include/simdjson/generic/ondemand/parser-inl.h
++++ b/include/simdjson/generic/ondemand/parser-inl.h
+@@ -21,7 +21,7 @@ simdjson_warn_unused simdjson_really_inline error_code parser::allocate(size_t n
+     SIMDJSON_TRY( implementation->set_capacity(new_capacity) );
+     SIMDJSON_TRY( implementation->set_max_depth(new_max_depth) );
+   } else {
+-    SIMDJSON_TRY( simdjson::active_implementation->create_dom_parser_implementation(new_capacity, new_max_depth, implementation) );
++    SIMDJSON_TRY( simdjson::get_active_implementation()->create_dom_parser_implementation(new_capacity, new_max_depth, implementation) );
+   }
+   _capacity = new_capacity;
+   _max_depth = new_max_depth;
+diff --git a/include/simdjson/implementation.h b/include/simdjson/implementation.h
+index 5724201b..2133d9b7 100644
+--- a/include/simdjson/implementation.h
++++ b/include/simdjson/implementation.h
+@@ -56,7 +56,7 @@ public:
+   /**
+    * The name of this implementation.
+    *
+-   *     const implementation *impl = simdjson::active_implementation;
++   *     const implementation *impl = simdjson::get_active_implementation();
+    *     cout << "simdjson is optimized for " << impl->name() << "(" << impl->description() << ")" << endl;
+    *
+    * @return the name of the implementation, e.g. "haswell", "westmere", "arm64"
+@@ -66,7 +66,7 @@ public:
+   /**
+    * The description of this implementation.
+    *
+-   *     const implementation *impl = simdjson::active_implementation;
++   *     const implementation *impl = simdjson::get_active_implementation();
+    *     cout << "simdjson is optimized for " << impl->name() << "(" << impl->description() << ")" << endl;
+    *
+    * @return the name of the implementation, e.g. "haswell", "westmere", "arm64"
+@@ -95,7 +95,7 @@ public:
+   /**
+    * @private For internal implementation use
+    *
+-   *     const implementation *impl = simdjson::active_implementation;
++   *     const implementation *impl = simdjson::get_active_implementation();
+    *     cout << "simdjson is optimized for " << impl->name() << "(" << impl->description() << ")" << endl;
+    *
+    * @param capacity The largest document that will be passed to the parser.
+@@ -189,10 +189,10 @@ public:
+    *
+    * Case sensitive.
+    *
+-   *     const implementation *impl = simdjson::available_implementations["westmere"];
++   *     const implementation *impl = simdjson::get_available_implementations()["westmere"];
+    *     if (!impl) { exit(1); }
+    *     if (!imp->supported_by_runtime_system()) { exit(1); }
+-   *     simdjson::active_implementation = impl;
++   *     simdjson::get_active_implementation() = impl;
+    *
+    * @param name the implementation to find, e.g. "westmere", "haswell", "arm64"
+    * @return the implementation, or nullptr if the parse failed.
+@@ -210,7 +210,7 @@ public:
+    * This is used to initialize the implementation on startup.
+    *
+    *     const implementation *impl = simdjson::available_implementation::detect_best_supported();
+-   *     simdjson::active_implementation = impl;
++   *     simdjson::get_active_implementation() = impl;
+    *
+    * @return the most advanced supported implementation for the current host, or an
+    *         implementation that returns UNSUPPORTED_ARCHITECTURE if there is no supported
+@@ -242,14 +242,14 @@ private:
+ /**
+  * The list of available implementations compiled into simdjson.
+  */
+-extern SIMDJSON_DLLIMPORTEXPORT const internal::available_implementation_list available_implementations;
++extern SIMDJSON_DLLIMPORTEXPORT const internal::available_implementation_list& get_available_implementations();
+ 
+ /**
+   * The active implementation.
+   *
+   * Automatically initialized on first use to the most advanced implementation supported by this hardware.
+   */
+-extern SIMDJSON_DLLIMPORTEXPORT internal::atomic_ptr<const implementation> active_implementation;
++extern SIMDJSON_DLLIMPORTEXPORT internal::atomic_ptr<const implementation>& get_active_implementation();
+ 
+ } // namespace simdjson
+ 
+diff --git a/singleheader/simdjson.cpp b/singleheader/simdjson.cpp
+index 33a78d9b..eeabfaa6 100644
+--- a/singleheader/simdjson.cpp
++++ b/singleheader/simdjson.cpp
+@@ -1,4 +1,4 @@
+-/* auto-generated on 2021-10-27 19:25:23 -0400. Do not edit! */
++/* auto-generated on 2021-12-29 22:23:52 +0000. Do not edit! */
+ /* begin file src/simdjson.cpp */
+ #include "simdjson.h"
+ 
+@@ -2620,19 +2620,34 @@ namespace internal {
+ // without requiring a static initializer.
+ 
+ #if SIMDJSON_IMPLEMENTATION_HASWELL
+-const haswell::implementation haswell_singleton{};
++static const haswell::implementation* get_haswell_singleton() {
++  static const haswell::implementation haswell_singleton{};
++  return &haswell_singleton;
++}
+ #endif
+ #if SIMDJSON_IMPLEMENTATION_WESTMERE
+-const westmere::implementation westmere_singleton{};
++static const westmere::implementation* get_westmere_singleton() {
++  static const westmere::implementation westmere_singleton{};
++  return &westmere_singleton;
++}
+ #endif // SIMDJSON_IMPLEMENTATION_WESTMERE
+ #if SIMDJSON_IMPLEMENTATION_ARM64
+-const arm64::implementation arm64_singleton{};
++static const arm64::implementation* get_arm64_singleton() {
++  static const arm64::implementation arm64_singleton{};
++  return &arm64_singleton;
++}
+ #endif // SIMDJSON_IMPLEMENTATION_ARM64
+ #if SIMDJSON_IMPLEMENTATION_PPC64
+-const ppc64::implementation ppc64_singleton{};
++static const ppc64::implementation* get_ppc64_singleton() {
++  static const ppc64::implementation ppc64_singleton{};
++  return &ppc64_singleton;
++}
+ #endif // SIMDJSON_IMPLEMENTATION_PPC64
+ #if SIMDJSON_IMPLEMENTATION_FALLBACK
+-const fallback::implementation fallback_singleton{};
++static const fallback::implementation* get_fallback_singleton() {
++  static const fallback::implementation fallback_singleton{};
++  return &fallback_singleton;
++}
+ #endif // SIMDJSON_IMPLEMENTATION_FALLBACK
+ 
+ /**
+@@ -2661,25 +2676,26 @@ private:
+   const implementation *set_best() const noexcept;
+ };
+ 
+-const detect_best_supported_implementation_on_first_use detect_best_supported_implementation_on_first_use_singleton;
+-
+-const std::initializer_list<const implementation *> available_implementation_pointers {
++static const std::initializer_list<const implementation *>& get_available_implementation_pointers() {
++  static const std::initializer_list<const implementation *> available_implementation_pointers {
+ #if SIMDJSON_IMPLEMENTATION_HASWELL
+-  &haswell_singleton,
++    get_haswell_singleton(),
+ #endif
+ #if SIMDJSON_IMPLEMENTATION_WESTMERE
+-  &westmere_singleton,
++    get_westmere_singleton(),
+ #endif
+ #if SIMDJSON_IMPLEMENTATION_ARM64
+-  &arm64_singleton,
++    get_arm64_singleton(),
+ #endif
+ #if SIMDJSON_IMPLEMENTATION_PPC64
+-  &ppc64_singleton,
++    get_ppc64_singleton(),
+ #endif
+ #if SIMDJSON_IMPLEMENTATION_FALLBACK
+-  &fallback_singleton,
++    get_fallback_singleton(),
+ #endif
+-}; // available_implementation_pointers
++  }; // available_implementation_pointers
++  return available_implementation_pointers;
++}
+ 
+ // So we can return UNSUPPORTED_ARCHITECTURE from the parser when there is no support
+ class unsupported_implementation final : public implementation {
+@@ -2707,25 +2723,28 @@ public:
+   unsupported_implementation() : implementation("unsupported", "Unsupported CPU (no detected SIMD instructions)", 0) {}
+ };
+ 
+-const unsupported_implementation unsupported_singleton{};
++const unsupported_implementation* get_unsupported_singleton() {
++    static const unsupported_implementation unsupported_singleton{};
++    return &unsupported_singleton;
++}
+ 
+ size_t available_implementation_list::size() const noexcept {
+-  return internal::available_implementation_pointers.size();
++  return internal::get_available_implementation_pointers().size();
+ }
+ const implementation * const *available_implementation_list::begin() const noexcept {
+-  return internal::available_implementation_pointers.begin();
++  return internal::get_available_implementation_pointers().begin();
+ }
+ const implementation * const *available_implementation_list::end() const noexcept {
+-  return internal::available_implementation_pointers.end();
++  return internal::get_available_implementation_pointers().end();
+ }
+ const implementation *available_implementation_list::detect_best_supported() const noexcept {
+   // They are prelisted in priority order, so we just go down the list
+   uint32_t supported_instruction_sets = internal::detect_supported_architectures();
+-  for (const implementation *impl : internal::available_implementation_pointers) {
++  for (const implementation *impl : internal::get_available_implementation_pointers()) {
+     uint32_t required_instruction_sets = impl->required_instruction_sets();
+     if ((supported_instruction_sets & required_instruction_sets) == required_instruction_sets) { return impl; }
+   }
+-  return &unsupported_singleton; // this should never happen?
++  return get_unsupported_singleton(); // this should never happen?
+ }
+ 
+ const implementation *detect_best_supported_implementation_on_first_use::set_best() const noexcept {
+@@ -2735,31 +2754,39 @@ const implementation *detect_best_supported_implementation_on_first_use::set_bes
+   SIMDJSON_POP_DISABLE_WARNINGS
+ 
+   if (force_implementation_name) {
+-    auto force_implementation = available_implementations[force_implementation_name];
++    auto force_implementation = get_available_implementations()[force_implementation_name];
+     if (force_implementation) {
+-      return active_implementation = force_implementation;
++      return get_active_implementation() = force_implementation;
+     } else {
+       // Note: abort() and stderr usage within the library is forbidden.
+-      return active_implementation = &unsupported_singleton;
++      return get_active_implementation() = get_unsupported_singleton();
+     }
+   }
+-  return active_implementation = available_implementations.detect_best_supported();
++  return get_active_implementation() = get_available_implementations().detect_best_supported();
+ }
+ 
+ } // namespace internal
+ 
+-SIMDJSON_DLLIMPORTEXPORT const internal::available_implementation_list available_implementations{};
+-SIMDJSON_DLLIMPORTEXPORT internal::atomic_ptr<const implementation> active_implementation{&internal::detect_best_supported_implementation_on_first_use_singleton};
++SIMDJSON_DLLIMPORTEXPORT const internal::available_implementation_list& get_available_implementations() {
++  static const internal::available_implementation_list available_implementations{};
++  return available_implementations;
++}
++
++SIMDJSON_DLLIMPORTEXPORT internal::atomic_ptr<const implementation>& get_active_implementation() {
++    static const internal::detect_best_supported_implementation_on_first_use detect_best_supported_implementation_on_first_use_singleton;
++    static internal::atomic_ptr<const implementation> active_implementation{&detect_best_supported_implementation_on_first_use_singleton};
++    return active_implementation;
++}
+ 
+ simdjson_warn_unused error_code minify(const char *buf, size_t len, char *dst, size_t &dst_len) noexcept {
+-  return active_implementation->minify(reinterpret_cast<const uint8_t *>(buf), len, reinterpret_cast<uint8_t *>(dst), dst_len);
++  return get_active_implementation()->minify(reinterpret_cast<const uint8_t *>(buf), len, reinterpret_cast<uint8_t *>(dst), dst_len);
+ }
+ simdjson_warn_unused bool validate_utf8(const char *buf, size_t len) noexcept {
+-  return active_implementation->validate_utf8(buf, len);
++  return get_active_implementation()->validate_utf8(buf, len);
+ }
+ 
+ const implementation * builtin_implementation() {
+-  static const implementation * builtin_impl = available_implementations[STRINGIFY(SIMDJSON_BUILTIN_IMPLEMENTATION)];
++  static const implementation * builtin_impl = get_available_implementations()[SIMDJSON_STRINGIFY(SIMDJSON_BUILTIN_IMPLEMENTATION)];
+   assert(builtin_impl);
+   return builtin_impl;
+ }
+@@ -3473,11 +3500,11 @@ simdjson_really_inline uint64_t follows(const uint64_t match, uint64_t &overflow
+ 
+ simdjson_really_inline json_block json_scanner::next(const simd::simd8x64<uint8_t>& in) {
+   json_string_block strings = string_scanner.next(in);
+-  // identifies the white-space and the structurat characters
++  // identifies the white-space and the structural characters
+   json_character_block characters = json_character_block::classify(in);
+   // The term "scalar" refers to anything except structural characters and white space
+   // (so letters, numbers, quotes).
+-  // We want  follows_scalar to mark anything that follows a non-quote scalar (so letters and numbers).
++  // We want follows_scalar to mark anything that follows a non-quote scalar (so letters and numbers).
+   //
+   // A terminal quote should either be followed by a structural character (comma, brace, bracket, colon)
+   // or nothing. However, we still want ' "a string"true ' to mark the 't' of 'true' as a potential
+@@ -4246,25 +4273,25 @@ public:
+   /**
+    * Log that a value has been found.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_value(const char *type) const noexcept;
+   /**
+    * Log the start of a multipart value.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_start_value(const char *type) const noexcept;
+   /**
+    * Log the end of a multipart value.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_end_value(const char *type) const noexcept;
+   /**
+    * Log an error.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_error(const char *error) const noexcept;
+ 
+@@ -5574,25 +5601,25 @@ public:
+   /**
+    * Log that a value has been found.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_value(const char *type) const noexcept;
+   /**
+    * Log the start of a multipart value.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_start_value(const char *type) const noexcept;
+   /**
+    * Log the end of a multipart value.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_end_value(const char *type) const noexcept;
+   /**
+    * Log an error.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_error(const char *error) const noexcept;
+ 
+@@ -6937,11 +6964,11 @@ simdjson_really_inline uint64_t follows(const uint64_t match, uint64_t &overflow
+ 
+ simdjson_really_inline json_block json_scanner::next(const simd::simd8x64<uint8_t>& in) {
+   json_string_block strings = string_scanner.next(in);
+-  // identifies the white-space and the structurat characters
++  // identifies the white-space and the structural characters
+   json_character_block characters = json_character_block::classify(in);
+   // The term "scalar" refers to anything except structural characters and white space
+   // (so letters, numbers, quotes).
+-  // We want  follows_scalar to mark anything that follows a non-quote scalar (so letters and numbers).
++  // We want follows_scalar to mark anything that follows a non-quote scalar (so letters and numbers).
+   //
+   // A terminal quote should either be followed by a structural character (comma, brace, bracket, colon)
+   // or nothing. However, we still want ' "a string"true ' to mark the 't' of 'true' as a potential
+@@ -7709,25 +7736,25 @@ public:
+   /**
+    * Log that a value has been found.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_value(const char *type) const noexcept;
+   /**
+    * Log the start of a multipart value.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_start_value(const char *type) const noexcept;
+   /**
+    * Log the end of a multipart value.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_end_value(const char *type) const noexcept;
+   /**
+    * Log an error.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_error(const char *error) const noexcept;
+ 
+@@ -9063,11 +9090,11 @@ simdjson_really_inline uint64_t follows(const uint64_t match, uint64_t &overflow
+ 
+ simdjson_really_inline json_block json_scanner::next(const simd::simd8x64<uint8_t>& in) {
+   json_string_block strings = string_scanner.next(in);
+-  // identifies the white-space and the structurat characters
++  // identifies the white-space and the structural characters
+   json_character_block characters = json_character_block::classify(in);
+   // The term "scalar" refers to anything except structural characters and white space
+   // (so letters, numbers, quotes).
+-  // We want  follows_scalar to mark anything that follows a non-quote scalar (so letters and numbers).
++  // We want follows_scalar to mark anything that follows a non-quote scalar (so letters and numbers).
+   //
+   // A terminal quote should either be followed by a structural character (comma, brace, bracket, colon)
+   // or nothing. However, we still want ' "a string"true ' to mark the 't' of 'true' as a potential
+@@ -9836,25 +9863,25 @@ public:
+   /**
+    * Log that a value has been found.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_value(const char *type) const noexcept;
+   /**
+    * Log the start of a multipart value.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_start_value(const char *type) const noexcept;
+   /**
+    * Log the end of a multipart value.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_end_value(const char *type) const noexcept;
+   /**
+    * Log an error.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_error(const char *error) const noexcept;
+ 
+@@ -11225,11 +11252,11 @@ simdjson_really_inline uint64_t follows(const uint64_t match, uint64_t &overflow
+ 
+ simdjson_really_inline json_block json_scanner::next(const simd::simd8x64<uint8_t>& in) {
+   json_string_block strings = string_scanner.next(in);
+-  // identifies the white-space and the structurat characters
++  // identifies the white-space and the structural characters
+   json_character_block characters = json_character_block::classify(in);
+   // The term "scalar" refers to anything except structural characters and white space
+   // (so letters, numbers, quotes).
+-  // We want  follows_scalar to mark anything that follows a non-quote scalar (so letters and numbers).
++  // We want follows_scalar to mark anything that follows a non-quote scalar (so letters and numbers).
+   //
+   // A terminal quote should either be followed by a structural character (comma, brace, bracket, colon)
+   // or nothing. However, we still want ' "a string"true ' to mark the 't' of 'true' as a potential
+@@ -11997,25 +12024,25 @@ public:
+   /**
+    * Log that a value has been found.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_value(const char *type) const noexcept;
+   /**
+    * Log the start of a multipart value.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_start_value(const char *type) const noexcept;
+   /**
+    * Log the end of a multipart value.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_end_value(const char *type) const noexcept;
+   /**
+    * Log an error.
+    *
+-   * Set ENABLE_LOGGING=true in logger.h to see logging.
++   * Set LOG_ENABLED=true in logger.h to see logging.
+    */
+   simdjson_really_inline void log_error(const char *error) const noexcept;
+ 
+diff --git a/singleheader/simdjson.h b/singleheader/simdjson.h
+index 6c73ad90..f8b08342 100644
+--- a/singleheader/simdjson.h
++++ b/singleheader/simdjson.h
+@@ -1,4 +1,4 @@
+-/* auto-generated on 2021-10-27 19:25:23 -0400. Do not edit! */
++/* auto-generated on 2021-12-29 22:23:52 +0000. Do not edit! */
+ /* begin file include/simdjson.h */
+ #ifndef SIMDJSON_H
+ #define SIMDJSON_H
+@@ -160,10 +160,10 @@ use a 64-bit target such as x64, 64-bit ARM or 64-bit PPC.")
+ #endif // SIMDJSON_IS_32BITS
+ 
+ // this is almost standard?
+-#undef STRINGIFY_IMPLEMENTATION_
+-#undef STRINGIFY
+-#define STRINGIFY_IMPLEMENTATION_(a) #a
+-#define STRINGIFY(a) STRINGIFY_IMPLEMENTATION_(a)
++#undef SIMDJSON_STRINGIFY_IMPLEMENTATION_
++#undef SIMDJSON_STRINGIFY
++#define SIMDJSON_STRINGIFY_IMPLEMENTATION_(a) #a
++#define SIMDJSON_STRINGIFY(a) SIMDJSON_STRINGIFY_IMPLEMENTATION_(a)
+ 
+ // Our fast kernels require 64-bit systems.
+ //
+@@ -187,13 +187,13 @@ use a 64-bit target such as x64, 64-bit ARM or 64-bit PPC.")
+ // til 8.0 so SIMDJSON_TARGET_REGION and SIMDJSON_UNTARGET_REGION must be *outside* of a
+ // namespace.
+ #define SIMDJSON_TARGET_REGION(T)                                                       \
+-  _Pragma(STRINGIFY(                                                           \
++  _Pragma(SIMDJSON_STRINGIFY(                                                           \
+       clang attribute push(__attribute__((target(T))), apply_to = function)))
+ #define SIMDJSON_UNTARGET_REGION _Pragma("clang attribute pop")
+ #elif defined(__GNUC__)
+ // GCC is easier
+ #define SIMDJSON_TARGET_REGION(T)                                                       \
+-  _Pragma("GCC push_options") _Pragma(STRINGIFY(GCC target(T)))
++  _Pragma("GCC push_options") _Pragma(SIMDJSON_STRINGIFY(GCC target(T)))
+ #define SIMDJSON_UNTARGET_REGION _Pragma("GCC pop_options")
+ #endif // clang then gcc
+ 
+@@ -227,11 +227,11 @@ use a 64-bit target such as x64, 64-bit ARM or 64-bit PPC.")
+ 
+ 
+ #if defined(__clang__)
+-#define NO_SANITIZE_UNDEFINED __attribute__((no_sanitize("undefined")))
++#define SIMDJSON_NO_SANITIZE_UNDEFINED __attribute__((no_sanitize("undefined")))
+ #elif defined(__GNUC__)
+-#define NO_SANITIZE_UNDEFINED __attribute__((no_sanitize_undefined))
++#define SIMDJSON_NO_SANITIZE_UNDEFINED __attribute__((no_sanitize_undefined))
+ #else
+-#define NO_SANITIZE_UNDEFINED
++#define SIMDJSON_NO_SANITIZE_UNDEFINED
+ #endif
+ 
+ #ifdef SIMDJSON_VISUAL_STUDIO
+@@ -2219,7 +2219,12 @@ enum {
+ namespace simdjson {
+ 
+ /**
+- * All possible errors returned by simdjson.
++ * All possible errors returned by simdjson. These error codes are subject to change
++ * and not all simdjson kernel returns the same error code given the same input: it is not
++ * well defined which error a given input should produce.
++ *
++ * Only SUCCESS evaluates to false as a Boolean. All other error codes will evaluate
++ * to true as a Boolean.
+  */
+ enum error_code {
+   SUCCESS = 0,                ///< No error
+@@ -3247,7 +3252,7 @@ public:
+   /**
+    * The name of this implementation.
+    *
+-   *     const implementation *impl = simdjson::active_implementation;
++   *     const implementation *impl = simdjson::get_active_implementation();
+    *     cout << "simdjson is optimized for " << impl->name() << "(" << impl->description() << ")" << endl;
+    *
+    * @return the name of the implementation, e.g. "haswell", "westmere", "arm64"
+@@ -3257,7 +3262,7 @@ public:
+   /**
+    * The description of this implementation.
+    *
+-   *     const implementation *impl = simdjson::active_implementation;
++   *     const implementation *impl = simdjson::get_active_implementation();
+    *     cout << "simdjson is optimized for " << impl->name() << "(" << impl->description() << ")" << endl;
+    *
+    * @return the name of the implementation, e.g. "haswell", "westmere", "arm64"
+@@ -3286,7 +3291,7 @@ public:
+   /**
+    * @private For internal implementation use
+    *
+-   *     const implementation *impl = simdjson::active_implementation;
++   *     const implementation *impl = simdjson::get_active_implementation();
+    *     cout << "simdjson is optimized for " << impl->name() << "(" << impl->description() << ")" << endl;
+    *
+    * @param capacity The largest document that will be passed to the parser.
+@@ -3380,10 +3385,10 @@ public:
+    *
+    * Case sensitive.
+    *
+-   *     const implementation *impl = simdjson::available_implementations["westmere"];
++   *     const implementation *impl = simdjson::get_available_implementations()["westmere"];
+    *     if (!impl) { exit(1); }
+    *     if (!imp->supported_by_runtime_system()) { exit(1); }
+-   *     simdjson::active_implementation = impl;
++   *     simdjson::get_active_implementation() = impl;
+    *
+    * @param name the implementation to find, e.g. "westmere", "haswell", "arm64"
+    * @return the implementation, or nullptr if the parse failed.
+@@ -3401,7 +3406,7 @@ public:
+    * This is used to initialize the implementation on startup.
+    *
+    *     const implementation *impl = simdjson::available_implementation::detect_best_supported();
+-   *     simdjson::active_implementation = impl;
++   *     simdjson::get_active_implementation() = impl;
+    *
+    * @return the most advanced supported implementation for the current host, or an
+    *         implementation that returns UNSUPPORTED_ARCHITECTURE if there is no supported
+@@ -3433,14 +3438,14 @@ private:
+ /**
+  * The list of available implementations compiled into simdjson.
+  */
+-extern SIMDJSON_DLLIMPORTEXPORT const internal::available_implementation_list available_implementations;
++extern SIMDJSON_DLLIMPORTEXPORT const internal::available_implementation_list& get_available_implementations();
+ 
+ /**
+   * The active implementation.
+   *
+   * Automatically initialized on first use to the most advanced implementation supported by this hardware.
+   */
+-extern SIMDJSON_DLLIMPORTEXPORT internal::atomic_ptr<const implementation> active_implementation;
++extern SIMDJSON_DLLIMPORTEXPORT internal::atomic_ptr<const implementation>& get_active_implementation();
+ 
+ } // namespace simdjson
+ 
+@@ -8672,7 +8677,7 @@ inline error_code parser::allocate(size_t capacity, size_t max_depth) noexcept {
+   if (implementation) {
+     err = implementation->allocate(capacity, max_depth);
+   } else {
+-    err = simdjson::active_implementation->create_dom_parser_implementation(capacity, max_depth, implementation);
++    err = simdjson::get_active_implementation()->create_dom_parser_implementation(capacity, max_depth, implementation);
+   }
+   if (err) { return err; }
+   return SUCCESS;
+@@ -9420,9 +9425,13 @@ extern SIMDJSON_DLLIMPORTEXPORT const uint64_t thintable_epi8[256];
+ #ifndef SIMDJSON_IMPLEMENTATION_HASWELL
+ #define SIMDJSON_IMPLEMENTATION_HASWELL (SIMDJSON_IS_X86_64)
+ #endif
++#ifdef _MSC_VER
+ // To see why  (__BMI__) && (__PCLMUL__) && (__LZCNT__) are not part of this next line, see
+ // https://github.com/simdjson/simdjson/issues/1247
+ #define SIMDJSON_CAN_ALWAYS_RUN_HASWELL ((SIMDJSON_IMPLEMENTATION_HASWELL) && (SIMDJSON_IS_X86_64) && (__AVX2__))
++#else
++#define SIMDJSON_CAN_ALWAYS_RUN_HASWELL ((SIMDJSON_IMPLEMENTATION_HASWELL) && (SIMDJSON_IS_X86_64) && (__AVX2__) && (__BMI__) && (__PCLMUL__) && (__LZCNT__))
++#endif
+ 
+ // Default Westmere to on if this is x86-64, unless we'll always select Haswell.
+ #ifndef SIMDJSON_IMPLEMENTATION_WESTMERE
+@@ -9598,7 +9607,7 @@ namespace {
+ // We sometimes call trailing_zero on inputs that are zero,
+ // but the algorithms do not end up using the returned value.
+ // Sadly, sanitizers are not smart enough to figure it out.
+-NO_SANITIZE_UNDEFINED
++SIMDJSON_NO_SANITIZE_UNDEFINED
+ simdjson_really_inline int trailing_zeroes(uint64_t input_num) {
+ #ifdef SIMDJSON_REGULAR_VISUAL_STUDIO
+   unsigned long ret;
+@@ -9663,7 +9672,7 @@ simdjson_really_inline uint64_t reverse_bits(uint64_t input_num) {
+  * greating or equal to 63 in which case we trigger undefined behavior, but the output
+  * of such undefined behavior is never used.
+  **/
+-NO_SANITIZE_UNDEFINED
++SIMDJSON_NO_SANITIZE_UNDEFINED
+ simdjson_really_inline uint64_t zero_leading_bit(uint64_t rev_bits, int leading_zeroes) {
+   return rev_bits ^ (uint64_t(0x8000000000000000) >> leading_zeroes);
+ }
+@@ -11021,7 +11030,7 @@ error_code slow_float_parsing(simdjson_unused const uint8_t * src, W writer) {
+ }
+ 
+ template<typename I>
+-NO_SANITIZE_UNDEFINED // We deliberately allow overflow here and check later
++SIMDJSON_NO_SANITIZE_UNDEFINED // We deliberately allow overflow here and check later
+ simdjson_really_inline bool parse_digit(const uint8_t c, I &i) {
+   const uint8_t digit = static_cast<uint8_t>(c - '0');
+   if (digit > 9) {
+@@ -12854,7 +12863,7 @@ error_code slow_float_parsing(simdjson_unused const uint8_t * src, W writer) {
+ }
+ 
+ template<typename I>
+-NO_SANITIZE_UNDEFINED // We deliberately allow overflow here and check later
++SIMDJSON_NO_SANITIZE_UNDEFINED // We deliberately allow overflow here and check later
+ simdjson_really_inline bool parse_digit(const uint8_t c, I &i) {
+   const uint8_t digit = static_cast<uint8_t>(c - '0');
+   if (digit > 9) {
+@@ -13961,7 +13970,7 @@ namespace {
+ // We sometimes call trailing_zero on inputs that are zero,
+ // but the algorithms do not end up using the returned value.
+ // Sadly, sanitizers are not smart enough to figure it out.
+-NO_SANITIZE_UNDEFINED
++SIMDJSON_NO_SANITIZE_UNDEFINED
+ simdjson_really_inline int trailing_zeroes(uint64_t input_num) {
+ #ifdef SIMDJSON_REGULAR_VISUAL_STUDIO
+   return (int)_tzcnt_u64(input_num);
+@@ -15172,7 +15181,7 @@ error_code slow_float_parsing(simdjson_unused const uint8_t * src, W writer) {
+ }
+ 
+ template<typename I>
+-NO_SANITIZE_UNDEFINED // We deliberately allow overflow here and check later
++SIMDJSON_NO_SANITIZE_UNDEFINED // We deliberately allow overflow here and check later
+ simdjson_really_inline bool parse_digit(const uint8_t c, I &i) {
+   const uint8_t digit = static_cast<uint8_t>(c - '0');
+   if (digit > 9) {
+@@ -16234,7 +16243,7 @@ namespace {
+ // We sometimes call trailing_zero on inputs that are zero,
+ // but the algorithms do not end up using the returned value.
+ // Sadly, sanitizers are not smart enough to figure it out.
+-NO_SANITIZE_UNDEFINED
++SIMDJSON_NO_SANITIZE_UNDEFINED
+ simdjson_really_inline int trailing_zeroes(uint64_t input_num) {
+ #ifdef SIMDJSON_REGULAR_VISUAL_STUDIO
+   unsigned long ret;
+@@ -17589,7 +17598,7 @@ error_code slow_float_parsing(simdjson_unused const uint8_t * src, W writer) {
+ }
+ 
+ template<typename I>
+-NO_SANITIZE_UNDEFINED // We deliberately allow overflow here and check later
++SIMDJSON_NO_SANITIZE_UNDEFINED // We deliberately allow overflow here and check later
+ simdjson_really_inline bool parse_digit(const uint8_t c, I &i) {
+   const uint8_t digit = static_cast<uint8_t>(c - '0');
+   if (digit > 9) {
+@@ -18672,7 +18681,7 @@ namespace {
+ // We sometimes call trailing_zero on inputs that are zero,
+ // but the algorithms do not end up using the returned value.
+ // Sadly, sanitizers are not smart enough to figure it out.
+-NO_SANITIZE_UNDEFINED
++SIMDJSON_NO_SANITIZE_UNDEFINED
+ simdjson_really_inline int trailing_zeroes(uint64_t input_num) {
+ #ifdef SIMDJSON_REGULAR_VISUAL_STUDIO
+   unsigned long ret;
+@@ -19864,7 +19873,7 @@ error_code slow_float_parsing(simdjson_unused const uint8_t * src, W writer) {
+ }
+ 
+ template<typename I>
+-NO_SANITIZE_UNDEFINED // We deliberately allow overflow here and check later
++SIMDJSON_NO_SANITIZE_UNDEFINED // We deliberately allow overflow here and check later
+ simdjson_really_inline bool parse_digit(const uint8_t c, I &i) {
+   const uint8_t digit = static_cast<uint8_t>(c - '0');
+   if (digit > 9) {
+@@ -21048,7 +21057,6 @@ protected:
+     uint64_t unsigned_integer;
+   } payload{0};
+   number_type type{number_type::signed_integer};
+-  friend class value_iterator;
+ };
+ 
+ /**
+@@ -22512,7 +22520,7 @@ public:
+ 
+   /**
+    * Get the value at the given index. This function has linear-time complexity.
+-   * This function should only be called once on an array instance since the iterator is not reset between each call.
++   * This function should only be called once on an array instance since the array iterator is not reset between each call.
+    *
+    * @return The value at the given index, or:
+    *         - INDEX_OUT_OF_BOUNDS if the array index is larger than an array length
+@@ -22694,6 +22702,8 @@ public:
+    *
+    * The string is guaranteed to be valid UTF-8.
+    *
++   * Important: Calling get_string() twice on the same document is an error.
++   *
+    * @returns An UTF-8 string. The string is stored in the parser and will be invalidated the next
+    *          time it parses a document or when it is destroyed.
+    * @returns INCORRECT_TYPE if the JSON value is not a string.
+@@ -22867,7 +22877,7 @@ public:
+   simdjson_really_inline simdjson_result<size_t> count_fields() & noexcept;
+   /**
+    * Get the value at the given index in the array. This function has linear-time complexity.
+-   * This function should only be called once as the array iterator is not reset between each call.
++   * This function should only be called once on an array instance since the array iterator is not reset between each call.
+    *
+    * @return The value at the given index, or:
+    *         - INDEX_OUT_OF_BOUNDS if the array index is larger than an array length
+@@ -22911,6 +22921,10 @@ public:
+    * the code in Debug mode (or with the macro `SIMDJSON_DEVELOPMENT_CHECKS` set to 1): an
+    * OUT_OF_ORDER_ITERATION error is generated.
+    *
++   * You are expected to access keys only once. You should access the value corresponding to
++   * a key a single time. Doing object["mykey"].to_string()and then again object["mykey"].to_string()
++   * is an error.
++   *
+    * @param key The key to look up.
+    * @returns The value of the field, or NO_SUCH_FIELD if the field is not in the object.
+    */
+@@ -22941,6 +22955,10 @@ public:
+    * the code in Debug mode (or with the macro `SIMDJSON_DEVELOPMENT_CHECKS` set to 1): an
+    * OUT_OF_ORDER_ITERATION error is generated.
+    *
++   * You are expected to access keys only once. You should access the value corresponding to a key
++   * a single time. Doing object["mykey"].to_string() and then again object["mykey"].to_string()
++   * is an error.
++   *
+    * @param key The key to look up.
+    * @returns The value of the field, or NO_SUCH_FIELD if the field is not in the object.
+    */
+@@ -23113,7 +23131,7 @@ public:
+   simdjson_really_inline simdjson_result<value> at_pointer(std::string_view json_pointer) noexcept;
+   /**
+    * Consumes the document and returns a string_view instance corresponding to the
+-   * document as represented in JSON. It points inside the original byte array containg
++   * document as represented in JSON. It points inside the original byte array containing
+    * the JSON document.
+    */
+   simdjson_really_inline simdjson_result<std::string_view> raw_json() noexcept;
+@@ -23461,6 +23479,9 @@ public:
+    *
+    * Equivalent to get<std::string_view>().
+    *
++   * Important: a value should be consumed once. Calling get_string() twice on the same value
++   * is an error.
++   *
+    * @returns An UTF-8 string. The string is stored in the parser and will be invalidated the next
+    *          time it parses a document or when it is destroyed.
+    * @returns INCORRECT_TYPE if the JSON value is not a string.
+@@ -23601,7 +23622,7 @@ public:
+   simdjson_really_inline simdjson_result<size_t> count_fields() & noexcept;
+   /**
+    * Get the value at the given index in the array. This function has linear-time complexity.
+-   * This function should only be called once as the array iterator is not reset between each call.
++   * This function should only be called once on an array instance since the array iterator is not reset between each call.
+    *
+    * @return The value at the given index, or:
+    *         - INDEX_OUT_OF_BOUNDS if the array index is larger than an array length
+@@ -24112,6 +24133,10 @@ public:
+    * the code in Debug mode (or with the macro `SIMDJSON_DEVELOPMENT_CHECKS` set to 1): an
+    * OUT_OF_ORDER_ITERATION error is generated.
+    *
++   * You are expected to access keys only once. You should access the value corresponding to a
++   * key a single time. Doing object["mykey"].to_string() and then again object["mykey"].to_string()
++   * is an error.
++   *
+    * @param key The key to look up.
+    * @returns The value of the field, or NO_SUCH_FIELD if the field is not in the object.
+    */
+@@ -24145,6 +24170,9 @@ public:
+    * the code in Debug mode (or with the macro `SIMDJSON_DEVELOPMENT_CHECKS` set to 1): an
+    * OUT_OF_ORDER_ITERATION error is generated.
+    *
++   * You are expected to access keys only once. You should access the value corresponding to a key
++   * a single time. Doing object["mykey"].to_string() and then again object["mykey"].to_string() is an error.
++   *
+    * @param key The key to look up.
+    * @returns The value of the field, or NO_SUCH_FIELD if the field is not in the object.
+    */
+@@ -24468,7 +24496,7 @@ public:
+    * The characters inside a JSON document, and between JSON documents, must be valid Unicode (UTF-8).
+    *
+    * The documents must not exceed batch_size bytes (by default 1MB) or they will fail to parse.
+-   * Setting batch_size to excessively large or excesively small values may impact negatively the
++   * Setting batch_size to excessively large or excessively small values may impact negatively the
+    * performance.
+    *
+    * ### REQUIRED: Buffer Padding
+@@ -24930,6 +24958,14 @@ inline simdjson_result<std::string_view> to_json_string(simdjson_result<SIMDJSON
+ inline simdjson_result<std::string_view> to_json_string(simdjson_result<SIMDJSON_BUILTIN_IMPLEMENTATION::ondemand::array> x);
+ } // namespace simdjson
+ 
++/**
++ * We want to support argument-dependent lookup (ADL).
++ * Hence we should define operator<< in the namespace
++ * where the argument (here value, object, etc.) resides.
++ * Credit: @madhur4127
++ * See https://github.com/simdjson/simdjson/issues/1768
++ */
++namespace simdjson { namespace SIMDJSON_BUILTIN_IMPLEMENTATION { namespace ondemand {
+ 
+ /**
+  * Print JSON to an output stream.
+@@ -24979,6 +25015,7 @@ inline std::ostream& operator<<(std::ostream& out, simdjson::SIMDJSON_BUILTIN_IM
+ #if SIMDJSON_EXCEPTIONS
+ inline std::ostream& operator<<(std::ostream& out, simdjson::simdjson_result<simdjson::SIMDJSON_BUILTIN_IMPLEMENTATION::ondemand::object> x);
+ #endif
++}}} // namespace simdjson::SIMDJSON_BUILTIN_IMPLEMENTATION::ondemand
+ /* end file include/simdjson/generic/ondemand/serialization.h */
+ /* end file include/simdjson/generic/ondemand.h */
+ 
+@@ -28787,7 +28824,7 @@ simdjson_warn_unused simdjson_really_inline error_code parser::allocate(size_t n
+     SIMDJSON_TRY( implementation->set_capacity(new_capacity) );
+     SIMDJSON_TRY( implementation->set_max_depth(new_max_depth) );
+   } else {
+-    SIMDJSON_TRY( simdjson::active_implementation->create_dom_parser_implementation(new_capacity, new_max_depth, implementation) );
++    SIMDJSON_TRY( simdjson::get_active_implementation()->create_dom_parser_implementation(new_capacity, new_max_depth, implementation) );
+   }
+   _capacity = new_capacity;
+   _max_depth = new_max_depth;
+@@ -29407,6 +29444,7 @@ inline simdjson_result<std::string_view> to_json_string(simdjson_result<SIMDJSON
+ }
+ } // namespace simdjson
+ 
++namespace simdjson { namespace SIMDJSON_BUILTIN_IMPLEMENTATION { namespace ondemand {
+ 
+ #if SIMDJSON_EXCEPTIONS
+ inline std::ostream& operator<<(std::ostream& out, simdjson::SIMDJSON_BUILTIN_IMPLEMENTATION::ondemand::value x) {
+@@ -29524,6 +29562,7 @@ inline std::ostream& operator<<(std::ostream& out, simdjson::SIMDJSON_BUILTIN_IM
+   }
+ }
+ #endif
++}}} // namespace simdjson::SIMDJSON_BUILTIN_IMPLEMENTATION::ondemand
+ /* end file include/simdjson/generic/ondemand/serialization-inl.h */
+ /* end file include/simdjson/generic/ondemand-inl.h */
+ 
+diff --git a/src/implementation.cpp b/src/implementation.cpp
+index 85665a93..653ac2ce 100644
+--- a/src/implementation.cpp
++++ b/src/implementation.cpp
+@@ -15,19 +15,34 @@ namespace internal {
+ // without requiring a static initializer.
+ 
+ #if SIMDJSON_IMPLEMENTATION_HASWELL
+-const haswell::implementation haswell_singleton{};
++static const haswell::implementation* get_haswell_singleton() {
++  static const haswell::implementation haswell_singleton{};
++  return &haswell_singleton;
++}
+ #endif
+ #if SIMDJSON_IMPLEMENTATION_WESTMERE
+-const westmere::implementation westmere_singleton{};
++static const westmere::implementation* get_westmere_singleton() {
++  static const westmere::implementation westmere_singleton{};
++  return &westmere_singleton;
++}
+ #endif // SIMDJSON_IMPLEMENTATION_WESTMERE
+ #if SIMDJSON_IMPLEMENTATION_ARM64
+-const arm64::implementation arm64_singleton{};
++static const arm64::implementation* get_arm64_singleton() {
++  static const arm64::implementation arm64_singleton{};
++  return &arm64_singleton;
++}
+ #endif // SIMDJSON_IMPLEMENTATION_ARM64
+ #if SIMDJSON_IMPLEMENTATION_PPC64
+-const ppc64::implementation ppc64_singleton{};
++static const ppc64::implementation* get_ppc64_singleton() {
++  static const ppc64::implementation ppc64_singleton{};
++  return &ppc64_singleton;
++}
+ #endif // SIMDJSON_IMPLEMENTATION_PPC64
+ #if SIMDJSON_IMPLEMENTATION_FALLBACK
+-const fallback::implementation fallback_singleton{};
++static const fallback::implementation* get_fallback_singleton() {
++  static const fallback::implementation fallback_singleton{};
++  return &fallback_singleton;
++}
+ #endif // SIMDJSON_IMPLEMENTATION_FALLBACK
+ 
+ /**
+@@ -56,25 +71,26 @@ private:
+   const implementation *set_best() const noexcept;
+ };
+ 
+-const detect_best_supported_implementation_on_first_use detect_best_supported_implementation_on_first_use_singleton;
+-
+-const std::initializer_list<const implementation *> available_implementation_pointers {
++static const std::initializer_list<const implementation *>& get_available_implementation_pointers() {
++  static const std::initializer_list<const implementation *> available_implementation_pointers {
+ #if SIMDJSON_IMPLEMENTATION_HASWELL
+-  &haswell_singleton,
++    get_haswell_singleton(),
+ #endif
+ #if SIMDJSON_IMPLEMENTATION_WESTMERE
+-  &westmere_singleton,
++    get_westmere_singleton(),
+ #endif
+ #if SIMDJSON_IMPLEMENTATION_ARM64
+-  &arm64_singleton,
++    get_arm64_singleton(),
+ #endif
+ #if SIMDJSON_IMPLEMENTATION_PPC64
+-  &ppc64_singleton,
++    get_ppc64_singleton(),
+ #endif
+ #if SIMDJSON_IMPLEMENTATION_FALLBACK
+-  &fallback_singleton,
++    get_fallback_singleton(),
+ #endif
+-}; // available_implementation_pointers
++  }; // available_implementation_pointers
++  return available_implementation_pointers;
++}
+ 
+ // So we can return UNSUPPORTED_ARCHITECTURE from the parser when there is no support
+ class unsupported_implementation final : public implementation {
+@@ -102,25 +118,28 @@ public:
+   unsupported_implementation() : implementation("unsupported", "Unsupported CPU (no detected SIMD instructions)", 0) {}
+ };
+ 
+-const unsupported_implementation unsupported_singleton{};
++const unsupported_implementation* get_unsupported_singleton() {
++    static const unsupported_implementation unsupported_singleton{};
++    return &unsupported_singleton;
++}
+ 
+ size_t available_implementation_list::size() const noexcept {
+-  return internal::available_implementation_pointers.size();
++  return internal::get_available_implementation_pointers().size();
+ }
+ const implementation * const *available_implementation_list::begin() const noexcept {
+-  return internal::available_implementation_pointers.begin();
++  return internal::get_available_implementation_pointers().begin();
+ }
+ const implementation * const *available_implementation_list::end() const noexcept {
+-  return internal::available_implementation_pointers.end();
++  return internal::get_available_implementation_pointers().end();
+ }
+ const implementation *available_implementation_list::detect_best_supported() const noexcept {
+   // They are prelisted in priority order, so we just go down the list
+   uint32_t supported_instruction_sets = internal::detect_supported_architectures();
+-  for (const implementation *impl : internal::available_implementation_pointers) {
++  for (const implementation *impl : internal::get_available_implementation_pointers()) {
+     uint32_t required_instruction_sets = impl->required_instruction_sets();
+     if ((supported_instruction_sets & required_instruction_sets) == required_instruction_sets) { return impl; }
+   }
+-  return &unsupported_singleton; // this should never happen?
++  return get_unsupported_singleton(); // this should never happen?
+ }
+ 
+ const implementation *detect_best_supported_implementation_on_first_use::set_best() const noexcept {
+@@ -130,31 +149,39 @@ const implementation *detect_best_supported_implementation_on_first_use::set_bes
+   SIMDJSON_POP_DISABLE_WARNINGS
+ 
+   if (force_implementation_name) {
+-    auto force_implementation = available_implementations[force_implementation_name];
++    auto force_implementation = get_available_implementations()[force_implementation_name];
+     if (force_implementation) {
+-      return active_implementation = force_implementation;
++      return get_active_implementation() = force_implementation;
+     } else {
+       // Note: abort() and stderr usage within the library is forbidden.
+-      return active_implementation = &unsupported_singleton;
++      return get_active_implementation() = get_unsupported_singleton();
+     }
+   }
+-  return active_implementation = available_implementations.detect_best_supported();
++  return get_active_implementation() = get_available_implementations().detect_best_supported();
+ }
+ 
+ } // namespace internal
+ 
+-SIMDJSON_DLLIMPORTEXPORT const internal::available_implementation_list available_implementations{};
+-SIMDJSON_DLLIMPORTEXPORT internal::atomic_ptr<const implementation> active_implementation{&internal::detect_best_supported_implementation_on_first_use_singleton};
++SIMDJSON_DLLIMPORTEXPORT const internal::available_implementation_list& get_available_implementations() {
++  static const internal::available_implementation_list available_implementations{};
++  return available_implementations;
++}
++
++SIMDJSON_DLLIMPORTEXPORT internal::atomic_ptr<const implementation>& get_active_implementation() {
++    static const internal::detect_best_supported_implementation_on_first_use detect_best_supported_implementation_on_first_use_singleton;
++    static internal::atomic_ptr<const implementation> active_implementation{&detect_best_supported_implementation_on_first_use_singleton};
++    return active_implementation;
++}
+ 
+ simdjson_warn_unused error_code minify(const char *buf, size_t len, char *dst, size_t &dst_len) noexcept {
+-  return active_implementation->minify(reinterpret_cast<const uint8_t *>(buf), len, reinterpret_cast<uint8_t *>(dst), dst_len);
++  return get_active_implementation()->minify(reinterpret_cast<const uint8_t *>(buf), len, reinterpret_cast<uint8_t *>(dst), dst_len);
+ }
+ simdjson_warn_unused bool validate_utf8(const char *buf, size_t len) noexcept {
+-  return active_implementation->validate_utf8(buf, len);
++  return get_active_implementation()->validate_utf8(buf, len);
+ }
+ 
+ const implementation * builtin_implementation() {
+-  static const implementation * builtin_impl = available_implementations[SIMDJSON_STRINGIFY(SIMDJSON_BUILTIN_IMPLEMENTATION)];
++  static const implementation * builtin_impl = get_available_implementations()[SIMDJSON_STRINGIFY(SIMDJSON_BUILTIN_IMPLEMENTATION)];
+   assert(builtin_impl);
+   return builtin_impl;
+ }
+diff --git a/tools/json2json.cpp b/tools/json2json.cpp
+index 1981625c..aa4aea02 100644
+--- a/tools/json2json.cpp
++++ b/tools/json2json.cpp
+@@ -22,7 +22,7 @@ int main(int argc, const char *argv[]) {
+   std::string progUsage = "json2json version ";
+   progUsage += SIMDJSON_STRINGIFY(SIMDJSON_VERSION);
+   progUsage += " (";
+-  progUsage += simdjson::active_implementation->name();
++  progUsage += simdjson::get_active_implementation()->name();
+   progUsage += ")\n";
+   progUsage += "Reads json in, out the result of the parsing.\n";
+   progUsage += argv[0];
+diff --git a/tools/minify.cpp b/tools/minify.cpp
+index 77ef5158..49880786 100644
+--- a/tools/minify.cpp
++++ b/tools/minify.cpp
+@@ -31,7 +31,7 @@ int main(int argc, const char *argv[]) {
+   std::stringstream ss;
+   ss << "Parser implementation (by default, detects the most advanced implementation supported on the host machine)."  << std::endl;
+   ss << "Available parser implementations:" << std::endl;
+-  for (auto impl : simdjson::available_implementations) {
++  for (auto impl : simdjson::get_available_implementations()) {
+     if(impl->supported_by_runtime_system()) {
+       ss << "-a " << std::left << std::setw(9) << impl->name() << " - Use the " << impl->description() << " parser implementation." << std::endl;
+     }
+@@ -55,7 +55,7 @@ int main(int argc, const char *argv[]) {
+     return EXIT_FAILURE;
+   }
+   if(result.count("arch")) {
+-    const simdjson::implementation *impl = simdjson::available_implementations[result["arch"].as<std::string>().c_str()];
++    const simdjson::implementation *impl = simdjson::get_available_implementations()[result["arch"].as<std::string>().c_str()];
+     if(!impl) {
+       usage("Unsupported implementation.");
+       return EXIT_FAILURE;
+@@ -64,7 +64,7 @@ int main(int argc, const char *argv[]) {
+       usage("The selected implementation does not match your current CPU.");
+       return EXIT_FAILURE;
+     }
+-    simdjson::active_implementation = impl;
++    simdjson::get_active_implementation() = impl;
+   }
+ 
+   std::string filename = result["file"].as<std::string>();
+@@ -77,7 +77,7 @@ int main(int argc, const char *argv[]) {
+   }
+   simdjson::padded_string copy(p.length()); // does not need to be padded after all!
+   size_t copy_len;
+-  error = simdjson::active_implementation->minify((const uint8_t*)p.data(), p.length(), (uint8_t*)copy.data(), copy_len);
++  error = simdjson::get_active_implementation()->minify((const uint8_t*)p.data(), p.length(), (uint8_t*)copy.data(), copy_len);
+   if (error) { std::cerr << error << std::endl; return EXIT_FAILURE; }
+   printf("%s", copy.data());
+   return EXIT_SUCCESS;
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/fuzz/fuzz_implementations.cpp b/fuzz/fuzz_implementations.cpp
+index bfbe3b1a..120d0e6a 100644
+--- a/fuzz/fuzz_implementations.cpp
++++ b/fuzz/fuzz_implementations.cpp
+@@ -93,7 +93,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+     std::size_t nerrors=0;
+     for(std::size_t i=0; i<Nimplementations; ++i) {
+         auto& e=implementations[i];
+-        simdjson::active_implementation=e.impl;
++        simdjson::get_active_implementation()=e.impl;
+         e.error=e.parser.parse(Data,Size).get(e.element);
+         if(e.error) {
+             ++nerrors;
+diff --git a/fuzz/supported_implementations.h b/fuzz/supported_implementations.h
+index 5957f837..787c3553 100644
+--- a/fuzz/supported_implementations.h
++++ b/fuzz/supported_implementations.h
+@@ -17,7 +17,7 @@
+ std::vector<const simdjson::implementation*>
+ get_runtime_supported_implementations() {
+     std::vector<const simdjson::implementation*> ret;
+-    for(auto& e: simdjson::available_implementations) {
++    for(auto& e: simdjson::get_available_implementations()) {
+         if(e->supported_by_runtime_system()) {
+             ret.emplace_back(e);
+         }

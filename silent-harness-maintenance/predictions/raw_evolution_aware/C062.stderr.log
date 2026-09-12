@@ -1,0 +1,282 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/silent-maintenance-evolution_aware-C062-upjalhov
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a089a5-2280-7b21-9ee4-4766915dcce1
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous Fuzz-Harness Maintenance Case
+
+Case ID
+
+C062
+
+## Evidence boundary
+
+The material below contains only the complete existing harness H0 and the complete production source diff from S0 to S1. No developer-updated harness, commit message, build result, coverage result, reachability result, or label is supplied.
+
+## Existing Harness H0
+
+### `fuzz/c/std/zlib_fuzzer.c`
+
+```text
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a sanity check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN zlib_fuzzer.c
+./a.out ../../../test/data/*.zlib
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c whitelist which parts of Wuffs to build. That file contains
+// the entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__ADLER32
+#define WUFFS_CONFIG__MODULE__DEFLATE
+#define WUFFS_CONFIG__MODULE__ZLIB
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+
+#define DST_BUFFER_ARRAY_SIZE 65536
+
+// Wuffs allows either statically or dynamically allocated work buffers. This
+// program exercises static allocation.
+#define WORK_BUFFER_ARRAY_SIZE \
+  WUFFS_ZLIB__DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE
+#if WORK_BUFFER_ARRAY_SIZE > 0
+uint8_t g_work_buffer_array[WORK_BUFFER_ARRAY_SIZE];
+#else
+// Not all C/C++ compilers support 0-length arrays.
+uint8_t g_work_buffer_array[1];
+#endif
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_zlib__decoder dec;
+  wuffs_base__status status = wuffs_zlib__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+
+  // Ignore the checksum for 99.99%-ish of all input. When fuzzers generate
+  // random input, the checkum is very unlikely to match. Still, it's useful to
+  // verify that checksumming does not lead to e.g. buffer overflows.
+  wuffs_zlib__decoder__set_ignore_checksum(&dec, hash & 0xFFFE);
+
+  uint8_t dst_buffer[DST_BUFFER_ARRAY_SIZE];
+  wuffs_base__io_buffer dst = ((wuffs_base__io_buffer){
+      .data = ((wuffs_base__slice_u8){
+          .ptr = dst_buffer,
+          .len = DST_BUFFER_ARRAY_SIZE,
+      }),
+  });
+
+  while (true) {
+    dst.meta.wi = 0;
+    status = wuffs_zlib__decoder__transform_io(
+        &dec, &dst, src,
+        wuffs_base__make_slice_u8(g_work_buffer_array, WORK_BUFFER_ARRAY_SIZE));
+    if (status.repr != wuffs_base__suspension__short_write) {
+      break;
+    }
+    if (dst.meta.wi == 0) {
+      fprintf(stderr, "wuffs_zlib__decoder__transform_io made no progress\n");
+      intentional_segfault();
+    }
+  }
+  return wuffs_base__status__message(&status);
+}
+
+```
+
+## Complete production source diff S0 -> S1
+
+The fixed `--function-context` rule includes the complete diff and expanded changed-function bodies where Git recognizes them.
+
+```diff
+diff --git a/release/c/wuffs-unsupported-snapshot.c b/release/c/wuffs-unsupported-snapshot.c
+index 0f4edbae171bfce82f0dcb618a7e18a7e7788cd0..813f7e712ae18aef6e370ddb659a966b57d3507d 100644
+--- a/release/c/wuffs-unsupported-snapshot.c
++++ b/release/c/wuffs-unsupported-snapshot.c
+@@ -26347,8 +26347,18 @@ WUFFS_BASE__MAYBE_STATIC wuffs_base__empty_struct
+ wuffs_gzip__decoder__set_quirk_enabled(
+     wuffs_gzip__decoder* self,
+     uint32_t a_quirk,
+     bool a_enabled) {
++  if (!self) {
++    return wuffs_base__make_empty_struct();
++  }
++  if (self->private_impl.magic != WUFFS_BASE__MAGIC) {
++    return wuffs_base__make_empty_struct();
++  }
++
++  if (a_quirk == 1) {
++    self->private_impl.f_ignore_checksum = a_enabled;
++  }
+   return wuffs_base__make_empty_struct();
+ }
+ 
+ // -------- func gzip.decoder.workbuf_len
+@@ -29966,8 +29976,18 @@ WUFFS_BASE__MAYBE_STATIC wuffs_base__empty_struct
+ wuffs_zlib__decoder__set_quirk_enabled(
+     wuffs_zlib__decoder* self,
+     uint32_t a_quirk,
+     bool a_enabled) {
++  if (!self) {
++    return wuffs_base__make_empty_struct();
++  }
++  if (self->private_impl.magic != WUFFS_BASE__MAGIC) {
++    return wuffs_base__make_empty_struct();
++  }
++
++  if (a_quirk == 1) {
++    self->private_impl.f_ignore_checksum = a_enabled;
++  }
+   return wuffs_base__make_empty_struct();
+ }
+ 
+ // -------- func zlib.decoder.workbuf_len
+@@ -31397,8 +31417,19 @@ WUFFS_BASE__MAYBE_STATIC wuffs_base__empty_struct
+ wuffs_png__decoder__set_quirk_enabled(
+     wuffs_png__decoder* self,
+     uint32_t a_quirk,
+     bool a_enabled) {
++  if (!self) {
++    return wuffs_base__make_empty_struct();
++  }
++  if (self->private_impl.magic != WUFFS_BASE__MAGIC) {
++    return wuffs_base__make_empty_struct();
++  }
++
++  if (a_quirk == 1) {
++    self->private_impl.f_ignore_checksum = a_enabled;
++    wuffs_zlib__decoder__set_quirk_enabled(&self->private_data.f_zlib, a_quirk, a_enabled);
++  }
+   return wuffs_base__make_empty_struct();
+ }
+ 
+ // -------- func png.decoder.decode_image_config
+diff --git a/std/gzip/decode_gzip.wuffs b/std/gzip/decode_gzip.wuffs
+index e8e5ce1d74462728c6fafc00828fb4604344d28a..67fb478b9e6d7ff6488e7fd159fd8a8705358943 100644
+--- a/std/gzip/decode_gzip.wuffs
++++ b/std/gzip/decode_gzip.wuffs
+@@ -37,6 +37,9 @@ pub func decoder.set_ignore_checksum!(ic: base.bool) {
+ }
+ 
+ pub func decoder.set_quirk_enabled!(quirk: base.u32, enabled: base.bool) {
++	if args.quirk == base.QUIRK_IGNORE_CHECKSUM {
++		this.ignore_checksum = args.enabled
++	}
+ }
+ 
+ pub func decoder.workbuf_len() base.range_ii_u64 {
+diff --git a/std/png/decode_png.wuffs b/std/png/decode_png.wuffs
+index 9363d4c2a0633f0557d96a870a974d9ff6a9526b..29d98c403832fa3f90f67a5d79be2af89ec00e64 100644
+--- a/std/png/decode_png.wuffs
++++ b/std/png/decode_png.wuffs
+@@ -99,6 +99,10 @@ pub func decoder.set_ignore_checksum!(ic: base.bool) {
+ }
+ 
+ pub func decoder.set_quirk_enabled!(quirk: base.u32, enabled: base.bool) {
++	if args.quirk == base.QUIRK_IGNORE_CHECKSUM {
++		this.ignore_checksum = args.enabled
++		this.zlib.set_quirk_enabled!(quirk: args.quirk, enabled: args.enabled)
++	}
+ }
+ 
+ pub func decoder.decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+diff --git a/std/zlib/decode_zlib.wuffs b/std/zlib/decode_zlib.wuffs
+index 8fef738d308c33c1151797e107bad450c2f7a722..e77e52b8457bd47fd76f11a55e320d90fd6036eb 100644
+--- a/std/zlib/decode_zlib.wuffs
++++ b/std/zlib/decode_zlib.wuffs
+@@ -64,6 +64,9 @@ pub func decoder.set_ignore_checksum!(ic: base.bool) {
+ }
+ 
+ pub func decoder.set_quirk_enabled!(quirk: base.u32, enabled: base.bool) {
++	if args.quirk == base.QUIRK_IGNORE_CHECKSUM {
++		this.ignore_checksum = args.enabled
++	}
+ }
+ 
+ pub func decoder.workbuf_len() base.range_ii_u64 {
+
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C062","gap_exists":false,"gap_type":[],"commit_induced":"NO","maintenance_needed":false,"confidence":99,"affected_functions":["wuffs_gzip__decoder__set_quirk_enabled","wuffs_zlib__decoder__set_quirk_enabled","wuffs_png__decoder__set_quirk_enabled"],"reason":"The commit adds QUIRK_IGNORE_CHECKSUM handling to three set_quirk_enabled entry points, but it does not create a material gap for H0. For the in-scope zlib decoder, the new branch only assigns private_impl.f_ignore_checksum, which H0 already controls through wuffs_zlib__decoder__set_ignore_checksum(&dec, hash & 0xFFFE) before calling wuffs_zlib__decoder__transform_io. Thus H0 reaches the same changed checksum behavior with fuzz-controlled configuration and input. H0 explicitly enables only BASE, ADLER32, DEFLATE, and ZLIB modules, so the gzip and png entry points are outside its configured target rather than newly uncovered behavior within that target.","evidence":["In wuffs_zlib__decoder__set_quirk_enabled, a_quirk == 1 sets self->private_impl.f_ignore_checksum = a_enabled.","H0 calls wuffs_zlib__decoder__set_ignore_checksum(&dec, hash & 0xFFFE), providing fuzz-derived control over the same ignore-checksum state.","H0 then exercises that state through wuffs_zlib__decoder__transform_io(&dec, &dst, src, ...), with src carrying the fuzz input.","H0 defines WUFFS_CONFIG__MODULE__ZLIB but does not define WUFFS_CONFIG__MODULE__GZIP or WUFFS_CONFIG__MODULE__PNG.","The new null and private_impl.magic checks in the generated set_quirk_enabled functions are validation paths and do not prevent H0 from reaching the underlying changed checksum behavior through the existing initialized decoder and direct setter."],"recommended_action":"No harness maintenance is needed for this commit; retain the existing hash-controlled wuffs_zlib__decoder__set_ignore_checksum coverage."}
+tokens used
+6,242

@@ -1,0 +1,199 @@
+diff --git a/include/mbedtls/config.h b/include/mbedtls/config.h
+index 4905b924309dc856099512ba7f5c1b2a074e848e..993b90ff66f14a02222274222fffddf084c9d741 100644
+--- a/include/mbedtls/config.h
++++ b/include/mbedtls/config.h
+@@ -1592,18 +1592,6 @@
+  */
+ #define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE
+ 
+-/**
+- * \def MBEDTLS_SSL_CBC_RECORD_SPLITTING
+- *
+- * Enable 1/n-1 record splitting for CBC mode in TLS.
+- *
+- * This is a countermeasure to the BEAST attack, which also minimizes the risk
+- * of interoperability issues compared to sending 0-length records.
+- *
+- * Comment this macro to disable 1/n-1 record splitting.
+- */
+-#define MBEDTLS_SSL_CBC_RECORD_SPLITTING
+-
+ /**
+  * \def MBEDTLS_SSL_RENEGOTIATION
+  *
+diff --git a/include/mbedtls/ssl.h b/include/mbedtls/ssl.h
+index 39661cbac260c3137a6e54f0e3f11de32a68e3db..b5200426f7f2ae6ecbc1d7d66bd838ea5a616ad3 100644
+--- a/include/mbedtls/ssl.h
++++ b/include/mbedtls/ssl.h
+@@ -198,9 +198,6 @@
+ #define MBEDTLS_SSL_SESSION_TICKETS_DISABLED     0
+ #define MBEDTLS_SSL_SESSION_TICKETS_ENABLED      1
+ 
+-#define MBEDTLS_SSL_CBC_RECORD_SPLITTING_DISABLED    0
+-#define MBEDTLS_SSL_CBC_RECORD_SPLITTING_ENABLED     1
+-
+ #define MBEDTLS_SSL_PRESET_DEFAULT              0
+ #define MBEDTLS_SSL_PRESET_SUITEB               2
+ 
+@@ -1192,9 +1189,6 @@ struct mbedtls_ssl_config
+ #if defined(MBEDTLS_SSL_DTLS_ANTI_REPLAY)
+     unsigned int anti_replay : 1;   /*!< detect and prevent replay?         */
+ #endif
+-#if defined(MBEDTLS_SSL_CBC_RECORD_SPLITTING)
+-    unsigned int cbc_record_splitting : 1;  /*!< do cbc record splitting    */
+-#endif
+ #if defined(MBEDTLS_SSL_RENEGOTIATION)
+     unsigned int disable_renegotiation : 1; /*!< disable renegotiation?     */
+ #endif
+@@ -1356,10 +1350,6 @@ struct mbedtls_ssl_context
+     uint16_t mtu;               /*!< path mtu, used to fragment outgoing messages */
+ #endif /* MBEDTLS_SSL_PROTO_DTLS */
+ 
+-#if defined(MBEDTLS_SSL_CBC_RECORD_SPLITTING)
+-    signed char split_done;     /*!< current record already splitted? */
+-#endif /* MBEDTLS_SSL_CBC_RECORD_SPLITTING */
+-
+     /*
+      * PKI layer
+      */
+diff --git a/library/ssl_msg.c b/library/ssl_msg.c
+index 540d5d1f64db80df04976923b3302898ad63751c..081a0b2b975c8c0bd49bd306ef3597dc15fee60a 100644
+--- a/library/ssl_msg.c
++++ b/library/ssl_msg.c
+@@ -5475,44 +5475,6 @@ static int ssl_write_real( mbedtls_ssl_context *ssl,
+     return( (int) len );
+ }
+ 
+-/*
+- * Write application data, doing 1/n-1 splitting if necessary.
+- *
+- * With non-blocking I/O, ssl_write_real() may return WANT_WRITE,
+- * then the caller will call us again with the same arguments, so
+- * remember whether we already did the split or not.
+- */
+-#if defined(MBEDTLS_SSL_CBC_RECORD_SPLITTING)
+-static int ssl_write_split( mbedtls_ssl_context *ssl,
+-                            const unsigned char *buf, size_t len )
+-{
+-    int ret = MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;
+-
+-    if( ssl->conf->cbc_record_splitting ==
+-            MBEDTLS_SSL_CBC_RECORD_SPLITTING_DISABLED ||
+-        len <= 1 ||
+-        ssl->minor_ver > MBEDTLS_SSL_MINOR_VERSION_1 ||
+-        mbedtls_cipher_get_cipher_mode( &ssl->transform_out->cipher_ctx_enc )
+-                                != MBEDTLS_MODE_CBC )
+-    {
+-        return( ssl_write_real( ssl, buf, len ) );
+-    }
+-
+-    if( ssl->split_done == 0 )
+-    {
+-        if( ( ret = ssl_write_real( ssl, buf, 1 ) ) <= 0 )
+-            return( ret );
+-        ssl->split_done = 1;
+-    }
+-
+-    if( ( ret = ssl_write_real( ssl, buf + 1, len - 1 ) ) <= 0 )
+-        return( ret );
+-    ssl->split_done = 0;
+-
+-    return( ret + 1 );
+-}
+-#endif /* MBEDTLS_SSL_CBC_RECORD_SPLITTING */
+-
+ /*
+  * Write application data (public-facing wrapper)
+  */
+@@ -5542,11 +5504,7 @@ int mbedtls_ssl_write( mbedtls_ssl_context *ssl, const unsigned char *buf, size_
+         }
+     }
+ 
+-#if defined(MBEDTLS_SSL_CBC_RECORD_SPLITTING)
+-    ret = ssl_write_split( ssl, buf, len );
+-#else
+     ret = ssl_write_real( ssl, buf, len );
+-#endif
+ 
+     MBEDTLS_SSL_DEBUG_MSG( 2, ( "<= write" ) );
+ 
+diff --git a/library/ssl_tls.c b/library/ssl_tls.c
+index 58675dbede8d649948d32b77cc9ed1ec5f53cbe0..771e01a2a301b51ecb5d3b7b2d705aeaee019aae 100644
+--- a/library/ssl_tls.c
++++ b/library/ssl_tls.c
+@@ -3307,10 +3307,6 @@ int mbedtls_ssl_session_reset_int( mbedtls_ssl_context *ssl, int partial )
+     ssl->out_msgtype = 0;
+     ssl->out_msglen = 0;
+     ssl->out_left = 0;
+-#if defined(MBEDTLS_SSL_CBC_RECORD_SPLITTING)
+-    if( ssl->split_done != MBEDTLS_SSL_CBC_RECORD_SPLITTING_DISABLED )
+-        ssl->split_done = 0;
+-#endif
+ 
+     memset( ssl->cur_out_ctr, 0, sizeof( ssl->cur_out_ctr ) );
+ 
+@@ -4202,13 +4198,6 @@ void mbedtls_ssl_conf_truncated_hmac( mbedtls_ssl_config *conf, int truncate )
+ }
+ #endif /* MBEDTLS_SSL_TRUNCATED_HMAC */
+ 
+-#if defined(MBEDTLS_SSL_CBC_RECORD_SPLITTING)
+-void mbedtls_ssl_conf_cbc_record_splitting( mbedtls_ssl_config *conf, char split )
+-{
+-    conf->cbc_record_splitting = split;
+-}
+-#endif
+-
+ void mbedtls_ssl_conf_legacy_renegotiation( mbedtls_ssl_config *conf, int allow_legacy )
+ {
+     conf->allow_legacy_renegotiation = allow_legacy;
+@@ -6234,10 +6223,6 @@ int mbedtls_ssl_config_defaults( mbedtls_ssl_config *conf,
+     conf->extended_ms = MBEDTLS_SSL_EXTENDED_MS_ENABLED;
+ #endif
+ 
+-#if defined(MBEDTLS_SSL_CBC_RECORD_SPLITTING)
+-    conf->cbc_record_splitting = MBEDTLS_SSL_CBC_RECORD_SPLITTING_ENABLED;
+-#endif
+-
+ #if defined(MBEDTLS_SSL_DTLS_HELLO_VERIFY) && defined(MBEDTLS_SSL_SRV_C)
+     conf->f_cookie_write = ssl_cookie_write_dummy;
+     conf->f_cookie_check = ssl_cookie_check_dummy;
+diff --git a/programs/ssl/ssl_client2.c b/programs/ssl/ssl_client2.c
+index fb3cce19f25107e1b584d03d09c37e2dbe949cd6..a643900b9517182aaf32b910161df33b10ec0ae2 100644
+--- a/programs/ssl/ssl_client2.c
++++ b/programs/ssl/ssl_client2.c
+@@ -248,13 +248,6 @@ int main( void )
+ #define USAGE_MAX_FRAG_LEN ""
+ #endif /* MBEDTLS_SSL_MAX_FRAGMENT_LENGTH */
+ 
+-#if defined(MBEDTLS_SSL_CBC_RECORD_SPLITTING)
+-#define USAGE_RECSPLIT \
+-    "    recsplit=0/1        default: (library default: on)\n"
+-#else
+-#define USAGE_RECSPLIT
+-#endif
+-
+ #if defined(MBEDTLS_DHM_C)
+ #define USAGE_DHMLEN \
+     "    dhmlen=%%d           default: (library default: 1024 bits)\n"
+@@ -414,7 +407,6 @@ int main( void )
+     USAGE_ETM                                               \
+     USAGE_REPRODUCIBLE                                      \
+     USAGE_CURVES                                            \
+-    USAGE_RECSPLIT                                          \
+     USAGE_DHMLEN                                            \
+     "\n"
+ #define USAGE4 \
+@@ -1780,13 +1772,6 @@ int main( int argc, char *argv[] )
+ #endif /* MBEDTLS_SSL_DTLS_SRTP */
+ #endif /* MBEDTLS_SSL_EXPORT_KEYS */
+ 
+-#if defined(MBEDTLS_SSL_CBC_RECORD_SPLITTING)
+-    if( opt.recsplit != DFL_RECSPLIT )
+-        mbedtls_ssl_conf_cbc_record_splitting( &conf, opt.recsplit
+-                                  ? MBEDTLS_SSL_CBC_RECORD_SPLITTING_ENABLED
+-                                  : MBEDTLS_SSL_CBC_RECORD_SPLITTING_DISABLED );
+-#endif
+-
+ #if defined(MBEDTLS_DHM_C)
+     if( opt.dhmlen != DFL_DHMLEN )
+         mbedtls_ssl_conf_dhm_min_bitlen( &conf, opt.dhmlen );

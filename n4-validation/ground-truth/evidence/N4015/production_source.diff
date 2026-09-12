@@ -1,0 +1,141 @@
+diff --git a/std/jpeg/decode_jpeg.wuffs b/std/jpeg/decode_jpeg.wuffs
+index 338f0ca0..f0deae2b 100644
+--- a/std/jpeg/decode_jpeg.wuffs
++++ b/std/jpeg/decode_jpeg.wuffs
+@@ -6,24 +6,25 @@
+ // option. This file may not be copied, modified, or distributed
+ // except according to those terms.
+ //
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
+ pub status "#bad DHT marker"
+ pub status "#bad DQT marker"
+ pub status "#bad DRI marker"
+ pub status "#bad SOF marker"
+ pub status "#bad SOS marker"
+ pub status "#bad header"
+ pub status "#bad marker"
++pub status "#bad scan count"
+ pub status "#missing Huffman table"
+ pub status "#missing Quantization table"
+ pub status "#truncated input"
+ pub status "#unsupported arithmetic coding"
+ pub status "#unsupported color model"
+ pub status "#unsupported fractional sampling"
+ pub status "#unsupported hierarchical coding"
+ pub status "#unsupported implicit height"
+ pub status "#unsupported lossless coding"
+ pub status "#unsupported marker"
+ pub status "#unsupported precision (12 bits)"
+ pub status "#unsupported precision (16 bits)"
+@@ -269,24 +270,26 @@ pub struct decoder? implements base.image_decoder(
+         seen_dqt       : array[4] base.bool,
+         saved_seen_dqt : array[4] base.bool,
+         seen_dht       : array[8] base.bool,
+ 
+         // These fields yield bitstream bits in Most Significant Bits order.
+         bitstream_bits   : base.u64,
+         bitstream_n_bits : base.u32,
+         bitstream_ri     : base.u32[..= 0x800],
+         bitstream_wi     : base.u32[..= 0x800],
+ 
+         bitstream_is_closed : base.bool,
+ 
++        expect_multiple_scans : base.bool,
++
+         // bitstream_padding is the number (per restart) of implicit zeroes
+         // remaining at the end of the bitstream. Its initial 12345 value is
+         // arbitrary.
+         bitstream_padding : base.u32[..= 12345],
+ 
+         quant_tables       : array[4] array[64] base.u16[..= 0xFF],
+         saved_quant_tables : array[4] array[64] base.u16[..= 0xFF],
+ 
+         // huff_tables_symbols[(tc*4)|th][i] is the i'th Huffman code's symbol.
+         huff_tables_symbols : array[8] array[256] base.u8,
+ 
+         // huff_tables_slow[(tc*4)|th][n] is a u32 such that:
+@@ -1247,24 +1250,26 @@ pri func decoder.calculate_huff_tables!(tc4_th: base.u8[..= 7], total_count: bas
+     return false
+ }
+ 
+ pri func decoder.decode_sos?(src: base.io_reader, workbuf: slice base.u8) {
+     var my : base.u32
+     var mx : base.u32
+ 
+     var decode_mcu_result : base.u32
+     var bitstream_length  : base.u32
+ 
+     if this.scan_count >= 64 {
+         return "#unsupported scan count"
++    } else if (this.scan_count > 0) and (not this.expect_multiple_scans) {
++        return "#bad scan count"
+     }
+ 
+     this.prepare_scan?(src: args.src)
+ 
+     // Reset.
+     this.next_restart_marker = 0
+     this.mcu_previous_dc_values[0] = 0
+     this.mcu_previous_dc_values[1] = 0
+     this.mcu_previous_dc_values[2] = 0
+     this.mcu_previous_dc_values[3] = 0
+     this.restarts_remaining = this.restart_interval
+     this.eob_run = 0
+@@ -1422,24 +1427,30 @@ pri func decoder.prepare_scan?(src: base.io_reader) {
+         this.scan_comps_ta[i] = c8 & 0x0F
+         // SOF0 (which is 0xC0) means a baseline JPEG. The baseline (tx <= 1)
+         // restriction is specified in table B.5.
+         if this.sof_marker == 0xC0 {
+             if (this.scan_comps_td[i] > 1) or (this.scan_comps_ta[i] > 1) {
+                 return "#bad SOS marker"
+             }
+         }
+ 
+         i += 1
+     }
+ 
++    if this.scan_count == 0 {
++        this.expect_multiple_scans =
++                (this.sof_marker >= 0xC2) or
++                (this.scan_num_components < this.num_components)
++    }
++
+     if this.sof_marker < 0xC2 {
+         // At this point, for sequential (not progressive) JPEGs, we should
+         // check that (Ss, Se, Ah, Al) is (0, 63, 0, 0) but libjpeg treats
+         // otherwise as a warning (JWRN_NOT_SEQUENTIAL), not an error.
+         args.src.skip_u32?(n: 3)
+         this.scan_ss = 0
+         this.scan_se = 63
+         this.scan_ah = 0
+         this.scan_al = 0
+ 
+     } else {
+         c8 = args.src.read_u8?()
+@@ -2051,24 +2062,25 @@ pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.sta
+     var i : base.u32
+     var j : base.u32
+ 
+     if this.call_sequence < 0x20 {
+         return base."#bad call sequence"
+     }
+     if args.index <> 0 {
+         return base."#bad argument"
+     }
+ 
+     this.call_sequence = 0x28
+     this.bitstream_is_closed = false
++    this.expect_multiple_scans = false
+     this.frame_config_io_position = args.io_position
+     this.scan_count = 0
+     this.restart_interval = this.saved_restart_interval
+ 
+     i = 0
+     while i < 4 {
+         this.seen_dqt[i] = this.saved_seen_dqt[i]
+         j = 0
+         while j < 64,
+                 inv i < 4,
+         {
+             this.quant_tables[i][j] = this.saved_quant_tables[i][j]

@@ -1,0 +1,689 @@
+PROJECT h2o
+COMMIT ca72d787e15842094b4d112286b048c9fba33f44
+PARENT b4fbd13f5db228b5ee1a1857e4a8a2fa67350815
+SUBJECT make h2o_socketpool_target_conf_t as a super class
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/include/h2o.h b/include/h2o.h
+index dd05d882cf..6b8a40fb7b 100644
+--- a/include/h2o.h
++++ b/include/h2o.h
+@@ -313,7 +313,7 @@ typedef struct st_h2o_status_handler_t {
+     h2o_iovec_t name;
+     void *(*init)(void); /* optional callback, allocates a context that will be passed to per_thread() */
+     void (*per_thread)(void *priv, h2o_context_t *ctx); /* optional callback, will be called for each thread */
+-    h2o_iovec_t (*final)(void *ctx, h2o_globalconf_t *gconf, h2o_req_t *req); /* mandatory, will be passed the optional context */
++    h2o_iovec_t (* final)(void *ctx, h2o_globalconf_t *gconf, h2o_req_t *req); /* mandatory, will be passed the optional context */
+ } h2o_status_handler_t;
+ 
+ typedef H2O_VECTOR(h2o_status_handler_t) h2o_status_callbacks_t;
+@@ -1877,6 +1877,7 @@ int h2o_headers_is_prohibited_name(const h2o_token_t *token);
+ void h2o_headers_register_configurator(h2o_globalconf_t *conf);
+ 
+ /* lib/proxy.c */
++
+ typedef struct st_h2o_proxy_config_vars_t {
+     uint64_t io_timeout;
+     uint64_t connect_timeout;
+diff --git a/include/h2o/balancer.h b/include/h2o/balancer.h
+index 41f6167904..5588baf546 100644
+--- a/include/h2o/balancer.h
++++ b/include/h2o/balancer.h
+@@ -36,17 +36,21 @@ typedef size_t (*h2o_balancer_selector)(h2o_balancer_t *balancer, h2o_socketpool
+ 
+ typedef void (*h2o_balancer_destroyer)(h2o_balancer_t *balancer);
+ 
++typedef void (*h2o_balancer_set_target_cb)(h2o_balancer_t *balancer, h2o_socketpool_target_t **targets, size_t target_len);
++
+ typedef struct st_h2o_balancer_callbacks_t {
+-    h2o_balancer_selector selector;
++    h2o_balancer_set_target_cb set_targets;
++    h2o_balancer_selector select;
+     h2o_balancer_destroyer destroy;
+ } h2o_balancer_callbacks_t;
+ 
+ struct st_h2o_balancer_t {
+     const h2o_balancer_callbacks_t *callbacks;
++    size_t target_conf_len;
+ };
+ 
+ /* round robin */
+-h2o_balancer_t *h2o_balancer_create_rr(h2o_socketpool_target_t **targets, size_t target_len);
++h2o_balancer_t *h2o_balancer_create_rr();
+ 
+ /* least connection */
+ h2o_balancer_t *h2o_balancer_create_lc(void);
+diff --git a/include/h2o/socketpool.h b/include/h2o/socketpool.h
+index c325c6ff6a..375a82ee00 100644
+--- a/include/h2o/socketpool.h
++++ b/include/h2o/socketpool.h
+@@ -40,12 +40,10 @@ typedef enum en_h2o_socketpool_target_type_t {
+     H2O_SOCKETPOOL_TYPE_SOCKADDR
+ } h2o_socketpool_target_type_t;
+ 
++/* if there's any other conf for specific balancer, create a subclass */
+ typedef struct st_h2o_socketpool_target_conf_t {
+     /* weight for load balancer */
+     size_t weight;
+-    
+-    /* other per target specific conf for balancer */
+-    void *data_for_balancer;
+ } h2o_socketpool_target_conf_t;
+ 
+ typedef struct st_h2o_socketpool_target_t {
+@@ -70,7 +68,7 @@ typedef struct st_h2o_socketpool_target_t {
+         } sockaddr;
+     } peer;
+     
+-    h2o_socketpool_target_conf_t conf;
++    h2o_socketpool_target_conf_t *conf;
+ 
+     struct {
+         h2o_linklist_t sockets;
+@@ -125,9 +123,9 @@ void h2o_socketpool_init_global(h2o_socketpool_t *pool, size_t capacity);
+  */
+ void h2o_socketpool_dispose(h2o_socketpool_t *pool);
+ /**
+- * create a target
++ * create a target, where conf_len is the size of lb_target_conf. If lb_target_conf is NULL, a default target conf would be created.
+  */
+-h2o_socketpool_target_t *h2o_socketpool_target_create(h2o_url_t *origin, h2o_socketpool_target_conf_t *lb_target_conf);
++h2o_socketpool_target_t *h2o_socketpool_target_create(h2o_url_t *origin, h2o_socketpool_target_conf_t *lb_target_conf, size_t conf_len);
+ /**
+  * destroy a target
+  */
+diff --git a/lib/common/balancer/least_conn.c b/lib/common/balancer/least_conn.c
+index 8faa8fbe3e..0cf4a1713f 100644
+--- a/lib/common/balancer/least_conn.c
++++ b/lib/common/balancer/least_conn.c
+@@ -32,7 +32,7 @@ static size_t selector(h2o_balancer_t *ignored, h2o_socketpool_target_vector_t *
+     for (i = 0; i < targets->size; i++) {
+         if (!tried[i]) {
+             result = i;
+-            result_weight = targets->entries[i]->conf.weight;
++            result_weight = targets->entries[i]->conf->weight;
+             break;
+         }
+     }
+@@ -41,10 +41,10 @@ static size_t selector(h2o_balancer_t *ignored, h2o_socketpool_target_vector_t *
+         leftprod = targets->entries[i]->_shared.leased_count;
+         leftprod *= result_weight;
+         rightprod = targets->entries[result]->_shared.leased_count;
+-        rightprod *= targets->entries[i]->conf.weight;
++        rightprod *= targets->entries[i]->conf->weight;
+         if (!tried[i] && leftprod < rightprod) {
+             result = i;
+-            result_weight = targets->entries[i]->conf.weight;
++            result_weight = targets->entries[i]->conf->weight;
+         }
+     }
+ 
+@@ -57,9 +57,11 @@ static void destroy(h2o_balancer_t *ignored) {}
+ h2o_balancer_t *h2o_balancer_create_lc(void)
+ {
+     static const h2o_balancer_callbacks_t lc_callbacks = {
++        NULL,
+         selector,
+         destroy
+     };
+-    static h2o_balancer_t lc_balancer = {&lc_callbacks};
++    static const size_t target_conf_len = sizeof(h2o_socketpool_target_conf_t);
++    static h2o_balancer_t lc_balancer = {&lc_callbacks, target_conf_len};
+     return &lc_balancer;
+ }
+diff --git a/lib/common/balancer/roundrobin.c b/lib/common/balancer/roundrobin.c
+index 487dcda42b..65b34b6d49 100644
+--- a/lib/common/balancer/roundrobin.c
++++ b/lib/common/balancer/roundrobin.c
+@@ -75,25 +75,37 @@ static void destroy(h2o_balancer_t *balancer)
+     free(self);
+ }
+ 
+-h2o_balancer_t *h2o_balancer_create_rr(h2o_socketpool_target_t **targets, size_t target_len) {
+-    static const h2o_balancer_callbacks_t rr_callbacks = {
+-        selector,
+-        destroy
+-    };
+-    
++static void set_targets(h2o_balancer_t *balancer, h2o_socketpool_target_t **targets, size_t target_len) {
++    struct round_robin_t *self = (void *)balancer;
+     size_t i;
+-    struct round_robin_t *self = h2o_mem_alloc(sizeof(*self));
++
++    pthread_mutex_lock(&self->mutex);
+     self->next_pos = 0;
+     self->next_actual_target = 0;
+-    pthread_mutex_init(&self->mutex, NULL);
++    free(self->floor_next_target);
+     self->floor_next_target = h2o_mem_alloc(sizeof(*self->floor_next_target) * target_len);
+-    
+-    self->floor_next_target[0] = targets[0]->conf.weight;
++
++    self->floor_next_target[0] = targets[0]->conf->weight;
+     for (i = 1; i < target_len; i++) {
+-        self->floor_next_target[i] = self->floor_next_target[i - 1] + targets[i]->conf.weight;
++        self->floor_next_target[i] = self->floor_next_target[i - 1] + targets[i]->conf->weight;
+     }
+     self->pos_less_than = self->floor_next_target[target_len - 1];
++    pthread_mutex_unlock(&self->mutex);
++}
++
++h2o_balancer_t *h2o_balancer_create_rr() {
++    static const h2o_balancer_callbacks_t rr_callbacks = {
++        set_targets,
++        selector,
++        destroy
++    };
++    static const size_t target_conf_len = sizeof(h2o_socketpool_target_conf_t);
++
++    struct round_robin_t *self = h2o_mem_alloc(sizeof(*self));
++    memset(self, 0, sizeof(*self));
++    pthread_mutex_init(&self->mutex, NULL);
+     self->super.callbacks = &rr_callbacks;
+-    
++    self->super.target_conf_len = target_conf_len;
++
+     return &self->super;
+ }
+diff --git a/lib/common/socketpool.c b/lib/common/socketpool.c
+index 09ff1eb161..0dffdbbba3 100644
+--- a/lib/common/socketpool.c
++++ b/lib/common/socketpool.c
+@@ -147,12 +147,15 @@ h2o_socketpool_target_type_t detect_target_type(h2o_url_t *url, struct sockaddr_
+     }
+ }
+ 
+-h2o_socketpool_target_t *h2o_socketpool_target_create(h2o_url_t *origin, h2o_socketpool_target_conf_t *lb_target_conf)
++h2o_socketpool_target_t *h2o_socketpool_target_create(h2o_url_t *origin, h2o_socketpool_target_conf_t *lb_target_conf, size_t conf_len)
+ {
+     struct sockaddr_storage sa;
+     socklen_t salen;
+ 
+     h2o_socketpool_target_t *target = h2o_mem_alloc(sizeof(*target));
++    if (lb_target_conf == NULL)
++        conf_len = sizeof(*lb_target_conf);
++    h2o_socketpool_target_conf_t *conf = h2o_mem_alloc(conf_len);
+     h2o_url_copy(NULL, &target->url, origin);
+     assert(target->url.host.base[target->url.host.len] == '\0'); /* needs to be null-terminated in order to be used in SNI */
+     target->type = detect_target_type(origin, &sa, &salen);
+@@ -173,11 +176,11 @@ h2o_socketpool_target_t *h2o_socketpool_target_create(h2o_url_t *origin, h2o_soc
+         break;
+     }
+     target->_shared.leased_count = 0;
++    target->conf = conf;
+     if (lb_target_conf != NULL)
+-        target->conf = *lb_target_conf;
++        memcpy(conf, lb_target_conf, conf_len);
+     else {
+-        target->conf.weight = 1;
+-        target->conf.data_for_balancer = NULL;
++        conf->weight = 1;
+     }
+ 
+     h2o_linklist_init_anchor(&target->_shared.sockets);
+@@ -194,7 +197,10 @@ void h2o_socketpool_init_specific(h2o_socketpool_t *pool, size_t capacity, h2o_s
+         target_vector.entries[i] = targets[i];
+     target_vector.size = target_len;
+     if (balancer == NULL) {
+-        balancer = h2o_balancer_create_rr(targets, target_len);
++        balancer = h2o_balancer_create_rr();
++    }
++    if (balancer->callbacks->set_targets != NULL) {
++        balancer->callbacks->set_targets(balancer, targets, target_len);
+     }
+ 
+     common_init(pool, target_vector, capacity, balancer);
+@@ -209,7 +215,7 @@ static size_t add_target(h2o_socketpool_t *pool, h2o_url_t *origin)
+ {
+     assert(is_global_pool(pool));
+     h2o_vector_reserve(NULL, &pool->targets, pool->targets.size + 1);
+-    h2o_socketpool_target_t *target = h2o_socketpool_target_create(origin, NULL);
++    h2o_socketpool_target_t *target = h2o_socketpool_target_create(origin, NULL, 0);
+     pool->targets.entries[pool->targets.size++] = target;
+     return pool->targets.size - 1;
+ }
+@@ -231,7 +237,7 @@ void h2o_socketpool_target_destroy(h2o_socketpool_target_t *target)
+     free(target->url.authority.base);
+     free(target->url.host.base);
+     free(target->url.path.base);
+-    free(target->conf.data_for_balancer);
++    free(target->conf);
+     free(target);
+ }
+ 
+@@ -390,12 +396,12 @@ static void try_connect(h2o_socketpool_connect_request_t *req)
+     h2o_socketpool_target_t *target;
+     h2o_socketpool_t *pool = req->pool;
+     h2o_linklist_t *sockets = NULL;
+-    
++
+     req->remaining_try_count--;
+ 
+     if (req->lb.tried != NULL) {
+         if (req->pool->targets.size > 1) {
+-            req->selected_target = req->pool->balancer->callbacks->selector(req->pool->balancer, &req->pool->targets,
++            req->selected_target = req->pool->balancer->callbacks->select(req->pool->balancer, &req->pool->targets,
+                                                                       req->lb.tried);
+             assert(!req->lb.tried[req->selected_target]);
+             req->lb.tried[req->selected_target] = 1;
+@@ -406,7 +412,7 @@ static void try_connect(h2o_socketpool_connect_request_t *req)
+     }
+     target = req->pool->targets.entries[req->selected_target];
+     sockets = &pool->targets.entries[req->selected_target]->_shared.sockets;
+-    
++
+     /* FIXME repsect `capacity` */
+     __sync_add_and_fetch(&pool->_shared.count, 1);
+     
+@@ -468,17 +474,17 @@ void h2o_socketpool_connect(h2o_socketpool_connect_request_t **_req, h2o_socketp
+ {
+     struct pool_entry_t *entry = NULL;
+     struct on_close_data_t *close_data;
+-    
++
+     if (_req != NULL)
+         *_req = NULL;
+-    
++
+     size_t target = SIZE_MAX;
+     h2o_linklist_t *sockets = NULL;
+-    
++
+     /* fetch an entry and return it */
+     pthread_mutex_lock(&pool->_shared.mutex);
+     destroy_expired(pool);
+-    
++
+     /* TODO lookup outside this critical section */
+     if (is_global_pool(pool)) {
+         target = lookup_target(pool, url);
+@@ -490,7 +496,7 @@ void h2o_socketpool_connect(h2o_socketpool_connect_request_t **_req, h2o_socketp
+         sockets = &pool->_shared.sockets;
+     }
+     assert(pool->targets.size != 0);
+-    
++
+     while (!h2o_linklist_is_empty(sockets)) {
+         if (is_global_pool(pool)) {
+             entry = H2O_STRUCT_FROM_MEMBER(struct pool_entry_t, target_link, sockets->next);
+@@ -500,7 +506,7 @@ void h2o_socketpool_connect(h2o_socketpool_connect_request_t **_req, h2o_socketp
+         h2o_linklist_unlink(&entry->all_link);
+         h2o_linklist_unlink(&entry->target_link);
+         pthread_mutex_unlock(&pool->_shared.mutex);
+-        
++
+         /* test if the connection is still alive */
+         char buf[1];
+         ssize_t rret = recv(entry->sockinfo.fd, buf, 1, MSG_PEEK);
+@@ -517,7 +523,7 @@ void h2o_socketpool_connect(h2o_socketpool_connect_request_t **_req, h2o_socketp
+             cb(sock, NULL, data, &pool->targets.entries[entry_target]->url);
+             return;
+         }
+-        
++
+         /* connection is dead, report, close, and retry */
+         if (rret <= 0) {
+             static long counter = 0;
+@@ -532,18 +538,18 @@ void h2o_socketpool_connect(h2o_socketpool_connect_request_t **_req, h2o_socketp
+         pthread_mutex_lock(&pool->_shared.mutex);
+     }
+     pthread_mutex_unlock(&pool->_shared.mutex);
+-    
++
+     /* FIXME repsect `capacity` */
+     __sync_add_and_fetch(&pool->_shared.count, 1);
+-    
++
+     /* prepare request object */
+     h2o_socketpool_connect_request_t *req = h2o_mem_alloc(sizeof(*req));
+     *req = (h2o_socketpool_connect_request_t){data, cb, pool, loop};
+-    
++
+     if (_req != NULL)
+         *_req = req;
+     req->getaddr_receiver = getaddr_receiver;
+-    
++
+     req->selected_target = target;
+     if (target == SIZE_MAX) {
+         req->lb.tried = h2o_mem_alloc(sizeof(int) * pool->targets.size);
+diff --git a/lib/core/proxy.c b/lib/core/proxy.c
+index df1ded5b3e..2831b3a86a 100644
+--- a/lib/core/proxy.c
++++ b/lib/core/proxy.c
+@@ -674,7 +674,7 @@ void h2o__proxy_process_request(h2o_req_t *req)
+     h2o_req_overrides_t *overrides = req->overrides;
+     h2o_http1client_ctx_t *client_ctx = get_client_ctx(req);
+     h2o_url_t target_buf, *target = &target_buf;
+-    
++
+     h2o_socketpool_t *socketpool = &req->conn->ctx->globalconf->proxy.global_socketpool;
+     if (overrides != NULL && overrides->socketpool != NULL) {
+         socketpool = overrides->socketpool;
+@@ -683,11 +683,11 @@ void h2o__proxy_process_request(h2o_req_t *req)
+     }
+     if (target == &target_buf)
+         h2o_url_init(&target_buf, req->scheme, req->authority, h2o_iovec_init(H2O_STRLIT("/")));
+-    
++
+     struct rp_generator_t *self = proxy_send_prepare(req);
+-    
++
+     /*
+-     When the PROXY protocol is being used (i.e. when overrides->use_proxy_protocol is set), the client needs to establish a new
++      When the PROXY protocol is being used (i.e. when overrides->use_proxy_protocol is set), the client needs to establish a new
+      connection even when there is a pooled connection to the peer, since the header (as defined in
+      https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) needs to be sent at the beginning of the connection.
+      However, currently h2o_http1client_connect doesn't provide an interface to enforce estabilishing a new connection. In other
+diff --git a/lib/handler/configurator/proxy.c b/lib/handler/configurator/proxy.c
+index 1b006ef434..8d1474e295 100644
+--- a/lib/handler/configurator/proxy.c
++++ b/lib/handler/configurator/proxy.c
+@@ -303,7 +303,7 @@ static int parse_balancer(h2o_configurator_command_t *cmd, yoml_t *node, h2o_soc
+     }
+ 
+     if (strcmp(lb_type_node->data.scalar, "round-robin") == 0) {
+-        self->vars->conf.balancer = h2o_balancer_create_rr(targets, target_len);
++        self->vars->conf.balancer = h2o_balancer_create_rr();
+     } else if (strcmp(lb_type_node->data.scalar, "least-conn") == 0) {
+         self->vars->conf.balancer = h2o_balancer_create_lc();
+     } else {
+@@ -316,14 +316,17 @@ static int parse_balancer(h2o_configurator_command_t *cmd, yoml_t *node, h2o_soc
+     return 0;
+ }
+ 
+-static int parse_backends(h2o_configurator_command_t *cmd, yoml_t **inputs, size_t num_upstreams, h2o_url_t *upstreams, h2o_socketpool_target_conf_t *lb_per_target_confs)
++static int parse_backends(h2o_configurator_command_t *cmd, yoml_t **inputs, size_t num_upstreams, h2o_socketpool_target_t **targets)
+ {
++    struct proxy_configurator_t *self = (void *)cmd->configurator;
+     size_t i, j;
++    h2o_url_t upstream;
++    h2o_socketpool_target_conf_t *lb_per_target_conf = alloca(self->vars->conf.balancer->target_conf_len);
+     for (i = 0; i != num_upstreams; ++i) {
+         yoml_t *url_node = NULL;
+         yoml_t *node_for_parsing;
+-        lb_per_target_confs[i].data_for_balancer = NULL; /* currently no balancer needs extra data per target */
+-        lb_per_target_confs[i].weight = 1; /* default weight of each target */
++        memset(lb_per_target_conf, 0, sizeof(*lb_per_target_conf));
++        lb_per_target_conf->weight = 1; /* default weight of each target */
+         switch (inputs[i]->type) {
+             case YOML_TYPE_SCALAR:
+                 url_node = inputs[i];
+@@ -351,8 +354,8 @@ static int parse_backends(h2o_configurator_command_t *cmd, yoml_t **inputs, size
+                             h2o_configurator_errprintf(cmd, value, "value must be a scalar");
+                             return -1;
+                         }
+-                        lb_per_target_confs[i].weight = h2o_strtosize(value->data.scalar, strlen(value->data.scalar));
+-                        if (lb_per_target_confs[i].weight == SIZE_MAX || lb_per_target_confs[i].weight == 0) {
++                        lb_per_target_conf->weight = h2o_strtosize(value->data.scalar, strlen(value->data.scalar));
++                        if (lb_per_target_conf->weight == SIZE_MAX || lb_per_target_conf->weight == 0) {
+                             h2o_configurator_errprintf(cmd, value, "value of weight must be an unsigned integer greater than 0");
+                             return -1;
+                         }
+@@ -372,10 +375,11 @@ static int parse_backends(h2o_configurator_command_t *cmd, yoml_t **inputs, size
+                                            "be either a scalar or a mapping");
+                 return -1;
+         }
+-        if (h2o_url_parse(url_node->data.scalar, SIZE_MAX, upstreams + i) != 0) {
++        if (h2o_url_parse(url_node->data.scalar, SIZE_MAX, &upstream) != 0) {
+             h2o_configurator_errprintf(cmd, url_node, "failed to parse URL: %s\n", url_node->data.scalar);
+             return -1;
+         }
++        targets[i] = h2o_socketpool_target_create(&upstream, lb_per_target_conf, self->vars->conf.balancer->target_conf_len);
+     }
+     return 0;
+ }
+@@ -384,21 +388,20 @@ static int on_config_reverse_url(h2o_configurator_command_t *cmd, h2o_configurat
+ {
+     struct proxy_configurator_t *self = (void *)cmd->configurator;
+ 
+-    h2o_socketpool_target_conf_t *lb_per_target_confs;
+     yoml_t **inputs = NULL;
+     yoml_t *balancer_conf = NULL;
+-    size_t upstream_len = 0;
++    size_t num_upstreams = 0;
+     size_t i;
+ 
+     /* parse the URL(s) */
+     switch (node->type) {
+     case YOML_TYPE_SCALAR:
+         inputs = &node;
+-        upstream_len = 1;
++        num_upstreams = 1;
+         break;
+     case YOML_TYPE_SEQUENCE:
+         inputs = node->data.sequence.elements;
+-        upstream_len = node->data.sequence.size;
++        num_upstreams = node->data.sequence.size;
+         break;
+     case YOML_TYPE_MAPPING:
+         for (i = 0; i < node->data.mapping.size; i++) {
+@@ -412,11 +415,11 @@ static int on_config_reverse_url(h2o_configurator_command_t *cmd, h2o_configurat
+                 switch (value->type) {
+                 case YOML_TYPE_SCALAR:
+                     inputs = &value;
+-                    upstream_len = 1;
++                    num_upstreams = 1;
+                     break;
+                 case YOML_TYPE_SEQUENCE:
+                     inputs = value->data.sequence.elements;
+-                    upstream_len = value->data.sequence.size;
++                    num_upstreams = value->data.sequence.size;
+                     break;
+                 default:
+                     h2o_configurator_errprintf(cmd, value, "value for backends must be either a scalar or a sequence");
+@@ -433,33 +436,30 @@ static int on_config_reverse_url(h2o_configurator_command_t *cmd, h2o_configurat
+         h2o_fatal("unexpected node type");
+         return -1;
+     }
+-    h2o_url_t *upstreams = alloca(sizeof(*upstreams) * upstream_len);
+-    lb_per_target_confs = alloca(upstream_len * sizeof(h2o_socketpool_target_conf_t));
+-    h2o_socketpool_target_t **targets = alloca(sizeof(*targets) * upstream_len);
+-    
++
++    h2o_socketpool_target_t **targets = alloca(sizeof(*targets) * num_upstreams);
++
+     if (inputs == NULL) {
+         h2o_configurator_errprintf(cmd, node, "No backend is defined.");
+     }
+-    if (parse_backends(cmd, inputs, upstream_len, upstreams, lb_per_target_confs) != 0)
+-        return -1;
+-    for (i = 0; i < upstream_len; i++) {
+-        h2o_socketpool_target_t *target = h2o_socketpool_target_create(&upstreams[i], &lb_per_target_confs[i]);
+-        targets[i] = target;
+-    }
+     if (balancer_conf != NULL) {
+-        if (parse_balancer(cmd, balancer_conf, targets, upstream_len) != 0) {
++        if (parse_balancer(cmd, balancer_conf, targets, num_upstreams) != 0) {
+             return -1;
+         }
+     } else {
+-        self->vars->conf.balancer = h2o_balancer_create_rr(targets, upstream_len);
++        self->vars->conf.balancer = h2o_balancer_create_rr(targets, num_upstreams);
+     }
++
++    if (parse_backends(cmd, inputs, num_upstreams, targets) != 0)
++        return -1;
++
+     if (self->vars->keepalive_timeout != 0 && self->vars->conf.use_proxy_protocol) {
+         h2o_configurator_errprintf(cmd, node, "please either set `proxy.use-proxy-protocol` to `OFF` or disable keep-alive by "
+-                                   "setting `proxy.timeout.keepalive` to zero; the features are mutually exclusive");
++                                              "setting `proxy.timeout.keepalive` to zero; the features are mutually exclusive");
+         return -1;
+     }
+ 
+-    if (upstream_len == 0) {
++    if (num_upstreams == 0) {
+         h2o_configurator_errprintf(cmd, node, "please set at least one backend url for reverse proxy");
+         return -1;
+     }
+@@ -470,7 +470,7 @@ static int on_config_reverse_url(h2o_configurator_command_t *cmd, h2o_configurat
+     h2o_socketpool_t *sockpool = malloc(sizeof(*sockpool));
+     memset(sockpool, 0, sizeof(*sockpool));
+     /* init socket pool */
+-    h2o_socketpool_init_specific(sockpool, SIZE_MAX /* FIXME */, targets, upstream_len, self->vars->conf.balancer);
++    h2o_socketpool_init_specific(sockpool, SIZE_MAX /* FIXME */, targets, num_upstreams, self->vars->conf.balancer);
+     h2o_socketpool_set_timeout(sockpool, self->vars->keepalive_timeout);
+     h2o_socketpool_set_ssl_ctx(sockpool, self->vars->ssl_ctx);
+     h2o_proxy_register_reverse_proxy(ctx->pathconf, &self->vars->conf, sockpool);
+@@ -596,8 +596,7 @@ void h2o_proxy_register_configurator(h2o_globalconf_t *conf)
+     h2o_configurator_define_command(&c->super, "proxy.reverse.url",
+                                     H2O_CONFIGURATOR_FLAG_PATH | H2O_CONFIGURATOR_FLAG_EXPECT_SCALAR |
+                                         H2O_CONFIGURATOR_FLAG_EXPECT_SEQUENCE | H2O_CONFIGURATOR_FLAG_EXPECT_MAPPING |
+-                                    H2O_CONFIGURATOR_FLAG_DEFERRED,
+-                                    on_config_reverse_url);
++                                        H2O_CONFIGURATOR_FLAG_DEFERRED, on_config_reverse_url);
+     h2o_configurator_define_command(&c->super, "proxy.preserve-host",
+                                     H2O_CONFIGURATOR_FLAG_ALL_LEVELS | H2O_CONFIGURATOR_FLAG_EXPECT_SCALAR,
+                                     on_config_preserve_host);
+diff --git a/lib/handler/fastcgi.c b/lib/handler/fastcgi.c
+index aa4e44ec90..7a0e7d380d 100644
+--- a/lib/handler/fastcgi.c
++++ b/lib/handler/fastcgi.c
+@@ -847,7 +847,7 @@ h2o_fastcgi_handler_t *h2o_fastcgi_register(h2o_pathconf_t *pathconf, h2o_url_t
+     if (vars->document_root.base != NULL)
+         handler->config.document_root = h2o_strdup(NULL, vars->document_root.base, vars->document_root.len);
+ 
+-    h2o_socketpool_target_t *target = h2o_socketpool_target_create(upstream, NULL);
++    h2o_socketpool_target_t *target = h2o_socketpool_target_create(upstream, NULL, 0);
+     h2o_socketpool_target_t **targets = &target;
+     h2o_socketpool_init_specific(&handler->sockpool, SIZE_MAX /* FIXME */, targets, 1, NULL);
+     h2o_socketpool_set_timeout(&handler->sockpool, handler->config.keepalive_timeout);
+diff --git a/t/00unit/lib/common/balancer/least_conn.c b/t/00unit/lib/common/balancer/least_conn.c
+index 246b39eb90..e01ecb22d6 100644
+--- a/t/00unit/lib/common/balancer/least_conn.c
++++ b/t/00unit/lib/common/balancer/least_conn.c
+@@ -9,7 +9,9 @@ static h2o_socketpool_target_vector_t gen_targets(size_t size) {
+     for (i = 0; i < size; i++) {
+         h2o_socketpool_target_t *target = h2o_mem_alloc(sizeof(*target));
+         target->_shared.leased_count = 0;
+-        target->conf.weight = 1;
++        h2o_socketpool_target_conf_t *conf = h2o_mem_alloc(sizeof(*conf));
++        target->conf = conf;
++        target->conf->weight = 1;
+         targets.entries[i] = target;
+     }
+     targets.size = size;
+@@ -22,6 +24,7 @@ static void free_targets(h2o_socketpool_target_vector_t *targets)
+     size_t i;
+     
+     for (i = 0; i < targets->size; i++) {
++        free(targets->entries[i]->conf);
+         free(targets->entries[i]);
+     }
+     
+@@ -50,13 +53,13 @@ static int check_if_acceptable(h2o_socketpool_target_vector_t *targets, size_t s
+     double conn_weight_quotient;
+     size_t i;
+     double selected_conn_weight_quotient = targets->entries[selected]->_shared.leased_count;
+-    selected_conn_weight_quotient /= targets->entries[selected]->conf.weight;
++    selected_conn_weight_quotient /= targets->entries[selected]->conf->weight;
+     
+     for (i = 0; i < targets->size; i++) {
+         if (i == selected)
+             continue;
+         conn_weight_quotient = targets->entries[i]->_shared.leased_count;
+-        conn_weight_quotient /= targets->entries[i]->conf.weight;
++        conn_weight_quotient /= targets->entries[i]->conf->weight;
+         if (conn_weight_quotient < selected_conn_weight_quotient) {
+             return -1;
+         }
+@@ -99,7 +102,7 @@ static void test_least_conn_weighted(void)
+     int check_result = 1;
+     
+     for (i = 0; i < 10; i++)
+-        targets.entries[i]->conf.weight = i % 3 + 1;
++        targets.entries[i]->conf->weight = i % 3 + 1;
+     
+     for (i = 0; i < 10000; i++) {
+         selected = selector(NULL, &targets, tried);
+diff --git a/t/00unit/lib/common/balancer/roundrobin.c b/t/00unit/lib/common/balancer/roundrobin.c
+index fb2d82991b..3c5ac0473a 100644
+--- a/t/00unit/lib/common/balancer/roundrobin.c
++++ b/t/00unit/lib/common/balancer/roundrobin.c
+@@ -9,7 +9,9 @@ static h2o_socketpool_target_vector_t gen_targets(size_t size) {
+     for (i = 0; i < size; i++) {
+         h2o_socketpool_target_t *target = h2o_mem_alloc(sizeof(*target));
+         target->_shared.leased_count = 0;
+-        target->conf.weight = 1;
++        h2o_socketpool_target_conf_t *conf = h2o_mem_alloc(sizeof(*conf));
++        target->conf = conf;
++        target->conf->weight = 1;
+         targets.entries[i] = target;
+     }
+     targets.size = size;
+@@ -22,6 +24,7 @@ static void free_targets(h2o_socketpool_target_vector_t *targets)
+     size_t i;
+     
+     for (i = 0; i < targets->size; i++) {
++        free(targets->entries[i]->conf);
+         free(targets->entries[i]);
+     }
+     
+@@ -36,7 +39,8 @@ static void test_when_backend_down(void)
+     size_t selected;
+     h2o_balancer_t *balancer;
+     
+-    balancer = h2o_balancer_create_rr(targets.entries, targets.size);
++    balancer = h2o_balancer_create_rr();
++    balancer->callbacks->set_targets(balancer, targets.entries, targets.size);
+     
+     for (i = 0; i < 10; i++) {
+         selected = selector(balancer, &targets, tried);
+@@ -56,8 +60,8 @@ static int check_weight_distribution(h2o_socketpool_target_vector_t *targets)
+     
+     for (i = 0; i < targets->size; i++) {
+         for (j = i + 1; j < targets->size; j++) {
+-            if (targets->entries[i]->_shared.leased_count * targets->entries[j]->conf.weight !=
+-                targets->entries[j]->_shared.leased_count * targets->entries[i]->conf.weight)
++            if (targets->entries[i]->_shared.leased_count * targets->entries[j]->conf->weight !=
++                targets->entries[j]->_shared.leased_count * targets->entries[i]->conf->weight)
+                 return 0;
+         }
+     }
+@@ -74,10 +78,11 @@ static void test_round_robin(void)
+     int check_result = 1;
+     h2o_balancer_t *balancer;
+     
+-    balancer = h2o_balancer_create_rr(targets.entries, targets.size);
++    balancer = h2o_balancer_create_rr();
++    balancer->callbacks->set_targets(balancer, targets.entries, targets.size);
+     
+     for (i = 0; i < targets.size; i++)
+-        total_count += targets.entries[i]->conf.weight;
++        total_count += targets.entries[i]->conf->weight;
+     total_count *= 1000;
+     
+     for (i = 0; i < total_count; i++) {
+@@ -112,11 +117,12 @@ static void test_round_robin_weighted(void)
+     h2o_balancer_t *balancer;
+     
+     for (i = 0; i < 10; i++)
+-        targets.entries[i]->conf.weight = i % 3 + 1;
+-    balancer = h2o_balancer_create_rr(targets.entries, targets.size);
++        targets.entries[i]->conf->weight = i % 3 + 1;
++    balancer = h2o_balancer_create_rr();
++    balancer->callbacks->set_targets(balancer, targets.entries, targets.size);
+     
+     for (i = 0; i < targets.size; i++)
+-        total_count += targets.entries[i]->conf.weight;
++        total_count += targets.entries[i]->conf->weight;
+     total_count *= 1000;
+     
+     for (i = 0; i < total_count; i++) {
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/fuzz/driver.cc b/fuzz/driver.cc
+index 3fa9f7b899..8c294ff1d0 100644
+--- a/fuzz/driver.cc
++++ b/fuzz/driver.cc
+@@ -359,7 +359,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size)
+         register_handler(hostconf, "/chunked-test", chunked_test);
+         h2o_url_parse(unix_listener, strlen(unix_listener), &upstream);
+         h2o_socketpool_t *sockpool = new h2o_socketpool_t();
+-        h2o_socketpool_target_t *target = h2o_socketpool_target_create(&upstream, NULL);
++        h2o_socketpool_target_t *target = h2o_socketpool_target_create(&upstream, NULL, 0);
+         h2o_socketpool_target_t **targets = &target;
+         h2o_socketpool_init_specific(sockpool, SIZE_MAX /* FIXME */, targets, 1, NULL);
+         h2o_socketpool_set_timeout(sockpool, 2000);

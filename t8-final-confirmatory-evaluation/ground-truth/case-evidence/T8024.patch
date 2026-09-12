@@ -1,0 +1,292 @@
+PROJECT libxml2
+COMMIT f96dca9c0e639b2dc358d4643cc6ccd3ccfc9b47
+PARENT ab5e6debd1577e04d223a284fe53066955ff6f44
+SUBJECT xmllint: Switch to resource loader
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/xmllint.c b/xmllint.c
+index 3a7a8a00..77b4b2bf 100644
+--- a/xmllint.c
++++ b/xmllint.c
+@@ -224,15 +224,13 @@ void parsePath(const xmlChar *path) {
+     }
+ }
+ 
+-static xmlExternalEntityLoader defaultEntityLoader = NULL;
+-
+-static xmlParserInputPtr
+-xmllintExternalEntityLoader(const char *URL, const char *ID,
+-			     xmlParserCtxtPtr ctxt) {
+-    xmlParserInputPtr ret;
+-    warningSAXFunc warning = NULL;
+-    errorSAXFunc err = NULL;
++static xmlResourceLoader defaultResourceLoader = NULL;
+ 
++static int
++xmllintResourceLoader(void *ctxt ATTRIBUTE_UNUSED, const char *URL,
++                      const char *ID, int type, int flags,
++		      xmlParserInputPtr *out) {
++    int code;
+     int i;
+     const char *lastsegment = URL;
+     const char *iter = URL;
+@@ -245,66 +243,43 @@ xmllintExternalEntityLoader(const char *URL, const char *ID,
+ 	}
+     }
+ 
+-    if ((ctxt != NULL) && (ctxt->sax != NULL)) {
+-	warning = ctxt->sax->warning;
+-	err = ctxt->sax->error;
+-	ctxt->sax->warning = NULL;
+-	ctxt->sax->error = NULL;
++    if (defaultResourceLoader != NULL)
++        code = defaultResourceLoader(NULL, URL, ID, type, flags, out);
++    else
++        code = xmlInputCreateUrl(URL, flags, out);
++    if (code != XML_IO_ENOENT) {
++        if ((load_trace) && (code == XML_ERR_OK)) {
++            fprintf(ERR_STREAM, "Loaded URL=\"%s\" ID=\"%s\"\n",
++                    URL, ID ? ID : "(null)");
++        }
++        return(code);
+     }
+ 
+-    if (defaultEntityLoader != NULL) {
+-	ret = defaultEntityLoader(URL, ID, ctxt);
+-	if (ret != NULL) {
+-	    if (warning != NULL)
+-		ctxt->sax->warning = warning;
+-	    if (err != NULL)
+-		ctxt->sax->error = err;
+-	    if (load_trace) {
+-		fprintf \
+-			(ERR_STREAM,
+-			 "Loaded URL=\"%s\" ID=\"%s\"\n",
+-			 URL ? URL : "(null)",
+-			 ID ? ID : "(null)");
+-	    }
+-	    return(ret);
+-	}
+-    }
+-    for (i = 0;i < nbpaths;i++) {
++    for (i = 0; i < nbpaths; i++) {
+ 	xmlChar *newURL;
+ 
+ 	newURL = xmlStrdup((const xmlChar *) paths[i]);
+ 	newURL = xmlStrcat(newURL, (const xmlChar *) "/");
+ 	newURL = xmlStrcat(newURL, (const xmlChar *) lastsegment);
+ 	if (newURL != NULL) {
+-	    ret = defaultEntityLoader((const char *)newURL, ID, ctxt);
+-	    if (ret != NULL) {
+-		if (warning != NULL)
+-		    ctxt->sax->warning = warning;
+-		if (err != NULL)
+-		    ctxt->sax->error = err;
+-		if (load_trace) {
+-		    fprintf \
+-			(ERR_STREAM,
+-			 "Loaded URL=\"%s\" ID=\"%s\"\n",
+-			 newURL,
+-			 ID ? ID : "(null)");
+-		}
+-		xmlFree(newURL);
+-		return(ret);
+-	    }
++            if (defaultResourceLoader != NULL)
++                code = defaultResourceLoader(NULL, (const char *) newURL, ID,
++                                             type, flags, out);
++            else
++                code = xmlInputCreateUrl((const char *) newURL, flags, out);
++            if (code != XML_IO_ENOENT) {
++                if ((load_trace) && (code == XML_ERR_OK)) {
++                    fprintf(ERR_STREAM, "Loaded URL=\"%s\" ID=\"%s\"\n",
++                            newURL, ID ? ID : "(null)");
++                }
++	        xmlFree(newURL);
++                return(code);
++            }
+ 	    xmlFree(newURL);
+ 	}
+     }
+-    if (err != NULL)
+-        ctxt->sax->error = err;
+-    if (warning != NULL) {
+-	ctxt->sax->warning = warning;
+-	if (URL != NULL)
+-	    warning(ctxt, "failed to load external entity \"%s\"\n", URL);
+-	else if (ID != NULL)
+-	    warning(ctxt, "failed to load external entity \"%s\"\n", ID);
+-    }
+-    return(NULL);
++
++    return(XML_IO_ENOENT);
+ }
+ 
+ /************************************************************************
+@@ -1644,6 +1619,8 @@ testSAX(const char *filename) {
+             progresult = XMLLINT_ERR_MEM;
+ 	    return;
+ 	}
++
++        xmlCtxtSetResourceLoader(ctxt, xmllintResourceLoader, NULL);
+         if (maxAmpl > 0)
+             xmlCtxtSetMaxAmplification(ctxt, maxAmpl);
+ 
+@@ -1803,8 +1780,10 @@ static void streamFile(const char *filename) {
+ 
+ 
+     if (reader != NULL) {
++        xmlTextReaderSetResourceLoader(reader, xmllintResourceLoader, NULL);
+         if (maxAmpl > 0)
+             xmlTextReaderSetMaxAmplification(reader, maxAmpl);
++
+ #ifdef LIBXML_SCHEMAS_ENABLED
+ 	if (relaxng != NULL) {
+ 	    if ((timing) && (!repeat)) {
+@@ -2213,10 +2192,15 @@ parseFile(const char *filename, xmlParserCtxtPtr rectxt) {
+ #endif
+ 
+     if (html) {
++        ctxt = htmlNewParserCtxt();
++        xmlCtxtSetResourceLoader(ctxt, xmllintResourceLoader, NULL);
++
+         if (strcmp(filename, "-") == 0)
+-            doc = htmlReadFd(STDIN_FILENO, "-", NULL, options);
++            doc = htmlCtxtReadFd(ctxt, STDIN_FILENO, "-", NULL, options);
+         else
+-            doc = htmlReadFile(filename, NULL, options);
++            doc = htmlCtxtReadFile(ctxt, filename, NULL, options);
++
++        htmlFreeParserCtxt(ctxt);
+ 
+         return(doc);
+     }
+@@ -2248,8 +2232,9 @@ parseFile(const char *filename, xmlParserCtxtPtr rectxt) {
+                 fclose(f);
+             return(NULL);
+         }
+-        xmlCtxtUseOptions(ctxt, options);
+ 
++        xmlCtxtSetResourceLoader(ctxt, xmllintResourceLoader, NULL);
++        xmlCtxtUseOptions(ctxt, options);
+         if (maxAmpl > 0)
+             xmlCtxtSetMaxAmplification(ctxt, maxAmpl);
+ 
+@@ -2281,6 +2266,7 @@ parseFile(const char *filename, xmlParserCtxtPtr rectxt) {
+             ctxt = rectxt;
+         }
+ 
++        xmlCtxtSetResourceLoader(ctxt, xmllintResourceLoader, NULL);
+         if (maxAmpl > 0)
+             xmlCtxtSetMaxAmplification(ctxt, maxAmpl);
+ 
+@@ -3109,7 +3095,7 @@ skipArgs(const char *arg) {
+ }
+ 
+ static int
+-xmllintMain(int argc, const char **argv) {
++xmllintMain(int argc, const char **argv, xmlResourceLoader loader) {
+     int i, acount;
+     int files = 0;
+     int version = 0;
+@@ -3123,6 +3109,8 @@ xmllintMain(int argc, const char **argv) {
+     int nocatalogs = 0;
+ #endif
+ 
++    defaultResourceLoader = loader;
++
+ #ifdef XMLLINT_FUZZ
+ #ifdef LIBXML_DEBUG_ENABLED
+     shell = 0;
+@@ -3196,7 +3184,6 @@ xmllintMain(int argc, const char **argv) {
+ #endif
+     options = XML_PARSE_COMPACT | XML_PARSE_BIG_LINES;
+     maxAmpl = 0;
+-    defaultEntityLoader = NULL;
+ #endif /* XMLLINT_FUZZ */
+ 
+     if (argc <= 1) {
+@@ -3512,9 +3499,6 @@ xmllintMain(int argc, const char **argv) {
+         else if ((!strcmp(argv[i], "-nonet")) ||
+                    (!strcmp(argv[i], "--nonet"))) {
+ 	    options |= XML_PARSE_NONET;
+-#ifndef XMLLINT_FUZZ
+-	    xmlSetExternalEntityLoader(xmlNoNetExternalEntityLoader);
+-#endif
+         } else if ((!strcmp(argv[i], "-nocompact")) ||
+                    (!strcmp(argv[i], "--nocompact"))) {
+ 	    options &= ~XML_PARSE_COMPACT;
+@@ -3576,9 +3560,6 @@ xmllintMain(int argc, const char **argv) {
+     }
+ #endif
+ 
+-    defaultEntityLoader = xmlGetExternalEntityLoader();
+-    xmlSetExternalEntityLoader(xmllintExternalEntityLoader);
+-
+     if ((htmlout) && (!nowrap)) {
+ 	fprintf(ERR_STREAM,
+          "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\"\n");
+@@ -3641,6 +3622,7 @@ xmllintMain(int argc, const char **argv) {
+             progresult = XMLLINT_ERR_MEM;
+             goto error;
+         }
++        xmlRelaxNGSetResourceLoader(ctxt, xmllintResourceLoader, NULL);
+ 	relaxngschemas = xmlRelaxNGParse(ctxt);
+ 	if (relaxngschemas == NULL) {
+ 	    fprintf(ERR_STREAM,
+@@ -3667,6 +3649,7 @@ xmllintMain(int argc, const char **argv) {
+             progresult = XMLLINT_ERR_MEM;
+             goto error;
+         }
++        xmlSchemaSetResourceLoader(ctxt, xmllintResourceLoader, NULL);
+ 	wxschemas = xmlSchemaParse(ctxt);
+ 	if (wxschemas == NULL) {
+ 	    fprintf(ERR_STREAM,
+@@ -3706,6 +3689,8 @@ xmllintMain(int argc, const char **argv) {
+                 progresult = XMLLINT_ERR_MEM;
+                 goto error;
+             }
++
++            xmlCtxtSetResourceLoader(ctxt, xmllintResourceLoader, NULL);
+             if (maxAmpl > 0)
+                 xmlCtxtSetMaxAmplification(ctxt, maxAmpl);
+ 
+@@ -3771,8 +3756,6 @@ xmllintMain(int argc, const char **argv) {
+     goto error;
+ 
+ error:
+-    if (defaultEntityLoader != NULL)
+-        xmlSetExternalEntityLoader(defaultEntityLoader);
+     xmlCleanupParser();
+ 
+     return(progresult);
+@@ -3781,7 +3764,7 @@ error:
+ #ifndef XMLLINT_FUZZ
+ int
+ main(int argc, char **argv) {
+-    return(xmllintMain(argc, (const char **) argv));
++    return(xmllintMain(argc, (const char **) argv, NULL));
+ }
+ #endif
+ 
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/fuzz/lint.c b/fuzz/lint.c
+index 5e71d0e8..5c41716c 100644
+--- a/fuzz/lint.c
++++ b/fuzz/lint.c
+@@ -198,12 +198,11 @@ LLVMFuzzerTestOneInput(const char *data, size_t size) {
+     pushArg(NULL);
+ 
+     xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+-    xmlSetExternalEntityLoader(xmlFuzzEntityLoader);
+ #ifdef LIBXML_CATALOG_ENABLED
+     xmlCatalogSetDefaults(XML_CATA_ALLOW_NONE);
+ #endif
+ 
+-    xmllintMain(vars.argi - 1, vars.argv);
++    xmllintMain(vars.argi - 1, vars.argv, xmlFuzzResourceLoader);
+ 
+     xmlMemSetup(free, malloc, realloc, xmlMemStrdup);
+ 

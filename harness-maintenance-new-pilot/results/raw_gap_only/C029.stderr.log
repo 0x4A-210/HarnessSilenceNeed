@@ -1,0 +1,469 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/maintenance-gap_only-C029-hn9xb1t1
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0863b-8030-7c23-a054-421bc83bfe3a
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C029
+
+## Existing Fuzz Harness H0
+
+### `test/ares-test-fuzz.c`
+
+~~~~c
+#include <stddef.h>
+
+#include "ares.h"
+
+// Entrypoint for Clang's libfuzzer
+int LLVMFuzzerTestOneInput(const unsigned char *data,
+                           unsigned long size) {
+  // Feed the data into each of the ares_parse_*_reply functions.
+  struct hostent *host = NULL;
+  struct ares_addrttl info[5];
+  int count = 5;
+  ares_parse_a_reply(data, size, &host, info, &count);
+  if (host) ares_free_hostent(host);
+
+  host = NULL;
+  struct ares_addr6ttl info6[5];
+  count = 5;
+  ares_parse_aaaa_reply(data, size, &host, info6, &count);
+  if (host) ares_free_hostent(host);
+
+  host = NULL;
+  unsigned char addrv4[4] = {0x10, 0x20, 0x30, 0x40};
+  ares_parse_ptr_reply(data, size, addrv4, sizeof(addrv4), AF_INET, &host);
+  if (host) ares_free_hostent(host);
+
+  host = NULL;
+  ares_parse_ns_reply(data, size, &host);
+  if (host) ares_free_hostent(host);
+
+  struct ares_srv_reply* srv = NULL;
+  ares_parse_srv_reply(data, size, &srv);
+  if (srv) ares_free_data(srv);
+
+  struct ares_mx_reply* mx = NULL;
+  ares_parse_mx_reply(data, size, &mx);
+  if (mx) ares_free_data(mx);
+
+  struct ares_txt_reply* txt = NULL;
+  ares_parse_txt_reply(data, size, &txt);
+  if (txt) ares_free_data(txt);
+
+  struct ares_soa_reply* soa = NULL;
+  ares_parse_soa_reply(data, size, &soa);
+  if (soa) ares_free_data(soa);
+
+  struct ares_naptr_reply* naptr = NULL;
+  ares_parse_naptr_reply(data, size, &naptr);
+  if (naptr) ares_free_data(naptr);
+
+  struct ares_caa_reply* caa = NULL;
+  ares_parse_caa_reply(data, size, &caa);
+  if (caa) ares_free_data(caa);
+
+  return 0;
+}
+~~~~
+
+## Production Source Change (S0 -> S1)
+
+Harness changes, commit messages, tests, outcomes, and future evidence are excluded. The source diff is complete.
+
+~~~~diff
+diff --git a/include/ares.h b/include/ares.h
+index b341d60..135c1a5 100644
+--- a/include/ares.h
++++ b/include/ares.h
+@@ -588,6 +588,14 @@ struct ares_soa_reply {
+   unsigned int minttl;
+ };
+ 
++struct ares_uri_reply {
++  struct ares_uri_reply  *next;
++  unsigned short          priority;
++  unsigned short          weight;
++  char                   *uri;
++  int                     ttl;
++};
++
+ /*
+  * Similar to addrinfo, but with extra ttl and missing canonname.
+  */
+@@ -685,6 +693,10 @@ CARES_EXTERN int ares_parse_soa_reply(const unsigned char* abuf,
+ 				      int alen,
+ 				      struct ares_soa_reply** soa_out);
+ 
++CARES_EXTERN int ares_parse_uri_reply(const unsigned char* abuf,
++                                      int alen,
++                                      struct ares_uri_reply** uri_out);
++
+ CARES_EXTERN void ares_free_string(void *str);
+ 
+ CARES_EXTERN void ares_free_hostent(struct hostent *host);
+diff --git a/src/lib/Makefile.inc b/src/lib/Makefile.inc
+index 51be62c..7426c3d 100644
+--- a/src/lib/Makefile.inc
++++ b/src/lib/Makefile.inc
+@@ -39,6 +39,7 @@ CSOURCES = ares__close_sockets.c	\
+   ares_parse_soa_reply.c		\
+   ares_parse_srv_reply.c		\
+   ares_parse_txt_reply.c		\
++  ares_parse_uri_reply.c		\
+   ares_platform.c			\
+   ares_process.c			\
+   ares_query.c				\
+diff --git a/src/lib/ares_data.c b/src/lib/ares_data.c
+index aa925b8..69dff06 100644
+--- a/src/lib/ares_data.c
++++ b/src/lib/ares_data.c
+@@ -77,6 +77,14 @@ void ares_free_data(void *dataptr)
+             ares_free(ptr->data.srv_reply.host);
+           break;
+ 
++        case ARES_DATATYPE_URI_REPLY:
++
++          if (ptr->data.uri_reply.next)
++            next_data = ptr->data.uri_reply.next;
++          if (ptr->data.uri_reply.uri)
++            ares_free(ptr->data.uri_reply.uri);
++          break;
++
+         case ARES_DATATYPE_TXT_REPLY:
+         case ARES_DATATYPE_TXT_EXT:
+ 
+@@ -174,6 +182,14 @@ void *ares_malloc_data(ares_datatype type)
+         ptr->data.srv_reply.port = 0;
+         break;
+ 
++      case ARES_DATATYPE_URI_REPLY:
++        ptr->data.uri_reply.next = NULL;
++        ptr->data.uri_reply.priority = 0;
++        ptr->data.uri_reply.weight = 0;
++        ptr->data.uri_reply.uri = NULL;
++        ptr->data.uri_reply.ttl = 0;
++        break;
++
+       case ARES_DATATYPE_TXT_EXT:
+         ptr->data.txt_ext.record_start = 0;
+         /* FALLTHROUGH */
+diff --git a/src/lib/ares_data.h b/src/lib/ares_data.h
+index b0182fd..6b9dd9f 100644
+--- a/src/lib/ares_data.h
++++ b/src/lib/ares_data.h
+@@ -23,6 +23,7 @@ typedef enum {
+   ARES_DATATYPE_MX_REPLY,    /* struct ares_mx_reply   - introduced in 1.7.2 */
+   ARES_DATATYPE_NAPTR_REPLY,/* struct ares_naptr_reply - introduced in 1.7.6 */
+   ARES_DATATYPE_SOA_REPLY,    /* struct ares_soa_reply - introduced in 1.9.0 */
++  ARES_DATATYPE_URI_REPLY, 	/* struct ares_uri_reply */
+ #if 0
+   ARES_DATATYPE_ADDR6TTL,     /* struct ares_addrttl   */
+   ARES_DATATYPE_ADDRTTL,      /* struct ares_addr6ttl  */
+@@ -67,6 +68,7 @@ struct ares_data {
+     struct ares_naptr_reply  naptr_reply;
+     struct ares_soa_reply    soa_reply;
+     struct ares_caa_reply    caa_reply;
++    struct ares_uri_reply    uri_reply;
+   } data;
+ };
+ 
+diff --git a/src/lib/ares_nameser.h b/src/lib/ares_nameser.h
+index 5270e5a..65aebcc 100644
+--- a/src/lib/ares_nameser.h
++++ b/src/lib/ares_nameser.h
+@@ -138,7 +138,7 @@ typedef enum __ns_type {
+     ns_t_mailb = 253,       /* Transfer mailbox records. */
+     ns_t_maila = 254,       /* Transfer mail agent records. */
+     ns_t_any = 255,         /* Wildcard match. */
+-    ns_t_zxfr = 256,        /* BIND-specific, nonstandard. */
++    ns_t_uri = 256,         /* Uniform Resource Identifier (RFC7553) */
+     ns_t_caa = 257,         /* Certification Authority Authorization. */
+     ns_t_max = 65536
+ } ns_type;
+@@ -468,8 +468,8 @@ typedef enum __ns_rcode {
+ #ifndef T_ANY
+ #  define T_ANY           255 /* ns_t_any */
+ #endif
+-#ifndef T_ZXFR
+-#  define T_ZXFR          256 /* ns_t_zxfr */
++#ifndef T_URI
++#  define T_URI          256 /* ns_t_uri */
+ #endif
+ #ifndef T_CAA
+ #  define T_CAA           257 /* ns_t_caa */
+diff --git a/src/lib/ares_parse_uri_reply.c b/src/lib/ares_parse_uri_reply.c
+new file mode 100644
+index 0000000..99300c0
+--- /dev/null
++++ b/src/lib/ares_parse_uri_reply.c
+@@ -0,0 +1,184 @@
++
++/* Copyright 1998 by the Massachusetts Institute of Technology.
++ * Copyright (C) 2009 by Jakub Hrozek <jhrozek@redhat.com>
++ *
++ * Permission to use, copy, modify, and distribute this
++ * software and its documentation for any purpose and without
++ * fee is hereby granted, provided that the above copyright
++ * notice appear in all copies and that both that copyright
++ * notice and this permission notice appear in supporting
++ * documentation, and that the name of M.I.T. not be used in
++ * advertising or publicity pertaining to distribution of the
++ * software without specific, written prior permission.
++ * M.I.T. makes no representations about the suitability of
++ * this software for any purpose.  It is provided "as is"
++ * without express or implied warranty.
++ */
++
++#include "ares_setup.h"
++
++#ifdef HAVE_NETINET_IN_H
++#  include <netinet/in.h>
++#endif
++#ifdef HAVE_NETDB_H
++#  include <netdb.h>
++#endif
++#ifdef HAVE_ARPA_INET_H
++#  include <arpa/inet.h>
++#endif
++
++#include "ares_nameser.h"
++
++#include "ares.h"
++#include "ares_dns.h"
++#include "ares_data.h"
++#include "ares_private.h"
++
++/* AIX portability check */
++#ifndef T_URI
++#  define T_URI 256 /* uri selection */
++#endif
++
++int
++ares_parse_uri_reply (const unsigned char *abuf, int alen,
++                      struct ares_uri_reply **uri_out)
++{
++  unsigned int qdcount, ancount, i;
++  const unsigned char *aptr, *vptr;
++  int status, rr_type, rr_class, rr_len, rr_ttl;
++  long len;
++  char *uri_str = NULL, *rr_name = NULL;
++  struct ares_uri_reply *uri_head = NULL;
++  struct ares_uri_reply *uri_last = NULL;
++  struct ares_uri_reply *uri_curr;
++
++  /* Set *uri_out to NULL for all failure cases. */
++  *uri_out = NULL;
++
++  /* Give up if abuf doesn't have room for a header. */
++  if (alen < HFIXEDSZ){
++	  return ARES_EBADRESP;
++  }
++
++  /* Fetch the question and answer count from the header. */
++  qdcount = DNS_HEADER_QDCOUNT (abuf);
++  ancount = DNS_HEADER_ANCOUNT (abuf);
++  if (qdcount != 1) {
++      return ARES_EBADRESP;
++  }
++  if (ancount == 0) {
++	  return ARES_ENODATA;
++  }
++  /* Expand the name from the question, and skip past the question. */
++  aptr = abuf + HFIXEDSZ;
++
++  status = ares_expand_name (aptr, abuf, alen, &uri_str, &len);
++  if (status != ARES_SUCCESS){
++	  return status;
++  }
++  if (aptr + len + QFIXEDSZ > abuf + alen)
++    {
++      ares_free (uri_str);
++      return ARES_EBADRESP;
++    }
++  aptr += len + QFIXEDSZ;
++
++  /* Examine each answer resource record (RR) in turn. */
++  for (i = 0; i < ancount; i++)
++    {
++      /* Decode the RR up to the data field. */
++      status = ares_expand_name (aptr, abuf, alen, &rr_name, &len);
++      if (status != ARES_SUCCESS)
++        {
++          break;
++        }
++      aptr += len;
++      if (aptr + RRFIXEDSZ > abuf + alen)
++        {
++          status = ARES_EBADRESP;
++          break;
++        }
++
++      rr_type 	= DNS_RR_TYPE (aptr);
++      rr_class 	= DNS_RR_CLASS (aptr);
++      rr_ttl 	= DNS_RR_TTL(aptr);
++      rr_len 	= DNS_RR_LEN (aptr);
++      aptr += RRFIXEDSZ;
++
++      if (aptr + rr_len > abuf + alen)
++        {
++          status = ARES_EBADRESP;
++          break;
++        }
++
++      /* Check if we are really looking at a URI record */
++      if (rr_class == C_IN && rr_type == T_URI)
++        {
++          /* parse the URI record itself */
++          if (rr_len < 5)
++            {
++              status = ARES_EBADRESP;
++              break;
++            }
++          /* Allocate storage for this URI answer appending it to the list */
++          uri_curr = ares_malloc_data(ARES_DATATYPE_URI_REPLY);
++          if (!uri_curr)
++            {
++              status = ARES_ENOMEM;
++              break;
++            }
++          if (uri_last)
++            {
++              uri_last->next = uri_curr;
++            }
++          else
++            {
++              uri_head = uri_curr;
++            }
++          uri_last = uri_curr;
++
++          vptr = aptr;
++          uri_curr->priority = DNS__16BIT(vptr);
++          vptr += sizeof(unsigned short);
++          uri_curr->weight = DNS__16BIT(vptr);
++          vptr += sizeof(unsigned short);
++          uri_curr->uri = (char *)ares_malloc(rr_len-3);
++	  	  if (!uri_curr->uri)
++	      	{
++	      	  status = ARES_ENOMEM;
++			  break;
++		    }
++          uri_curr->uri = strncpy(uri_curr->uri, vptr, rr_len-4);
++          uri_curr->uri[rr_len-4]='\0';
++          uri_curr->ttl = rr_ttl;
++
++          if (status != ARES_SUCCESS)
++            break;
++        }
++
++      /* Don't lose memory in the next iteration */
++      ares_free (rr_name);
++      rr_name = NULL;
++
++      /* Move on to the next record */
++      aptr += rr_len;
++    }
++
++  if (uri_str)
++    ares_free (uri_str);
++  if (rr_name)
++    ares_free (rr_name);
++
++  /* clean up on error */
++  if (status != ARES_SUCCESS)
++    {
++      if (uri_head)
++        ares_free_data (uri_head);
++      return status;
++    }
++
++  /* everything looks fine, return the data */
++  *uri_out = uri_head;
++
++  return ARES_SUCCESS;
++}
+diff --git a/src/tools/adig.c b/src/tools/adig.c
+index 3f99f7f..412ad46 100644
+--- a/src/tools/adig.c
++++ b/src/tools/adig.c
+@@ -121,6 +121,7 @@ static const struct nv types[] = {
+   { "NSEC",     T_NSEC },
+   { "DNSKEY",   T_DNSKEY },
+   { "CAA",      T_CAA },
++  { "URI",      T_URI },
+   { "ANY",      T_ANY }
+ };
+ static const int ntypes = sizeof(types) / sizeof(types[0]);
+@@ -516,7 +517,7 @@ static const unsigned char *display_rr(const unsigned char *aptr,
+                                        const unsigned char *abuf, int alen)
+ {
+   const unsigned char *p;
+-  int type, dnsclass, ttl, dlen, status;
++  int type, dnsclass, ttl, dlen, status, i;
+   long len;
+   int vlen;
+   char addr[46];
+@@ -737,6 +738,18 @@ static const unsigned char *display_rr(const unsigned char *aptr,
+       ares_free_string(name.as_char);
+       break;
+ 
++    case T_URI:
++      /* The RR data is two two-byte numbers representing the
++       * priority and weight, followed by a target.
++       */
++
++      printf("\t%d ", (int)DNS__16BIT(aptr));
++      printf("%d \t\t", (int)DNS__16BIT(aptr+2));
++      p = aptr +4;
++      for (i=0; i <dlen-4; ++i)
++        printf("%c",p[i]);
++      break;
++
+     case T_NAPTR:
+ 
+       printf("\t%d", (int)DNS__16BIT(aptr)); /* order */
+@@ -962,7 +975,7 @@ static void print_help_info_adig(void) {
+     "              KEY, LOC, MAILA, MAILB, MB, MD,\n"
+     "              MF, MG, MINFO, MR, MX, NAPTR, NS,\n"
+     "              NSAP, NSAP_PTR, NULL, PTR, PX, RP,\n"
+-    "              RT,  SIG,  SOA, SRV, TXT, WKS, X25\n\n"
++    "              RT,  SIG,  SOA, SRV, TXT, URI, WKS, X25\n\n"
+     " -x  : For a '-t PTR a.b.c.d' lookup, query for 'd.c.b.a.in-addr.arpa.'\n"
+     " -xx : As above, but for IPv6, compact the format into a bitstring like\n"
+     "       '[xabcdef00000000000000000000000000].IP6.ARPA.'\n");
+~~~~
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C029","gap_exists":true,"gap_type":["entry_point","API_protocol","input_semantics","memory_lifecycle"],"confidence":99,"affected_functions":["ares_parse_uri_reply","ares_malloc_data","ares_free_data"],"reason":"H0 exercises many ares_parse_*_reply APIs but never calls the newly exposed ares_parse_uri_reply. Consequently, arbitrary DNS URI replies do not reach its URI-specific validation, record-list construction, string allocation/copying, TTL extraction, or error cleanup paths.","evidence":["include/ares.h adds the public ares_parse_uri_reply API and struct ares_uri_reply.","ares_parse_uri_reply parses attacker-controlled abuf/alen, requires qdcount == 1, iterates ancount records, filters rr_class == C_IN and rr_type == T_URI, and handles variable rr_len.","For accepted URI records, ares_parse_uri_reply allocates ARES_DATATYPE_URI_REPLY nodes, links them through next, allocates uri using rr_len, copies record bytes, and invokes ares_free_data on failures.","ares_data.c adds URI-specific allocation initialization and recursive list/string cleanup under ARES_DATATYPE_URI_REPLY.","H0 calls ares_parse_a_reply, ares_parse_aaaa_reply, ares_parse_ptr_reply, ares_parse_ns_reply, ares_parse_srv_reply, ares_parse_mx_reply, ares_parse_txt_reply, ares_parse_soa_reply, ares_parse_naptr_reply, and ares_parse_caa_reply, but not ares_parse_uri_reply."],"recommended_action":"Extend H0 to call ares_parse_uri_reply(data, size, &uri), then free any returned list with ares_free_data(uri), so malformed, mixed-type, multi-answer, boundary-length, allocation, and cleanup behavior is fuzzed."}
+tokens used
+7,871

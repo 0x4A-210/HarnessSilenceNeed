@@ -1,0 +1,1349 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/n4-evolution_aware-C040-la1b957g
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08a7c-1358-71e3-ae1d-6a7a526619bd
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+C040
+
+## Existing harness H0
+
+The complete project-owned harness translation unit is shown below. Framework
+main/CLI scaffolding is not expanded; directly included semantic helper files
+are shown separately under the fixed context rule.
+
+Path: `fuzz/c/std/webp_fuzzer.c`
+
+```c
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN webp_fuzzer.c
+./a.out ../../../test/data/*.webp
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__VP8
+#define WUFFS_CONFIG__MODULE__WEBP
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+#include "../fuzzlib/fuzzlib_image_decoder.c"
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_webp__decoder dec;
+  wuffs_base__status status = wuffs_webp__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  hash = wuffs_base__u64__rotate_right(hash, 1);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  return fuzz_image_decoder(
+      src, hash,
+      wuffs_webp__decoder__upcast_as__wuffs_base__image_decoder(&dec));
+}
+```
+
+### Direct H0 helper: `fuzz/c/fuzzlib/fuzzlib_image_decoder.c`
+
+```c
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+#ifndef WUFFS_INCLUDE_GUARD
+#error "Wuffs' .h files need to be included before this file"
+#endif
+
+static const char*  //
+fuzz_image_decoder(wuffs_base__io_buffer* src,
+                   uint64_t hash,
+                   wuffs_base__image_decoder* dec) {
+  const char* ret = NULL;
+  wuffs_base__slice_u8 pixbuf = ((wuffs_base__slice_u8){});
+  wuffs_base__slice_u8 workbuf = ((wuffs_base__slice_u8){});
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    wuffs_base__status status =
+        wuffs_base__image_decoder__decode_image_config(dec, &ic, src);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    // 50% of the time, choose BGRA_PREMUL instead of the native pixel config.
+    if (hash & 1) {
+      wuffs_base__pixel_config__set(
+          &ic.pixcfg, WUFFS_BASE__PIXEL_FORMAT__BGRA_PREMUL,
+          WUFFS_BASE__PIXEL_SUBSAMPLING__NONE,
+          wuffs_base__pixel_config__width(&ic.pixcfg),
+          wuffs_base__pixel_config__height(&ic.pixcfg));
+    }
+    hash >>= 1;
+
+    // Wuffs allows either statically or dynamically allocated work buffers.
+    // This program exercises dynamic allocation.
+    uint64_t n = wuffs_base__image_decoder__workbuf_len(dec).max_incl;
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      workbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!workbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    n = wuffs_base__pixel_config__pixbuf_len(&ic.pixcfg);
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      pixbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!pixbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    status = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, pixbuf);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      wuffs_base__frame_config fc = ((wuffs_base__frame_config){});
+      status = wuffs_base__image_decoder__decode_frame_config(dec, &fc, src);
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+
+      status = wuffs_base__image_decoder__decode_frame(
+          dec, &pb, src, WUFFS_BASE__PIXEL_BLEND__SRC, workbuf, NULL);
+
+      wuffs_base__rect_ie_u32 frame_rect =
+          wuffs_base__frame_config__bounds(&fc);
+      wuffs_base__rect_ie_u32 dirty_rect =
+          wuffs_base__image_decoder__frame_dirty_rect(dec);
+      if (!wuffs_base__rect_ie_u32__contains_rect(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not contain dirty_rect";
+        goto exit;
+      }
+
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+      seen_ok = true;
+
+      if (!wuffs_base__rect_ie_u32__equals(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not equal dirty_rect";
+        goto exit;
+      }
+    }
+  }
+
+exit:
+  free(workbuf.ptr);
+  free(pixbuf.ptr);
+  return ret;
+}
+```
+
+## Complete S0 -> S1 hand-written production-source diff
+
+The fixed rule includes every changed `std/**/*.wuffs` production file. It
+excludes generated release snapshots, tests, docs, examples, and commit text.
+
+```diff
+diff --git a/std/vp8/decode_macroblocks.wuffs b/std/vp8/decode_macroblocks.wuffs
+index 3b959b39..533debc7 100644
+--- a/std/vp8/decode_macroblocks.wuffs
++++ b/std/vp8/decode_macroblocks.wuffs
+@@ -1,26 +1,25 @@
+ // Copyright 2026 The Wuffs Authors.
+ //
+ // Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+ // https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+ // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+ // option. This file may not be copied, modified, or distributed
+ // except according to those terms.
+ //
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
+-pri func decoder.decode_macroblocks!(dst: ptr base.pixel_buffer, workbuf: slice base.u8) base.status {
+-    var mby    : base.u32
+-    var mbx    : base.u32
+-    var status : base.status
++pri func decoder.decode_macroblocks!(workbuf: slice base.u8) base.status {
++    var mby : base.u32
++    var mbx : base.u32
+ 
+     mbx = 0
+     while mbx < this.mbw {
+         assert mbx < 0x400 via "a < b: a < c; c <= b"(c: this.mbw)
+ 
+         this.mb_states_top[mbx] = 0
+ 
+         mbx += 1
+     }
+ 
+     mby = 0
+     while mby < this.mbh {
+@@ -46,38 +45,34 @@ pri func decoder.decode_macroblocks!(dst: ptr base.pixel_buffer, workbuf: slice
+             if this.filt_level <= 0 {
+                 // No-op.
+             } else if this.filt_simple {
+                 this.filter_simple!(workbuf: args.workbuf, mby: mby - 1)
+             } else {
+                 this.filter_normal!(workbuf: args.workbuf, mby: mby - 1)
+             }
+         }
+ 
+         mby += 1
+     }
+ 
+-    // Filter the final row, already in args.workbuf, and swizzle to args.dst.
++    // Filter the final row, already in args.workbuf.
+     if this.mbh > 0 {
+         if this.filt_level <= 0 {
+             // No-op.
+         } else if this.filt_simple {
+             this.filter_simple!(workbuf: args.workbuf, mby: this.mbh - 1)
+         } else {
+             this.filter_normal!(workbuf: args.workbuf, mby: this.mbh - 1)
+         }
+ 
+-        status = this.swizzle!(dst: args.dst, workbuf: args.workbuf)
+-        if not status.is_ok() {
+-            return status
+-        }
+     }
+ 
+     return ok
+ }
+ 
+ pri func decoder.decode_one_macroblock!(workbuf: slice base.u8, mbx: base.u32[..= 0x3FF], mby: base.u32[..= 0x3FF]) {
+     var v1 : base.u32[..= 1]
+ 
+     var seg         : base.u32[..= 3]
+     var skip        : base.u32[..= 1]
+     var mask        : base.u32
+     var luma_mode   : base.u32[..= 4]
+diff --git a/std/vp8/decode_quirks.wuffs b/std/vp8/decode_quirks.wuffs
+index ed13f79d..99761bcb 100644
+--- a/std/vp8/decode_quirks.wuffs
++++ b/std/vp8/decode_quirks.wuffs
+@@ -9,30 +9,35 @@
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
+ // --------
+ 
+ // Quirks are discussed in (/doc/note/quirks.md).
+ //
+ // The base38 encoding of "vp8." is 0x1B_5EFE. Left shifting by 10 gives
+ // 0x6D7B_F800.
+ pri const QUIRKS_BASE : base.u32 = 0x6D7B_F800
+ 
+ // --------
+ 
++// When this quirk is enabled, the workbuf starts with (width × height) alpha
++// samples, decoded out-of-band (from the VP8 decoder's perspective, they are
++// typically decoded in-band from the surrounding WebP decoder's perspective).
++pub const QUIRK_HAS_ALPHA_SIDE_CHANNEL : base.u32 = 0x6D7B_F800 | 0x00
++
+ // Gives the image width and height out-of-band, in the u64 quirk value. The
+ // low 32 bits are the width and the high 32 bits are the height. Both
+ // dimensions should range within 0x0001 ..= 0x3FFF.
+ //
+ // A simple WebP file could contain one chunk, a VP8 chunk, that gives the
+ // image width and height. A complex WebP file could contain three chunks:
+ // VP8X, ALPH and VP8. The image dimensions are given in the VP8X chunk and are
+ // then repeated in the VP8 chunk.
+ //
+ // After a webp.decoder decode_image_config call, the caller might next want to
+ // query the workbuf length, to know how much memory to dynamically allocate,
+ // especially before attempting to decode the ALPH chunk. The outer
+ // webp.decoder workbuf_len method can delegate to the inner vp8.decoder
+ // workbuf_len method, but the latter needs to know the image dimensions.
+ //
+ // This quirk mechanism lets the outer webp decoder tell the inner vp8 decoder
+ // those dimensions, after parsing the VP8X chunk but before ALPH or VP8.
+-pub const QUIRK_WIDTH_AND_HEIGHT : base.u32 = 0x6D7B_F800 | 0x00
++pub const QUIRK_WIDTH_AND_HEIGHT : base.u32 = 0x6D7B_F800 | 0x01
+diff --git a/std/vp8/decode_vp8.wuffs b/std/vp8/decode_vp8.wuffs
+index cdc0d1d4..c5fde4eb 100644
+--- a/std/vp8/decode_vp8.wuffs
++++ b/std/vp8/decode_vp8.wuffs
+@@ -8,53 +8,58 @@
+ //
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
+ pub status "#bad QUIRK_SOURCE_LENGTH"
+ pub status "#bad QUIRK_WIDTH_AND_HEIGHT"
+ pub status "#bad header"
+ pub status "#inconsistent width and height"
+ pub status "#missing QUIRK_SOURCE_LENGTH"
+ pub status "#truncated input"
+ pub status "#unsupported QUIRK_SOURCE_LENGTH"
+ pub status "#unsupported VP8 file"
+ 
+-pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0x20FF_FFFF
++pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0x30FF_8000
+ 
+ pub struct decoder? implements base.image_decoder(
+         width  : base.u32[..= 0x3FFF],
+         height : base.u32[..= 0x3FFF],
+ 
+         // Width and height again, but this time measured in 16×16 macroblocks.
+         mbw : base.u32[..= 0x400],
+         mbh : base.u32[..= 0x400],
+ 
+         // The call sequence state machine is discussed in
+         // (/doc/std/image-decoders-call-sequence.md).
+         call_sequence : base.u8,
+ 
+         is_key_frame : base.bool,
+ 
++        quirk_has_alpha_side_channel : base.bool,
++
+         frame_config_io_position : base.u64,
+ 
+         // This uses the same representation as an wuffs_base__optional_u63:
+         // ((value_as_u63 << 1) | has_value_as_u1).
+         quirk_source_length : base.u64,
+ 
+         quirk_width_and_height : base.u64,
+ 
+         // Just under 144 MiB, for 9 partitions each up to 0xFF_FFFF bytes.
+         partitioned_data_length : base.u32[..= 0x08FF_FFF7],
+ 
+         // args.workbuf strides and offsets.
+         //
++        // The foobar_end offsets are measured after any "prefix trimmed work
++        // buffer" adjustment (if QUIRK_HAS_ALPHA_SIDE_CHANNEL is enabled).
++        //
+         // The workbuf holds the YUV buffers (after decoding from the source
+         // bytes but before converting YUV to RGBX) and then also a copy of
+         // most of the source bytes themselves - the "at least 2, up to 9"
+         // partitions after the frame header. Decoding successive rows of
+         // macroblocks alternates between the other (not-first) partitions.
+         // Source bytes are processed with random (not sequential) access.
+         workbuf_yuv_y_stride  : base.u32[..= 0x4000],
+         workbuf_yuv_uv_stride : base.u32[..= 0x2000],
+         workbuf_yuv_y_end     : base.u64[..= 0x1000_0000],
+         workbuf_yuv_u_end     : base.u64[..= 0x1400_0000],
+         workbuf_yuv_v_end     : base.u64[..= 0x1800_0000],
+ 
+@@ -200,24 +205,28 @@ pub struct decoder? implements base.image_decoder(
+         // The u8 bits are packed like this:
+         //
+         //  -  4 ..=  7 are unused
+         //  -  3        is  decode_one_macroblock's (not skip).
+         //  -  0 ..=  2 are an index into loop_filters.
+         //
+         mb_filters : array[2] array[0x400] base.u8,
+ )
+ 
+ pub func decoder.get_quirk(key: base.u32) base.u64 {
+     if args.key == base.QUIRK_SOURCE_LENGTH {
+         return this.quirk_source_length
++    } else if args.key == QUIRK_HAS_ALPHA_SIDE_CHANNEL {
++        if this.quirk_has_alpha_side_channel {
++            return 1
++        }
+     } else if args.key == QUIRK_WIDTH_AND_HEIGHT {
+         return this.quirk_width_and_height
+     }
+     return 0
+ }
+ 
+ pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+     var w : base.u32
+     var h : base.u32
+ 
+     if args.key == base.QUIRK_SOURCE_LENGTH {
+         if (args.value & 1) == 0 {
+@@ -227,24 +236,28 @@ pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+             this.quirk_source_length = 0
+             this.partitioned_data_length = 0
+         } else if (args.value >> 1) < 10 {
+             return "#bad QUIRK_SOURCE_LENGTH"
+         } else if (args.value >> 1) > (0x08FF_FFF7 + 10) {
+             return "#unsupported QUIRK_SOURCE_LENGTH"
+         } else {
+             this.quirk_source_length = args.value
+             this.partitioned_data_length = ((args.value >> 1) as base.u32) - 10
+         }
+         return ok
+ 
++    } else if args.key == QUIRK_HAS_ALPHA_SIDE_CHANNEL {
++        this.quirk_has_alpha_side_channel = args.value <> 0
++        return ok
++
+     } else if args.key == QUIRK_WIDTH_AND_HEIGHT {
+         w = (args.value & 0xFFFF_FFFF) as base.u32
+         h = (args.value & 0xFFFF_FFFF) as base.u32
+         if (w < 1) or (0x3FFF < w) or (h < 1) or (0x3FFF < h) {
+             return "#bad QUIRK_WIDTH_AND_HEIGHT"
+         }
+         this.quirk_width_and_height = args.value
+         this.width = w
+         this.height = h
+         this.calculate_mbw_mbh!()
+         return ok
+     }
+@@ -372,41 +385,68 @@ pri func decoder.do_decode_frame_config?(dst: nptr base.frame_config, src: base.
+                 index: 0,
+                 io_position: this.frame_config_io_position,
+                 disposal: 0,
+                 opaque_within_bounds: false,
+                 overwrite_instead_of_blend: false,
+                 background_color: 0xFF00_0000)
+     }
+ 
+     this.call_sequence = 0x40
+ }
+ 
+ pub func decoder.decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
++    var wh     : base.u64[..= 0xFFF_8001]
+     var wb_len : base.u64[..= DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE]
+     var status : base.status
+ 
++    // The args.workbuf, with a "prefix trimmed work buffer" adjustment, if
++    // QUIRK_HAS_ALPHA_SIDE_CHANNEL is enabled, in which case the first (width
++    // × height) bytes of args.workbuf hold alpha samples that are e.g. part of
++    // WebP, not part of VP8 per se.
++    //
++    // The prefix isn't used when decoding VP8 to YCbCr, but the final swizzle
++    // to the destination pixel buffer should combine YCbCr and Alpha.
++    var trimmed : slice base.u8
++
+     while true {
++        trimmed = args.workbuf
++        if this.quirk_has_alpha_side_channel {
++            wh = (this.width * this.height) as base.u64
++            if wh > args.workbuf.length() {
++                return base."#bad workbuf length"
++            }
++            trimmed = args.workbuf[wh ..]
++        }
++
+         wb_len = this.workbuf_yuv_v_end + (this.partitioned_data_length as base.u64) + 8
+-        if wb_len > args.workbuf.length() {
++        if wb_len > trimmed.length() {
+             return base."#bad workbuf length"
+         } else {
+-            args.workbuf = args.workbuf[.. wb_len]
++            trimmed = trimmed[.. wb_len]
+         }
+ 
+-        status =? this.do_decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
+-        if (status == base."$short read") and args.src.is_closed() {
++        status =? this.do_decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: trimmed, opts: args.opts)
++        if status.is_ok() {
++            break
++        } else if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+         yield? status
+     }
++
++    // TODO: trimmed should be args.workbuf.
++    status = this.swizzle!(dst: args.dst, workbuf: trimmed)
++    if not status.is_ok() {
++        return status
++    }
+ }
+ 
+ pri func decoder.do_decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
+     var i      : base.u32
+     var status : base.status
+ 
+     if this.call_sequence == 0x40 {
+         // No-op.
+     } else if this.call_sequence < 0x40 {
+         this.do_decode_frame_config?(dst: nullptr, src: args.src)
+     } else {
+         return base."@end of data"
+@@ -435,25 +475,25 @@ pri func decoder.do_decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reade
+     }
+ 
+     status = this.swizzler.prepare!(
+             dst_pixfmt: args.dst.pixel_format(),
+             dst_palette: args.dst.palette(),
+             src_pixfmt: this.util.make_pixel_format(repr: base.PIXEL_FORMAT__BGRX),
+             src_palette: this.util.empty_slice_u8(),
+             blend: args.blend)
+     if not status.is_ok() {
+         return status
+     }
+ 
+-    status = this.decode_macroblocks!(dst: args.dst, workbuf: args.workbuf)
++    status = this.decode_macroblocks!(workbuf: args.workbuf)
+     if not status.is_ok() {
+         return status
+     }
+ 
+     this.call_sequence = 0x60
+ }
+ 
+ pub func decoder.frame_dirty_rect() base.rect_ie_u32 {
+     return this.util.make_rect_ie_u32(
+             min_incl_x: 0,
+             min_incl_y: 0,
+             max_excl_x: this.width,
+@@ -481,27 +521,32 @@ pub func decoder.num_decoded_frames() base.u64 {
+ pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+     if this.call_sequence < 0x20 {
+         return base."#bad call sequence"
+     }
+     if (args.index <> 0) or (args.io_position <> this.frame_config_io_position) {
+         return base."#bad argument"
+     }
+     this.call_sequence = 0x28
+     return ok
+ }
+ 
+ pub func decoder.set_report_metadata!(fourcc: base.u32, report: base.bool) {
+-    // No-op. VP8 doesn't support metadata (but WEBP does).
++    // No-op. VP8 doesn't support metadata (but WebP does).
+ }
+ 
+ pub func decoder.tell_me_more?(dst: base.io_writer, minfo: nptr base.more_information, src: base.io_reader) {
+     return base."#no more information"
+ }
+ 
+ pub func decoder.workbuf_len() base.range_ii_u64 {
+-    var wb_len : base.u64[..= DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE]
++    var wh     : base.u64[..= 0xFFF_8001]
++    var wb_len : base.u64[..= DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE - 0xFFF_8001]
++
++    if this.quirk_has_alpha_side_channel {
++        wh = (this.width * this.height) as base.u64
++    }
+ 
+     wb_len = this.workbuf_yuv_v_end + (this.partitioned_data_length as base.u64) + 8
+     return this.util.make_range_ii_u64(
+-            min_incl: wb_len,
+-            max_incl: wb_len)
++            min_incl: wh + wb_len,
++            max_incl: wh + wb_len)
+ }
+diff --git a/std/webp/decode_alph_default.wuffs b/std/webp/decode_alph_default.wuffs
+new file mode 100644
+index 00000000..2287c52b
+--- /dev/null
++++ b/std/webp/decode_alph_default.wuffs
+@@ -0,0 +1,242 @@
++// Copyright 2026 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
++// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
++// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
++// option. This file may not be copied, modified, or distributed
++// except according to those terms.
++//
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++pri func decoder.decode_alph?(src: base.io_reader, workbuf: slice base.u8) {
++    var r_mark : base.u64
++    var status : base.status
++
++    while true {
++        io_limit (io: args.src, limit: this.sub_chunk_length as base.u64) {
++            r_mark = args.src.mark()
++            status =? this.decode_alph_limited?(src: args.src, workbuf: args.workbuf)
++            this.sub_chunk_length ~sat-=
++                    (args.src.count_since(mark: r_mark) & 0xFFFF_FFFF) as base.u32
++        }
++
++        if status.is_ok() {
++            break
++        } else if not status.is_suspension() {
++            return status
++        } else if (status == base."$short read") and (this.sub_chunk_length == 0) {
++            return "#short chunk"
++        }
++        yield? status
++    }
++}
++
++pri func decoder.decode_alph_limited?(src: base.io_reader, workbuf: slice base.u8) {
++    var n : base.u64
++
++    this.vp8x_alph_flags = args.src.read_u8?()
++
++    if (this.vp8x_alph_flags & 3) == 0 {
++        args.src.limited_copy_u32_to_slice!(up_to: this.width * this.height, s: args.workbuf)
++    } else if (this.vp8x_alph_flags & 3) == 1 {
++        this.do_decode_frame_vp8l?(
++                dst: nullptr,
++                src: args.src,
++                blend: this.util.make_pixel_blend(repr: base.PIXEL_BLEND__SRC),
++                workbuf: args.workbuf,
++                opts: nullptr)
++
++        n = (this.width * this.height * 4) as base.u64
++        if n <= args.workbuf.length() {
++            this.compact_alph!(s: args.workbuf[.. n])
++        }
++    } else {
++        return "#bad VP8X chunk"
++    }
++    this.vp8x_alph_flags |= 2
++
++    n = (this.width * this.height) as base.u64
++    if n <= args.workbuf.length() {
++        if (this.vp8x_alph_flags & 0x0C) == 0x04 {
++            this.filter_alph_horizontal!(s: args.workbuf[.. n])
++        } else if (this.vp8x_alph_flags & 0x0C) == 0x08 {
++            this.filter_alph_vertical!(s: args.workbuf[.. n])
++        } else if (this.vp8x_alph_flags & 0x0C) == 0x0C {
++            this.filter_alph_gradient!(s: args.workbuf[.. n])
++        }
++    }
++}
++
++pri func decoder.compact_alph!(s: slice base.u8) {
++    var i : base.u64[..= 0x4000_0004]
++    var j : base.u64[..= 0x4000_0004]
++
++    if args.s.length() > 0x4000_0000 {
++        return nothing
++    }
++
++    i = 0
++    j = 1
++    while (i < args.s.length()) and (j < args.s.length()),
++            inv args.s.length() <= 0x4000_0000,
++    {
++        assert i <= 0x4000_0000 via "a <= b: a <= c; c <= b"(c: args.s.length())
++        assert j <= 0x4000_0000 via "a <= b: a <= c; c <= b"(c: args.s.length())
++        args.s[i] = args.s[j]
++        i += 1
++        j += 4
++    }
++}
++
++// libwebp calls this HorizontalUnfilter_C.
++pri func decoder.filter_alph_horizontal!(s: slice base.u8) {
++    var y    : base.u32
++    var x    : base.u32
++    var i    : base.u64
++    var pred : base.u8
++
++    y = 0
++    while y < this.height {
++        assert y < 0x4000 via "a < b: a < c; c <= b"(c: this.height)
++
++        pred = 0
++        if y > 0 {
++            i = ((y - 1) * this.width) as base.u64
++            if i >= args.s.length() {
++                break
++            }
++            pred = args.s[i]
++        }
++
++        x = 0
++        while x < this.width,
++                inv y < 0x4000,
++        {
++            assert x < 0x4000 via "a < b: a < c; c <= b"(c: this.width)
++
++            i = ((y * this.width) + x) as base.u64
++            if i >= args.s.length() {
++                break
++            }
++            args.s[i] ~mod+= pred
++            pred = args.s[i]
++
++            x += 1
++        }
++        y += 1
++    }
++}
++
++// libwebp calls this VerticalUnfilter_C.
++pri func decoder.filter_alph_vertical!(s: slice base.u8) {
++    var y    : base.u32
++    var x    : base.u32
++    var i    : base.u64
++    var pred : base.u8
++
++    x = 0
++    while x < this.width {
++        assert x < 0x4000 via "a < b: a < c; c <= b"(c: this.width)
++
++        pred = 0
++        if x > 0 {
++            i = (x - 1) as base.u64
++            if i >= args.s.length() {
++                break
++            }
++            pred = args.s[i]
++        }
++
++        y = 0
++        while y < this.height,
++                inv x < 0x4000,
++        {
++            assert y < 0x4000 via "a < b: a < c; c <= b"(c: this.height)
++
++            i = ((y * this.width) + x) as base.u64
++            if i >= args.s.length() {
++                break
++            }
++            args.s[i] ~mod+= pred
++            pred = args.s[i]
++
++            y += 1
++        }
++        x += 1
++    }
++}
++
++// libwebp calls this GradientUnfilter_C.
++pri func decoder.filter_alph_gradient!(s: slice base.u8) {
++    var y    : base.u32
++    var x    : base.u32
++    var i    : base.u64
++    var pred : base.u8
++    var grad : base.u32
++    var l    : base.u8  // Left sample.
++    var t    : base.u8  // Top sample.
++    var tl   : base.u8  // Top-Left sample.
++
++    // First row.
++    x = 0
++    while x < this.width {
++        assert x < 0x4000 via "a < b: a < c; c <= b"(c: this.width)
++
++        i = x as base.u64
++        if i >= args.s.length() {
++            break
++        }
++        args.s[i] ~mod+= pred
++        pred = args.s[i]
++
++        x += 1
++    }
++
++    // Other rows.
++    y = 1
++    while y < this.height,
++            inv y >= 1,
++    {
++        assert y < 0x4000 via "a < b: a < c; c <= b"(c: this.height)
++
++        i = (((y - 1) * this.width) + 0) as base.u64
++        if i >= args.s.length() {
++            break
++        }
++        t = args.s[i]
++        tl = t
++        l = t
++
++        x = 0
++        while x < this.width,
++                inv y >= 1,
++                inv y < 0x4000,
++        {
++            assert x < 0x4000 via "a < b: a < c; c <= b"(c: this.width)
++
++            i = (((y - 1) * this.width) + x) as base.u64
++            if i >= args.s.length() {
++                break
++            }
++            t = args.s[i]
++
++            i = ((y * this.width) + x) as base.u64
++            if i >= args.s.length() {
++                break
++            }
++            grad = ((l as base.u32) ~mod+ (t as base.u32)) ~mod- (tl as base.u32)
++            if grad > 0x7FFF_FFFF {
++                grad = 0x00
++            } else if grad > 0xFF {
++                grad = 0xFF
++            }
++            l = args.s[i] ~mod+ ((grad & 0xFF) as base.u8)
++            args.s[i] = l
++            tl = t
++
++            x += 1
++        }
++
++        y += 1
++    }
++}
+diff --git a/std/webp/decode_vp8l.wuffs b/std/webp/decode_vp8l.wuffs
+index c0b9f605..4a72e924 100644
+--- a/std/webp/decode_vp8l.wuffs
++++ b/std/webp/decode_vp8l.wuffs
+@@ -1,23 +1,23 @@
+ // Copyright 2026 The Wuffs Authors.
+ //
+ // Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+ // https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+ // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+ // option. This file may not be copied, modified, or distributed
+ // except according to those terms.
+ //
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
+-pri func decoder.do_decode_frame_vp8l?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
++pri func decoder.do_decode_frame_vp8l?(dst: nptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
+     var c8             : base.u8
+     var has_more       : base.u32[..= 1]
+     var width          : base.u32[..= 0x4000]
+     var dst            : slice base.u8
+     var tile_data      : roslice base.u8
+     var status         : base.status
+     var pix            : slice base.u8
+     var which          : base.u32[..= 4]
+     var transform_type : base.u32[..= 3]
+     var ti             : base.u64
+     var tj             : base.u64
+ 
+@@ -417,36 +417,40 @@ pri func decoder.decode_pixels?(dst: slice base.u8, src: base.io_reader, width:
+         i += 1
+     }
+ 
+     this.decode_pixels_slow?(
+             dst: args.dst,
+             src: args.src,
+             width: args.width,
+             height: args.height,
+             tile_data: args.tile_data,
+             tile_size_log2: args.tile_size_log2)
+ }
+ 
+-pri func decoder.swizzle!(dst: ptr base.pixel_buffer, src: roslice base.u8, blend: base.pixel_blend) base.status {
++pri func decoder.swizzle!(dst: nptr base.pixel_buffer, src: roslice base.u8, blend: base.pixel_blend) base.status {
+     var status              : base.status
+     var dst_pixfmt          : base.pixel_format
+     var dst_bits_per_pixel  : base.u32[..= 256]
+     var dst_bytes_per_pixel : base.u32[..= 32]
+     var dst_bytes_per_row   : base.u64
+     var dst_palette         : slice base.u8
+     var tab                 : table base.u8
+     var src_bytes_per_row   : base.u64
+     var dst                 : slice base.u8
+     var y                   : base.u32
+ 
++    if args.dst == nullptr {
++        return ok
++    }
++
+     status = this.swizzler.prepare!(
+             dst_pixfmt: args.dst.pixel_format(),
+             dst_palette: args.dst.palette_or_else(fallback: this.palette[..]),
+             src_pixfmt: this.util.make_pixel_format(repr: base.PIXEL_FORMAT__BGRA_NONPREMUL),
+             src_palette: this.util.empty_slice_u8(),
+             blend: args.blend)
+     if not status.is_ok() {
+         return status
+     }
+ 
+     // TODO: the dst_pixfmt variable shouldn't be necessary. We should be able
+     // to chain the two calls: "args.dst.pixel_format().bits_per_pixel()".
+diff --git a/std/webp/decode_webp.wuffs b/std/webp/decode_webp.wuffs
+index 6e5a38e7..77bbc63b 100644
+--- a/std/webp/decode_webp.wuffs
++++ b/std/webp/decode_webp.wuffs
+@@ -124,28 +124,36 @@ pub struct decoder? implements base.image_decoder(
+         // not-VP8X. Similarly, ((vp8x_header_flags & 0x11) == 0x01) is an easy
+         // check for "VP8X without an ALPH chunk".
+         //
+         // See also libwebp's src/webp/mux_types.h:
+         //
+         // ANIMATION_FLAG = 0x00000002,
+         // XMP_FLAG       = 0x00000004,
+         // EXIF_FLAG      = 0x00000008,
+         // ALPHA_FLAG     = 0x00000010,
+         // ICCP_FLAG      = 0x00000020,
+         vp8x_header_flags : base.u8,
+ 
++        // The "Rsv| P | F | C" bits from
++        // https://developers.google.com/speed/webp/docs/riff_container#alpha
++        //
++        // We also re-purpose the otherwise-unused 0x02 bit to mean that we
++        // have seen the ALPH chunk.
++        vp8x_alph_flags : base.u8,
++
+         frame_config_io_position : base.u64,
+ 
+         riff_chunk_length : base.u32,
+         sub_chunk_length  : base.u32,
++        sub_chunk_type    : base.u32,
+ 
+         bits   : base.u32,
+         n_bits : base.u32[..= 31],
+ 
+         seen_transform           : array[4] base.bool,
+         transform_type           : array[4] base.u8[..= 3],
+         transform_tile_size_log2 : array[4] base.u8[..= 9],
+         n_transforms             : base.u32[..= 4],
+ 
+         color_cache_bits         : base.u32[..= 11],
+         overall_color_cache_bits : base.u32[..= 11],
+         overall_tile_size_log2   : base.u32[..= 9],
+@@ -314,27 +322,24 @@ pri func decoder.do_decode_image_config_limited?(dst: nptr base.image_config, sr
+     c32 = args.src.read_u32le?()
+     if c32 == 'VP8 'le {
+         this.variant = 0x01
+     } else if c32 == 'VP8L'le {
+         this.variant = 0x02
+     } else if c32 == 'VP8X'le {
+         this.variant = 0x04
+     } else {
+         return "#bad header"
+     }
+ 
+     this.sub_chunk_length = args.src.read_u32le?()
+-    if this.sub_chunk_length < 4 {
+-        return "#bad header"
+-    }
+     this.sub_chunk_has_padding = (this.sub_chunk_length & 1) <> 0
+ 
+     if this.variant == 0x01 {
+         this.vp8.set_quirk!(
+                 key: base.QUIRK_SOURCE_LENGTH,
+                 value: ((this.sub_chunk_length as base.u64) << 1) | 1)
+     } else if this.variant == 0x02 {
+         // No-op.
+     } else if this.sub_chunk_length <> 10 {
+         return "#bad header"
+     } else {
+         this.vp8.set_quirk!(
+@@ -504,111 +509,172 @@ pub func decoder.decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader,
+     var status : base.status
+ 
+     while true {
+         status =? this.do_decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
+         if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+         yield? status
+     }
+ }
+ 
+ pri func decoder.do_decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
+-    var chunk_type   : base.u32
+-    var chunk_length : base.u32
++    var r_mark : base.u64
++    var status : base.status
+ 
+     if this.call_sequence == 0x40 {
+         // No-op.
+     } else if this.call_sequence < 0x40 {
+         this.do_decode_frame_config?(dst: nullptr, src: args.src)
+     } else {
+         return base."@end of data"
+     }
+ 
+     while (this.variant & 0x03) == 0 {
+-        chunk_type = args.src.read_u32le?()
+-        chunk_length = args.src.read_u32le?()
++        this.sub_chunk_type = args.src.read_u32le?()
++        this.sub_chunk_length = args.src.read_u32le?()
++        this.sub_chunk_has_padding = (this.sub_chunk_length & 1) <> 0
++        if this.sub_chunk_length > 0x7FFF_FFFF {
++            return "#unsupported WebP file"
++        }
+ 
+-        if chunk_type == 'ICCP'le {
++        if this.sub_chunk_type == 'ICCP'le {
+             if this.variant > 0x04 {
+                 return "#bad chunk order"
+             } else if (this.vp8x_header_flags & 0x20) == 0 {
+                 return "#bad VP8X chunk"
+             }
+             this.variant = 0x08
+ 
+-        } else if chunk_type == 'ANIM'le {
++        } else if this.sub_chunk_type == 'ANIM'le {
+             if this.variant > 0x08 {
+                 return "#bad chunk order"
+             } else if (this.vp8x_header_flags & 0x02) == 0 {
+                 return "#bad VP8X chunk"
+             }
+             this.variant = 0x10
+ 
+-        } else if chunk_type == 'ANMF'le {
++        } else if this.sub_chunk_type == 'ANMF'le {
+             if this.variant > 0x10 {
+                 return "#bad chunk order"
+             } else if (this.vp8x_header_flags & 0x02) == 0 {
+                 return "#bad VP8X chunk"
+             }
+             this.variant = 0x20
+ 
+-        } else if chunk_type == 'ALPH'le {
++        } else if this.sub_chunk_type == 'ALPH'le {
+             if this.variant > 0x20 {
+                 return "#bad chunk order"
+             } else if (this.vp8x_header_flags & 0x10) == 0 {
+                 return "#bad VP8X chunk"
+             }
+             this.variant = 0x40
++            this.decode_alph?(src: args.src, workbuf: args.workbuf)
++            this.vp8.set_quirk!(
++                    key: vp8.QUIRK_HAS_ALPHA_SIDE_CHANNEL,
++                    value: 1)
+ 
+-        } else if chunk_type == 'VP8 'le {
+-            if (chunk_length as base.u64) > VP8X_MAX_INCL_VP8_CHUNK_LENGTH_DEFAULT {
++        } else if this.sub_chunk_type == 'VP8 'le {
++            if (this.sub_chunk_length as base.u64) > VP8X_MAX_INCL_VP8_CHUNK_LENGTH_DEFAULT {
+                 return "#unsupported VP8X/VP8 chunk length"
+             }
+             this.vp8.set_quirk!(
+                     key: base.QUIRK_SOURCE_LENGTH,
+-                    value: ((chunk_length as base.u64) << 1) | 1)
++                    value: ((this.sub_chunk_length as base.u64) << 1) | 1)
+             this.variant = 0x81
+             break
+ 
+-        } else if chunk_type == 'VP8L'le {
++        } else if this.sub_chunk_type == 'VP8L'le {
+             if (this.vp8x_header_flags & 0x10) <> 0 {
+                 return "#bad ALPH+VP8L combination"
+             }
+             this.variant = 0x82
+             break
+ 
+-        } else if chunk_type == 'XMP 'le {
++        } else if this.sub_chunk_type == 'XMP 'le {
+             if (this.vp8x_header_flags & 0x04) == 0 {
+                 return "#bad VP8X chunk"
+             }
+ 
+-        } else if chunk_type == 'EXIF'le {
++        } else if this.sub_chunk_type == 'EXIF'le {
+             if (this.vp8x_header_flags & 0x08) == 0 {
+                 return "#bad VP8X chunk"
+             }
+         }
+ 
+-        if chunk_length > 0x7FFF_FFFF {
+-            return "#unsupported WebP file"
+-        } else if (chunk_length & 1) <> 0 {
+-            chunk_length += 1
++        args.src.skip_u32?(n: this.sub_chunk_length)
++        if this.sub_chunk_has_padding {
++            args.src.skip_u32?(n: 1)
+         }
+-        args.src.skip_u32?(n: chunk_length)
+     }
+ 
+-    if (this.variant & 0x01) <> 0 {
+-        this.vp8.decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
+-    } else {
+-        this.do_decode_frame_vp8l?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
++    while true {
++        io_limit (io: args.src, limit: this.sub_chunk_length as base.u64) {
++            r_mark = args.src.mark()
++            if (this.variant & 0x01) <> 0 {
++                status =? this.vp8.decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
++            } else {
++                status =? this.do_decode_frame_vp8l?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
++            }
++            this.sub_chunk_length ~sat-=
++                    (args.src.count_since(mark: r_mark) & 0xFFFF_FFFF) as base.u32
++        }
++
++        if status.is_ok() {
++            break
++        } else if not status.is_suspension() {
++            return status
++        } else if (status == base."$short read") and (this.sub_chunk_length == 0) {
++            return "#short chunk"
++        }
++        yield? status
++    }
++
++    if this.vp8x_alph_flags <> 0 {
++        this.apply_alph_chunk!(dst: args.dst, workbuf: args.workbuf)
++    }
++}
++
++// TODO: don't assume PIXEL_BLEND__SRC and PIXEL_FORMAT__BGRA_NONPREMUL.
++pri func decoder.apply_alph_chunk!(dst: ptr base.pixel_buffer, workbuf: slice base.u8) {
++    var y   : base.u32
++    var x   : base.u32
++    var tab : table base.u8
++    var row : slice base.u8
++    var d   : base.u64
++    var s   : base.u64
++
++    tab = args.dst.plane(p: 0)
++    y = 0
++    while y < this.height {
++        assert y < 0x4000 via "a < b: a < c; c <= b"(c: this.height)
++
++        row = tab.row_u32(y: y)
++
++        x = 0
++        while x < this.width,
++                inv y < 0x4000,
++        {
++            assert x < 0x4000 via "a < b: a < c; c <= b"(c: this.width)
++
++            d = ((x * 4) + 3) as base.u64
++            s = ((y * this.width) + x) as base.u64
++            if (d >= row.length()) or (s >= args.workbuf.length()) {
++                break
++            }
++            row[d] = args.workbuf[s]
++
++            x += 1
++        }
++        y += 1
+     }
+ }
+ 
+ pub func decoder.frame_dirty_rect() base.rect_ie_u32 {
+     if this.variant == 0x01 {
+         return this.vp8.frame_dirty_rect()
+     }
+     return this.util.make_rect_ie_u32(
+             min_incl_x: 0,
+             min_incl_y: 0,
+             max_excl_x: this.width,
+             max_excl_y: this.height)
+```
+
+## Uniform selected declaration context
+
+This same mechanically selected S0/S1 context is supplied for every case.
+
+### S0
+
+```text
+lines 184-232
+000184:         //  -  0 ..=  3 are the 0th predictor mode.
+000185:         //
+000186:         // HNZC stands for has-non-zero-coefficients.
+000187:         //
+000188:         // The mb_states_top array is indexed by mbx.
+000189:         mb_states_left : base.u32,
+000190:         mb_states_top  : array[0x400] base.u32,
+000191: 
+000192:         // Macroblock filter parameters.
+000193:         //
+000194:         // The first index is (mby & 1). As we decode rows (and columns) of
+000195:         // macroblocks, the filter parameters are decoded at the time of the
+000196:         // R'th row but are applied (to row R) at the time of the (R+1)'th row.
+000197:         //
+000198:         // The second index is mbx.
+000199:         //
+000200:         // The u8 bits are packed like this:
+000201:         //
+000202:         //  -  4 ..=  7 are unused
+000203:         //  -  3        is  decode_one_macroblock's (not skip).
+000204:         //  -  0 ..=  2 are an index into loop_filters.
+000205:         //
+000206:         mb_filters : array[2] array[0x400] base.u8,
+000207: )
+000208: 
+000209: pub func decoder.get_quirk(key: base.u32) base.u64 {
+000210:     if args.key == base.QUIRK_SOURCE_LENGTH {
+000211:         return this.quirk_source_length
+000212:     } else if args.key == QUIRK_WIDTH_AND_HEIGHT {
+000213:         return this.quirk_width_and_height
+000214:     }
+000215:     return 0
+000216: }
+000217: 
+000218: pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+000219:     var w : base.u32
+000220:     var h : base.u32
+000221: 
+000222:     if args.key == base.QUIRK_SOURCE_LENGTH {
+000223:         if (args.value & 1) == 0 {
+000224:             if args.value <> 0 {
+000225:                 return "#bad QUIRK_SOURCE_LENGTH"
+000226:             }
+000227:             this.quirk_source_length = 0
+000228:             this.partitioned_data_length = 0
+000229:         } else if (args.value >> 1) < 10 {
+000230:             return "#bad QUIRK_SOURCE_LENGTH"
+000231:         } else if (args.value >> 1) > (0x08FF_FFF7 + 10) {
+000232:             return "#unsupported QUIRK_SOURCE_LENGTH"
+```
+
+### S1
+
+```text
+lines 189-237
+000189:         //  -  0 ..=  3 are the 0th predictor mode.
+000190:         //
+000191:         // HNZC stands for has-non-zero-coefficients.
+000192:         //
+000193:         // The mb_states_top array is indexed by mbx.
+000194:         mb_states_left : base.u32,
+000195:         mb_states_top  : array[0x400] base.u32,
+000196: 
+000197:         // Macroblock filter parameters.
+000198:         //
+000199:         // The first index is (mby & 1). As we decode rows (and columns) of
+000200:         // macroblocks, the filter parameters are decoded at the time of the
+000201:         // R'th row but are applied (to row R) at the time of the (R+1)'th row.
+000202:         //
+000203:         // The second index is mbx.
+000204:         //
+000205:         // The u8 bits are packed like this:
+000206:         //
+000207:         //  -  4 ..=  7 are unused
+000208:         //  -  3        is  decode_one_macroblock's (not skip).
+000209:         //  -  0 ..=  2 are an index into loop_filters.
+000210:         //
+000211:         mb_filters : array[2] array[0x400] base.u8,
+000212: )
+000213: 
+000214: pub func decoder.get_quirk(key: base.u32) base.u64 {
+000215:     if args.key == base.QUIRK_SOURCE_LENGTH {
+000216:         return this.quirk_source_length
+000217:     } else if args.key == QUIRK_HAS_ALPHA_SIDE_CHANNEL {
+000218:         if this.quirk_has_alpha_side_channel {
+000219:             return 1
+000220:         }
+000221:     } else if args.key == QUIRK_WIDTH_AND_HEIGHT {
+000222:         return this.quirk_width_and_height
+000223:     }
+000224:     return 0
+000225: }
+000226: 
+000227: pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+000228:     var w : base.u32
+000229:     var h : base.u32
+000230: 
+000231:     if args.key == base.QUIRK_SOURCE_LENGTH {
+000232:         if (args.value & 1) == 0 {
+000233:             if args.value <> 0 {
+000234:                 return "#bad QUIRK_SOURCE_LENGTH"
+000235:             }
+000236:             this.quirk_source_length = 0
+000237:             this.partitioned_data_length = 0
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C040","gap_exists":false,"gap_type":[],"commit_induced":"NO","maintenance_needed":false,"confidence":98,"affected_functions":["fuzz","fuzz_image_decoder","decoder.decode_frame?","decoder.do_decode_frame?","decoder.decode_alph?","decoder.decode_alph_limited?","decoder.apply_alph_chunk!","decoder.workbuf_len"],"reason":"H0 already drives the public WebP image-decoder protocol with arbitrary source bytes: fuzz constructs wuffs_webp__decoder and fuzz_image_decoder calls decode_image_config, queries workbuf_len, allocates that work buffer, then repeatedly calls decode_frame_config and decode_frame. In S1, WebP ALPH processing is reached through those same calls when input selects an 'ALPH' chunk; decoder.do_decode_frame? invokes decoder.decode_alph?, sets vp8.QUIRK_HAS_ALPHA_SIDE_CHANNEL internally, and later invokes decoder.apply_alph_chunk!. The caller-visible increased buffer requirement is represented by decoder.workbuf_len, which H0 already queries after decode_image_config. Thus H0 retains adequate input, state, configuration, and allocation control for the newly added behavior, and the new VP8 quirk is an internal WebP-to-VP8 protocol rather than a missing harness action.","evidence":["fuzz passes the complete wuffs_base__io_buffer src to fuzz_image_decoder using wuffs_webp__decoder__upcast_as__wuffs_base__image_decoder.","fuzz_image_decoder calls wuffs_base__image_decoder__decode_image_config before obtaining wuffs_base__image_decoder__workbuf_len(dec).max_incl and allocating workbuf.","fuzz_image_decoder repeatedly calls wuffs_base__image_decoder__decode_frame_config and wuffs_base__image_decoder__decode_frame with that workbuf.","S1 decoder.do_decode_frame? recognizes sub_chunk_type == 'ALPH'le and directly calls this.decode_alph?(src: args.src, workbuf: args.workbuf).","S1 decoder.do_decode_frame? directly calls this.vp8.set_quirk!(key: vp8.QUIRK_HAS_ALPHA_SIDE_CHANNEL, value: 1), so H0 does not need to configure that quirk separately.","S1 decoder.workbuf_len adds width × height when quirk_has_alpha_side_channel is enabled, matching H0's existing dynamic work-buffer allocation path."],"recommended_action":"No harness maintenance is needed for this commit; retain H0 and rely on ALPH-bearing WebP corpus inputs to exercise the new path."}
+tokens used
+17,512

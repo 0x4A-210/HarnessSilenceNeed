@@ -1,0 +1,187 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/maintenance-gap_only-C022-kewfsfn6
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0863a-8989-7930-a3af-7f4e723b4edb
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C022
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `c/fuzz/decode_fuzzer.c`
+
+~~~~c
+// Copyright 2015 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#include <brotli/decode.h>
+
+// Entry point for LibFuzzer.
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  size_t addend = 0;
+  if (size > 0)
+    addend = data[size - 1] & 7;
+  const uint8_t* next_in = data;
+
+  const int kBufferSize = 1024;
+  uint8_t* buffer = (uint8_t*) malloc(kBufferSize);
+  if (!buffer) {
+    // OOM is out-of-scope here.
+    return 0;
+  }
+  /* The biggest "magic number" in brotli is 16MiB - 16, so no need to check
+     the cases with much longer output. */
+  const size_t total_out_limit = (addend == 0) ? (1 << 26) : (1 << 24);
+  size_t total_out = 0;
+
+  BrotliDecoderState* state = BrotliDecoderCreateInstance(0, 0, 0);
+
+  if (addend == 0)
+    addend = size;
+  /* Test both fast (addend == size) and slow (addend <= 7) decoding paths. */
+  for (size_t i = 0; i < size;) {
+    size_t next_i = i + addend;
+    if (next_i > size)
+      next_i = size;
+    size_t avail_in = next_i - i;
+    i = next_i;
+    BrotliDecoderResult result = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
+    while (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
+      size_t avail_out = kBufferSize;
+      uint8_t* next_out = buffer;
+      result = BrotliDecoderDecompressStream(
+          state, &avail_in, &next_in, &avail_out, &next_out, &total_out);
+      if (total_out > total_out_limit)
+        break;
+    }
+    if (total_out > total_out_limit)
+      break;
+    if (result != BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT)
+      break;
+  }
+
+  BrotliDecoderDestroyInstance(state);
+  free(buffer);
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/brotli/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+
+cmake . -DBUILD_TESTING=OFF
+make clean
+make -j$(nproc) brotlidec-static
+
+$CC $CFLAGS -c -std=c99 -I. -I./c/include c/fuzz/decode_fuzzer.c 
+
+$CXX $CXXFLAGS ./decode_fuzzer.o  -o $OUT/decode_fuzzer \
+    $LIB_FUZZING_ENGINE ./libbrotlidec-static.a ./libbrotlicommon-static.a
+
+cp java/org/brotli/integration/fuzz_data.zip $OUT/decode_fuzzer_seed_corpus.zip
+chmod a-x $OUT/decode_fuzzer_seed_corpus.zip # we will try to run it otherwise
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `c/common/platform.h`
+
+~~~~diff
+diff --git a/c/common/platform.h b/c/common/platform.h
+--- a/c/common/platform.h
++++ b/c/common/platform.h
+@@ -37,13 +37,13 @@
+ /* Let's try and follow the Linux convention */
+ #define BROTLI_X_BYTE_ORDER BYTE_ORDER
+ #define BROTLI_X_LITTLE_ENDIAN LITTLE_ENDIAN
+ #define BROTLI_X_BIG_ENDIAN BIG_ENDIAN
+ #endif
+ 
+-#if BROTLI_MSVC_VERSION_CHECK(12, 0, 0)
++#if BROTLI_MSVC_VERSION_CHECK(18, 0, 0)
+ #include <intrin.h>
+ #endif
+ 
+ #if defined(BROTLI_ENABLE_LOG) || defined(BROTLI_DEBUG)
+ #include <assert.h>
+ #include <stdio.h>
+@@ -526,13 +526,13 @@ BROTLI_MIN_MAX(size_t) BROTLI_MIN_MAX(uint32_t) BROTLI_MIN_MAX(uint8_t)
+ }
+ 
+ #if BROTLI_64_BITS
+ #if BROTLI_GNUC_HAS_BUILTIN(__builtin_ctzll, 3, 4, 0) || \
+     BROTLI_INTEL_VERSION_CHECK(16, 0, 0)
+ #define BROTLI_TZCNT64 __builtin_ctzll
+-#elif BROTLI_MSVC_VERSION_CHECK(12, 0, 0)
++#elif BROTLI_MSVC_VERSION_CHECK(18, 0, 0)
+ #if defined(BROTLI_TARGET_X64)
+ #define BROTLI_TZCNT64 _tzcnt_u64
+ #else /* BROTLI_TARGET_X64 */
+ static BROTLI_INLINE uint32_t BrotliBsf64Msvc(uint64_t x) {
+   uint32_t lsb;
+   _BitScanForward64(&lsb, x);
+@@ -543,13 +543,13 @@ static BROTLI_INLINE uint32_t BrotliBsf64Msvc(uint64_t x) {
+ #endif /* __builtin_ctzll */
+ #endif /* BROTLI_64_BITS */
+ 
+ #if BROTLI_GNUC_HAS_BUILTIN(__builtin_clz, 3, 4, 0) || \
+     BROTLI_INTEL_VERSION_CHECK(16, 0, 0)
+ #define BROTLI_BSR32(x) (31u ^ (uint32_t)__builtin_clz(x))
+-#elif BROTLI_MSVC_VERSION_CHECK(12, 0, 0)
++#elif BROTLI_MSVC_VERSION_CHECK(18, 0, 0)
+ static BROTLI_INLINE uint32_t BrotliBsr32Msvc(uint32_t x) {
+   unsigned long msb;
+   _BitScanReverse(&msb, x);
+   return (uint32_t)msb;
+ }
+ #define BROTLI_BSR32 BrotliBsr32Msvc
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C022","gap_exists":false,"gap_type":[],"confidence":97,"affected_functions":["BROTLI_TZCNT64","BrotliBsf64Msvc","BrotliBsr32Msvc","BROTLI_BSR32"],"reason":"The change only raises three compile-time MSVC feature guards from BROTLI_MSVC_VERSION_CHECK(12, 0, 0) to BROTLI_MSVC_VERSION_CHECK(18, 0, 0), controlling <intrin.h> and MSVC-specific bit-scan/count implementations. It introduces no new runtime entry point, API protocol, decoder state, configuration accepted at runtime, input semantics, or data-dependent attack surface. H0 already drives BrotliDecoderDecompressStream with arbitrary bytes and varied input chunking; its use of $CC does not cover MSVC-version compilation, but that is a build-compatibility matrix concern rather than a material fuzz-harness gap.","evidence":["c/common/platform.h changes only BROTLI_MSVC_VERSION_CHECK thresholds around <intrin.h>, BROTLI_TZCNT64, BrotliBsf64Msvc, and BrotliBsr32Msvc/BROTLI_BSR32.","decode_fuzzer.c supplies arbitrary data to BrotliDecoderDecompressStream and exercises both whole-input and 1-to-7-byte incremental-input paths.","No production runtime logic, public API, or input parsing behavior is added or modified by S1."],"recommended_action":"Do not add a fuzz target for this change; validate the affected MSVC version configurations through compile/build-matrix testing instead."}
+tokens used
+16,075

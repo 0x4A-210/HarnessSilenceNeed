@@ -1,0 +1,1124 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/n4-gap_only-C029-porbwqtl
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08a75-2bac-7673-b2ea-2f20f1fe3f9f
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+C029
+
+## Existing harness H0
+
+The complete project-owned harness translation unit is shown below. Framework
+main/CLI scaffolding is not expanded; directly included semantic helper files
+are shown separately under the fixed context rule.
+
+Path: `fuzz/c/std/json_fuzzer.cc`
+
+```cpp
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN json_fuzzer.c
+./a.out ../../../test/data/*.json
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__AUX__BASE
+#define WUFFS_CONFIG__MODULE__AUX__JSON
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__JSON
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+
+#define TOK_BUFFER_ARRAY_SIZE 4096
+#define STACK_SIZE (WUFFS_JSON__DECODER_DEPTH_MAX_INCL + 1)
+
+// Wuffs allows either statically or dynamically allocated work buffers. This
+// program exercises static allocation.
+#define WORK_BUFFER_ARRAY_SIZE \
+  WUFFS_JSON__DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE
+#if WORK_BUFFER_ARRAY_SIZE > 0
+uint8_t g_work_buffer_array[WORK_BUFFER_ARRAY_SIZE];
+#else
+// Not all C/C++ compilers support 0-length arrays.
+uint8_t g_work_buffer_array[1];
+#endif
+
+// Each stack element is 1 byte. The low 7 bits denote the container:
+//  - 0x01 means no container: we are at the top level.
+//  - 0x02 means a [] list.
+//  - 0x04 means a {} dictionary.
+//
+// The high 0x80 bit holds the even/odd-ness of the number of elements in that
+// container. A valid dictionary contains key-value pairs and should therefore
+// contain an even number of elements.
+typedef uint8_t stack_element;
+
+const char*  //
+fuzz_one_token(wuffs_base__token t,
+               wuffs_base__token prev_token,
+               wuffs_base__io_buffer* src,
+               size_t* ti,
+               stack_element* stack,
+               size_t* depth) {
+  uint64_t len = wuffs_base__token__length(&t);
+  if (len > 0xFFFF) {
+    return "fuzz: internal error: length too long (vs 0xFFFF)";
+  } else if (len > (src->meta.wi - *ti)) {
+    return "fuzz: internal error: length too long (vs wi - ti)";
+  }
+  *ti += len;
+
+  if ((wuffs_base__token__value_extension(&t) >= 0) &&
+      !wuffs_base__token__continued(&prev_token)) {
+    return "fuzz: internal error: extended token not after continued token";
+  }
+
+  int64_t vbc = wuffs_base__token__value_base_category(&t);
+  uint64_t vbd = wuffs_base__token__value_base_detail(&t);
+
+  switch (vbc) {
+    case WUFFS_BASE__TOKEN__VBC__STRUCTURE: {
+      bool from_consistent = false;
+      if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_NONE) {
+        from_consistent = stack[*depth] & 0x01;
+      } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_LIST) {
+        from_consistent = stack[*depth] & 0x02;
+      } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_DICT) {
+        from_consistent = stack[*depth] & 0x04;
+      }
+      if (!from_consistent) {
+        return "fuzz: internal error: inconsistent VBD__STRUCTURE__FROM_ETC";
+      }
+
+      if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__PUSH) {
+        (*depth)++;
+        if ((*depth >= STACK_SIZE) || (*depth == 0)) {
+          return "fuzz: internal error: depth too large";
+        }
+
+        if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_NONE) {
+          return "fuzz: internal error: push to the 'none' container";
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_LIST) {
+          stack[*depth] = 0x02;
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_DICT) {
+          stack[*depth] = 0x04;
+        } else {
+          return "fuzz: internal error: unrecognized VBD__STRUCTURE__TO_ETC";
+        }
+
+      } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__POP) {
+        if ((vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__FROM_DICT) &&
+            (0 != (0x80 & stack[*depth]))) {
+          return "fuzz: internal error: dictionary had an incomplete key/value "
+                 "pair";
+        }
+
+        if (*depth <= 0) {
+          return "fuzz: internal error: depth too small";
+        }
+        (*depth)--;
+
+        bool to_consistent = false;
+        if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_NONE) {
+          to_consistent = stack[*depth] & 0x01;
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_LIST) {
+          to_consistent = stack[*depth] & 0x02;
+        } else if (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__TO_DICT) {
+          to_consistent = stack[*depth] & 0x04;
+        }
+        if (!to_consistent) {
+          return "fuzz: internal error: inconsistent VBD__STRUCTURE__TO_ETC";
+        }
+
+      } else {
+        return "fuzz: internal error: unrecognized VBC__STRUCTURE";
+      }
+      break;
+    }
+
+    case WUFFS_BASE__TOKEN__VBC__STRING: {
+      if (vbd & WUFFS_BASE__TOKEN__VBD__STRING__CONVERT_1_DST_1_SRC_COPY) {
+        wuffs_base__slice_u8 s =
+            wuffs_base__make_slice_u8(src->data.ptr + *ti - len, len);
+        if ((vbd & WUFFS_BASE__TOKEN__VBD__STRING__DEFINITELY_UTF_8) &&
+            (s.len != wuffs_base__utf_8__longest_valid_prefix(s.ptr, s.len))) {
+          return "fuzz: internal error: invalid UTF-8";
+        }
+        if ((vbd & WUFFS_BASE__TOKEN__VBD__STRING__DEFINITELY_ASCII) &&
+            (s.len != wuffs_base__ascii__longest_valid_prefix(s.ptr, s.len))) {
+          return "fuzz: internal error: invalid ASCII";
+        }
+      }
+      break;
+    }
+
+    case WUFFS_BASE__TOKEN__VBC__UNICODE_CODE_POINT: {
+      if ((WUFFS_BASE__UNICODE_SURROGATE__MIN_INCL <= vbd) &&
+          (vbd <= WUFFS_BASE__UNICODE_SURROGATE__MAX_INCL)) {
+        return "fuzz: internal error: invalid Unicode surrogate";
+      } else if (WUFFS_BASE__UNICODE_CODE_POINT__MAX_INCL < vbd) {
+        return "fuzz: internal error: invalid Unicode code point";
+      }
+      break;
+    }
+
+    default:
+      break;
+  }
+
+  // After a complete JSON value, update the parity (even/odd count) of the
+  // container.
+  if (!wuffs_base__token__continued(&t) &&
+      (vbc != WUFFS_BASE__TOKEN__VBC__FILLER) &&
+      ((vbc != WUFFS_BASE__TOKEN__VBC__STRUCTURE) ||
+       (vbd & WUFFS_BASE__TOKEN__VBD__STRUCTURE__POP))) {
+    stack[*depth] ^= 0x80;
+  }
+
+  return NULL;
+}
+
+uint64_t  //
+buffer_limit(uint64_t hash, uint64_t min, uint64_t max) {
+  hash &= 0x3F;
+  uint64_t n;
+  if (hash < 0x20) {
+    n = min + hash;
+  } else {
+    n = max - (0x3F - hash);
+  }
+  if (n < min) {
+    return min;
+  } else if (n > max) {
+    return max;
+  }
+  return n;
+}
+
+uint32_t g_quirks[] = {
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_A,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_CAPITAL_U,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_E,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_QUESTION_MARK,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_SINGLE_QUOTE,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_V,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_X_AS_CODE_POINTS,
+    WUFFS_JSON__QUIRK_ALLOW_BACKSLASH_ZERO,
+    WUFFS_JSON__QUIRK_ALLOW_COMMENT_BLOCK,
+    WUFFS_JSON__QUIRK_ALLOW_COMMENT_LINE,
+    WUFFS_JSON__QUIRK_ALLOW_EXTRA_COMMA,
+    WUFFS_JSON__QUIRK_ALLOW_INF_NAN_NUMBERS,
+    WUFFS_JSON__QUIRK_ALLOW_LEADING_ASCII_RECORD_SEPARATOR,
+    WUFFS_JSON__QUIRK_ALLOW_LEADING_UNICODE_BYTE_ORDER_MARK,
+    WUFFS_JSON__QUIRK_ALLOW_TRAILING_FILLER,
+    WUFFS_JSON__QUIRK_JSON_POINTER_ALLOW_TILDE_N_TILDE_R_TILDE_T,
+    WUFFS_JSON__QUIRK_REPLACE_INVALID_UNICODE,
+    0,
+};
+
+void set_quirks(wuffs_json__decoder* dec, uint64_t hash) {
+  for (uint32_t i = 0; g_quirks[i]; i++) {
+    uint64_t bit = 1 << (i & 63);
+    if (hash & bit) {
+      wuffs_json__decoder__set_quirk(dec, g_quirks[i], 1);
+    }
+  }
+}
+
+const char*  //
+fuzz_complex(wuffs_base__io_buffer* full_src, uint64_t hash) {
+  uint64_t tok_limit = buffer_limit(
+      hash & 0x3F, WUFFS_JSON__DECODER_DST_TOKEN_BUFFER_LENGTH_MIN_INCL,
+      TOK_BUFFER_ARRAY_SIZE);
+  hash = wuffs_base__u64__rotate_right(hash, 6);
+
+  uint64_t src_limit = buffer_limit(
+      hash & 0x3F, WUFFS_JSON__DECODER_SRC_IO_BUFFER_LENGTH_MIN_INCL, 4096);
+  hash = wuffs_base__u64__rotate_right(hash, 6);
+
+  // ----
+
+  wuffs_json__decoder dec;
+  wuffs_base__status status = wuffs_json__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  set_quirks(&dec, hash);
+
+  wuffs_base__token tok_array[TOK_BUFFER_ARRAY_SIZE];
+  wuffs_base__token_buffer tok = ((wuffs_base__token_buffer){
+      .data = ((wuffs_base__slice_token){
+          .ptr = tok_array,
+          .len = (size_t)((tok_limit < TOK_BUFFER_ARRAY_SIZE)
+                              ? tok_limit
+                              : TOK_BUFFER_ARRAY_SIZE),
+      }),
+  });
+
+  wuffs_base__token prev_token = wuffs_base__make_token(0);
+  uint32_t no_progress_count = 0;
+
+  stack_element stack[STACK_SIZE];
+  stack[0] = 0x01;  // We start in the 'none' container.
+  size_t depth = 0;
+
+  // ----
+
+  while (true) {  // Outer loop.
+    wuffs_base__io_buffer src = make_limited_reader(*full_src, src_limit);
+
+    size_t old_tok_wi = tok.meta.wi;
+    size_t old_tok_ri = tok.meta.ri;
+    size_t old_src_wi = src.meta.wi;
+    size_t old_src_ri = src.meta.ri;
+    size_t ti = old_src_ri;
+
+    status = wuffs_json__decoder__decode_tokens(
+        &dec, &tok, &src,
+        wuffs_base__make_slice_u8(g_work_buffer_array, WORK_BUFFER_ARRAY_SIZE));
+    if ((tok.data.len < tok.meta.wi) ||  //
+        (tok.meta.wi < tok.meta.ri) ||   //
+        (tok.meta.ri != old_tok_ri)) {
+      return "fuzz: internal error: inconsistent tok indexes";
+    } else if ((src.data.len < src.meta.wi) ||  //
+               (src.meta.wi < src.meta.ri) ||   //
+               (src.meta.wi != old_src_wi)) {
+      return "fuzz: internal error: inconsistent src indexes";
+    }
+    full_src->meta.ri += src.meta.ri - old_src_ri;
+
+    if ((tok.meta.wi > old_tok_wi) || (src.meta.ri > old_src_ri) ||
+        !wuffs_base__status__is_suspension(&status)) {
+      no_progress_count = 0;
+    } else if (no_progress_count < 999) {
+      no_progress_count++;
+    } else if (!full_src->meta.closed &&
+               (status.repr == wuffs_base__suspension__short_read)) {
+      return wuffs_base__status__message(&status);
+    } else {
+      return "fuzz: internal error: no progress";
+    }
+
+    // ----
+
+    while (tok.meta.ri < tok.meta.wi) {  // Inner loop.
+      wuffs_base__token t = tok.data.ptr[tok.meta.ri++];
+      const char* z =
+          fuzz_one_token(t, prev_token, &src, &ti, &stack[0], &depth);
+      if (z != NULL) {
+        return z;
+      }
+      prev_token = t;
+    }  // Inner loop.
+
+    // ----
+
+    // Check that, starting from old_src_ri, summing the token lengths brings
+    // us to the new src.meta.ri.
+    if (ti != src.meta.ri) {
+      return "fuzz: internal error: ti != ri";
+    }
+
+    if (status.repr == NULL) {
+      break;
+
+    } else if (status.repr == wuffs_base__suspension__short_read) {
+      if (src.meta.closed) {
+        return "fuzz: internal error: short read on a closed io_reader";
+      }
+      // We don't compact full_src as it may be mmap'ed read-only.
+      continue;
+
+    } else if (status.repr == wuffs_base__suspension__short_write) {
+      wuffs_base__token_buffer__compact(&tok);
+      continue;
+    }
+
+    return wuffs_base__status__message(&status);
+  }  // Outer loop.
+
+  // ----
+
+  if (depth != 0) {
+    return "fuzz: internal error: decoded OK but final depth was not zero";
+  } else if (wuffs_base__token__continued(&prev_token)) {
+    return "fuzz: internal error: decoded OK but final token was continued";
+  }
+  return NULL;
+}
+
+const char*  //
+fuzz_simple(wuffs_base__io_buffer* full_src) {
+  wuffs_json__decoder dec;
+  wuffs_base__status status =
+      wuffs_json__decoder__initialize(&dec, sizeof dec, WUFFS_VERSION, 0);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+
+  wuffs_base__token tok_array[TOK_BUFFER_ARRAY_SIZE];
+  wuffs_base__token_buffer tok = ((wuffs_base__token_buffer){
+      .data = ((wuffs_base__slice_token){
+          .ptr = tok_array,
+          .len = TOK_BUFFER_ARRAY_SIZE,
+      }),
+  });
+
+  while (true) {
+    status = wuffs_json__decoder__decode_tokens(
+        &dec, &tok, full_src,
+        wuffs_base__make_slice_u8(g_work_buffer_array, WORK_BUFFER_ARRAY_SIZE));
+    if (status.repr == NULL) {
+      break;
+
+    } else if (status.repr == wuffs_base__suspension__short_write) {
+      tok.meta.ri = tok.meta.wi;
+      wuffs_base__token_buffer__compact(&tok);
+      continue;
+    }
+
+    return wuffs_base__status__message(&status);
+  }
+
+  return NULL;
+}
+
+#if defined(__cplusplus)
+#include <vector>
+
+class Callbacks : public wuffs_aux::DecodeJsonCallbacks {
+ public:
+  Callbacks() : m_depth(0) {}
+
+  std::string AppendNull() override { return ""; }
+
+  std::string AppendBool(bool val) override { return ""; }
+
+  std::string AppendI64(int64_t val) override { return ""; }
+
+  std::string AppendF64(double val) override { return ""; }
+
+  std::string AppendTextString(std::string&& val) override { return ""; }
+
+  std::string Push(uint32_t flags) override {
+    m_depth++;
+    return "";
+  }
+
+  std::string Pop(uint32_t flags) override {
+    m_depth--;
+    if (m_depth < 0) {
+      fprintf(stderr, "negative depth\n");
+      intentional_segfault();
+    }
+    return "";
+  }
+
+  void Done(wuffs_aux::DecodeJsonResult& result,
+            wuffs_aux::sync_io::Input& input,
+            wuffs_aux::IOBuffer& buffer) override {
+    if (result.error_message.empty()) {
+      if (m_depth != 0) {
+        fprintf(stderr, "no error message but final depth is non-zero\n");
+        intentional_segfault();
+      }
+    } else if (result.error_message.find("internal error:") !=
+               std::string::npos) {
+      fprintf(stderr, "internal errors shouldn't occur: \"%s\"\n",
+              result.error_message.c_str());
+      intentional_segfault();
+    }
+  }
+
+ private:
+  int64_t m_depth;
+};
+
+void  //
+fuzz_cpp(const uint8_t* in_ptr, size_t in_len, uint64_t hash) {
+  static const char* json_pointers[16] = {
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "",           //
+      "/",          //
+      "/2/3/4/5",   //
+      "/k0",        //
+      "/k0/1",      //
+      "/x/y",       //
+      "/~0/~1/~n",  //
+  };
+  const char* json_pointer = json_pointers[hash & 15];
+  hash = wuffs_base__u64__rotate_right(hash, 4);
+
+  std::vector<uint32_t> quirks;
+  for (uint32_t i = 0; g_quirks[i]; i++) {
+    uint64_t bit = 1 << (i & 63);
+    if (hash & bit) {
+      quirks.push_back(g_quirks[i]);
+    }
+  }
+
+  Callbacks callbacks;
+  wuffs_aux::sync_io::MemoryInput input(in_ptr, in_len);
+  wuffs_aux::DecodeJson(
+      callbacks, input,
+      wuffs_aux::DecodeJsonArgQuirks(quirks.data(), quirks.size()),
+      wuffs_aux::DecodeJsonArgJsonPointer(json_pointer));
+}
+#endif  // defined(__cplusplus)
+
+const char*  //
+fuzz(wuffs_base__io_buffer* full_src, uint64_t hash) {
+#if defined(__cplusplus)
+  fuzz_cpp(full_src->reader_pointer(), full_src->reader_length(),
+           wuffs_base__u64__rotate_right(hash, 32));
+#endif  // defined(__cplusplus)
+
+  // Send 99.6% of inputs to fuzz_complex and the remainder to fuzz_simple. The
+  // 0xA5 constant is arbitrary but non-zero. If the hash function maps the
+  // empty input to 0, this still sends the empty input to fuzz_complex.
+  //
+  // The fuzz_simple implementation shows how easy decoding with Wuffs is when
+  // all you want is to run LLVMFuzzerTestOneInput's built-in (Wuffs API
+  // independent) checks (e.g. the ASan address sanitizer) and you don't really
+  // care what the output is, just that it doesn't crash.
+  //
+  // The fuzz_complex implementation adds many more Wuffs API specific checks
+  // (e.g. that the sum of the tokens' lengths do not exceed the input length).
+  if ((hash & 0xFF) != 0xA5) {
+    return fuzz_complex(full_src, wuffs_base__u64__rotate_right(hash, 8));
+  }
+  return fuzz_simple(full_src);
+}
+```
+
+No semantic helper beyond the generic runner is directly included.
+
+## Complete S0 -> S1 hand-written production-source diff
+
+The fixed rule includes every changed `std/**/*.wuffs` production file. It
+excludes generated release snapshots, tests, docs, examples, and commit text.
+
+```diff
+diff --git a/std/sha256/common_sha256.wuffs b/std/sha256/common_sha256.wuffs
+new file mode 100644
+index 00000000..e8fd30fc
+--- /dev/null
++++ b/std/sha256/common_sha256.wuffs
+@@ -0,0 +1,452 @@
++// Copyright 2023 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
++// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
++// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
++// option. This file may not be copied, modified, or distributed
++// except according to those terms.
++//
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++// INITIAL_SHA256_H comes from section "5.3.3 SHA-256" of
++// https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.180-4.pdf
++pri const INITIAL_SHA256_H : roarray[8] base.u32 = [
++        0x6A09_E667, 0xBB67_AE85, 0x3C6E_F372, 0xA54F_F53A,
++        0x510E_527F, 0x9B05_688C, 0x1F83_D9AB, 0x5BE0_CD19,
++]
++
++// K comes from section "4.2.2 SHA-224 and SHA-256 Constants" of
++// https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.180-4.pdf
++pri const K : roarray[64] base.u32 = [
++        0x428A_2F98, 0x7137_4491, 0xB5C0_FBCF, 0xE9B5_DBA5,
++        0x3956_C25B, 0x59F1_11F1, 0x923F_82A4, 0xAB1C_5ED5,
++        0xD807_AA98, 0x1283_5B01, 0x2431_85BE, 0x550C_7DC3,
++        0x72BE_5D74, 0x80DE_B1FE, 0x9BDC_06A7, 0xC19B_F174,
++        0xE49B_69C1, 0xEFBE_4786, 0x0FC1_9DC6, 0x240C_A1CC,
++        0x2DE9_2C6F, 0x4A74_84AA, 0x5CB0_A9DC, 0x76F9_88DA,
++        0x983E_5152, 0xA831_C66D, 0xB003_27C8, 0xBF59_7FC7,
++        0xC6E0_0BF3, 0xD5A7_9147, 0x06CA_6351, 0x1429_2967,
++        0x27B7_0A85, 0x2E1B_2138, 0x4D2C_6DFC, 0x5338_0D13,
++        0x650A_7354, 0x766A_0ABB, 0x81C2_C92E, 0x9272_2C85,
++        0xA2BF_E8A1, 0xA81A_664B, 0xC24B_8B70, 0xC76C_51A3,
++        0xD192_E819, 0xD699_0624, 0xF40E_3585, 0x106A_A070,
++        0x19A4_C116, 0x1E37_6C08, 0x2748_774C, 0x34B0_BCB5,
++        0x391C_0CB3, 0x4ED8_AA4A, 0x5B9C_CA4F, 0x682E_6FF3,
++        0x748F_82EE, 0x78A5_636F, 0x84C8_7814, 0x8CC7_0208,
++        0x90BE_FFFA, 0xA450_6CEB, 0xBEF9_A3F7, 0xC671_78F2,
++]
++
++pub struct hasher? implements base.hasher_bitvec256(
++        length_modulo_u64    : base.u64,
++        length_overflows_u64 : base.bool,
++
++        padding0 : base.u8,
++        padding1 : base.u8,
++        padding2 : base.u8,
++
++        buf_len  : base.u32[..= 64],
++        buf_data : array[64] base.u8,
++
++        h0 : base.u32,
++        h1 : base.u32,
++        h2 : base.u32,
++        h3 : base.u32,
++        h4 : base.u32,
++        h5 : base.u32,
++        h6 : base.u32,
++        h7 : base.u32,
++
++        util : base.utility,
++)
++
++pub func hasher.get_quirk(key: base.u32) base.u64 {
++    return 0
++}
++
++pub func hasher.set_quirk!(key: base.u32, value: base.u64) base.status {
++    return base."#unsupported option"
++}
++
++pub func hasher.update!(x: roslice base.u8) {
++    var new_lmu : base.u64
++
++    if (this.length_modulo_u64 == 0) and not this.length_overflows_u64 {
++        this.h0 = INITIAL_SHA256_H[0]
++        this.h1 = INITIAL_SHA256_H[1]
++        this.h2 = INITIAL_SHA256_H[2]
++        this.h3 = INITIAL_SHA256_H[3]
++        this.h4 = INITIAL_SHA256_H[4]
++        this.h5 = INITIAL_SHA256_H[5]
++        this.h6 = INITIAL_SHA256_H[6]
++        this.h7 = INITIAL_SHA256_H[7]
++    }
++
++    new_lmu = this.length_modulo_u64 ~mod+ args.x.length()
++    this.length_overflows_u64 = (new_lmu < this.length_modulo_u64) or this.length_overflows_u64
++    this.length_modulo_u64 = new_lmu
++
++    // Align to a block boundary before calling this.up.
++    if this.buf_len <> 0 {
++        while this.buf_len < 64 {
++            if args.x.length() <= 0 {
++                return nothing
++            }
++            this.buf_data[this.buf_len] = args.x[0]
++            this.buf_len += 1
++            args.x = args.x[1 ..]
++        } endwhile
++        this.buf_len = 0
++        this.up!(x: this.buf_data[..])
++    }
++
++    this.up!(x: args.x)
++}
++
++pub func hasher.update_bitvec256!(x: roslice base.u8) base.bitvec256 {
++    this.update!(x: args.x)
++    return this.checksum_bitvec256()
++}
++
++pri func hasher.up!(x: roslice base.u8) {
++    var p : roslice base.u8
++
++    var w : array[64] base.u32
++
++    var w2  : base.u32
++    var w15 : base.u32
++    var s0  : base.u32
++    var s1  : base.u32
++    var t1  : base.u32
++    var t2  : base.u32
++
++    var a : base.u32
++    var b : base.u32
++    var c : base.u32
++    var d : base.u32
++    var e : base.u32
++    var f : base.u32
++    var g : base.u32
++    var h : base.u32
++
++    var i : base.u32
++
++    var buf_len : base.u32[..= 63]
++
++    a = this.h0
++    b = this.h1
++    c = this.h2
++    d = this.h3
++    e = this.h4
++    f = this.h5
++    g = this.h6
++    h = this.h7
++
++    iterate (p = args.x)(length: 64, advance: 64, unroll: 1) {
++        w[0x00] = ((p[0x00] as base.u32) << 24) | ((p[0x01] as base.u32) << 16) |
++                ((p[0x02] as base.u32) << 8) | ((p[0x03] as base.u32))
++        w[0x01] = ((p[0x04] as base.u32) << 24) | ((p[0x05] as base.u32) << 16) |
++                ((p[0x06] as base.u32) << 8) | ((p[0x07] as base.u32))
++        w[0x02] = ((p[0x08] as base.u32) << 24) | ((p[0x09] as base.u32) << 16) |
++                ((p[0x0A] as base.u32) << 8) | ((p[0x0B] as base.u32))
++        w[0x03] = ((p[0x0C] as base.u32) << 24) | ((p[0x0D] as base.u32) << 16) |
++                ((p[0x0E] as base.u32) << 8) | ((p[0x0F] as base.u32))
++        w[0x04] = ((p[0x10] as base.u32) << 24) | ((p[0x11] as base.u32) << 16) |
++                ((p[0x12] as base.u32) << 8) | ((p[0x13] as base.u32))
++        w[0x05] = ((p[0x14] as base.u32) << 24) | ((p[0x15] as base.u32) << 16) |
++                ((p[0x16] as base.u32) << 8) | ((p[0x17] as base.u32))
++        w[0x06] = ((p[0x18] as base.u32) << 24) | ((p[0x19] as base.u32) << 16) |
++                ((p[0x1A] as base.u32) << 8) | ((p[0x1B] as base.u32))
++        w[0x07] = ((p[0x1C] as base.u32) << 24) | ((p[0x1D] as base.u32) << 16) |
++                ((p[0x1E] as base.u32) << 8) | ((p[0x1F] as base.u32))
++        w[0x08] = ((p[0x20] as base.u32) << 24) | ((p[0x21] as base.u32) << 16) |
++                ((p[0x22] as base.u32) << 8) | ((p[0x23] as base.u32))
++        w[0x09] = ((p[0x24] as base.u32) << 24) | ((p[0x25] as base.u32) << 16) |
++                ((p[0x26] as base.u32) << 8) | ((p[0x27] as base.u32))
++        w[0x0A] = ((p[0x28] as base.u32) << 24) | ((p[0x29] as base.u32) << 16) |
++                ((p[0x2A] as base.u32) << 8) | ((p[0x2B] as base.u32))
++        w[0x0B] = ((p[0x2C] as base.u32) << 24) | ((p[0x2D] as base.u32) << 16) |
++                ((p[0x2E] as base.u32) << 8) | ((p[0x2F] as base.u32))
++        w[0x0C] = ((p[0x30] as base.u32) << 24) | ((p[0x31] as base.u32) << 16) |
++                ((p[0x32] as base.u32) << 8) | ((p[0x33] as base.u32))
++        w[0x0D] = ((p[0x34] as base.u32) << 24) | ((p[0x35] as base.u32) << 16) |
++                ((p[0x36] as base.u32) << 8) | ((p[0x37] as base.u32))
++        w[0x0E] = ((p[0x38] as base.u32) << 24) | ((p[0x39] as base.u32) << 16) |
++                ((p[0x3A] as base.u32) << 8) | ((p[0x3B] as base.u32))
++        w[0x0F] = ((p[0x3C] as base.u32) << 24) | ((p[0x3D] as base.u32) << 16) |
++                ((p[0x3E] as base.u32) << 8) | ((p[0x3F] as base.u32))
++
++        i = 16
++        while i < 64,
++                inv i >= 16,
++        {
++            w2 = w[i - 2]
++            s1 = (w2 >> 10) ^
++                    ((w2 ~mod<< 15) | (w2 >> 17)) ^
++                    ((w2 ~mod<< 13) | (w2 >> 19))
++            w15 = w[i - 15]
++            s0 = (w15 >> 3) ^
++                    ((w15 ~mod<< 25) | (w15 >> 7)) ^
++                    ((w15 ~mod<< 14) | (w15 >> 18))
++            w[i] = ((s1 ~mod+ w[i - 7]) ~mod+ s0) ~mod+ w[i - 16]
++            i += 1
++        } endwhile
++
++        i = 0
++        while i < 64 {
++            t1 = h
++            t1 ~mod+= ((e ~mod<< 26) | (e >> 6)) ^
++                    ((e ~mod<< 21) | (e >> 11)) ^
++                    ((e ~mod<< 7) | (e >> 25))
++            t1 ~mod+= (e & f) ^ ((0xFFFF_FFFF ^ e) & g)
++            t1 ~mod+= K[i]
++            t1 ~mod+= w[i]
++
++            t2 = ((a ~mod<< 30) | (a >> 2)) ^
++                    ((a ~mod<< 19) | (a >> 13)) ^
++                    ((a ~mod<< 10) | (a >> 22))
++            t2 ~mod+= (a & b) ^ (a & c) ^ (b & c)
++
++            h = g
++            g = f
++            f = e
++            e = d ~mod+ t1
++            d = c
++            c = b
++            b = a
++            a = t1 ~mod+ t2
++
++            i += 1
++        } endwhile
++
++        a ~mod+= this.h0
++        this.h0 = a
++        b ~mod+= this.h1
++        this.h1 = b
++        c ~mod+= this.h2
++        this.h2 = c
++        d ~mod+= this.h3
++        this.h3 = d
++        e ~mod+= this.h4
++        this.h4 = e
++        f ~mod+= this.h5
++        this.h5 = f
++        g ~mod+= this.h6
++        this.h6 = g
++        h ~mod+= this.h7
++        this.h7 = h
++
++    } else (length: 1, advance: 1, unroll: 1) {
++        this.buf_data[buf_len] = p[0]
++        buf_len = (buf_len + 1) & 63
++    }
++    this.buf_len = (args.x.length() & 63) as base.u32
++}
++
++pub func hasher.checksum_bitvec256() base.bitvec256 {
++    var buf_len  : base.u32[..= 64]
++    var buf_data : array[64] base.u8
++
++    var length_in_bits : base.u64
++
++    var w : array[64] base.u32
++
++    var w2  : base.u32
++    var w15 : base.u32
++    var s0  : base.u32
++    var s1  : base.u32
++    var t1  : base.u32
++    var t2  : base.u32
++
++    var h0 : base.u32
++    var h1 : base.u32
++    var h2 : base.u32
++    var h3 : base.u32
++    var h4 : base.u32
++    var h5 : base.u32
++    var h6 : base.u32
++    var h7 : base.u32
++
++    var a : base.u32
++    var b : base.u32
++    var c : base.u32
++    var d : base.u32
++    var e : base.u32
++    var f : base.u32
++    var g : base.u32
++    var h : base.u32
++
++    var i : base.u32
++
++    var final_block : base.bool
++
++    i = 0
++    while i < 64 {
++        buf_data[i] = this.buf_data[i]
++        i += 1
++    } endwhile
++
++    // Pad with a 1 bit and then zero or more 0 bits, until we're at 56 bytes
++    // (448 bits), modulo 64 bytes (512 bits).
++    buf_len = this.buf_len & 63
++    if buf_len < 56 {
++        buf_data[buf_len] = 0x80
++        buf_len += 1
++        while buf_len < 56 {
++            buf_data[buf_len] = 0x00
++            buf_len += 1
++        } endwhile
++        final_block = true
++
++    } else {
++        assert buf_len <= 63
++        buf_data[buf_len] = 0x80
++        buf_len += 1
++        while buf_len < 64 {
++            buf_data[buf_len] = 0x00
++            buf_len += 1
++        } endwhile
++    }
++
++    h0 = this.h0
++    a = h0
++    h1 = this.h1
++    b = h1
++    h2 = this.h2
++    c = h2
++    h3 = this.h3
++    d = h3
++    h4 = this.h4
++    e = h4
++    h5 = this.h5
++    f = h5
++    h6 = this.h6
++    g = h6
++    h7 = this.h7
++    h = h7
++
++    while true {
++        if final_block {
++            // The final block ends with the total length (in bits).
++            length_in_bits = this.length_modulo_u64 ~mod* 8
++            buf_data[56] = ((length_in_bits >> 56) & 0xFF) as base.u8
++            buf_data[57] = ((length_in_bits >> 48) & 0xFF) as base.u8
++            buf_data[58] = ((length_in_bits >> 40) & 0xFF) as base.u8
++            buf_data[59] = ((length_in_bits >> 32) & 0xFF) as base.u8
++            buf_data[60] = ((length_in_bits >> 24) & 0xFF) as base.u8
++            buf_data[61] = ((length_in_bits >> 16) & 0xFF) as base.u8
++            buf_data[62] = ((length_in_bits >> 8) & 0xFF) as base.u8
++            buf_data[63] = ((length_in_bits) & 0xFF) as base.u8
++        }
++
++        w[0x00] = ((buf_data[0x00] as base.u32) << 24) | ((buf_data[0x01] as base.u32) << 16) |
++                ((buf_data[0x02] as base.u32) << 8) | ((buf_data[0x03] as base.u32))
++        w[0x01] = ((buf_data[0x04] as base.u32) << 24) | ((buf_data[0x05] as base.u32) << 16) |
++                ((buf_data[0x06] as base.u32) << 8) | ((buf_data[0x07] as base.u32))
++        w[0x02] = ((buf_data[0x08] as base.u32) << 24) | ((buf_data[0x09] as base.u32) << 16) |
++                ((buf_data[0x0A] as base.u32) << 8) | ((buf_data[0x0B] as base.u32))
++        w[0x03] = ((buf_data[0x0C] as base.u32) << 24) | ((buf_data[0x0D] as base.u32) << 16) |
++                ((buf_data[0x0E] as base.u32) << 8) | ((buf_data[0x0F] as base.u32))
++        w[0x04] = ((buf_data[0x10] as base.u32) << 24) | ((buf_data[0x11] as base.u32) << 16) |
++                ((buf_data[0x12] as base.u32) << 8) | ((buf_data[0x13] as base.u32))
++        w[0x05] = ((buf_data[0x14] as base.u32) << 24) | ((buf_data[0x15] as base.u32) << 16) |
++                ((buf_data[0x16] as base.u32) << 8) | ((buf_data[0x17] as base.u32))
++        w[0x06] = ((buf_data[0x18] as base.u32) << 24) | ((buf_data[0x19] as base.u32) << 16) |
++                ((buf_data[0x1A] as base.u32) << 8) | ((buf_data[0x1B] as base.u32))
++        w[0x07] = ((buf_data[0x1C] as base.u32) << 24) | ((buf_data[0x1D] as base.u32) << 16) |
++                ((buf_data[0x1E] as base.u32) << 8) | ((buf_data[0x1F] as base.u32))
++        w[0x08] = ((buf_data[0x20] as base.u32) << 24) | ((buf_data[0x21] as base.u32) << 16) |
++                ((buf_data[0x22] as base.u32) << 8) | ((buf_data[0x23] as base.u32))
++        w[0x09] = ((buf_data[0x24] as base.u32) << 24) | ((buf_data[0x25] as base.u32) << 16) |
++                ((buf_data[0x26] as base.u32) << 8) | ((buf_data[0x27] as base.u32))
++        w[0x0A] = ((buf_data[0x28] as base.u32) << 24) | ((buf_data[0x29] as base.u32) << 16) |
++                ((buf_data[0x2A] as base.u32) << 8) | ((buf_data[0x2B] as base.u32))
++        w[0x0B] = ((buf_data[0x2C] as base.u32) << 24) | ((buf_data[0x2D] as base.u32) << 16) |
++                ((buf_data[0x2E] as base.u32) << 8) | ((buf_data[0x2F] as base.u32))
++        w[0x0C] = ((buf_data[0x30] as base.u32) << 24) | ((buf_data[0x31] as base.u32) << 16) |
++                ((buf_data[0x32] as base.u32) << 8) | ((buf_data[0x33] as base.u32))
++        w[0x0D] = ((buf_data[0x34] as base.u32) << 24) | ((buf_data[0x35] as base.u32) << 16) |
++                ((buf_data[0x36] as base.u32) << 8) | ((buf_data[0x37] as base.u32))
++        w[0x0E] = ((buf_data[0x38] as base.u32) << 24) | ((buf_data[0x39] as base.u32) << 16) |
++                ((buf_data[0x3A] as base.u32) << 8) | ((buf_data[0x3B] as base.u32))
++        w[0x0F] = ((buf_data[0x3C] as base.u32) << 24) | ((buf_data[0x3D] as base.u32) << 16) |
++                ((buf_data[0x3E] as base.u32) << 8) | ((buf_data[0x3F] as base.u32))
++
++        i = 16
++        while i < 64,
++                inv i >= 16,
++        {
++            w2 = w[i - 2]
++            s1 = (w2 >> 10) ^
++                    ((w2 ~mod<< 15) | (w2 >> 17)) ^
++                    ((w2 ~mod<< 13) | (w2 >> 19))
++            w15 = w[i - 15]
++            s0 = (w15 >> 3) ^
++                    ((w15 ~mod<< 25) | (w15 >> 7)) ^
++                    ((w15 ~mod<< 14) | (w15 >> 18))
++            w[i] = ((s1 ~mod+ w[i - 7]) ~mod+ s0) ~mod+ w[i - 16]
++            i += 1
++        } endwhile
++
++        i = 0
++        while i < 64 {
++            t1 = h
++            t1 ~mod+= ((e ~mod<< 26) | (e >> 6)) ^
++                    ((e ~mod<< 21) | (e >> 11)) ^
++                    ((e ~mod<< 7) | (e >> 25))
++            t1 ~mod+= (e & f) ^ ((0xFFFF_FFFF ^ e) & g)
++            t1 ~mod+= K[i]
++            t1 ~mod+= w[i]
++
++            t2 = ((a ~mod<< 30) | (a >> 2)) ^
++                    ((a ~mod<< 19) | (a >> 13)) ^
++                    ((a ~mod<< 10) | (a >> 22))
++            t2 ~mod+= (a & b) ^ (a & c) ^ (b & c)
++
++            h = g
++            g = f
++            f = e
++            e = d ~mod+ t1
++            d = c
++            c = b
++            b = a
++            a = t1 ~mod+ t2
++
++            i += 1
++        } endwhile
++
++        a ~mod+= h0
++        b ~mod+= h1
++        c ~mod+= h2
++        d ~mod+= h3
++        e ~mod+= h4
++        f ~mod+= h5
++        g ~mod+= h6
++        h ~mod+= h7
++
++        if final_block {
++            break
++        }
++        final_block = true
++
++        h0 = a
++        h1 = b
++        h2 = c
++        h3 = d
++        h4 = e
++        h5 = f
++        h6 = g
++        h7 = h
++
++        buf_len = 0
++        while buf_len < 56 {
++            buf_data[buf_len] = 0x00
++            buf_len += 1
++        } endwhile
++    } endwhile
++
++    return this.util.make_bitvec256(
++            e00: (h as base.u64) | ((g as base.u64) << 32),
++            e01: (f as base.u64) | ((e as base.u64) << 32),
++            e02: (d as base.u64) | ((c as base.u64) << 32),
++            e03: (b as base.u64) | ((a as base.u64) << 32))
++}
+```
+
+## Uniform selected declaration context
+
+This same mechanically selected S0/S1 context is supplied for every case.
+
+### S0
+
+```text
+<no matching declaration in the selected S0 source file>
+```
+
+### S1
+
+```text
+lines 220-268
+000220: 
+000221:         a ~mod+= this.h0
+000222:         this.h0 = a
+000223:         b ~mod+= this.h1
+000224:         this.h1 = b
+000225:         c ~mod+= this.h2
+000226:         this.h2 = c
+000227:         d ~mod+= this.h3
+000228:         this.h3 = d
+000229:         e ~mod+= this.h4
+000230:         this.h4 = e
+000231:         f ~mod+= this.h5
+000232:         this.h5 = f
+000233:         g ~mod+= this.h6
+000234:         this.h6 = g
+000235:         h ~mod+= this.h7
+000236:         this.h7 = h
+000237: 
+000238:     } else (length: 1, advance: 1, unroll: 1) {
+000239:         this.buf_data[buf_len] = p[0]
+000240:         buf_len = (buf_len + 1) & 63
+000241:     }
+000242:     this.buf_len = (args.x.length() & 63) as base.u32
+000243: }
+000244: 
+000245: pub func hasher.checksum_bitvec256() base.bitvec256 {
+000246:     var buf_len  : base.u32[..= 64]
+000247:     var buf_data : array[64] base.u8
+000248: 
+000249:     var length_in_bits : base.u64
+000250: 
+000251:     var w : array[64] base.u32
+000252: 
+000253:     var w2  : base.u32
+000254:     var w15 : base.u32
+000255:     var s0  : base.u32
+000256:     var s1  : base.u32
+000257:     var t1  : base.u32
+000258:     var t2  : base.u32
+000259: 
+000260:     var h0 : base.u32
+000261:     var h1 : base.u32
+000262:     var h2 : base.u32
+000263:     var h3 : base.u32
+000264:     var h4 : base.u32
+000265:     var h5 : base.u32
+000266:     var h6 : base.u32
+000267:     var h7 : base.u32
+000268:
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C029","gap_exists":true,"gap_type":["entry_point","API_protocol","state","configuration","input_semantics"],"confidence":100,"affected_functions":["hasher.get_quirk","hasher.set_quirk!","hasher.update!","hasher.update_bitvec256!","hasher.up!","hasher.checksum_bitvec256"],"reason":"S1 introduces a stateful SHA-256 hasher API, but H0 compiles only AUX/JSON and JSON modules and exclusively exercises wuffs_json__decoder and wuffs_aux::DecodeJson. Consequently, none of the hasher's byte-processing, buffering, incremental-update, finalization, or quirk methods are reached. The omitted state protocol is material because behavior depends on update partitioning, buf_len across 64-byte blocks, and checksum padding on either side of the 56-byte boundary.","evidence":["H0 defines WUFFS_CONFIG__MODULE__AUX__BASE, WUFFS_CONFIG__MODULE__AUX__JSON, WUFFS_CONFIG__MODULE__BASE, and WUFFS_CONFIG__MODULE__JSON, but no SHA256 module.","H0's fuzz_complex and fuzz_simple call wuffs_json__decoder__decode_tokens, while fuzz_cpp calls wuffs_aux::DecodeJson; no identifier from S1's hasher appears in H0.","S1 adds public entry points hasher.update!, hasher.update_bitvec256!, hasher.checksum_bitvec256, hasher.get_quirk, and hasher.set_quirk!.","hasher.update! retains partial input in buf_data and buf_len, invokes up! at 64-byte boundaries, and updates length_modulo_u64 and length_overflows_u64, creating stateful call-sequence semantics absent from H0.","hasher.checksum_bitvec256 copies buffered state and has distinct padding paths for buf_len < 56 and buf_len >= 56, including a possible second block."],"recommended_action":"Add a SHA-256-specific harness that compiles the SHA256 module and drives the public hasher API with arbitrary bytes and call sequences. Compare one-shot versus variably chunked update! calls, exercise zero-length updates and lengths around 56 and 64 bytes, call checksum_bitvec256 repeatedly and between later updates, verify update_bitvec256! agrees with update! followed by checksum_bitvec256, and exercise get_quirk/set_quirk! status behavior."}
+tokens used
+16,753

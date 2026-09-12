@@ -1,0 +1,113 @@
+diff --git a/gen/c/std/gif.c b/gen/c/std/gif.c
+index 555309e1f79cc85a2027d606ae828374f2fe1671..223d9303abf7666a3e50729020e3c3e57794568c 100644
+--- a/gen/c/std/gif.c
++++ b/gen/c/std/gif.c
+@@ -1266,9 +1266,11 @@ wuffs_gif__status wuffs_gif__decoder__decode_config(
+     wuffs_base__image_config* a_dst,
+     wuffs_base__io_reader a_src);
+ 
+-wuffs_gif__status wuffs_gif__decoder__decode_frame(wuffs_gif__decoder* self,
+-                                                   wuffs_base__io_writer a_dst,
+-                                                   wuffs_base__io_reader a_src);
++wuffs_gif__status wuffs_gif__decoder__decode_frame(
++    wuffs_gif__decoder* self,
++    wuffs_base__image_buffer* a_ib,
++    wuffs_base__io_writer a_dst,
++    wuffs_base__io_reader a_src);
+ 
+ #ifdef __cplusplus
+ }  // extern "C"
+@@ -1806,6 +1808,7 @@ static wuffs_gif__status wuffs_gif__decoder__decode_ae(
+ 
+ static wuffs_gif__status wuffs_gif__decoder__decode_id(
+     wuffs_gif__decoder* self,
++    wuffs_base__image_buffer* a_ib,
+     wuffs_base__io_writer a_dst,
+     wuffs_base__io_reader a_src);
+ 
+@@ -1993,6 +1996,7 @@ short_read_src:
+ 
+ wuffs_gif__status wuffs_gif__decoder__decode_frame(
+     wuffs_gif__decoder* self,
++    wuffs_base__image_buffer* a_ib,
+     wuffs_base__io_writer a_dst,
+     wuffs_base__io_reader a_src) {
+   if (!self) {
+@@ -2004,6 +2008,10 @@ wuffs_gif__status wuffs_gif__decoder__decode_frame(
+   if (self->private_impl.status < 0) {
+     return self->private_impl.status;
+   }
++  if (!a_ib) {
++    self->private_impl.status = WUFFS_GIF__ERROR_BAD_ARGUMENT;
++    return WUFFS_GIF__ERROR_BAD_ARGUMENT;
++  }
+   wuffs_gif__status status = WUFFS_GIF__STATUS_OK;
+ 
+   uint8_t* ioptr_src = NULL;
+@@ -2064,7 +2072,7 @@ wuffs_gif__status wuffs_gif__decoder__decode_frame(
+         if (a_src.private_impl.buf) {
+           a_src.private_impl.buf->ri = ioptr_src - a_src.private_impl.buf->ptr;
+         }
+-        status = wuffs_gif__decoder__decode_id(self, a_dst, a_src);
++        status = wuffs_gif__decoder__decode_id(self, a_ib, a_dst, a_src);
+         if (a_src.private_impl.buf) {
+           ioptr_src = a_src.private_impl.buf->ptr + a_src.private_impl.buf->ri;
+         }
+@@ -2720,6 +2728,7 @@ short_read_src:
+ 
+ static wuffs_gif__status wuffs_gif__decoder__decode_id(
+     wuffs_gif__decoder* self,
++    wuffs_base__image_buffer* a_ib,
+     wuffs_base__io_writer a_dst,
+     wuffs_base__io_reader a_src) {
+   wuffs_gif__status status = WUFFS_GIF__STATUS_OK;
+diff --git a/gen/h/std/gif.h b/gen/h/std/gif.h
+index 06bbbe3286084cab8bc9d61b4407accbe3ea3459..2769626e7647f34114196f85a9959a969a453b2b 100644
+--- a/gen/h/std/gif.h
++++ b/gen/h/std/gif.h
+@@ -1266,9 +1266,11 @@ wuffs_gif__status wuffs_gif__decoder__decode_config(
+     wuffs_base__image_config* a_dst,
+     wuffs_base__io_reader a_src);
+ 
+-wuffs_gif__status wuffs_gif__decoder__decode_frame(wuffs_gif__decoder* self,
+-                                                   wuffs_base__io_writer a_dst,
+-                                                   wuffs_base__io_reader a_src);
++wuffs_gif__status wuffs_gif__decoder__decode_frame(
++    wuffs_gif__decoder* self,
++    wuffs_base__image_buffer* a_ib,
++    wuffs_base__io_writer a_dst,
++    wuffs_base__io_reader a_src);
+ 
+ #ifdef __cplusplus
+ }  // extern "C"
+diff --git a/std/gif/decode_gif.wuffs b/std/gif/decode_gif.wuffs
+index ed659f9e8c4eed94ca5ba2050dcf2fe160c4bb6b..9a5113e510594de90a5f19c701c85bb7c1b6a57f 100644
+--- a/std/gif/decode_gif.wuffs
++++ b/std/gif/decode_gif.wuffs
+@@ -89,7 +89,7 @@ pub func decoder.decode_config?(dst ptr base.image_config, src base.io_reader)()
+ 	this.call_sequence = 1
+ }
+ 
+-pub func decoder.decode_frame?(dst base.io_writer, src base.io_reader)() {
++pub func decoder.decode_frame?(ib ptr base.image_buffer, dst base.io_writer, src base.io_reader)() {
+ 	if this.call_sequence < 1 {
+ 		return error "invalid call sequence"
+ 	}
+@@ -108,7 +108,7 @@ pub func decoder.decode_frame?(dst base.io_writer, src base.io_reader)() {
+ 			// the API? Should the 0x3B Trailer byte result in a "no more
+ 			// frames" suspension instead of ok? Do we need additional
+ 			// destination arguments for timing and palette?
+-			this.decode_id?(dst:in.dst, src:in.src)
++			this.decode_id?(ib:in.ib, dst:in.dst, src:in.src)
+ 			return
+ 		} else if this.block_type == 0x3B {  // The spec calls 0x3B the "Trailer".
+ 			break
+@@ -281,7 +281,7 @@ pri func decoder.decode_ae?(src base.io_reader)() {
+ // See the spec section 20 "Image Descriptor" on page 11.
+ //
+ // TODO: dst should be a ptr base.image_buffer, not a base.io_writer.
+-pri func decoder.decode_id?(dst base.io_writer, src base.io_reader)() {
++pri func decoder.decode_id?(ib ptr base.image_buffer, dst base.io_writer, src base.io_reader)() {
+ 	// TODO: check that the frame rect is inside the image rect??
+ 	this.frame_left = in.src.read_u16le?() as base.u32
+ 	this.frame_top = in.src.read_u16le?() as base.u32

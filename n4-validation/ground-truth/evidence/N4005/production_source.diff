@@ -1,0 +1,169 @@
+diff --git a/std/jpeg/decode_jpeg.wuffs b/std/jpeg/decode_jpeg.wuffs
+index 4f8bf3df..ce2c6789 100644
+--- a/std/jpeg/decode_jpeg.wuffs
++++ b/std/jpeg/decode_jpeg.wuffs
+@@ -107,24 +107,25 @@ pub struct decoder? implements base.image_decoder(
+         // the remaining four elements would all be 0x0900. If progressive
+         // encoded, the tail of the components_workbuf_offsets array is:
+         //   5: 0x1500 = 5376 = previous + (48 * 64)
+         //   6: 0x1800 = 6144 = previous + (24 * 32)
+         //   7: 0x1B00 = 6912 = previous + (24 * 32)
+         //   8: 0x1B00 = 6912 = previous + ( 0 *  0)
+         //
+         // The workbuf_len would be 0x0900 (baseline) or 0x1B00 (progressive).
+         components_workbuf_widths  : array[4] base.u32[..= 0x1_0008],
+         components_workbuf_heights : array[4] base.u32[..= 0x1_0008],
+         components_workbuf_offsets : array[9] base.u64[..= 0xC_00C0_0300],  // 12 * 0x1_0008 * 0x1_0008.
+ 
++        scan_count           : base.u32,
+         scan_num_components  : base.u32[..= 4],
+         scan_comps_cselector : array[4] base.u8[..= 3],
+         scan_comps_td        : array[4] base.u8[..= 3],
+         scan_comps_ta        : array[4] base.u8[..= 3],
+ 
+         // Every JPEG has a single SOI (Start Of Image) marker. Hierarchical
+         // JPEG images can have multiple Frames but this decoder does not
+         // support those. We thus expect a single SOF (Start Of Frame) for the
+         // single SOI.
+         //
+         // Sequential JPEGs have a single SOS (Start Of Scan) for the SOF.
+         // Their (Ss, Se, Ah, Al) below are effectively (0, 63, 0, 0).
+@@ -743,32 +744,49 @@ pri func decoder.do_decode_frame_config?(dst: nptr base.frame_config, src: base.
+                 index: 0,
+                 io_position: this.frame_config_io_position,
+                 disposal: 0,
+                 opaque_within_bounds: true,
+                 overwrite_instead_of_blend: false,
+                 background_color: 0xFF00_0000)
+     }
+ 
+     this.call_sequence = 0x40
+ }
+ 
+ pub func decoder.decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
+-    var status : base.status
++    var ddf_status     : base.status
++    var swizzle_status : base.status
++    var scan_count     : base.u32
+ 
+     while true {
+-        status =? this.do_decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
+-        if (status == base."$short read") and args.src.is_closed() {
++        scan_count = this.scan_count
++        ddf_status =? this.do_decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
++        if ddf_status.is_error() {
++            return ddf_status
++
++        } else if scan_count < this.scan_count {
++            if this.num_components == 1 {
++                swizzle_status = this.swizzle_gray!(dst: args.dst, workbuf: args.workbuf)
++            } else {
++                swizzle_status = this.swizzle_colorful!(dst: args.dst, workbuf: args.workbuf)
++            }
++            if swizzle_status.is_error() {
++                return swizzle_status
++            }
++        }
++
++        if (ddf_status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+-        yield? status
++        yield? ddf_status
+     } endwhile
+ }
+ 
+ pri func decoder.do_decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
+     var pixfmt : base.u32
+     var status : base.status
+     var i      : base.u64
+     var i_end  : base.u64
+     var c      : base.u8
+     var marker : base.u8
+ 
+     if this.call_sequence == 0x40 {
+@@ -1116,26 +1134,24 @@ pri func decoder.calculate_huff_tables!(tc4_th: base.u8[..= 7], total_count: bas
+ pri func decoder.decode_sos?(dst: ptr base.pixel_buffer, src: base.io_reader, workbuf: slice base.u8) {
+     var my : base.u32
+     var mx : base.u32
+ 
+     var decode_mcu_result : base.u32
+     var bitstream_length  : base.u32
+ 
+     var b      : base.u32
+     var csel   : base.u8[..= 3]
+     var stride : base.u64[..= 0x1_0008]
+     var offset : base.u64
+ 
+-    var status : base.status
+-
+     this.prepare_scan?(src: args.src)
+ 
+     // Reset.
+     this.next_restart_marker = 0
+     this.mcu_previous_dc_values[0] = 0
+     this.mcu_previous_dc_values[1] = 0
+     this.mcu_previous_dc_values[2] = 0
+     this.mcu_previous_dc_values[3] = 0
+     this.restarts_remaining = this.restart_interval
+     this.eob_run = 0
+     this.bitstream_bits = 0
+     this.bitstream_n_bits = 0
+@@ -1227,30 +1243,25 @@ pri func decoder.decode_sos?(dst: ptr base.pixel_buffer, src: base.io_reader, wo
+                     this.bitstream_bits = 0
+                     this.bitstream_n_bits = 0
+                     this.bitstream_ri = 0
+                     this.bitstream_wi = 0
+                 }
+             }
+ 
+             mx += 1
+         } endwhile
+         my += 1
+     } endwhile
+ 
+-    if this.num_components == 1 {
+-        status = this.swizzle_gray!(dst: args.dst, workbuf: args.workbuf)
+-        return status
+-    }
+-    status = this.swizzle_colorful!(dst: args.dst, workbuf: args.workbuf)
+-    return status
++    this.scan_count ~sat+= 1
+ }
+ 
+ pri func decoder.prepare_scan?(src: base.io_reader) {
+     var c         : base.u8
+     var i         : base.u32
+     var j         : base.u32
+     var h         : base.u32[..= 4]
+     var v         : base.u32[..= 4]
+     var hv        : base.u32[..= 16]
+     var total_hv  : base.u32
+     var b         : base.u32
+     var bx_offset : base.u32
+@@ -1800,24 +1811,25 @@ pub func decoder.num_decoded_frames() base.u64 {
+ pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+     var i : base.u32
+     var j : base.u32
+ 
+     if this.call_sequence < 0x20 {
+         return base."#bad call sequence"
+     }
+     if args.index <> 0 {
+         return base."#bad argument"
+     }
+     this.call_sequence = 0x28
+     this.frame_config_io_position = args.io_position
++    this.scan_count = 0
+     this.restart_interval = this.saved_restart_interval
+     while i < 4 {
+         this.seen_dqt[i] = this.saved_seen_dqt[i]
+         while j < 64,
+                 inv i < 4,
+         {
+             this.quant_tables[i][j] = this.saved_quant_tables[i][j]
+             j += 1
+         } endwhile
+         i += 1
+     } endwhile
+     while i < 8 {

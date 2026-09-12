@@ -1,0 +1,3862 @@
+diff --git a/src/lib/ares__addrinfo2hostent.c b/src/lib/ares__addrinfo2hostent.c
+index f7bfa23..4d8cdce 100644
+--- a/src/lib/ares__addrinfo2hostent.c
++++ b/src/lib/ares__addrinfo2hostent.c
+@@ -61,7 +61,7 @@ ares_status_t ares__addrinfo2hostent(const struct ares_addrinfo *ai, int family,
+   struct ares_addrinfo_cname *next_cname;
+   char **aliases = NULL;
+   char *addrs = NULL;
+-  int naliases = 0, naddrs = 0, alias = 0, i;
++  size_t naliases = 0, naddrs = 0, alias = 0, i;
+ 
+   if (ai == NULL || host == NULL)
+     return ARES_EBADQUERY;
+@@ -153,7 +153,7 @@ ares_status_t ares__addrinfo2hostent(const struct ares_addrinfo *ai, int family,
+ 
+   if (naddrs)
+     {
+-      addrs = ares_malloc(naddrs * (*host)->h_length);
++      addrs = ares_malloc(naddrs * (size_t)(*host)->h_length);
+       if (!addrs)
+         {
+           goto enomem;
+@@ -165,18 +165,18 @@ ares_status_t ares__addrinfo2hostent(const struct ares_addrinfo *ai, int family,
+         {
+           if(next->ai_family == family)
+             {
+-              (*host)->h_addr_list[i] = addrs + (i * (*host)->h_length);
++              (*host)->h_addr_list[i] = addrs + (i * (size_t)(*host)->h_length);
+               if (family == AF_INET6)
+                 {
+                   memcpy((*host)->h_addr_list[i],
+                      &(CARES_INADDR_CAST(struct sockaddr_in6 *, next->ai_addr)->sin6_addr),
+-                     (*host)->h_length);
++                     (size_t)(*host)->h_length);
+                 }
+               else
+                 {
+                   memcpy((*host)->h_addr_list[i],
+                      &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),
+-                     (*host)->h_length);
++                     (size_t)(*host)->h_length);
+                 }
+               ++i;
+             }
+@@ -206,10 +206,10 @@ enomem:
+ 
+ 
+ ares_status_t ares__addrinfo2addrttl(const struct ares_addrinfo *ai, int family,
+-                                     int req_naddrttls,
++                                     size_t req_naddrttls,
+                                      struct ares_addrttl *addrttls,
+                                      struct ares_addr6ttl *addr6ttls,
+-                                     int *naddrttls)
++                                     size_t *naddrttls)
+ {
+   struct ares_addrinfo_node *next;
+   struct ares_addrinfo_cname *next_cname;
+diff --git a/src/lib/ares__addrinfo_localhost.c b/src/lib/ares__addrinfo_localhost.c
+index 1811403..66420ff 100644
+--- a/src/lib/ares__addrinfo_localhost.c
++++ b/src/lib/ares__addrinfo_localhost.c
+@@ -49,7 +49,7 @@
+ 
+ ares_status_t ares_append_ai_node(int aftype,
+                                   unsigned short port,
+-                                  int ttl,
++                                  unsigned int ttl,
+                                   const void *adata,
+                                   struct ares_addrinfo_node **nodes)
+ {
+@@ -80,7 +80,7 @@ ares_status_t ares_append_ai_node(int aftype,
+       node->ai_family = AF_INET;
+       node->ai_addrlen = sizeof(*sin);
+       node->ai_addr = (struct sockaddr *)sin;
+-      node->ai_ttl = ttl;
++      node->ai_ttl = (int)ttl;
+     }
+ 
+   if (aftype == AF_INET6)
+@@ -100,7 +100,7 @@ ares_status_t ares_append_ai_node(int aftype,
+       node->ai_family = AF_INET6;
+       node->ai_addrlen = sizeof(*sin6);
+       node->ai_addr = (struct sockaddr *)sin6;
+-      node->ai_ttl = ttl;
++      node->ai_ttl = (int)ttl;
+     }
+ 
+   return ARES_SUCCESS;
+diff --git a/src/lib/ares__close_sockets.c b/src/lib/ares__close_sockets.c
+index fe64e54..93fbb0f 100644
+--- a/src/lib/ares__close_sockets.c
++++ b/src/lib/ares__close_sockets.c
+@@ -74,7 +74,7 @@ void ares__check_cleanup_conn(ares_channel channel, ares_socket_t fd)
+ {
+   ares__llist_node_t       *node;
+   struct server_connection *conn;
+-  int                       do_cleanup = 0;
++  ares_bool_t               do_cleanup = ARES_FALSE;
+ 
+   node = ares__htable_asvp_get_direct(channel->connnode_by_socket, fd);
+   if (node == NULL) {
+@@ -89,13 +89,13 @@ void ares__check_cleanup_conn(ares_channel channel, ares_socket_t fd)
+ 
+   /* If we are configured not to stay open, close it out */
+   if (!(channel->flags & ARES_FLAG_STAYOPEN)) {
+-    do_cleanup = 1;
++    do_cleanup = ARES_TRUE;
+   }
+ 
+   /* If the udp connection hit its max queries, always close it */
+   if (!conn->is_tcp && channel->udp_max_queries > 0 &&
+-      conn->total_queries >= (size_t)channel->udp_max_queries) {
+-    do_cleanup = 1;
++      conn->total_queries >= channel->udp_max_queries) {
++    do_cleanup = ARES_TRUE;
+   }
+ 
+   if (do_cleanup) {
+diff --git a/src/lib/ares__parse_into_addrinfo.c b/src/lib/ares__parse_into_addrinfo.c
+index 0d5ab77..5a81a89 100644
+--- a/src/lib/ares__parse_into_addrinfo.c
++++ b/src/lib/ares__parse_into_addrinfo.c
+@@ -50,16 +50,19 @@
+ #include "ares_private.h"
+ 
+ ares_status_t ares__parse_into_addrinfo(const unsigned char *abuf,
+-                                        int alen,
++                                        size_t alen,
+                                         ares_bool_t cname_only_is_enodata,
+                                         unsigned short port,
+                                         struct ares_addrinfo *ai)
+ {
+-  unsigned int qdcount, ancount;
++  size_t qdcount, ancount;
+   ares_status_t status;
+-  int i, rr_type, rr_class, rr_len, rr_ttl;
++  size_t i;
++  int rr_type, rr_class;
++  size_t rr_len;
++  unsigned int rr_ttl;
+   ares_bool_t got_a = ARES_FALSE, got_aaaa = ARES_FALSE, got_cname = ARES_FALSE;
+-  long len;
++  size_t len;
+   const unsigned char *aptr;
+   char *question_hostname = NULL;
+   char *hostname, *rr_name = NULL, *rr_data;
+@@ -93,7 +96,7 @@ ares_status_t ares__parse_into_addrinfo(const unsigned char *abuf,
+   aptr += len + QFIXEDSZ;
+ 
+   /* Examine each answer resource record (RR) in turn. */
+-  for (i = 0; i < (int)ancount; i++)
++  for (i = 0; i < ancount; i++)
+     {
+       /* Decode the RR up to the data field. */
+       status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len, 0);
+@@ -172,7 +175,7 @@ ares_status_t ares__parse_into_addrinfo(const unsigned char *abuf,
+               ares_free(rr_data);
+               goto failed_stat;
+             }
+-          cname->ttl = rr_ttl;
++          cname->ttl = (int)rr_ttl;
+           cname->alias = rr_name;
+           cname->name = rr_data;
+           rr_name = NULL;
+diff --git a/src/lib/ares__readaddrinfo.c b/src/lib/ares__readaddrinfo.c
+index b78c913..2254219 100644
+--- a/src/lib/ares__readaddrinfo.c
++++ b/src/lib/ares__readaddrinfo.c
+@@ -52,7 +52,7 @@ ares_status_t ares__readaddrinfo(FILE *fp,
+   char *line = NULL, *p, *q;
+   char *txtaddr, *txthost, *txtalias;
+   char *aliases[MAX_ALIASES];
+-  unsigned int i, alias_count;
++  size_t i, alias_count;
+   ares_status_t status = ARES_SUCCESS;
+   size_t linesize;
+   struct ares_addrinfo_cname *cname = NULL, *cnames = NULL;
+diff --git a/src/lib/ares__sortaddrinfo.c b/src/lib/ares__sortaddrinfo.c
+index c67692f..3a13b62 100644
+--- a/src/lib/ares__sortaddrinfo.c
++++ b/src/lib/ares__sortaddrinfo.c
+@@ -57,9 +57,9 @@
+ struct addrinfo_sort_elem
+ {
+   struct ares_addrinfo_node *ai;
+-  int has_src_addr;
++  ares_bool_t has_src_addr;
+   ares_sockaddr src_addr;
+-  int original_order;
++  size_t original_order;
+ };
+ 
+ #define ARES_IPV6_ADDR_MC_SCOPE(a) ((a)->s6_addr[1] & 0x0f)
+@@ -255,15 +255,16 @@ static int get_precedence(const struct sockaddr *addr)
+ /*
+  * Find number of matching initial bits between the two addresses a1 and a2.
+  */
+-static int common_prefix_len(const struct in6_addr *a1,
++static size_t common_prefix_len(const struct in6_addr *a1,
+                              const struct in6_addr *a2)
+ {
+-  const char *p1 = (const char *)a1;
+-  const char *p2 = (const char *)a2;
+-  unsigned i;
++  const unsigned char *p1 = (const unsigned char *)a1;
++  const unsigned char *p2 = (const unsigned char *)a2;
++  size_t i;
+   for (i = 0; i < sizeof(*a1); ++i)
+     {
+-      int x, j;
++      unsigned char x;
++      size_t j;
+       if (p1[i] == p2[i])
+         {
+           continue;
+@@ -294,12 +295,12 @@ static int rfc6724_compare(const void *ptr1, const void *ptr2)
+   int label_src1, label_dst1, label_match1;
+   int label_src2, label_dst2, label_match2;
+   int precedence1, precedence2;
+-  int prefixlen1, prefixlen2;
++  size_t prefixlen1, prefixlen2;
+ 
+   /* Rule 1: Avoid unusable destinations. */
+   if (a1->has_src_addr != a2->has_src_addr)
+     {
+-      return a2->has_src_addr - a1->has_src_addr;
++      return ((int)a2->has_src_addr) - ((int)a1->has_src_addr);
+     }
+ 
+   /* Rule 2: Prefer matching scope. */
+@@ -372,7 +373,7 @@ static int rfc6724_compare(const void *ptr1, const void *ptr2)
+       prefixlen2 = common_prefix_len(&a2_src->sin6_addr, &a2_dst->sin6_addr);
+       if (prefixlen1 != prefixlen2)
+         {
+-          return prefixlen2 - prefixlen1;
++          return (int)prefixlen2 - (int)prefixlen1;
+         }
+     }
+ 
+@@ -380,14 +381,14 @@ static int rfc6724_compare(const void *ptr1, const void *ptr2)
+    * Rule 10: Leave the order unchanged.
+    * We need this since qsort() is not necessarily stable.
+    */
+-  return a1->original_order - a2->original_order;
++  return ((int)a1->original_order) - ((int)a2->original_order);
+ }
+ 
+ /*
+  * Find the source address that will be used if trying to connect to the given
+  * address.
+  *
+- * Returns 1 if a source address was found, 0 if the address is unreachable,
++ * Returns 1 if a source address was found, 0 if the address is unreachable
+  * and -1 if a fatal error occurred. If 0 or 1, the contents of src_addr are
+  * undefined.
+  */
+@@ -454,7 +455,7 @@ ares_status_t ares__sortaddrinfo(ares_channel channel,
+                                  struct ares_addrinfo_node *list_sentinel)
+ {
+   struct ares_addrinfo_node *cur;
+-  int nelem = 0, i;
++  size_t nelem = 0, i;
+   int has_src_addr;
+   struct addrinfo_sort_elem *elems;
+ 
+@@ -490,7 +491,7 @@ ares_status_t ares__sortaddrinfo(ares_channel channel,
+           ares_free(elems);
+           return ARES_ENOTFOUND;
+         }
+-      elems[i].has_src_addr = has_src_addr;
++      elems[i].has_src_addr = (has_src_addr == 1)?ARES_TRUE:ARES_FALSE;
+     }
+ 
+   /* Sort the addresses, and rearrange the linked list so it matches the sorted
+diff --git a/src/lib/ares__timeval.c b/src/lib/ares__timeval.c
+index e7a0400..19fec13 100644
+--- a/src/lib/ares__timeval.c
++++ b/src/lib/ares__timeval.c
+@@ -59,7 +59,7 @@ struct timeval ares__tvnow(void)
+   struct timespec tsnow;
+   if(0 == clock_gettime(CLOCK_MONOTONIC, &tsnow)) {
+     now.tv_sec = tsnow.tv_sec;
+-    now.tv_usec = tsnow.tv_nsec / 1000;
++    now.tv_usec = (int)(tsnow.tv_nsec / 1000);
+   }
+   /*
+   ** Even when the configure process has truly detected monotonic clock
+diff --git a/src/lib/ares_create_query.c b/src/lib/ares_create_query.c
+index 21c6be0..d5c1650 100644
+--- a/src/lib/ares_create_query.c
++++ b/src/lib/ares_create_query.c
+@@ -163,7 +163,7 @@ int ares_create_query(const char *name, int dnsclass, int type,
+         {
+           if (*p == '\\' && *(p + 1) != 0)
+             p++;
+-          *q++ = *p;
++          *q++ = (unsigned char)*p;
+         }
+ 
+       /* Go to the next label and repeat, unless we hit the end. */
+@@ -188,7 +188,7 @@ int ares_create_query(const char *name, int dnsclass, int type,
+       DNS_RR_SET_CLASS(q, max_udp_size);
+       q += (EDNSFIXEDSZ-1);
+   }
+-  buflen = (q - buf);
++  buflen = (size_t)(q - buf);
+ 
+   /* Reject names that are longer than the maximum of 255 bytes that's
+    * specified in RFC 1035 ("To simplify implementations, the total length of
+diff --git a/src/lib/ares_destroy.c b/src/lib/ares_destroy.c
+index 560082f..d40e779 100644
+--- a/src/lib/ares_destroy.c
++++ b/src/lib/ares_destroy.c
+@@ -54,7 +54,7 @@ void ares_destroy_options(struct ares_options *options)
+ 
+ void ares_destroy(ares_channel channel)
+ {
+-  int                 i;
++  size_t              i;
+   ares__llist_node_t *node = NULL;
+ 
+   if (!channel)
+@@ -121,7 +121,7 @@ void ares_destroy(ares_channel channel)
+ void ares__destroy_servers_state(ares_channel channel)
+ {
+   struct server_state *server;
+-  int i;
++  size_t i;
+ 
+   if (channel->servers)
+     {
+@@ -136,5 +136,5 @@ void ares__destroy_servers_state(ares_channel channel)
+       ares_free(channel->servers);
+       channel->servers = NULL;
+     }
+-  channel->nservers = -1;
++  channel->nservers = 0;
+ }
+diff --git a/src/lib/ares_expand_name.c b/src/lib/ares_expand_name.c
+index 4d52f34..5a420d4 100644
+--- a/src/lib/ares_expand_name.c
++++ b/src/lib/ares_expand_name.c
+@@ -40,8 +40,9 @@
+ /* Maximum number of indirections allowed for a name */
+ #define MAX_INDIRS 50
+ 
+-static int name_length(const unsigned char *encoded, const unsigned char *abuf,
+-                       int alen, ares_bool_t is_hostname);
++static ares_ssize_t name_length(const unsigned char *encoded,
++                                const unsigned char *abuf, size_t alen,
++                                ares_bool_t is_hostname);
+ 
+ /* Reserved characters for names that need to be escaped */
+ static ares_bool_t is_reservedch(int ch)
+@@ -128,10 +129,10 @@ static ares_bool_t is_hostnamech(int ch)
+ 
+ ares_status_t ares__expand_name_validated(const unsigned char *encoded,
+                                           const unsigned char *abuf,
+-                                          int alen, char **s, long *enclen,
++                                          size_t alen, char **s, size_t *enclen,
+                                           ares_bool_t is_hostname)
+ {
+-  int len, indir = 0;
++  size_t len, indir = 0;
+   char *q;
+   const unsigned char *p;
+   union {
+@@ -172,14 +173,14 @@ ares_status_t ares__expand_name_validated(const unsigned char *encoded,
+         {
+           if (!indir)
+             {
+-              *enclen = aresx_uztosl(p + 2U - encoded);
++              *enclen = (size_t)(p + 2U - encoded);
+               indir = 1;
+             }
+           p = abuf + ((*p & ~INDIR_MASK) << 8 | *(p + 1));
+         }
+       else
+         {
+-          int name_len = *p;
++          size_t name_len = *p;
+           len = name_len;
+           p++;
+ 
+@@ -197,11 +198,11 @@ ares_status_t ares__expand_name_validated(const unsigned char *encoded,
+               else if (is_reservedch(*p))
+                 {
+                   *q++ = '\\';
+-                  *q++ = *p;
++                  *q++ = (char)*p;
+                 }
+               else
+                 {
+-                  *q++ = *p;
++                  *q++ = (char)*p;
+                 }
+               p++;
+             }
+@@ -210,7 +211,7 @@ ares_status_t ares__expand_name_validated(const unsigned char *encoded,
+      }
+ 
+   if (!indir)
+-    *enclen = aresx_uztosl(p + 1U - encoded);
++    *enclen = (size_t)(p + 1U - encoded);
+ 
+   /* Nuke the trailing period if we wrote one. */
+   if (q > *s)
+@@ -225,16 +226,27 @@ ares_status_t ares__expand_name_validated(const unsigned char *encoded,
+ int ares_expand_name(const unsigned char *encoded, const unsigned char *abuf,
+                      int alen, char **s, long *enclen)
+ {
+-  return ares__expand_name_validated(encoded, abuf, alen, s, enclen, ARES_FALSE);
++  /* Keep public API compatible */
++  size_t enclen_temp = 0;
++  ares_status_t status;
++
++  if (alen < 0)
++    return ARES_EBADRESP;
++
++  status = ares__expand_name_validated(encoded, abuf, (size_t)alen, s,
++                                       &enclen_temp, ARES_FALSE);
++  *enclen = (long)enclen_temp;
++  return (int)status;
+ }
+ 
+ /* Return the length of the expansion of an encoded domain name, or
+  * -1 if the encoding is invalid.
+  */
+-static int name_length(const unsigned char *encoded, const unsigned char *abuf,
+-                       int alen, ares_bool_t is_hostname)
++static ares_ssize_t name_length(const unsigned char *encoded,
++                                const unsigned char *abuf,
++                                size_t alen, ares_bool_t is_hostname)
+ {
+-  int n = 0, offset, indir = 0, top;
++  size_t n = 0, offset, indir = 0, top;
+ 
+   /* Allow the caller to pass us abuf + alen and have us check for it. */
+   if (encoded >= abuf + alen)
+@@ -248,7 +260,7 @@ static int name_length(const unsigned char *encoded, const unsigned char *abuf,
+           /* Check the offset and go there. */
+           if (encoded + 1 >= abuf + alen)
+             return -1;
+-          offset = (*encoded & ~INDIR_MASK) << 8 | *(encoded + 1);
++          offset = (size_t)(*encoded & ~INDIR_MASK) << 8 | *(encoded + 1);
+           if (offset >= alen)
+             return -1;
+           encoded = abuf + offset;
+@@ -262,7 +274,7 @@ static int name_length(const unsigned char *encoded, const unsigned char *abuf,
+         }
+       else if (top == 0x00)
+         {
+-          int name_len = *encoded;
++          size_t name_len = *encoded;
+           offset = name_len;
+           if (encoded + offset + 1 >= abuf + alen)
+             return -1;
+@@ -305,14 +317,15 @@ static int name_length(const unsigned char *encoded, const unsigned char *abuf,
+   /* If there were any labels at all, then the number of dots is one
+    * less than the number of labels, so subtract one.
+    */
+-  return (n) ? n - 1 : n;
++  return (ares_ssize_t)((n) ? n - 1 : n);
+ }
+ 
+ /* Like ares_expand_name_validated  but returns EBADRESP in case of invalid
+  * input. */
+ ares_status_t ares__expand_name_for_response(const unsigned char *encoded,
+                                              const unsigned char *abuf,
+-                                             int alen, char **s, long *enclen,
++                                             size_t alen, char **s,
++                                             size_t *enclen,
+                                              ares_bool_t is_hostname)
+ {
+   ares_status_t status = ares__expand_name_validated(encoded, abuf, alen, s,
+diff --git a/src/lib/ares_expand_string.c b/src/lib/ares_expand_string.c
+index 2d6daa1..ac73432 100644
+--- a/src/lib/ares_expand_string.c
++++ b/src/lib/ares_expand_string.c
+@@ -36,43 +36,60 @@
+ #include "ares.h"
+ #include "ares_private.h" /* for the memdebug */
+ 
++
+ /* Simply decodes a length-encoded character string. The first byte of the
+  * input is the length of the string to be returned and the bytes thereafter
+  * are the characters of the string. The returned result will be NULL
+  * terminated.
+  */
+-int ares_expand_string(const unsigned char *encoded,
+-                       const unsigned char *abuf,
+-                       int alen,
+-                       unsigned char **s,
+-                       long *enclen)
++ares_status_t ares_expand_string_ex(const unsigned char *encoded,
++                                    const unsigned char *abuf,
++                                    size_t alen,
++                                    unsigned char **s,
++                                    size_t *enclen)
+ {
+   unsigned char *q;
+-  union {
+-    ares_ssize_t sig;
+-     size_t uns;
+-  } elen;
++  size_t         len;
+ 
+   if (encoded == abuf+alen)
+     return ARES_EBADSTR;
+ 
+-  elen.uns = *encoded;
+-  if (encoded+elen.sig+1 > abuf+alen)
++  len = *encoded;
++  if (encoded + len + 1 > abuf + alen)
+     return ARES_EBADSTR;
+ 
+   encoded++;
+ 
+-  *s = ares_malloc(elen.uns+1);
++  *s = ares_malloc(len+1);
+   if (*s == NULL)
+     return ARES_ENOMEM;
+   q = *s;
+-  strncpy((char *)q, (char *)encoded, elen.uns);
+-  q[elen.uns] = '\0';
++  strncpy((char *)q, (char *)encoded, len);
++  q[len] = '\0';
+ 
+   *s = q;
+ 
+-  *enclen = (long)(elen.sig+1);
++  *enclen = len+1;
+ 
+   return ARES_SUCCESS;
+ }
+ 
++
++int ares_expand_string(const unsigned char *encoded,
++                       const unsigned char *abuf,
++                       int alen,
++                       unsigned char **s,
++                       long *enclen)
++{
++  ares_status_t status;
++  size_t        temp_enclen = 0;
++
++  if (alen < 0)
++    return ARES_EBADRESP;
++
++  status = ares_expand_string_ex(encoded, abuf, (size_t)alen, s, &temp_enclen);
++
++  *enclen = (long)temp_enclen;
++  return (int)status;
++}
++
+diff --git a/src/lib/ares_fds.c b/src/lib/ares_fds.c
+index 5ee149f..4bc5dde 100644
+--- a/src/lib/ares_fds.c
++++ b/src/lib/ares_fds.c
+@@ -35,7 +35,7 @@ int ares_fds(ares_channel channel, fd_set *read_fds, fd_set *write_fds)
+ {
+   struct server_state *server;
+   ares_socket_t nfds;
+-  int i;
++  size_t i;
+ 
+   /* Are there any active queries? */
+   size_t active_queries = ares__llist_len(channel->all_queries);
+diff --git a/src/lib/ares_getaddrinfo.c b/src/lib/ares_getaddrinfo.c
+index 41e7e32..8de7b2a 100644
+--- a/src/lib/ares_getaddrinfo.c
++++ b/src/lib/ares_getaddrinfo.c
+@@ -77,16 +77,15 @@ struct host_query
+   void *arg;
+   struct ares_addrinfo_hints hints;
+   int sent_family; /* this family is what was is being used */
+-  int timeouts;    /* number of timeouts we saw for this request */
++  size_t timeouts;    /* number of timeouts we saw for this request */
+   const char *remaining_lookups; /* types of lookup we need to perform ("fb" by
+                                     default, file and dns respectively) */
+   struct ares_addrinfo *ai;      /* store results between lookups */
+   unsigned short qid_a;    /* qid for A request */
+   unsigned short qid_aaaa; /* qid for AAAA request */
+-  int remaining;   /* number of DNS answers waiting for */
+-  int next_domain; /* next search domain to try */
+-  int nodata_cnt; /* Track nodata responses to possibly override final result */
+-
++  size_t remaining;   /* number of DNS answers waiting for */
++  ares_ssize_t next_domain; /* next search domain to try */
++  size_t nodata_cnt; /* Track nodata responses to possibly override final result */
+ };
+ 
+ static const struct ares_addrinfo_hints default_hints = {
+@@ -290,27 +289,28 @@ static unsigned short lookup_service(const char *service, int flags)
+  * fake up a host entry, end the query immediately, and return true.
+  * Otherwise return false.
+  */
+-static int fake_addrinfo(const char *name,
+-                         unsigned short port,
+-                         const struct ares_addrinfo_hints *hints,
+-                         struct ares_addrinfo *ai,
+-                         ares_addrinfo_callback callback,
+-                         void *arg)
++static ares_bool_t fake_addrinfo(const char *name,
++                                 unsigned short port,
++                                 const struct ares_addrinfo_hints *hints,
++                                 struct ares_addrinfo *ai,
++                                 ares_addrinfo_callback callback,
++                                 void *arg)
+ {
+   struct ares_addrinfo_cname *cname;
+   ares_status_t status = ARES_SUCCESS;
+-  int result = 0;
++  ares_bool_t result = ARES_FALSE;
+   int family = hints->ai_family;
+   if (family == AF_INET || family == AF_INET6 || family == AF_UNSPEC)
+     {
+       /* It only looks like an IP address if it's all numbers and dots. */
+-      int numdots = 0, valid = 1;
++      size_t numdots = 0;
++      ares_bool_t valid = ARES_TRUE;
+       const char *p;
+       for (p = name; *p; p++)
+         {
+           if (!ISDIGIT(*p) && *p != '.')
+             {
+-              valid = 0;
++              valid = ARES_FALSE;
+               break;
+             }
+           else if (*p == '.')
+@@ -323,18 +323,18 @@ static int fake_addrinfo(const char *name,
+        * (although inet_pton doesn't think so).
+        */
+       if (numdots != 3 || !valid)
+-        result = 0;
++        result = ARES_FALSE;
+       else
+         {
+           struct in_addr addr4;
+-          result = ares_inet_pton(AF_INET, name, &addr4) < 1 ? 0 : 1;
++          result = ares_inet_pton(AF_INET, name, &addr4) < 1 ? ARES_FALSE : ARES_TRUE;
+           if (result)
+             {
+               status = ares_append_ai_node(AF_INET, port, 0, &addr4, &ai->nodes);
+               if (status != ARES_SUCCESS)
+                 {
+-                  callback(arg, status, 0, NULL);
+-                  return 1;
++                  callback(arg, (int)status, 0, NULL);
++                  return ARES_TRUE;
+                 }
+             }
+         }
+@@ -343,20 +343,20 @@ static int fake_addrinfo(const char *name,
+   if (!result && (family == AF_INET6 || family == AF_UNSPEC))
+     {
+       struct ares_in6_addr addr6;
+-      result = ares_inet_pton(AF_INET6, name, &addr6) < 1 ? 0 : 1;
++      result = ares_inet_pton(AF_INET6, name, &addr6) < 1 ? ARES_FALSE : ARES_TRUE;
+       if (result)
+         {
+           status = ares_append_ai_node(AF_INET6, port, 0, &addr6, &ai->nodes);
+           if (status != ARES_SUCCESS)
+             {
+-              callback(arg, status, 0, NULL);
+-              return 1;
++              callback(arg, (int)status, 0, NULL);
++              return ARES_TRUE;
+             }
+         }
+     }
+ 
+   if (!result)
+-    return 0;
++    return ARES_FALSE;
+ 
+   if (hints->ai_flags & ARES_AI_CANONNAME)
+     {
+@@ -365,7 +365,7 @@ static int fake_addrinfo(const char *name,
+         {
+           ares_freeaddrinfo(ai);
+           callback(arg, ARES_ENOMEM, 0, NULL);
+-          return 1;
++          return ARES_TRUE;
+         }
+ 
+       /* Duplicate the name, to avoid a constness violation. */
+@@ -374,7 +374,7 @@ static int fake_addrinfo(const char *name,
+         {
+           ares_freeaddrinfo(ai);
+           callback(arg, ARES_ENOMEM, 0, NULL);
+-          return 1;
++          return ARES_TRUE;
+         }
+     }
+ 
+@@ -382,7 +382,7 @@ static int fake_addrinfo(const char *name,
+   ai->nodes->ai_protocol = hints->ai_protocol;
+ 
+   callback(arg, ARES_SUCCESS, 0, ai);
+-  return 1;
++  return ARES_TRUE;
+ }
+ 
+ static void end_hquery(struct host_query *hquery, ares_status_t status)
+@@ -414,7 +414,7 @@ static void end_hquery(struct host_query *hquery, ares_status_t status)
+       hquery->ai = NULL;
+     }
+ 
+-  hquery->callback(hquery->arg, status, hquery->timeouts, hquery->ai);
++  hquery->callback(hquery->arg, (int)status, (int)hquery->timeouts, hquery->ai);
+   ares_free(hquery->name);
+   ares_free(hquery);
+ }
+@@ -603,12 +603,16 @@ static void host_callback(void *arg, int status, int timeouts,
+   struct host_query *hquery = (struct host_query*)arg;
+   ares_status_t addinfostatus = ARES_SUCCESS;
+   unsigned short qid = 0;
+-  hquery->timeouts += timeouts;
++  hquery->timeouts += (size_t)timeouts;
+   hquery->remaining--;
+ 
+   if (status == ARES_SUCCESS) {
+-    addinfostatus = ares__parse_into_addrinfo(abuf, alen, 1, hquery->port,
+-                                              hquery->ai);
++    if (alen < 0) {
++      addinfostatus = ARES_EBADRESP;
++    } else {
++      addinfostatus = ares__parse_into_addrinfo(abuf, (size_t)alen, ARES_TRUE,
++                                                hquery->port, hquery->ai);
++    }
+     if (addinfostatus == ARES_SUCCESS && alen >= HFIXEDSZ) {
+       qid = DNS_HEADER_QID(abuf); /* Converts to host byte order */
+       terminate_retries(hquery, qid);
+@@ -630,14 +634,14 @@ static void host_callback(void *arg, int status, int timeouts,
+       end_hquery(hquery, ARES_SUCCESS);
+     } else if (status == ARES_EDESTRUCTION || status == ARES_ECANCELLED) {
+       /* must make sure we don't do next_lookup() on destroy or cancel */
+-      end_hquery(hquery, status);
++      end_hquery(hquery, (ares_status_t)status);
+     } else if (status == ARES_ENOTFOUND || status == ARES_ENODATA ||
+                addinfostatus == ARES_ENODATA) {
+       if (status == ARES_ENODATA || addinfostatus == ARES_ENODATA)
+         hquery->nodata_cnt++;
+-      next_lookup(hquery, hquery->nodata_cnt?ARES_ENODATA:status);
++      next_lookup(hquery, hquery->nodata_cnt?ARES_ENODATA:(ares_status_t)status);
+     } else {
+-      end_hquery(hquery, status);
++      end_hquery(hquery, (ares_status_t)status);
+     }
+   }
+ 
+@@ -683,7 +687,7 @@ void ares_getaddrinfo(ares_channel channel,
+    * things we are going to ignore) */
+   status = ares__single_domain(channel, name, &alias_name);
+   if (status != ARES_SUCCESS) {
+-    callback(arg, status, 0, NULL);
++    callback(arg, (int)status, 0, NULL);
+     return;
+   }
+ 
+@@ -789,7 +793,7 @@ static ares_bool_t next_dns_lookup(struct host_query *hquery)
+     }
+ 
+   /* if as_is_first is false, try hquery->name at last */
+-  if (!s && hquery->next_domain == hquery->channel->ndomains) {
++  if (!s && (size_t)hquery->next_domain == hquery->channel->ndomains) {
+     if (!as_is_first(hquery))
+       {
+         s = hquery->name;
+@@ -797,7 +801,7 @@ static ares_bool_t next_dns_lookup(struct host_query *hquery)
+     hquery->next_domain++;
+   }
+ 
+-  if (!s && hquery->next_domain < hquery->channel->ndomains && !as_is_only(hquery))
++  if (!s && (size_t)hquery->next_domain < hquery->channel->ndomains && !as_is_only(hquery))
+     {
+       status = ares__cat_domain(
+           hquery->name,
+@@ -850,7 +854,7 @@ static ares_bool_t next_dns_lookup(struct host_query *hquery)
+ static ares_bool_t as_is_first(const struct host_query* hquery)
+ {
+   char* p;
+-  int ndots = 0;
++  size_t ndots = 0;
+   size_t nname = hquery->name?strlen(hquery->name):0;
+   for (p = hquery->name; p && *p; p++)
+     {
+@@ -864,7 +868,7 @@ static ares_bool_t as_is_first(const struct host_query* hquery)
+       /* prevent ARES_EBADNAME for valid FQDN, where ndots < channel->ndots  */
+       return ARES_TRUE;
+     }
+-  return ndots >= hquery->channel->ndots?ARES_TRUE:ARES_FALSE;
++  return ndots >= (size_t)hquery->channel->ndots?ARES_TRUE:ARES_FALSE;
+ }
+ 
+ static ares_bool_t as_is_only(const struct host_query* hquery)
+diff --git a/src/lib/ares_gethostbyaddr.c b/src/lib/ares_gethostbyaddr.c
+index 426613c..b0bb197 100644
+--- a/src/lib/ares_gethostbyaddr.c
++++ b/src/lib/ares_gethostbyaddr.c
+@@ -56,7 +56,7 @@ struct addr_query {
+   void *arg;
+ 
+   const char *remaining_lookups;
+-  int timeouts;
++  size_t timeouts;
+ };
+ 
+ static void next_lookup(struct addr_query *aquery);
+@@ -65,7 +65,7 @@ static void addr_callback(void *arg, int status, int timeouts,
+ static void end_aquery(struct addr_query *aquery, ares_status_t status,
+                        struct hostent *host);
+ static ares_status_t file_lookup(struct ares_addr *addr, struct hostent **host);
+-static void ptr_rr_name(char *name, int name_size, const struct ares_addr *addr);
++static void ptr_rr_name(char *name, size_t name_size, const struct ares_addr *addr);
+ 
+ void ares_gethostbyaddr(ares_channel channel, const void *addr, int addrlen,
+                         int family, ares_host_callback callback, void *arg)
+@@ -146,7 +146,7 @@ static void addr_callback(void *arg, int status, int timeouts,
+   struct hostent *host;
+   size_t addrlen;
+ 
+-  aquery->timeouts += timeouts;
++  aquery->timeouts += (size_t)timeouts;
+   if (status == ARES_SUCCESS)
+     {
+       if (aquery->addr.family == AF_INET)
+@@ -161,10 +161,10 @@ static void addr_callback(void *arg, int status, int timeouts,
+           status = ares_parse_ptr_reply(abuf, alen, &aquery->addr.addrV6,
+                                         (int)addrlen, AF_INET6, &host);
+         }
+-      end_aquery(aquery, status, host);
++      end_aquery(aquery, (ares_status_t)status, host);
+     }
+   else if (status == ARES_EDESTRUCTION || status == ARES_ECANCELLED)
+-    end_aquery(aquery, status, NULL);
++    end_aquery(aquery, (ares_status_t)status, NULL);
+   else
+     next_lookup(aquery);
+ }
+@@ -172,7 +172,7 @@ static void addr_callback(void *arg, int status, int timeouts,
+ static void end_aquery(struct addr_query *aquery, ares_status_t status,
+                        struct hostent *host)
+ {
+-  aquery->callback(aquery->arg, status, aquery->timeouts, host);
++  aquery->callback(aquery->arg, (int)status, (int)aquery->timeouts, host);
+   if (host)
+     ares_free_hostent(host);
+   ares_free(aquery);
+@@ -267,7 +267,7 @@ static ares_status_t file_lookup(struct ares_addr *addr, struct hostent **host)
+   return status;
+ }
+ 
+-static void ptr_rr_name(char *name, int name_size, const struct ares_addr *addr)
++static void ptr_rr_name(char *name, size_t name_size, const struct ares_addr *addr)
+ {
+   if (addr->family == AF_INET)
+     {
+diff --git a/src/lib/ares_gethostbyname.c b/src/lib/ares_gethostbyname.c
+index 8fa9803..7242b36 100644
+--- a/src/lib/ares_gethostbyname.c
++++ b/src/lib/ares_gethostbyname.c
+@@ -51,13 +51,13 @@
+ #include "ares_private.h"
+ 
+ static void sort_addresses(struct hostent *host,
+-                           const struct apattern *sortlist, int nsort);
++                           const struct apattern *sortlist, size_t nsort);
+ static void sort6_addresses(struct hostent *host,
+-                            const struct apattern *sortlist, int nsort);
+-static int get_address_index(const struct in_addr *addr,
+-                             const struct apattern *sortlist, int nsort);
+-static int get6_address_index(const struct ares_in6_addr *addr,
+-                              const struct apattern *sortlist, int nsort);
++                            const struct apattern *sortlist, size_t nsort);
++static size_t get_address_index(const struct in_addr *addr,
++                                const struct apattern *sortlist, size_t nsort);
++static size_t get6_address_index(const struct ares_in6_addr *addr,
++                                 const struct apattern *sortlist, size_t nsort);
+ 
+ struct host_query {
+   ares_host_callback callback;
+@@ -73,7 +73,7 @@ static void ares_gethostbyname_callback(void *arg, int status, int timeouts,
+ 
+   if (status == ARES_SUCCESS)
+     {
+-      status = ares__addrinfo2hostent(result, AF_UNSPEC, &hostent);
++      status = (int)ares__addrinfo2hostent(result, AF_UNSPEC, &hostent);
+     }
+ 
+   /* addrinfo2hostent will only return ENODATA if there are no addresses _and_
+@@ -128,10 +128,11 @@ void ares_gethostbyname(ares_channel channel, const char *name, int family,
+ 
+ 
+ static void sort_addresses(struct hostent *host,
+-                           const struct apattern *sortlist, int nsort)
++                           const struct apattern *sortlist, size_t nsort)
+ {
+   struct in_addr a1, a2;
+-  int i1, i2, ind1, ind2;
++  int i1, i2;
++  size_t ind1, ind2;
+ 
+   /* This is a simple insertion sort, not optimized at all.  i1 walks
+    * through the address list, with the loop invariant that everything
+@@ -157,11 +158,11 @@ static void sort_addresses(struct hostent *host,
+ /* Find the first entry in sortlist which matches addr.  Return nsort
+  * if none of them match.
+  */
+-static int get_address_index(const struct in_addr *addr,
+-                             const struct apattern *sortlist,
+-                             int nsort)
++static size_t get_address_index(const struct in_addr *addr,
++                                const struct apattern *sortlist,
++                                size_t nsort)
+ {
+-  int i;
++  size_t i;
+ 
+   for (i = 0; i < nsort; i++)
+     {
+@@ -184,10 +185,11 @@ static int get_address_index(const struct in_addr *addr,
+ }
+ 
+ static void sort6_addresses(struct hostent *host,
+-                            const struct apattern *sortlist, int nsort)
++                            const struct apattern *sortlist, size_t nsort)
+ {
+   struct ares_in6_addr a1, a2;
+-  int i1, i2, ind1, ind2;
++  int i1, i2;
++  size_t ind1, ind2;
+ 
+   /* This is a simple insertion sort, not optimized at all.  i1 walks
+    * through the address list, with the loop invariant that everything
+@@ -213,11 +215,11 @@ static void sort6_addresses(struct hostent *host,
+ /* Find the first entry in sortlist which matches addr.  Return nsort
+  * if none of them match.
+  */
+-static int get6_address_index(const struct ares_in6_addr *addr,
+-                              const struct apattern *sortlist,
+-                              int nsort)
++static size_t get6_address_index(const struct ares_in6_addr *addr,
++                                 const struct apattern *sortlist,
++                                 size_t nsort)
+ {
+-  int i;
++  size_t i;
+ 
+   for (i = 0; i < nsort; i++)
+     {
+@@ -239,7 +241,7 @@ static ares_status_t file_lookup(const char *name, int family,
+ int ares_gethostbyname_file(ares_channel channel, const char *name,
+                             int family, struct hostent **host)
+ {
+-  ares_status_t result;
++  ares_status_t status;
+ 
+   /* We only take the channel to ensure that ares_init() been called. */
+   if(channel == NULL)
+@@ -253,13 +255,13 @@ int ares_gethostbyname_file(ares_channel channel, const char *name,
+   /* Just chain to the internal implementation we use here; it's exactly
+    * what we want.
+    */
+-  result = file_lookup(name, family, host);
+-  if(result != ARES_SUCCESS)
++  status = file_lookup(name, family, host);
++  if(status != ARES_SUCCESS)
+     {
+       /* We guarantee a NULL hostent on failure. */
+       *host = NULL;
+     }
+-  return result;
++  return (int)status;
+ }
+ 
+ static ares_status_t file_lookup(const char *name, int family,
+diff --git a/src/lib/ares_getnameinfo.c b/src/lib/ares_getnameinfo.c
+index 63d9cc0..69779f7 100644
+--- a/src/lib/ares_getnameinfo.c
++++ b/src/lib/ares_getnameinfo.c
+@@ -61,8 +61,8 @@ struct nameinfo_query {
+     struct sockaddr_in6 addr6;
+   } addr;
+   int family;
+-  int flags;
+-  int timeouts;
++  unsigned int flags;
++  size_t timeouts;
+ };
+ 
+ #ifdef HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID
+@@ -75,7 +75,7 @@ struct nameinfo_query {
+ 
+ static void nameinfo_callback(void *arg, int status, int timeouts,
+                               struct hostent *host);
+-static char *lookup_service(unsigned short port, int flags,
++static char *lookup_service(unsigned short port, unsigned int flags,
+                             char *buf, size_t buflen);
+ #ifdef HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID
+ static void append_scopeid(struct sockaddr_in6 *addr6, unsigned int scopeid,
+@@ -85,12 +85,13 @@ STATIC_TESTABLE char *ares_striendstr(const char *s1, const char *s2);
+ 
+ void ares_getnameinfo(ares_channel channel, const struct sockaddr *sa,
+                       ares_socklen_t salen,
+-                      int flags, ares_nameinfo_callback callback, void *arg)
++                      int flags_int, ares_nameinfo_callback callback, void *arg)
+ {
+   struct sockaddr_in *addr = NULL;
+   struct sockaddr_in6 *addr6 = NULL;
+   struct nameinfo_query *niquery;
+-  unsigned int port = 0;
++  unsigned short port = 0;
++  unsigned int flags = (unsigned int)flags_int;
+ 
+   /* Validate socket address family and length */
+   if ((sa->sa_family == AF_INET) &&
+@@ -204,7 +205,7 @@ static void nameinfo_callback(void *arg, int status, int timeouts,
+   char srvbuf[33];
+   char *service = NULL;
+ 
+-  niquery->timeouts += timeouts;
++  niquery->timeouts += (size_t)timeouts;
+   if (status == ARES_SUCCESS)
+     {
+       /* They want a service too */
+@@ -235,7 +236,7 @@ static void nameinfo_callback(void *arg, int status, int timeouts,
+              }
+         }
+ #endif
+-      niquery->callback(niquery->arg, ARES_SUCCESS, niquery->timeouts,
++      niquery->callback(niquery->arg, ARES_SUCCESS, (int)niquery->timeouts,
+                         (char *)(host->h_name),
+                         service);
+       ares_free(niquery);
+@@ -267,16 +268,16 @@ static void nameinfo_callback(void *arg, int status, int timeouts,
+             service = lookup_service(niquery->addr.addr6.sin6_port,
+                                      niquery->flags, srvbuf, sizeof(srvbuf));
+         }
+-      niquery->callback(niquery->arg, ARES_SUCCESS, niquery->timeouts, ipbuf,
++      niquery->callback(niquery->arg, ARES_SUCCESS, (int)niquery->timeouts, ipbuf,
+                         service);
+       ares_free(niquery);
+       return;
+     }
+-  niquery->callback(niquery->arg, status, niquery->timeouts, NULL, NULL);
++  niquery->callback(niquery->arg, status, (int)niquery->timeouts, NULL, NULL);
+   ares_free(niquery);
+ }
+ 
+-static char *lookup_service(unsigned short port, int flags,
++static char *lookup_service(unsigned short port, unsigned int flags,
+                             char *buf, size_t buflen)
+ {
+   const char *proto;
+diff --git a/src/lib/ares_getsock.c b/src/lib/ares_getsock.c
+index 48c9076..9f1f39d 100644
+--- a/src/lib/ares_getsock.c
++++ b/src/lib/ares_getsock.c
+@@ -34,14 +34,17 @@ int ares_getsock(ares_channel channel,
+                  int numsocks) /* size of the 'socks' array */
+ {
+   struct server_state *server;
+-  int i;
+-  int sockindex=0;
+-  int bitmap = 0;
++  size_t i;
++  size_t sockindex=0;
++  unsigned int bitmap = 0;
+   unsigned int setbits = 0xffffffff;
+ 
+   /* Are there any active queries? */
+   size_t active_queries = ares__llist_len(channel->all_queries);
+ 
++  if (numsocks <= 0)
++    return 0;
++
+   for (i = 0; i < channel->nservers; i++) {
+     ares__llist_node_t *node;
+     server = &channel->servers[i];
+@@ -52,7 +55,7 @@ int ares_getsock(ares_channel channel,
+ 
+       struct server_connection *conn = ares__llist_node_val(node);
+ 
+-      if (sockindex >= numsocks || sockindex >= ARES_GETSOCK_MAXNUM)
++      if (sockindex >= (size_t)numsocks || sockindex >= ARES_GETSOCK_MAXNUM)
+         break;
+ 
+       /* We only need to register interest in UDP sockets if we have
+@@ -75,5 +78,5 @@ int ares_getsock(ares_channel channel,
+       sockindex++;
+     }
+   }
+-  return bitmap;
++  return (int)bitmap;
+ }
+diff --git a/src/lib/ares_init.c b/src/lib/ares_init.c
+index 64fef73..6c7d583 100644
+--- a/src/lib/ares_init.c
++++ b/src/lib/ares_init.c
+@@ -81,15 +81,15 @@ static ares_status_t init_by_defaults(ares_channel channel);
+ 
+ #ifndef WATT32
+ static ares_status_t config_nameserver(struct server_state **servers,
+-                                       int *nservers, const char *str);
++                                       size_t *nservers, const char *str);
+ #endif
+ static ares_status_t set_search(ares_channel channel, const char *str);
+ static ares_status_t set_options(ares_channel channel, const char *str);
+ static const char *try_option(const char *p, const char *q, const char *opt);
+ 
+-static ares_status_t config_sortlist(struct apattern **sortlist, int *nsort,
++static ares_status_t config_sortlist(struct apattern **sortlist, size_t *nsort,
+                                      const char *str);
+-static ares_bool_t sortlist_alloc(struct apattern **sortlist, int *nsort,
++static ares_bool_t sortlist_alloc(struct apattern **sortlist, size_t *nsort,
+                                   struct apattern *pat);
+ static int ip_addr(const char *s, ares_ssize_t len, struct in_addr *addr);
+ static void natural_mask(struct apattern *pat);
+@@ -102,11 +102,11 @@ static ares_status_t config_lookup(ares_channel channel, const char *str,
+ static char *try_config(char *s, const char *opt, char scc);
+ #endif
+ 
+-#define ARES_CONFIG_CHECK(x) (x->lookups && x->nsort > -1 && \
+-                             x->nservers > -1 && \
+-                             x->ndomains > -1 && \
+-                             x->ndots > -1 && x->timeout > -1 && \
+-                             x->tries > -1)
++#define ARES_CONFIG_CHECK(x) (x->lookups && \
++                             x->nservers > 0 && \
++                             x->ndots > 0 && \
++                             x->timeout > 0 && \
++                             x->tries > 0)
+ 
+ int ares_init(ares_channel *channelptr)
+ {
+@@ -148,23 +148,6 @@ int ares_init_options(ares_channel *channelptr, struct ares_options *options,
+ 
+   memset(channel, 0, sizeof(*channel));
+ 
+-  /* Set everything to distinguished values so we know they haven't
+-   * been set yet.
+-   */
+-  channel->flags = -1;
+-  channel->timeout = -1;
+-  channel->tries = -1;
+-  channel->ndots = -1;
+-  channel->rotate = -1;
+-  channel->udp_port = -1;
+-  channel->tcp_port = -1;
+-  channel->ednspsz = -1;
+-  channel->socket_send_buffer_size = -1;
+-  channel->socket_receive_buffer_size = -1;
+-  channel->nservers = -1;
+-  channel->ndomains = -1;
+-  channel->nsort = -1;
+-
+   /* Generate random key */
+ 
+   channel->rand_state = ares__init_rand_state();
+@@ -249,7 +232,7 @@ done:
+       if (channel->servers) {
+         ares_free(channel->servers);
+       }
+-      if (channel->ndomains != -1)
++      if (channel->ndomains > 0)
+         ares__strsplit_free(channel->domains, channel->ndomains);
+       if (channel->sortlist)
+         ares_free(channel->sortlist);
+@@ -267,7 +250,7 @@ done:
+       ares__slist_destroy(channel->queries_by_timeout);
+       ares__htable_asvp_destroy(channel->connnode_by_socket);
+       ares_free(channel);
+-      return status;
++      return (int)status;
+     }
+ 
+   *channelptr = channel;
+@@ -281,7 +264,7 @@ int ares_dup(ares_channel *dest, ares_channel src)
+   struct ares_options opts;
+   struct ares_addr_port_node *servers;
+   int non_v4_default_port = 0;
+-  int i;
++  size_t i;
+   ares_status_t rc;
+   int optmask;
+ 
+@@ -289,21 +272,21 @@ int ares_dup(ares_channel *dest, ares_channel src)
+ 
+   /* First get the options supported by the old ares_save_options() function,
+      which is most of them */
+-  rc = ares_save_options(src, &opts, &optmask);
++  rc = (ares_status_t)ares_save_options(src, &opts, &optmask);
+   if(rc)
+   {
+     ares_destroy_options(&opts);
+-    return rc;
++    return (int)rc;
+   }
+ 
+   /* Then create the new channel with those options */
+-  rc = ares_init_options(dest, &opts, optmask);
++  rc = (ares_status_t)ares_init_options(dest, &opts, optmask);
+ 
+   /* destroy the options copy to not leak any memory */
+   ares_destroy_options(&opts);
+ 
+   if(rc)
+-    return rc;
++    return (int)rc;
+ 
+   /* Now clone the options that ares_save_options() doesn't support. */
+   (*dest)->sock_create_cb      = src->sock_create_cb;
+@@ -329,18 +312,18 @@ int ares_dup(ares_channel *dest, ares_channel src)
+       }
+     }
+   if (non_v4_default_port) {
+-    rc = ares_get_servers_ports(src, &servers);
++    rc = (ares_status_t)ares_get_servers_ports(src, &servers);
+     if (rc != ARES_SUCCESS) {
+       ares_destroy(*dest);
+       *dest = NULL;
+-      return rc;
++      return (int)rc;
+     }
+-    rc = ares_set_servers_ports(*dest, servers);
++    rc = (ares_status_t)ares_set_servers_ports(*dest, servers);
+     ares_free_data(servers);
+     if (rc != ARES_SUCCESS) {
+       ares_destroy(*dest);
+       *dest = NULL;
+-      return rc;
++      return (int)rc;
+     }
+   }
+ 
+@@ -351,8 +334,8 @@ int ares_dup(ares_channel *dest, ares_channel src)
+ int ares_save_options(ares_channel channel, struct ares_options *options,
+                       int *optmask)
+ {
+-  int i, j;
+-  int ipv4_nservers = 0;
++  size_t i, j;
++  size_t ipv4_nservers = 0;
+ 
+   /* Zero everything out */
+   memset(options, 0, sizeof(struct ares_options));
+@@ -376,13 +359,13 @@ int ares_save_options(ares_channel channel, struct ares_options *options,
+     (*optmask) |= ARES_OPT_HOSTS_FILE;
+ 
+   /* Copy easy stuff */
+-  options->flags   = channel->flags;
++  options->flags   = (int)channel->flags;
+ 
+   /* We return full millisecond resolution but that's only because we don't
+      set the ARES_OPT_TIMEOUT anymore, only the new ARES_OPT_TIMEOUTMS */
+-  options->timeout = channel->timeout;
+-  options->tries   = channel->tries;
+-  options->ndots   = channel->ndots;
++  options->timeout = (int)channel->timeout;
++  options->tries   = (int)channel->tries;
++  options->ndots   = (int)channel->ndots;
+   options->udp_port = ntohs(aresx_sitous(channel->udp_port));
+   options->tcp_port = ntohs(aresx_sitous(channel->tcp_port));
+   options->sock_state_cb     = channel->sock_state_cb;
+@@ -413,7 +396,7 @@ int ares_save_options(ares_channel channel, struct ares_options *options,
+       }
+     }
+   }
+-  options->nservers = ipv4_nservers;
++  options->nservers = (int)ipv4_nservers;
+ 
+   /* copy domains */
+   if (channel->ndomains) {
+@@ -423,13 +406,14 @@ int ares_save_options(ares_channel channel, struct ares_options *options,
+ 
+     for (i = 0; i < channel->ndomains; i++)
+     {
+-      options->ndomains = i;
+       options->domains[i] = ares_strdup(channel->domains[i]);
+-      if (!options->domains[i])
++      if (!options->domains[i]) {
++        options->ndomains = (int)i;
+         return ARES_ENOMEM;
++      }
+     }
+   }
+-  options->ndomains = channel->ndomains;
++  options->ndomains = (int)channel->ndomains;
+ 
+   /* copy lookups */
+   if (channel->lookups) {
+@@ -446,7 +430,7 @@ int ares_save_options(ares_channel channel, struct ares_options *options,
+     for (i = 0; i < channel->nsort; i++)
+       options->sortlist[i] = channel->sortlist[i];
+   }
+-  options->nsort = channel->nsort;
++  options->nsort = (int)channel->nsort;
+ 
+   /* copy path for resolv.conf file */
+   if (channel->resolvconf_path) {
+@@ -464,7 +448,7 @@ int ares_save_options(ares_channel channel, struct ares_options *options,
+ 
+   if (channel->udp_max_queries > 0) {
+     (*optmask) |= ARES_OPT_UDP_MAX_QUERIES;
+-    options->udp_max_queries = channel->udp_max_queries;
++    options->udp_max_queries = (int)channel->udp_max_queries;
+   }
+ 
+   return ARES_SUCCESS;
+@@ -474,54 +458,62 @@ static ares_status_t init_by_options(ares_channel channel,
+                                      const struct ares_options *options,
+                                      int optmask)
+ {
+-  int i;
++  size_t i;
+ 
+   /* Easy stuff. */
+-  if ((optmask & ARES_OPT_FLAGS) && channel->flags == -1)
+-    channel->flags = options->flags;
+-  if ((optmask & ARES_OPT_TIMEOUTMS) && channel->timeout == -1)
+-    channel->timeout = options->timeout;
+-  else if ((optmask & ARES_OPT_TIMEOUT) && channel->timeout == -1)
+-    channel->timeout = options->timeout * 1000;
+-  if ((optmask & ARES_OPT_TRIES) && channel->tries == -1)
+-    channel->tries = options->tries;
+-  if ((optmask & ARES_OPT_NDOTS) && channel->ndots == -1)
+-    channel->ndots = options->ndots;
+-  if ((optmask & ARES_OPT_ROTATE) && channel->rotate == -1)
+-    channel->rotate = 1;
+-  if ((optmask & ARES_OPT_NOROTATE) && channel->rotate == -1)
+-    channel->rotate = 0;
+-  if ((optmask & ARES_OPT_UDP_PORT) && channel->udp_port == -1)
++  if (optmask & ARES_OPT_FLAGS)
++    channel->flags = (unsigned int)options->flags;
++
++  if (optmask & ARES_OPT_TIMEOUTMS)
++    channel->timeout = (unsigned int)options->timeout;
++  else if (optmask & ARES_OPT_TIMEOUT)
++    channel->timeout = (unsigned int)options->timeout * 1000;
++
++  if (optmask & ARES_OPT_TRIES)
++    channel->tries = (size_t)options->tries;
++
++  if (optmask & ARES_OPT_NDOTS)
++    channel->ndots = (size_t)options->ndots;
++
++  if (optmask & ARES_OPT_ROTATE)
++    channel->rotate = ARES_TRUE;
++
++  if (optmask & ARES_OPT_NOROTATE)
++    channel->rotate = ARES_FALSE;
++
++  if ((optmask & ARES_OPT_UDP_PORT) && channel->udp_port == 0)
+     channel->udp_port = htons(options->udp_port);
+-  if ((optmask & ARES_OPT_TCP_PORT) && channel->tcp_port == -1)
++
++  if ((optmask & ARES_OPT_TCP_PORT) && channel->tcp_port == 0)
+     channel->tcp_port = htons(options->tcp_port);
++
+   if ((optmask & ARES_OPT_SOCK_STATE_CB) && channel->sock_state_cb == NULL)
+     {
+       channel->sock_state_cb = options->sock_state_cb;
+       channel->sock_state_cb_data = options->sock_state_cb_data;
+     }
+-  if ((optmask & ARES_OPT_SOCK_SNDBUF)
+-      && channel->socket_send_buffer_size == -1)
++
++  if (optmask & ARES_OPT_SOCK_SNDBUF && options->socket_send_buffer_size > 0)
+     channel->socket_send_buffer_size = options->socket_send_buffer_size;
+-  if ((optmask & ARES_OPT_SOCK_RCVBUF)
+-      && channel->socket_receive_buffer_size == -1)
++
++  if (optmask & ARES_OPT_SOCK_RCVBUF && channel->socket_receive_buffer_size > 0)
+     channel->socket_receive_buffer_size = options->socket_receive_buffer_size;
+ 
+-  if ((optmask & ARES_OPT_EDNSPSZ) && channel->ednspsz == -1)
+-    channel->ednspsz = options->ednspsz;
++  if (optmask & ARES_OPT_EDNSPSZ)
++    channel->ednspsz = (size_t)options->ednspsz;
+ 
+   /* Copy the IPv4 servers, if given. */
+-  if ((optmask & ARES_OPT_SERVERS) && channel->nservers == -1)
++  if (optmask & ARES_OPT_SERVERS)
+     {
+       /* Avoid zero size allocations at any cost */
+       if (options->nservers > 0)
+         {
+           channel->servers =
+-            ares_malloc(options->nservers * sizeof(*channel->servers));
++            ares_malloc((size_t)options->nservers * sizeof(*channel->servers));
+           if (!channel->servers)
+             return ARES_ENOMEM;
+-          memset(channel->servers, 0, options->nservers * sizeof(*channel->servers));
+-          for (i = 0; i < options->nservers; i++)
++          memset(channel->servers, 0, (size_t)options->nservers * sizeof(*channel->servers));
++          for (i = 0; i < (size_t)options->nservers; i++)
+             {
+               channel->servers[i].addr.family = AF_INET;
+               channel->servers[i].addr.udp_port = 0;
+@@ -531,29 +523,28 @@ static ares_status_t init_by_options(ares_channel channel,
+                      sizeof(channel->servers[i].addr.addrV4));
+             }
+         }
+-      channel->nservers = options->nservers;
++      channel->nservers = (size_t)options->nservers;
+     }
+ 
+   /* Copy the domains, if given.  Keep channel->ndomains consistent so
+    * we can clean up in case of error.
+    */
+-  if ((optmask & ARES_OPT_DOMAINS) && channel->ndomains == -1)
++  if (optmask & ARES_OPT_DOMAINS)
+     {
+       /* Avoid zero size allocations at any cost */
+       if (options->ndomains > 0)
+       {
+-        channel->domains = ares_malloc(options->ndomains * sizeof(char *));
++        channel->domains = ares_malloc((size_t)options->ndomains * sizeof(char *));
+         if (!channel->domains)
+           return ARES_ENOMEM;
+-        for (i = 0; i < options->ndomains; i++)
++        for (i = 0; i < (size_t)options->ndomains; i++)
+           {
+-            channel->ndomains = i;
+             channel->domains[i] = ares_strdup(options->domains[i]);
+             if (!channel->domains[i])
+               return ARES_ENOMEM;
+           }
+       }
+-      channel->ndomains = options->ndomains;
++      channel->ndomains = (size_t)options->ndomains;
+     }
+ 
+   /* Set lookups, if given. */
+@@ -565,15 +556,13 @@ static ares_status_t init_by_options(ares_channel channel,
+     }
+ 
+   /* copy sortlist */
+-  if ((optmask & ARES_OPT_SORTLIST) && (channel->nsort == -1)) {
+-    if (options->nsort > 0) {
+-      channel->sortlist = ares_malloc(options->nsort * sizeof(struct apattern));
+-      if (!channel->sortlist)
+-        return ARES_ENOMEM;
+-      for (i = 0; i < options->nsort; i++)
+-        channel->sortlist[i] = options->sortlist[i];
+-    }
+-    channel->nsort = options->nsort;
++  if (optmask & ARES_OPT_SORTLIST && options->nsort > 0) {
++    channel->nsort = (size_t)options->nsort;
++    channel->sortlist = ares_malloc((size_t)options->nsort * sizeof(struct apattern));
++    if (!channel->sortlist)
++      return ARES_ENOMEM;
++    for (i = 0; i < (size_t)options->nsort; i++)
++      channel->sortlist[i] = options->sortlist[i];
+   }
+ 
+   /* Set path for resolv.conf file, if given. */
+@@ -593,9 +582,9 @@ static ares_status_t init_by_options(ares_channel channel,
+     }
+ 
+   if (optmask & ARES_OPT_UDP_MAX_QUERIES)
+-    channel->udp_max_queries = options->udp_max_queries;
++    channel->udp_max_queries = (size_t)options->udp_max_queries;
+ 
+-  channel->optmask = optmask;
++  channel->optmask = (unsigned int)optmask;
+ 
+   return ARES_SUCCESS;
+ }
+@@ -606,7 +595,7 @@ static ares_status_t init_by_environment(ares_channel channel)
+   ares_status_t status;
+ 
+   localdomain = getenv("LOCALDOMAIN");
+-  if (localdomain && channel->ndomains == -1)
++  if (localdomain && channel->ndomains == 0)
+     {
+       status = set_search(channel, localdomain);
+       if (status != ARES_SUCCESS)
+@@ -1150,13 +1139,14 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+   char *line = NULL;
+ #endif
+   ares_status_t status = ARES_EOF;
+-  int nservers = 0, nsort = 0;
++  size_t nservers = 0;
++  size_t nsort = 0;
+   struct server_state *servers = NULL;
+   struct apattern *sortlist = NULL;
+ 
+ #ifdef WIN32
+ 
+-  if (channel->nservers > -1)  /* don't override ARES_OPT_SERVER */
++  if (channel->nservers > 0)  /* don't override ARES_OPT_SERVER */
+      return ARES_SUCCESS;
+ 
+   if (get_DNS_Windows(&line))
+@@ -1165,7 +1155,7 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+     ares_free(line);
+   }
+ 
+-  if (channel->ndomains == -1 && get_SuffixList_Windows(&line))
++  if (channel->ndomains == 0 && get_SuffixList_Windows(&line))
+   {
+       status = set_search(channel, line);
+       ares_free(line);
+@@ -1180,7 +1170,7 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+ #elif defined(__MVS__)
+ 
+   struct __res_state *res = 0;
+-  int count4, count6;
++  size_t count4, count6;
+   __STATEEXTIPV6 *v6;
+   struct server_state *pserver;
+   if (0 == res) {
+@@ -1195,14 +1185,16 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+   }
+ 
+   v6 = res->__res_extIPv6;
+-  count4 = res->nscount;
+-  if (v6) {
+-    count6 = v6->__stat_nscount;
++  if (res->nscount > 0)
++    count4 = (size_t)res->nscount;
++
++  if (v6 && v6->__stat_nscount > 0) {
++    count6 = (size_t)v6->__stat_nscount;
+   } else {
+     count6 = 0;
+   }
+ 
+-  nservers = count4 + count6;
++  nservers = (size_t)(count4 + count6);
+   servers = ares_malloc(nservers * sizeof(*servers));
+   if (!servers)
+     return ARES_ENOMEM;
+@@ -1260,7 +1252,7 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+   }
+ 
+ #elif defined(WATT32)
+-  int i;
++  size_t i;
+ 
+   sock_init();
+   for (i = 0; def_nameservers[i]; i++)
+@@ -1269,10 +1261,10 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+     return ARES_SUCCESS; /* use localhost DNS server */
+ 
+   nservers = i;
+-  servers = ares_malloc(sizeof(*servers));
++  servers = ares_malloc(nservers * sizeof(*servers));
+   if (!servers)
+      return ARES_ENOMEM;
+-  memset(servers, 0, sizeof(*servers));
++  memset(servers, 0, nservers * sizeof(*servers));
+ 
+   for (i = 0; def_nameservers[i]; i++)
+   {
+@@ -1284,7 +1276,7 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+   status = ARES_EOF;
+ 
+ #elif defined(ANDROID) || defined(__ANDROID__)
+-  unsigned int i;
++  size_t i;
+   char **dns_servers;
+   char *domains;
+   size_t num_servers;
+@@ -1311,7 +1303,7 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+     }
+     ares_free(dns_servers);
+   }
+-  if (channel->ndomains == -1)
++  if (channel->ndomains == 0)
+   {
+     domains = ares_get_android_search_domains_list();
+     set_search(channel, domains);
+@@ -1351,7 +1343,7 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+   if (result == 0 && (res.options & RES_INIT)) {
+     status = ARES_EOF;
+ 
+-    if (channel->nservers == -1) {
++    if (channel->nservers == 0) {
+       union res_sockaddr_union addr[MAXNS];
+       int nscount = res_getservers(&res, addr, MAXNS);
+       int i;
+@@ -1359,7 +1351,7 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+         char ipaddr[INET6_ADDRSTRLEN] = "";
+         char ipaddr_port[INET6_ADDRSTRLEN + 8]; /* [%s]:NNNNN */
+         unsigned short port = 0;
+-        int config_status;
++        ares_status_t config_status;
+         sa_family_t family = addr[i].sin.sin_family;
+         if (family == AF_INET) {
+           ares_inet_ntop(family, &addr[i].sin.sin_addr, ipaddr, sizeof(ipaddr));
+@@ -1384,8 +1376,8 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+         }
+       }
+     }
+-    if (channel->ndomains == -1) {
+-      int entries = 0;
++    if (channel->ndomains == 0) {
++      size_t entries = 0;
+       while ((entries < MAXDNSRCH) && res.dnsrch[entries])
+         entries++;
+       if(entries) {
+@@ -1393,7 +1385,7 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+         if (!channel->domains) {
+           status = ARES_ENOMEM;
+         } else {
+-          int i;
++          size_t i;
+           channel->ndomains = entries;
+           for (i = 0; i < channel->ndomains; ++i) {
+             channel->domains[i] = ares_strdup(res.dnsrch[i]);
+@@ -1403,16 +1395,21 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+         }
+       }
+     }
+-    if (channel->ndots == -1)
+-      channel->ndots = res.ndots;
+-    if (channel->tries == -1)
+-      channel->tries = res.retry;
+-    if (channel->rotate == -1)
+-      channel->rotate = res.options & RES_ROTATE;
+-    if (channel->timeout == -1) {
+-      channel->timeout = res.retrans * 1000;
++    if (channel->ndots == 0 && res.ndots > 0)
++      channel->ndots = (size_t)res.ndots;
++
++    if (channel->tries == 0 && res.retry > 0)
++      channel->tries = (size_t)res.retry;
++
++    if (!(channel->optmask & (ARES_OPT_ROTATE|ARES_OPT_NOROTATE)))
++      channel->rotate = (res.options & RES_ROTATE)?ARES_TRUE:ARES_FALSE;
++
++    if (channel->timeout == 0) {
++      if (res.retrans > 0)
++        channel->timeout = (unsigned int)res.retrans * 1000;
+ #ifdef __APPLE__
+-      channel->timeout /= (res.retry + 1) * (res.nscount > 0 ? res.nscount : 1);
++      if (res.retry >= 0)
++        channel->timeout /= ((unsigned int)res.retry + 1) * (unsigned int)(res.nscount > 0 ? res.nscount : 1);
+ #endif
+     }
+ 
+@@ -1432,7 +1429,7 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+         return ARES_SUCCESS;
+ 
+     /* Only update search domains if they're not already specified */
+-    update_domains = (channel->ndomains == -1);
++    update_domains = (channel->ndomains == 0);
+ 
+     /* Support path for resolvconf filename set by ares_init_options */
+     if(channel->resolvconf_path) {
+@@ -1452,10 +1449,10 @@ static ares_status_t init_by_resolv_conf(ares_channel channel)
+         else if ((p = try_config(line, "search", ';')) && update_domains)
+           status = set_search(channel, p);
+         else if ((p = try_config(line, "nameserver", ';')) &&
+-                channel->nservers == -1)
++                channel->nservers == 0)
+           status = config_nameserver(&servers, &nservers, p);
+         else if ((p = try_config(line, "sortlist", ';')) &&
+-                channel->nsort == -1)
++          !(channel->optmask & ARES_OPT_SORTLIST))
+           status = config_sortlist(&sortlist, &nsort, p);
+         else if ((p = try_config(line, "options", ';')))
+           status = set_options(channel, p);
+@@ -1613,25 +1610,24 @@ static ares_status_t init_by_defaults(ares_channel channel)
+   char *dot;
+ #endif
+ 
+-  if (channel->flags == -1)
+-    channel->flags = 0;
+-  if (channel->timeout == -1)
++  if (channel->timeout == 0)
+     channel->timeout = DEFAULT_TIMEOUT;
+-  if (channel->tries == -1)
++
++  if (channel->tries == 0)
+     channel->tries = DEFAULT_TRIES;
+-  if (channel->ndots == -1)
++
++  if (channel->ndots == 0)
+     channel->ndots = 1;
+-  if (channel->rotate == -1)
+-    channel->rotate = 0;
+-  if (channel->udp_port == -1)
++
++  if (channel->udp_port == 0)
+     channel->udp_port = htons(NAMESERVER_PORT);
+-  if (channel->tcp_port == -1)
++  if (channel->tcp_port == 0)
+     channel->tcp_port = htons(NAMESERVER_PORT);
+ 
+-  if (channel->ednspsz == -1)
++  if (channel->ednspsz == 0)
+     channel->ednspsz = EDNSPACKETSZ;
+ 
+-  if (channel->nservers == -1) {
++  if (channel->nservers == 0) {
+     /* If nobody specified servers, try a local named. */
+     channel->servers = ares_malloc(sizeof(*channel->servers));
+     if (!channel->servers) {
+@@ -1655,7 +1651,7 @@ static ares_status_t init_by_defaults(ares_channel channel)
+ #define toolong(x) (x == -1) &&  (SOCKERRNO == EINVAL)
+ #endif
+ 
+-  if (channel->ndomains == -1) {
++  if (channel->ndomains == 0) {
+     /* Derive a default domain search list from the kernel hostname,
+      * or set it to empty if the hostname isn't helpful.
+      */
+@@ -1715,9 +1711,8 @@ static ares_status_t init_by_defaults(ares_channel channel)
+ #endif
+   }
+ 
+-  if (channel->nsort == -1) {
++  if (channel->nsort == 0) {
+     channel->sortlist = NULL;
+-    channel->nsort = 0;
+   }
+ 
+   if (!channel->lookups) {
+@@ -1946,7 +1941,7 @@ static ares_status_t parse_dnsaddrport(const char *str, size_t len,
+     addr_end   = str+(len-1);
+   }
+ 
+-  mylen = (addr_end-addr_start)+1;
++  mylen = (size_t)(addr_end-addr_start)+1;
+   /* Larger than buffer with null term */
+   if (mylen+1 > sizeof(ipaddr)) {
+     return ARES_EBADSTR;
+@@ -1956,7 +1951,7 @@ static ares_status_t parse_dnsaddrport(const char *str, size_t len,
+   memcpy(ipaddr, addr_start, mylen);
+ 
+   if (port_start) {
+-    mylen = (port_end-port_start)+1;
++    mylen = (size_t)(port_end-port_start)+1;
+     /* Larger than buffer with null term */
+     if (mylen+1 > sizeof(ipport)) {
+       return ARES_EBADSTR;
+@@ -2000,7 +1995,7 @@ static ares_status_t parse_dnsaddrport(const char *str, size_t len,
+  * Returns an error code on failure, else ARES_SUCCESS.
+  */
+ static ares_status_t config_nameserver(struct server_state **servers,
+-                                       int *nservers, const char *str)
++                                       size_t *nservers, const char *str)
+ {
+   struct ares_addr host;
+   struct server_state *newserv;
+@@ -2026,7 +2021,7 @@ static ares_status_t config_nameserver(struct server_state **servers,
+       while (*p && !ISSPACE(*p) && (*p != ','))
+         p++;
+ 
+-      if (parse_dnsaddrport(txtaddr, p-txtaddr, &host, &port) !=
++      if (parse_dnsaddrport(txtaddr, (size_t)(p-txtaddr), &host, &port) !=
+           ARES_SUCCESS) {
+         continue;
+       }
+@@ -2059,8 +2054,8 @@ static ares_status_t config_nameserver(struct server_state **servers,
+ }
+ #endif  /* !WATT32 */
+ 
+-static ares_status_t config_sortlist(struct apattern **sortlist, int *nsort,
+-                           const char *str)
++static ares_status_t config_sortlist(struct apattern **sortlist, size_t *nsort,
++                                     const char *str)
+ {
+   struct apattern pat;
+   const char *q;
+@@ -2076,7 +2071,7 @@ static ares_status_t config_sortlist(struct apattern **sortlist, int *nsort,
+         q++;
+       if (q-str >= 16)
+         return ARES_EBADSTR;
+-      memcpy(ipbuf, str, q-str);
++      memcpy(ipbuf, str, (size_t)(q-str));
+       ipbuf[q-str] = '\0';
+       /* Find the prefix */
+       if (*q == '/')
+@@ -2086,7 +2081,7 @@ static ares_status_t config_sortlist(struct apattern **sortlist, int *nsort,
+             q++;
+           if (q-str >= 32)
+             return ARES_EBADSTR;
+-          memcpy(ipbufpfx, str, q-str);
++          memcpy(ipbufpfx, str, (size_t)(q-str));
+           ipbufpfx[q-str] = '\0';
+           str = str2;
+         }
+@@ -2125,7 +2120,7 @@ static ares_status_t config_sortlist(struct apattern **sortlist, int *nsort,
+         {
+           if (ipbufpfx[0])
+             {
+-              memcpy(ipbuf, str, q-str);
++              memcpy(ipbuf, str, (size_t)(q-str));
+               ipbuf[q-str] = '\0';
+               if (ip_addr(ipbuf, q-str, &pat.mask.addr4) != 0)
+                 natural_mask(&pat);
+@@ -2157,19 +2152,19 @@ static ares_status_t set_search(ares_channel channel, const char *str)
+ {
+   size_t cnt;
+ 
+-  if(channel->ndomains != -1) {
++  if(channel->ndomains > 0) {
+     /* LCOV_EXCL_START: all callers check ndomains == -1 */
+     /* if we already have some domains present, free them first */
+-    ares__strsplit_free(channel->domains, channel->ndomains);
++    ares__strsplit_free(channel->domains, (size_t)channel->ndomains);
+     channel->domains = NULL;
+-    channel->ndomains = -1;
++    channel->ndomains = 0;
+   } /* LCOV_EXCL_STOP */
+ 
+   channel->domains  = ares__strsplit(str, ", ", &cnt);
+-  channel->ndomains = (int)cnt;
++  channel->ndomains = cnt;
+   if (channel->domains == NULL || channel->ndomains == 0) {
+     channel->domains  = NULL;
+-    channel->ndomains = -1;
++    channel->ndomains = 0;
+   }
+ 
+   return ARES_SUCCESS;
+@@ -2186,17 +2181,21 @@ static ares_status_t set_options(ares_channel channel, const char *str)
+       while (*q && !ISSPACE(*q))
+         q++;
+       val = try_option(p, q, "ndots:");
+-      if (val && channel->ndots == -1)
+-        channel->ndots = aresx_sltosi(strtol(val, NULL, 10));
++      if (val && channel->ndots == 0)
++        channel->ndots = strtoul(val, NULL, 10);
++
+       val = try_option(p, q, "retrans:");
+-      if (val && channel->timeout == -1)
+-        channel->timeout = aresx_sltosi(strtol(val, NULL, 10));
++      if (val && channel->timeout == 0)
++        channel->timeout = strtoul(val, NULL, 10);
++
+       val = try_option(p, q, "retry:");
+-      if (val && channel->tries == -1)
+-        channel->tries = aresx_sltosi(strtol(val, NULL, 10));
++      if (val && channel->tries == 0)
++        channel->tries = strtoul(val, NULL, 10);
++
+       val = try_option(p, q, "rotate");
+-      if (val && channel->rotate == -1)
+-        channel->rotate = 1;
++      if (val && !(channel->optmask & (ARES_OPT_ROTATE|ARES_OPT_NOROTATE)))
++        channel->rotate = ARES_TRUE;
++
+       p = q;
+       while (ISSPACE(*p))
+         p++;
+@@ -2317,7 +2316,7 @@ static void natural_mask(struct apattern *pat)
+     pat->mask.addr4.s_addr = htonl(IN_CLASSC_NET);
+ }
+ 
+-static ares_bool_t sortlist_alloc(struct apattern **sortlist, int *nsort,
++static ares_bool_t sortlist_alloc(struct apattern **sortlist, size_t *nsort,
+                                   struct apattern *pat)
+ {
+   struct apattern *newsort;
+@@ -2379,7 +2378,7 @@ void ares_set_socket_functions(ares_channel channel,
+ 
+ int ares_set_sortlist(ares_channel channel, const char *sortstr)
+ {
+-  int nsort = 0;
++  size_t nsort = 0;
+   struct apattern *sortlist = NULL;
+   ares_status_t status;
+ 
+@@ -2393,13 +2392,13 @@ int ares_set_sortlist(ares_channel channel, const char *sortstr)
+     channel->sortlist = sortlist;
+     channel->nsort = nsort;
+   }
+-  return status;
++  return (int)status;
+ }
+ 
+ ares_status_t ares__init_servers_state(ares_channel channel)
+ {
+   struct server_state *server;
+-  int i;
++  size_t i;
+ 
+   for (i = 0; i < channel->nservers; i++) {
+     server = &channel->servers[i];
+@@ -2416,7 +2415,7 @@ ares_status_t ares__init_servers_state(ares_channel channel)
+       return ARES_ENOMEM;
+     }
+ 
+-    server->idx = i;
++    server->idx = (size_t)i;
+     server->connections = ares__llist_create(NULL);
+     if (server->connections == NULL) {
+       ares__buf_destroy(server->tcp_parser);
+diff --git a/src/lib/ares_options.c b/src/lib/ares_options.c
+index f1c23c9..756f1cd 100644
+--- a/src/lib/ares_options.c
++++ b/src/lib/ares_options.c
+@@ -44,7 +44,7 @@ int ares_get_servers(ares_channel channel,
+   struct ares_addr_node *srvr_last = NULL;
+   struct ares_addr_node *srvr_curr;
+   ares_status_t status = ARES_SUCCESS;
+-  int i;
++  size_t i;
+ 
+   if (!channel)
+     return ARES_ENODATA;
+@@ -89,7 +89,7 @@ int ares_get_servers(ares_channel channel,
+ 
+   *servers = srvr_head;
+ 
+-  return status;
++  return (int)status;
+ }
+ 
+ int ares_get_servers_ports(ares_channel channel,
+@@ -99,7 +99,7 @@ int ares_get_servers_ports(ares_channel channel,
+   struct ares_addr_port_node *srvr_last = NULL;
+   struct ares_addr_port_node *srvr_curr;
+   ares_status_t status = ARES_SUCCESS;
+-  int i;
++  size_t i;
+ 
+   if (!channel)
+     return ARES_ENODATA;
+@@ -146,15 +146,15 @@ int ares_get_servers_ports(ares_channel channel,
+ 
+   *servers = srvr_head;
+ 
+-  return status;
++  return (int)status;
+ }
+ 
+ int ares_set_servers(ares_channel channel,
+                      struct ares_addr_node *servers)
+ {
+   struct ares_addr_node *srvr;
+-  int num_srvrs = 0;
+-  int i;
++  size_t num_srvrs = 0;
++  size_t i;
+ 
+   if (ares_library_initialized() != ARES_SUCCESS)
+     return ARES_ENOTINITIALIZED;  /* LCOV_EXCL_LINE: n/a on non-WinSock */
+@@ -206,8 +206,8 @@ int ares_set_servers_ports(ares_channel channel,
+                            struct ares_addr_port_node *servers)
+ {
+   struct ares_addr_port_node *srvr;
+-  int num_srvrs = 0;
+-  int i;
++  size_t num_srvrs = 0;
++  size_t i;
+ 
+   if (ares_library_initialized() != ARES_SUCCESS)
+     return ARES_ENOTINITIALIZED;  /* LCOV_EXCL_LINE: n/a on non-WinSock */
+@@ -265,7 +265,7 @@ static ares_status_t set_servers_csv(ares_channel channel,
+   char* ptr;
+   char* start_host;
+   int cc = 0;
+-  ares_status_t rv = ARES_SUCCESS;
++  ares_status_t status = ARES_SUCCESS;
+   struct ares_addr_port_node *servers = NULL;
+   struct ares_addr_port_node *last = NULL;
+ 
+@@ -341,18 +341,16 @@ static ares_status_t set_servers_csv(ares_channel channel,
+         }
+       }
+       /* resolve host, try ipv4 first, rslt is in network byte order */
+-      rv = ares_inet_pton(AF_INET, start_host, &in4);
+-      if (!rv) {
++      if (!ares_inet_pton(AF_INET, start_host, &in4)) {
+         /* Ok, try IPv6 then */
+-        rv = ares_inet_pton(AF_INET6, start_host, &in6);
+-        if (!rv) {
+-          rv = ARES_EBADSTR;
++        if (!ares_inet_pton(AF_INET6, start_host, &in6)) {
++          status = ARES_EBADSTR;
+           goto out;
+         }
+         /* was ipv6, add new server */
+         s = ares_malloc(sizeof(*s));
+         if (!s) {
+-          rv = ARES_ENOMEM;
++          status = ARES_ENOMEM;
+           goto out;
+         }
+         s->family = AF_INET6;
+@@ -362,7 +360,7 @@ static ares_status_t set_servers_csv(ares_channel channel,
+         /* was ipv4, add new server */
+         s = ares_malloc(sizeof(*s));
+         if (!s) {
+-          rv = ARES_ENOMEM;
++          status = ARES_ENOMEM;
+           goto out;
+         }
+         s->family = AF_INET;
+@@ -389,7 +387,7 @@ static ares_status_t set_servers_csv(ares_channel channel,
+     }
+   }
+ 
+-  rv = ares_set_servers_ports(channel, servers);
++  status = (ares_status_t)ares_set_servers_ports(channel, servers);
+ 
+   out:
+   if (csv)
+@@ -400,18 +398,18 @@ static ares_status_t set_servers_csv(ares_channel channel,
+     ares_free(s);
+   }
+ 
+-  return rv;
++  return status;
+ }
+ 
+ int ares_set_servers_csv(ares_channel channel,
+                          const char* _csv)
+ {
+-  return set_servers_csv(channel, _csv, FALSE);
++  return (int)set_servers_csv(channel, _csv, FALSE);
+ }
+ 
+ int ares_set_servers_ports_csv(ares_channel channel,
+                                const char* _csv)
+ {
+-  return set_servers_csv(channel, _csv, TRUE);
++  return (int)set_servers_csv(channel, _csv, TRUE);
+ }
+ 
+diff --git a/src/lib/ares_parse_a_reply.c b/src/lib/ares_parse_a_reply.c
+index 11acf93..97138df 100644
+--- a/src/lib/ares_parse_a_reply.c
++++ b/src/lib/ares_parse_a_reply.c
+@@ -58,36 +58,36 @@ int ares_parse_a_reply(const unsigned char *abuf, int alen,
+   struct ares_addrinfo ai;
+   char *question_hostname = NULL;
+   ares_status_t status;
+-  int req_naddrttls = 0;
++  size_t req_naddrttls = 0;
+ 
+-  if (naddrttls)
+-    {
+-      req_naddrttls = *naddrttls;
+-      *naddrttls = 0;
+-    }
++  if (alen < 0)
++    return ARES_EBADRESP;
++
++  if (naddrttls) {
++    req_naddrttls = (size_t)*naddrttls;
++    *naddrttls = 0;
++  }
+ 
+   memset(&ai, 0, sizeof(ai));
+ 
+-  status = ares__parse_into_addrinfo(abuf, alen, 0, 0, &ai);
+-  if (status != ARES_SUCCESS && status != ARES_ENODATA)
+-    {
+-      goto fail;
+-    }
++  status = ares__parse_into_addrinfo(abuf, (size_t)alen, 0, 0, &ai);
++  if (status != ARES_SUCCESS && status != ARES_ENODATA) {
++    goto fail;
++  }
+ 
+-  if (host != NULL)
+-    {
+-      status = ares__addrinfo2hostent(&ai, AF_INET, host);
+-      if (status != ARES_SUCCESS && status != ARES_ENODATA)
+-        {
+-          goto fail;
+-        }
++  if (host != NULL) {
++    status = ares__addrinfo2hostent(&ai, AF_INET, host);
++    if (status != ARES_SUCCESS && status != ARES_ENODATA) {
++      goto fail;
+     }
++  }
+ 
+-  if (addrttls != NULL && req_naddrttls)
+-   {
+-     ares__addrinfo2addrttl(&ai, AF_INET, req_naddrttls, addrttls,
+-                            NULL, naddrttls);
+-   }
++  if (addrttls != NULL && req_naddrttls) {
++    size_t temp_naddrttls = 0;
++    ares__addrinfo2addrttl(&ai, AF_INET, req_naddrttls, addrttls,
++                           NULL, &temp_naddrttls);
++    *naddrttls = (int)temp_naddrttls;
++  }
+ 
+ 
+ fail:
+@@ -96,5 +96,5 @@ fail:
+   ares_free(ai.name);
+   ares_free(question_hostname);
+ 
+-  return status;
++  return (int)status;
+ }
+diff --git a/src/lib/ares_parse_aaaa_reply.c b/src/lib/ares_parse_aaaa_reply.c
+index 78faba6..107f603 100644
+--- a/src/lib/ares_parse_aaaa_reply.c
++++ b/src/lib/ares_parse_aaaa_reply.c
+@@ -60,35 +60,35 @@ int ares_parse_aaaa_reply(const unsigned char *abuf, int alen,
+   struct ares_addrinfo ai;
+   char *question_hostname = NULL;
+   ares_status_t status;
+-  int req_naddrttls = 0;
++  size_t req_naddrttls = 0;
+ 
+-  if (naddrttls)
+-    {
+-      req_naddrttls = *naddrttls;
+-      *naddrttls = 0;
+-    }
++  if (alen < 0)
++    return ARES_EBADRESP;
++
++  if (naddrttls) {
++    req_naddrttls = (size_t)*naddrttls;
++    *naddrttls = 0;
++  }
+ 
+   memset(&ai, 0, sizeof(ai));
+ 
+-  status = ares__parse_into_addrinfo(abuf, alen, 0, 0, &ai);
+-  if (status != ARES_SUCCESS && status != ARES_ENODATA)
+-    {
+-      goto fail;
+-    }
++  status = ares__parse_into_addrinfo(abuf, (size_t)alen, 0, 0, &ai);
++  if (status != ARES_SUCCESS && status != ARES_ENODATA) {
++    goto fail;
++  }
+ 
+-  if (host != NULL)
+-    {
+-      status = ares__addrinfo2hostent(&ai, AF_INET6, host);
+-      if (status != ARES_SUCCESS && status != ARES_ENODATA)
+-        {
+-          goto fail;
+-        }
++  if (host != NULL) {
++    status = ares__addrinfo2hostent(&ai, AF_INET6, host);
++    if (status != ARES_SUCCESS && status != ARES_ENODATA) {
++      goto fail;
+     }
++  }
+ 
+-  if (addrttls != NULL && req_naddrttls)
+-   {
+-     ares__addrinfo2addrttl(&ai, AF_INET6, req_naddrttls, NULL,
+-                            addrttls, naddrttls);
++  if (addrttls != NULL && req_naddrttls) {
++    size_t temp_naddrttls = 0;
++    ares__addrinfo2addrttl(&ai, AF_INET6, req_naddrttls, NULL,
++                          addrttls, &temp_naddrttls);
++    *naddrttls = (int)temp_naddrttls;
+    }
+ 
+ fail:
+@@ -97,6 +97,6 @@ fail:
+   ares_free(question_hostname);
+   ares_free(ai.name);
+ 
+-  return status;
++  return (int)status;
+ }
+ 
+diff --git a/src/lib/ares_parse_caa_reply.c b/src/lib/ares_parse_caa_reply.c
+index 1e70848..e12c614 100644
+--- a/src/lib/ares_parse_caa_reply.c
++++ b/src/lib/ares_parse_caa_reply.c
+@@ -72,15 +72,17 @@
+ #include "ares_private.h"
+ 
+ int
+-ares_parse_caa_reply (const unsigned char *abuf, int alen,
++ares_parse_caa_reply (const unsigned char *abuf, int alen_int,
+                       struct ares_caa_reply **caa_out)
+ {
+-  unsigned int qdcount, ancount, i;
++  size_t qdcount, ancount, i;
+   const unsigned char *aptr;
+   const unsigned char *strptr;
+   ares_status_t status;
+-  int rr_type, rr_class, rr_len;
+-  long len;
++  int rr_type, rr_class;
++  size_t rr_len;
++  size_t len;
++  size_t alen;
+   char *hostname = NULL, *rr_name = NULL;
+   struct ares_caa_reply *caa_head = NULL;
+   struct ares_caa_reply *caa_last = NULL;
+@@ -89,6 +91,11 @@ ares_parse_caa_reply (const unsigned char *abuf, int alen,
+   /* Set *caa_out to NULL for all failure cases. */
+   *caa_out = NULL;
+ 
++  if (alen_int < 0)
++    return ARES_EBADRESP;
++
++  alen = (size_t)alen_int;
++
+   /* Give up if abuf doesn't have room for a header. */
+   if (alen < HFIXEDSZ)
+     return ARES_EBADRESP;
+@@ -103,9 +110,9 @@ ares_parse_caa_reply (const unsigned char *abuf, int alen,
+ 
+   /* Expand the name from the question, and skip past the question. */
+   aptr = abuf + HFIXEDSZ;
+-  status = ares_expand_name (aptr, abuf, alen, &hostname, &len);
++  status = ares__expand_name_for_response(aptr, abuf, alen, &hostname, &len, ARES_TRUE);
+   if (status != ARES_SUCCESS)
+-    return status;
++    return (int)status;
+ 
+   if (aptr + len + QFIXEDSZ > abuf + alen)
+     {
+@@ -118,7 +125,7 @@ ares_parse_caa_reply (const unsigned char *abuf, int alen,
+   for (i = 0; i < ancount; i++)
+     {
+       /* Decode the RR up to the data field. */
+-      status = ares_expand_name (aptr, abuf, alen, &rr_name, &len);
++      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len, ARES_FALSE);
+       if (status != ARES_SUCCESS)
+         {
+           break;
+@@ -166,8 +173,8 @@ ares_parse_caa_reply (const unsigned char *abuf, int alen,
+               break;
+             }
+           caa_curr->critical = (int)*strptr++;
+-          caa_curr->plength = (int)*strptr++;
+-          if (caa_curr->plength <= 0 || (int)caa_curr->plength >= rr_len - 2)
++          caa_curr->plength = *strptr++;
++          if (caa_curr->plength <= 0 || caa_curr->plength >= rr_len - 2)
+             {
+               status = ARES_EBADRESP;
+               break;
+@@ -224,7 +231,7 @@ ares_parse_caa_reply (const unsigned char *abuf, int alen,
+     {
+       if (caa_head)
+         ares_free_data (caa_head);
+-      return status;
++      return (int)status;
+     }
+ 
+   /* everything looks fine, return the data */
+diff --git a/src/lib/ares_parse_mx_reply.c b/src/lib/ares_parse_mx_reply.c
+index 0c12f8c..b5bea51 100644
+--- a/src/lib/ares_parse_mx_reply.c
++++ b/src/lib/ares_parse_mx_reply.c
+@@ -45,14 +45,16 @@
+ #include "ares_private.h"
+ 
+ int
+-ares_parse_mx_reply (const unsigned char *abuf, int alen,
++ares_parse_mx_reply (const unsigned char *abuf, int alen_int,
+                      struct ares_mx_reply **mx_out)
+ {
+-  unsigned int qdcount, ancount, i;
++  size_t qdcount, ancount, i;
+   const unsigned char *aptr, *vptr;
+   ares_status_t status;
+-  int rr_type, rr_class, rr_len;
+-  long len;
++  int rr_type, rr_class;
++  size_t rr_len;
++  size_t alen;
++  size_t len;
+   char *hostname = NULL, *rr_name = NULL;
+   struct ares_mx_reply *mx_head = NULL;
+   struct ares_mx_reply *mx_last = NULL;
+@@ -61,6 +63,11 @@ ares_parse_mx_reply (const unsigned char *abuf, int alen,
+   /* Set *mx_out to NULL for all failure cases. */
+   *mx_out = NULL;
+ 
++  if (alen_int < 0)
++    return ARES_EBADRESP;
++
++  alen = (size_t)alen_int;
++
+   /* Give up if abuf doesn't have room for a header. */
+   if (alen < HFIXEDSZ)
+     return ARES_EBADRESP;
+@@ -75,9 +82,9 @@ ares_parse_mx_reply (const unsigned char *abuf, int alen,
+ 
+   /* Expand the name from the question, and skip past the question. */
+   aptr = abuf + HFIXEDSZ;
+-  status = ares_expand_name (aptr, abuf, alen, &hostname, &len);
++  status = ares__expand_name_for_response(aptr, abuf, alen, &hostname, &len, ARES_TRUE);
+   if (status != ARES_SUCCESS)
+-    return status;
++    return (int)status;
+ 
+   if (aptr + len + QFIXEDSZ > abuf + alen)
+     {
+@@ -90,7 +97,7 @@ ares_parse_mx_reply (const unsigned char *abuf, int alen,
+   for (i = 0; i < ancount; i++)
+     {
+       /* Decode the RR up to the data field. */
+-      status = ares_expand_name (aptr, abuf, alen, &rr_name, &len);
++      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len, ARES_FALSE);
+       if (status != ARES_SUCCESS)
+         {
+           break;
+@@ -142,7 +149,7 @@ ares_parse_mx_reply (const unsigned char *abuf, int alen,
+           mx_curr->priority = DNS__16BIT(vptr);
+           vptr += sizeof(unsigned short);
+ 
+-          status = ares_expand_name (vptr, abuf, alen, &mx_curr->host, &len);
++          status = ares__expand_name_for_response(vptr, abuf, alen, &mx_curr->host, &len, ARES_FALSE);
+           if (status != ARES_SUCCESS)
+             break;
+         }
+@@ -165,7 +172,7 @@ ares_parse_mx_reply (const unsigned char *abuf, int alen,
+     {
+       if (mx_head)
+         ares_free_data (mx_head);
+-      return status;
++      return (int)status;
+     }
+ 
+   /* everything looks fine, return the data */
+diff --git a/src/lib/ares_parse_naptr_reply.c b/src/lib/ares_parse_naptr_reply.c
+index e089ad6..c06b11b 100644
+--- a/src/lib/ares_parse_naptr_reply.c
++++ b/src/lib/ares_parse_naptr_reply.c
+@@ -44,14 +44,16 @@
+ #include "ares_private.h"
+ 
+ int
+-ares_parse_naptr_reply (const unsigned char *abuf, int alen,
++ares_parse_naptr_reply (const unsigned char *abuf, int alen_int,
+                         struct ares_naptr_reply **naptr_out)
+ {
+-  unsigned int qdcount, ancount, i;
++  size_t qdcount, ancount, i;
+   const unsigned char *aptr, *vptr;
+   ares_status_t status;
+-  int rr_type, rr_class, rr_len;
+-  long len;
++  int rr_type, rr_class;
++  size_t rr_len;
++  size_t len;
++  size_t alen;
+   char *hostname = NULL, *rr_name = NULL;
+   struct ares_naptr_reply *naptr_head = NULL;
+   struct ares_naptr_reply *naptr_last = NULL;
+@@ -60,6 +62,11 @@ ares_parse_naptr_reply (const unsigned char *abuf, int alen,
+   /* Set *naptr_out to NULL for all failure cases. */
+   *naptr_out = NULL;
+ 
++  if (alen_int < 0)
++    return ARES_EBADRESP;
++
++  alen = (size_t)alen_int;
++
+   /* Give up if abuf doesn't have room for a header. */
+   if (alen < HFIXEDSZ)
+     return ARES_EBADRESP;
+@@ -74,9 +81,9 @@ ares_parse_naptr_reply (const unsigned char *abuf, int alen,
+ 
+   /* Expand the name from the question, and skip past the question. */
+   aptr = abuf + HFIXEDSZ;
+-  status = ares_expand_name (aptr, abuf, alen, &hostname, &len);
++  status = ares__expand_name_for_response(aptr, abuf, alen, &hostname, &len, ARES_TRUE);
+   if (status != ARES_SUCCESS)
+-    return status;
++    return (int)status;
+ 
+   if (aptr + len + QFIXEDSZ > abuf + alen)
+     {
+@@ -89,7 +96,7 @@ ares_parse_naptr_reply (const unsigned char *abuf, int alen,
+   for (i = 0; i < ancount; i++)
+     {
+       /* Decode the RR up to the data field. */
+-      status = ares_expand_name (aptr, abuf, alen, &rr_name, &len);
++      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len, ARES_FALSE);
+       if (status != ARES_SUCCESS)
+         {
+           break;
+@@ -145,22 +152,22 @@ ares_parse_naptr_reply (const unsigned char *abuf, int alen,
+           naptr_curr->preference = DNS__16BIT(vptr);
+           vptr += sizeof(unsigned short);
+ 
+-          status = ares_expand_string(vptr, abuf, alen, &naptr_curr->flags, &len);
++          status = ares_expand_string_ex(vptr, abuf, alen, &naptr_curr->flags, &len);
+           if (status != ARES_SUCCESS)
+             break;
+           vptr += len;
+ 
+-          status = ares_expand_string(vptr, abuf, alen, &naptr_curr->service, &len);
++          status = ares_expand_string_ex(vptr, abuf, alen, &naptr_curr->service, &len);
+           if (status != ARES_SUCCESS)
+             break;
+           vptr += len;
+ 
+-          status = ares_expand_string(vptr, abuf, alen, &naptr_curr->regexp, &len);
++          status = ares_expand_string_ex(vptr, abuf, alen, &naptr_curr->regexp, &len);
+           if (status != ARES_SUCCESS)
+             break;
+           vptr += len;
+ 
+-          status = ares_expand_name(vptr, abuf, alen, &naptr_curr->replacement, &len);
++          status = ares__expand_name_for_response(vptr, abuf, alen, &naptr_curr->replacement, &len, ARES_FALSE);
+           if (status != ARES_SUCCESS)
+             break;
+         }
+@@ -183,7 +190,7 @@ ares_parse_naptr_reply (const unsigned char *abuf, int alen,
+     {
+       if (naptr_head)
+         ares_free_data (naptr_head);
+-      return status;
++      return (int)status;
+     }
+ 
+   /* everything looks fine, return the data */
+diff --git a/src/lib/ares_parse_ns_reply.c b/src/lib/ares_parse_ns_reply.c
+index 8009d7e..5e7624e 100644
+--- a/src/lib/ares_parse_ns_reply.c
++++ b/src/lib/ares_parse_ns_reply.c
+@@ -48,14 +48,17 @@
+ #include "ares_dns.h"
+ #include "ares_private.h"
+ 
+-int ares_parse_ns_reply( const unsigned char* abuf, int alen,
++int ares_parse_ns_reply( const unsigned char* abuf, int alen_int,
+                          struct hostent** host )
+ {
+-  unsigned int qdcount, ancount;
++  size_t qdcount, ancount;
+   ares_status_t status;
+-  int i, rr_type, rr_class, rr_len;
+-  int nameservers_num;
+-  long len;
++  size_t i;
++  int rr_type, rr_class;
++  size_t rr_len;
++  size_t nameservers_num;
++  size_t alen;
++  size_t len;
+   const unsigned char *aptr;
+   char* hostname, *rr_name, *rr_data, **nameservers;
+   struct hostent *hostent;
+@@ -63,6 +66,11 @@ int ares_parse_ns_reply( const unsigned char* abuf, int alen,
+   /* Set *host to NULL for all failure cases. */
+   *host = NULL;
+ 
++  if (alen_int < 0)
++    return ARES_EBADRESP;
++
++  alen = (size_t)alen_int;
++
+   /* Give up if abuf doesn't have room for a header. */
+   if ( alen < HFIXEDSZ )
+     return ARES_EBADRESP;
+@@ -75,9 +83,9 @@ int ares_parse_ns_reply( const unsigned char* abuf, int alen,
+ 
+   /* Expand the name from the question, and skip past the question. */
+   aptr = abuf + HFIXEDSZ;
+-  status = ares__expand_name_for_response( aptr, abuf, alen, &hostname, &len, 0);
++  status = ares__expand_name_for_response( aptr, abuf, alen, &hostname, &len, ARES_FALSE);
+   if ( status != ARES_SUCCESS )
+-    return status;
++    return (int)status;
+   if ( aptr + len + QFIXEDSZ > abuf + alen )
+   {
+     ares_free( hostname );
+@@ -95,10 +103,10 @@ int ares_parse_ns_reply( const unsigned char* abuf, int alen,
+   nameservers_num = 0;
+ 
+   /* Examine each answer resource record (RR) in turn. */
+-  for ( i = 0; i < ( int ) ancount; i++ )
++  for ( i = 0; i < ancount; i++ )
+   {
+     /* Decode the RR up to the data field. */
+-    status = ares__expand_name_for_response( aptr, abuf, alen, &rr_name, &len, 0);
++    status = ares__expand_name_for_response( aptr, abuf, alen, &rr_name, &len, ARES_FALSE);
+     if ( status != ARES_SUCCESS )
+       break;
+     aptr += len;
+@@ -123,7 +131,7 @@ int ares_parse_ns_reply( const unsigned char* abuf, int alen,
+     {
+       /* Decode the RR data and add it to the nameservers list */
+       status = ares__expand_name_for_response( aptr, abuf, alen, &rr_data,
+-                                               &len, 1);
++                                               &len, ARES_TRUE);
+       if ( status != ARES_SUCCESS )
+       {
+         ares_free(rr_name);
+@@ -186,5 +194,5 @@ int ares_parse_ns_reply( const unsigned char* abuf, int alen,
+     ares_free( nameservers[i] );
+   ares_free( nameservers );
+   ares_free( hostname );
+-  return status;
++  return (int)status;
+ }
+diff --git a/src/lib/ares_parse_ptr_reply.c b/src/lib/ares_parse_ptr_reply.c
+index 44e9400..648b317 100644
+--- a/src/lib/ares_parse_ptr_reply.c
++++ b/src/lib/ares_parse_ptr_reply.c
+@@ -45,24 +45,32 @@
+ #include "ares_nowarn.h"
+ #include "ares_private.h"
+ 
+-int ares_parse_ptr_reply(const unsigned char *abuf, int alen, const void *addr,
++int ares_parse_ptr_reply(const unsigned char *abuf, int alen_int, const void *addr,
+                          int addrlen, int family, struct hostent **host)
+ {
+-  unsigned int qdcount, ancount;
++  size_t qdcount, ancount;
+   ares_status_t status;
+-  int i, rr_type, rr_class, rr_len;
+-  long len;
++  size_t i;
++  int rr_type, rr_class;
++  size_t rr_len;
++  size_t len;
++  size_t alen;
+   const unsigned char *aptr;
+   char *ptrname, *hostname, *rr_name, *rr_data;
+   struct hostent *hostent = NULL;
+-  int aliascnt = 0;
+-  int alias_alloc = 8;
++  size_t aliascnt = 0;
++  size_t alias_alloc = 8;
+   char ** aliases;
+   size_t rr_data_len;
+ 
+   /* Set *host to NULL for all failure cases. */
+   *host = NULL;
+ 
++  if (alen_int < 0)
++    return ARES_EBADRESP;
++
++  alen = (size_t)alen_int;
++
+   /* Give up if abuf doesn't have room for a header. */
+   if (alen < HFIXEDSZ)
+     return ARES_EBADRESP;
+@@ -77,7 +85,7 @@ int ares_parse_ptr_reply(const unsigned char *abuf, int alen, const void *addr,
+   aptr = abuf + HFIXEDSZ;
+   status = ares__expand_name_for_response(aptr, abuf, alen, &ptrname, &len, 0);
+   if (status != ARES_SUCCESS)
+-    return status;
++    return (int)status;
+   if (aptr + len + QFIXEDSZ > abuf + alen)
+     {
+       ares_free(ptrname);
+@@ -93,10 +101,10 @@ int ares_parse_ptr_reply(const unsigned char *abuf, int alen, const void *addr,
+       ares_free(ptrname);
+       return ARES_ENOMEM;
+     }
+-  for (i = 0; i < (int)ancount; i++)
++  for (i = 0; i < ancount; i++)
+     {
+       /* Decode the RR up to the data field. */
+-      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len, 0);
++      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len, ARES_FALSE);
+       if (status != ARES_SUCCESS)
+         break;
+       aptr += len;
+@@ -122,7 +130,7 @@ int ares_parse_ptr_reply(const unsigned char *abuf, int alen, const void *addr,
+         {
+           /* Decode the RR data and set hostname to it. */
+           status = ares__expand_name_for_response(aptr, abuf, alen, &rr_data,
+-                                                  &len, 1);
++                                                  &len, ARES_TRUE);
+           if (status != ARES_SUCCESS)
+             {
+               ares_free(rr_name);
+@@ -158,7 +166,7 @@ int ares_parse_ptr_reply(const unsigned char *abuf, int alen, const void *addr,
+         {
+           /* Decode the RR data and replace ptrname with it. */
+           status = ares__expand_name_for_response(aptr, abuf, alen, &rr_data,
+-                                                  &len, 1);
++                                                  &len, ARES_TRUE);
+           if (status != ARES_SUCCESS)
+             {
+               ares_free(rr_name);
+@@ -198,7 +206,7 @@ int ares_parse_ptr_reply(const unsigned char *abuf, int alen, const void *addr,
+ 
+ 
+       if (addr && addrlen) {
+-        hostent->h_addr_list[0] = ares_malloc(addrlen);
++        hostent->h_addr_list[0] = ares_malloc((size_t)addrlen);
+         if (!hostent->h_addr_list[0])
+           goto fail;
+       } else {
+@@ -217,7 +225,7 @@ int ares_parse_ptr_reply(const unsigned char *abuf, int alen, const void *addr,
+       hostent->h_addrtype = aresx_sitoss(family);
+       hostent->h_length = aresx_sitoss(addrlen);
+       if (addr && addrlen)
+-        memcpy(hostent->h_addr_list[0], addr, addrlen);
++        memcpy(hostent->h_addr_list[0], addr, (size_t)addrlen);
+       hostent->h_addr_list[1] = NULL;
+       *host = hostent;
+       ares_free(aliases);
+@@ -236,5 +244,5 @@ fail:
+   if (hostname)
+     ares_free(hostname);
+   ares_free(ptrname);
+-  return status;
++  return (int)status;
+ }
+diff --git a/src/lib/ares_parse_soa_reply.c b/src/lib/ares_parse_soa_reply.c
+index fda1d10..9aecc0a 100644
+--- a/src/lib/ares_parse_soa_reply.c
++++ b/src/lib/ares_parse_soa_reply.c
+@@ -45,16 +45,25 @@
+ #include "ares_private.h"
+ 
+ int
+-ares_parse_soa_reply(const unsigned char *abuf, int alen,
++ares_parse_soa_reply(const unsigned char *abuf, int alen_int,
+ 		     struct ares_soa_reply **soa_out)
+ {
+   const unsigned char *aptr;
+-  long len;
++  size_t len;
++  size_t alen;
+   char *qname = NULL, *rr_name = NULL;
+   struct ares_soa_reply *soa = NULL;
+-  int qdcount, ancount, qclass;
++  size_t qdcount, ancount;
++  int qclass;
+   ares_status_t status;
+-  int i, rr_type, rr_class, rr_len;
++  size_t i;
++  int rr_type, rr_class;
++  size_t rr_len;
++
++  if (alen_int < 0)
++    return ARES_EBADRESP;
++
++  alen = (size_t)alen_int;
+ 
+   if (alen < HFIXEDSZ)
+     return ARES_EBADRESP;
+@@ -71,7 +80,7 @@ ares_parse_soa_reply(const unsigned char *abuf, int alen,
+   aptr = abuf + HFIXEDSZ;
+ 
+   /* query name */
+-  status = ares__expand_name_for_response(aptr, abuf, alen, &qname, &len, 0);
++  status = ares__expand_name_for_response(aptr, abuf, alen, &qname, &len, ARES_FALSE);
+   if (status != ARES_SUCCESS)
+     goto failed_stat;
+ 
+@@ -94,7 +103,7 @@ ares_parse_soa_reply(const unsigned char *abuf, int alen,
+   for (i = 0; i < ancount; i++)
+   {
+     rr_name = NULL;
+-    status  = ares__expand_name_for_response (aptr, abuf, alen, &rr_name, &len, 0);
++    status  = ares__expand_name_for_response (aptr, abuf, alen, &rr_name, &len, ARES_FALSE);
+     if (status != ARES_SUCCESS)
+      {
+       ares_free(rr_name);
+@@ -131,7 +140,7 @@ ares_parse_soa_reply(const unsigned char *abuf, int alen,
+ 
+       /* nsname */
+       status = ares__expand_name_for_response(aptr, abuf, alen, &soa->nsname,
+-                                               &len, 0);
++                                               &len, ARES_FALSE);
+       if (status != ARES_SUCCESS)
+        {
+         ares_free(rr_name);
+@@ -141,7 +150,7 @@ ares_parse_soa_reply(const unsigned char *abuf, int alen,
+ 
+       /* hostmaster */
+       status = ares__expand_name_for_response(aptr, abuf, alen,
+-                                               &soa->hostmaster, &len, 0);
++                                               &soa->hostmaster, &len, ARES_FALSE);
+       if (status != ARES_SUCCESS)
+        {
+         ares_free(rr_name);
+@@ -186,5 +195,5 @@ failed_stat:
+     ares_free_data(soa);
+   if (qname)
+     ares_free(qname);
+-  return status;
++  return (int)status;
+ }
+diff --git a/src/lib/ares_parse_srv_reply.c b/src/lib/ares_parse_srv_reply.c
+index c460eaf..c715763 100644
+--- a/src/lib/ares_parse_srv_reply.c
++++ b/src/lib/ares_parse_srv_reply.c
+@@ -45,14 +45,16 @@
+ #include "ares_private.h"
+ 
+ int
+-ares_parse_srv_reply (const unsigned char *abuf, int alen,
++ares_parse_srv_reply (const unsigned char *abuf, int alen_int,
+                       struct ares_srv_reply **srv_out)
+ {
+-  unsigned int qdcount, ancount, i;
++  size_t qdcount, ancount, i;
+   const unsigned char *aptr, *vptr;
+   ares_status_t status;
+-  int rr_type, rr_class, rr_len;
+-  long len;
++  int rr_type, rr_class;
++  size_t rr_len;
++  size_t len;
++  size_t alen;
+   char *hostname = NULL, *rr_name = NULL;
+   struct ares_srv_reply *srv_head = NULL;
+   struct ares_srv_reply *srv_last = NULL;
+@@ -61,6 +63,11 @@ ares_parse_srv_reply (const unsigned char *abuf, int alen,
+   /* Set *srv_out to NULL for all failure cases. */
+   *srv_out = NULL;
+ 
++  if (alen_int < 0)
++    return ARES_EBADRESP;
++
++  alen = (size_t)alen_int;
++
+   /* Give up if abuf doesn't have room for a header. */
+   if (alen < HFIXEDSZ)
+     return ARES_EBADRESP;
+@@ -75,9 +82,9 @@ ares_parse_srv_reply (const unsigned char *abuf, int alen,
+ 
+   /* Expand the name from the question, and skip past the question. */
+   aptr = abuf + HFIXEDSZ;
+-  status = ares_expand_name (aptr, abuf, alen, &hostname, &len);
++  status = ares__expand_name_for_response(aptr, abuf, alen, &hostname, &len, ARES_TRUE);
+   if (status != ARES_SUCCESS)
+-    return status;
++    return (int)status;
+ 
+   if (aptr + len + QFIXEDSZ > abuf + alen)
+     {
+@@ -90,7 +97,7 @@ ares_parse_srv_reply (const unsigned char *abuf, int alen,
+   for (i = 0; i < ancount; i++)
+     {
+       /* Decode the RR up to the data field. */
+-      status = ares_expand_name (aptr, abuf, alen, &rr_name, &len);
++      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len, ARES_FALSE);
+       if (status != ARES_SUCCESS)
+         {
+           break;
+@@ -146,7 +153,7 @@ ares_parse_srv_reply (const unsigned char *abuf, int alen,
+           srv_curr->port = DNS__16BIT(vptr);
+           vptr += sizeof(unsigned short);
+ 
+-          status = ares_expand_name (vptr, abuf, alen, &srv_curr->host, &len);
++          status = ares__expand_name_for_response(vptr, abuf, alen, &srv_curr->host, &len, ARES_FALSE);
+           if (status != ARES_SUCCESS)
+             break;
+         }
+@@ -169,7 +176,7 @@ ares_parse_srv_reply (const unsigned char *abuf, int alen,
+     {
+       if (srv_head)
+         ares_free_data (srv_head);
+-      return status;
++      return (int)status;
+     }
+ 
+   /* everything looks fine, return the data */
+diff --git a/src/lib/ares_parse_txt_reply.c b/src/lib/ares_parse_txt_reply.c
+index 676401a..172e0f1 100644
+--- a/src/lib/ares_parse_txt_reply.c
++++ b/src/lib/ares_parse_txt_reply.c
+@@ -49,16 +49,17 @@
+ #include "ares_private.h"
+ 
+ static int
+-ares__parse_txt_reply (const unsigned char *abuf, int alen,
+-                       int ex, void **txt_out)
++ares__parse_txt_reply (const unsigned char *abuf, size_t alen,
++                       ares_bool_t ex, void **txt_out)
+ {
+   size_t substr_len;
+-  unsigned int qdcount, ancount, i;
++  size_t qdcount, ancount, i;
+   const unsigned char *aptr;
+   const unsigned char *strptr;
+   ares_status_t status;
+-  int rr_type, rr_class, rr_len;
+-  long len;
++  int rr_type, rr_class;
++  size_t rr_len;
++  size_t len;
+   char *hostname = NULL, *rr_name = NULL;
+   struct ares_txt_ext *txt_head = NULL;
+   struct ares_txt_ext *txt_last = NULL;
+@@ -81,9 +82,9 @@ ares__parse_txt_reply (const unsigned char *abuf, int alen,
+ 
+   /* Expand the name from the question, and skip past the question. */
+   aptr = abuf + HFIXEDSZ;
+-  status = ares_expand_name (aptr, abuf, alen, &hostname, &len);
++  status = ares__expand_name_for_response(aptr, abuf, alen, &hostname, &len, ARES_TRUE);
+   if (status != ARES_SUCCESS)
+-    return status;
++    return (int)status;
+ 
+   if (aptr + len + QFIXEDSZ > abuf + alen)
+     {
+@@ -96,7 +97,7 @@ ares__parse_txt_reply (const unsigned char *abuf, int alen,
+   for (i = 0; i < ancount; i++)
+     {
+       /* Decode the RR up to the data field. */
+-      status = ares_expand_name (aptr, abuf, alen, &rr_name, &len);
++      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len, ARES_FALSE);
+       if (status != ARES_SUCCESS)
+         {
+           break;
+@@ -200,7 +201,7 @@ ares__parse_txt_reply (const unsigned char *abuf, int alen,
+     {
+       if (txt_head)
+         ares_free_data (txt_head);
+-      return status;
++      return (int)status;
+     }
+ 
+   /* everything looks fine, return the data */
+@@ -213,7 +214,9 @@ int
+ ares_parse_txt_reply (const unsigned char *abuf, int alen,
+                       struct ares_txt_reply **txt_out)
+ {
+-  return ares__parse_txt_reply(abuf, alen, 0, (void **) txt_out);
++  if (alen < 0)
++    return ARES_EBADRESP;
++  return ares__parse_txt_reply(abuf, (size_t)alen, ARES_FALSE, (void **) txt_out);
+ }
+ 
+ 
+@@ -221,5 +224,7 @@ int
+ ares_parse_txt_reply_ext (const unsigned char *abuf, int alen,
+                           struct ares_txt_ext **txt_out)
+ {
+-  return ares__parse_txt_reply(abuf, alen, 1, (void **) txt_out);
++  if (alen < 0)
++    return ARES_EBADRESP;
++  return ares__parse_txt_reply(abuf, (size_t)alen, ARES_TRUE, (void **) txt_out);
+ }
+diff --git a/src/lib/ares_parse_uri_reply.c b/src/lib/ares_parse_uri_reply.c
+index 8b6a47e..79d2e5b 100644
+--- a/src/lib/ares_parse_uri_reply.c
++++ b/src/lib/ares_parse_uri_reply.c
+@@ -50,14 +50,17 @@
+ #endif
+ 
+ int
+-ares_parse_uri_reply (const unsigned char *abuf, int alen,
++ares_parse_uri_reply (const unsigned char *abuf, int alen_int,
+                       struct ares_uri_reply **uri_out)
+ {
+-  unsigned int qdcount, ancount, i;
++  size_t qdcount, ancount, i;
+   const unsigned char *aptr, *vptr;
+   ares_status_t status;
+-  int rr_type, rr_class, rr_len, rr_ttl;
+-  long len;
++  int rr_type, rr_class;
++  size_t rr_len;
++  unsigned int rr_ttl;
++  size_t len;
++  size_t alen;
+   char *uri_str = NULL, *rr_name = NULL;
+   struct ares_uri_reply *uri_head = NULL;
+   struct ares_uri_reply *uri_last = NULL;
+@@ -66,9 +69,14 @@ ares_parse_uri_reply (const unsigned char *abuf, int alen,
+   /* Set *uri_out to NULL for all failure cases. */
+   *uri_out = NULL;
+ 
++  if (alen_int < 0)
++    return ARES_EBADRESP;
++
++  alen = (size_t)alen_int;
++
+   /* Give up if abuf doesn't have room for a header. */
+   if (alen < HFIXEDSZ){
+-	  return ARES_EBADRESP;
++    return ARES_EBADRESP;
+   }
+ 
+   /* Fetch the question and answer count from the header. */
+@@ -78,14 +86,14 @@ ares_parse_uri_reply (const unsigned char *abuf, int alen,
+       return ARES_EBADRESP;
+   }
+   if (ancount == 0) {
+-	  return ARES_ENODATA;
++    return ARES_ENODATA;
+   }
+   /* Expand the name from the question, and skip past the question. */
+   aptr = abuf + HFIXEDSZ;
+ 
+-  status = ares_expand_name (aptr, abuf, alen, &uri_str, &len);
+-  if (status != ARES_SUCCESS){
+-	  return status;
++  status = ares__expand_name_for_response(aptr, abuf, alen, &uri_str, &len, ARES_TRUE);
++  if (status != ARES_SUCCESS) {
++    return (int)status;
+   }
+   if (aptr + len + QFIXEDSZ > abuf + alen)
+     {
+@@ -98,7 +106,7 @@ ares_parse_uri_reply (const unsigned char *abuf, int alen,
+   for (i = 0; i < ancount; i++)
+     {
+       /* Decode the RR up to the data field. */
+-      status = ares_expand_name (aptr, abuf, alen, &rr_name, &len);
++      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len, ARES_FALSE);
+       if (status != ARES_SUCCESS)
+         {
+           break;
+@@ -154,14 +162,13 @@ ares_parse_uri_reply (const unsigned char *abuf, int alen,
+           uri_curr->weight = DNS__16BIT(vptr);
+           vptr += sizeof(unsigned short);
+           uri_curr->uri = (char *)ares_malloc(rr_len-3);
+-	  	  if (!uri_curr->uri)
+-	      	{
+-	      	  status = ARES_ENOMEM;
+-			  break;
+-		    }
++          if (!uri_curr->uri) {
++            status = ARES_ENOMEM;
++            break;
++          }
+           uri_curr->uri = strncpy(uri_curr->uri, (const char *)vptr, rr_len-4);
+           uri_curr->uri[rr_len-4]='\0';
+-          uri_curr->ttl = rr_ttl;
++          uri_curr->ttl = (int)rr_ttl;
+         }
+ 
+       /* Don't lose memory in the next iteration */
+@@ -182,7 +189,7 @@ ares_parse_uri_reply (const unsigned char *abuf, int alen,
+     {
+       if (uri_head)
+         ares_free_data (uri_head);
+-      return status;
++      return (int)status;
+     }
+ 
+   /* everything looks fine, return the data */
+diff --git a/src/lib/ares_platform.c b/src/lib/ares_platform.c
+index 6fcbd49..c13b9e5 100644
+--- a/src/lib/ares_platform.c
++++ b/src/lib/ares_platform.c
+@@ -11003,7 +11003,8 @@ struct servent *getservbyport(int port, const char *proto)
+ {
+   unsigned short u_port;
+   const char *protocol = NULL;
+-  int i, error = 0;
++  int error = 0;
++  size_t i;
+ 
+   u_port = ntohs((unsigned short)port);
+ 
+diff --git a/src/lib/ares_private.h b/src/lib/ares_private.h
+index a86f8c0..670ed37 100644
+--- a/src/lib/ares_private.h
++++ b/src/lib/ares_private.h
+@@ -150,8 +150,8 @@ struct ares_addr {
+     struct in_addr       addr4;
+     struct ares_in6_addr addr6;
+   } addr;
+-  int udp_port;  /* stored in network order */
+-  int tcp_port;  /* stored in network order */
++  unsigned short udp_port;  /* stored in network order */
++  unsigned short tcp_port;  /* stored in network order */
+ };
+ #define addrV4 addr.addr4
+ #define addrV6 addr.addr6
+@@ -188,7 +188,7 @@ struct server_state {
+    * retransmit requests into the very same socket, but if the server
+    * closes on us and we re-open the connection, then we do want to
+    * re-send. */
+-  int tcp_connection_generation;
++  size_t tcp_connection_generation;
+ 
+   /* Link back to owning channel */
+   ares_channel channel;
+@@ -214,21 +214,21 @@ struct query {
+ 
+   /* Query buf with length at beginning, for TCP transmission */
+   unsigned char *tcpbuf;
+-  int tcplen;
++  size_t tcplen;
+ 
+   /* Arguments passed to ares_send() (qbuf points into tcpbuf) */
+   const unsigned char *qbuf;
+-  int qlen;
++  size_t qlen;
+   ares_callback callback;
+   void *arg;
+ 
+   /* Query status */
+-  int try_count; /* Number of times we tried this query already. */
+-  int server; /* Server this query has last been sent to. */
++  size_t try_count; /* Number of times we tried this query already. */
++  size_t server; /* Server this query has last been sent to. */
+   struct query_server_info *server_info;   /* per-server state */
+   ares_bool_t using_tcp;
+   ares_status_t error_status;
+-  int timeouts; /* number of timeouts we saw for this request */
++  size_t timeouts; /* number of timeouts we saw for this request */
+   ares_bool_t no_retries; /* do not perform any additional retries, this is set when
+                            * a query is to be canceled */
+ };
+@@ -236,7 +236,7 @@ struct query {
+ /* Per-server state for a query */
+ struct query_server_info {
+   ares_bool_t skip_server;  /* should we skip server, due to errors, etc? */
+-  int tcp_connection_generation;  /* into which TCP connection did we send? */
++  size_t tcp_connection_generation;  /* into which TCP connection did we send? */
+ };
+ 
+ /* An IP address pattern; matches an IP address X if X & mask == addr */
+@@ -261,21 +261,22 @@ struct apattern {
+ 
+ struct ares_channeldata {
+   /* Configuration data */
+-  int flags;
+-  int timeout; /* in milliseconds */
+-  int tries;
+-  int ndots;
+-  int rotate; /* if true, all servers specified are used */
+-  int udp_port; /* stored in network order */
+-  int tcp_port; /* stored in network order */
+-  int socket_send_buffer_size;
+-  int socket_receive_buffer_size;
++  unsigned int flags;
++  size_t timeout; /* in milliseconds */
++  size_t tries;
++  size_t ndots;
++  ares_bool_t rotate;
++  unsigned short udp_port; /* stored in network order */
++  unsigned short tcp_port; /* stored in network order */
++  int socket_send_buffer_size; /* setsockopt takes int */
++  int socket_receive_buffer_size; /* setsockopt takes int */
+   char **domains;
+-  int ndomains;
++  size_t ndomains;
+   struct apattern *sortlist;
+-  int nsort;
++  size_t nsort;
+   char *lookups;
+-  int ednspsz;
++  size_t ednspsz;
++  unsigned int optmask;
+ 
+   /* For binding to local devices and/or IP addresses.  Leave
+    * them null/zero for no binding.
+@@ -284,20 +285,18 @@ struct ares_channeldata {
+   unsigned int local_ip4;
+   unsigned char local_ip6[16];
+ 
+-  int optmask; /* the option bitfield passed in at init time */
+-
+   /* Server addresses and communications state */
+   struct server_state *servers;
+-  int nservers;
++  size_t nservers;
+ 
+   /* random state to use when generating new ids */
+   ares_rand_state *rand_state;
+ 
+   /* Generation number to use for the next TCP socket open/close */
+-  int tcp_connection_generation;
++  size_t tcp_connection_generation;
+ 
+   /* Last server we sent a query to. */
+-  int last_server;
++  size_t last_server;
+ 
+   /* All active queries in a single list */
+   ares__llist_t   *all_queries;
+@@ -332,7 +331,7 @@ struct ares_channeldata {
+   char *hosts_path;
+ 
+   /* Maximum UDP queries per connection allowed */
+-  int udp_max_queries;
++  size_t udp_max_queries;
+ };
+ 
+ /* Does the domain end in ".onion" or ".onion."? Case-insensitive. */
+@@ -360,7 +359,7 @@ ares_status_t ares_query_qid(ares_channel channel, const char *name,
+ /* Identical to ares_send() except returns normal ares return codes like
+  * ARES_SUCCESS */
+ ares_status_t ares_send_ex(ares_channel channel, const unsigned char *qbuf,
+-                           int qlen, ares_callback callback, void *arg);
++                           size_t qlen, ares_callback callback, void *arg);
+ void ares__close_connection(struct server_connection *conn);
+ void ares__close_sockets(struct server_state *server);
+ void ares__check_cleanup_conn(ares_channel channel, ares_socket_t fd);
+@@ -376,12 +375,18 @@ unsigned short ares__generate_new_id(ares_rand_state *state);
+ struct timeval ares__tvnow(void);
+ ares_status_t ares__expand_name_validated(const unsigned char *encoded,
+                                           const unsigned char *abuf,
+-                                          int alen, char **s, long *enclen,
++                                          size_t alen, char **s, size_t *enclen,
+                                           ares_bool_t is_hostname);
+ ares_status_t ares__expand_name_for_response(const unsigned char *encoded,
+                                              const unsigned char *abuf,
+-                                             int alen, char **s, long *enclen,
++                                             size_t alen, char **s,
++                                             size_t *enclen,
+                                              ares_bool_t is_hostname);
++ares_status_t ares_expand_string_ex(const unsigned char *encoded,
++                                    const unsigned char *abuf,
++                                    size_t alen,
++                                    unsigned char **s,
++                                    size_t *enclen);
+ ares_status_t ares__init_servers_state(ares_channel channel);
+ void ares__destroy_servers_state(ares_channel channel);
+ ares_status_t ares__single_domain(ares_channel channel, const char *name,
+@@ -404,7 +409,8 @@ void ares__freeaddrinfo_cnames(struct ares_addrinfo_cname *ai_cname);
+ 
+ struct ares_addrinfo_cname *ares__append_addrinfo_cname(struct ares_addrinfo_cname **ai_cname);
+ 
+-ares_status_t ares_append_ai_node(int aftype, unsigned short port, int ttl,
++ares_status_t ares_append_ai_node(int aftype, unsigned short port,
++                                  unsigned int ttl,
+                                   const void *adata,
+                                   struct ares_addrinfo_node **nodes);
+ 
+@@ -412,7 +418,7 @@ void ares__addrinfo_cat_cnames(struct ares_addrinfo_cname **head,
+                                struct ares_addrinfo_cname *tail);
+ 
+ ares_status_t ares__parse_into_addrinfo(const unsigned char *abuf,
+-                                        int alen,
++                                        size_t alen,
+                                         ares_bool_t cname_only_is_enodata,
+                                         unsigned short port,
+                                         struct ares_addrinfo *ai);
+@@ -420,10 +426,10 @@ ares_status_t ares__parse_into_addrinfo(const unsigned char *abuf,
+ ares_status_t ares__addrinfo2hostent(const struct ares_addrinfo *ai, int family,
+                                      struct hostent **host);
+ ares_status_t ares__addrinfo2addrttl(const struct ares_addrinfo *ai, int family,
+-                                     int req_naddrttls,
++                                     size_t req_naddrttls,
+                                      struct ares_addrttl *addrttls,
+                                      struct ares_addr6ttl *addr6ttls,
+-                                     int *naddrttls);
++                                     size_t *naddrttls);
+ ares_status_t ares__addrinfo_localhost(const char *name, unsigned short port,
+                                        const struct ares_addrinfo_hints *hints,
+                                        struct ares_addrinfo *ai);
+@@ -439,10 +445,9 @@ int ares__connect_socket(ares_channel channel,
+ #define ARES_SWAP_BYTE(a,b) \
+   { unsigned char swapByte = *(a);  *(a) = *(b);  *(b) = swapByte; }
+ 
+-#define SOCK_STATE_CALLBACK(c, s, r, w)                                 \
+-  do {                                                                  \
+-    if ((c)->sock_state_cb)                                             \
+-      (c)->sock_state_cb((c)->sock_state_cb_data, (s), (r), (w));       \
+-  } WHILE_FALSE
++#define SOCK_STATE_CALLBACK(c, s, r, w)                               \
++  if ((c)->sock_state_cb) {                                           \
++    (c)->sock_state_cb((c)->sock_state_cb_data, (s), (r), (w));       \
++  }
+ 
+ #endif /* __ARES_PRIVATE_H */
+diff --git a/src/lib/ares_process.c b/src/lib/ares_process.c
+index 3348bd5..0c80e16 100644
+--- a/src/lib/ares_process.c
++++ b/src/lib/ares_process.c
+@@ -72,7 +72,8 @@ static void read_packets(ares_channel channel, fd_set *read_fds,
+                          ares_socket_t read_fd, struct timeval *now);
+ static void process_timeouts(ares_channel channel, struct timeval *now);
+ static void process_answer(ares_channel channel, const unsigned char *abuf,
+-                           int alen, struct server_connection *conn, int tcp,
++                           size_t alen, struct server_connection *conn,
++                           ares_bool_t tcp,
+                            struct timeval *now);
+ static void handle_error(struct server_connection *conn, struct timeval *now);
+ static void skip_server(ares_channel channel, struct query *query,
+@@ -82,19 +83,19 @@ static ares_status_t next_server(ares_channel channel, struct query *query,
+ static ares_status_t open_socket(ares_channel channel,
+                                  struct server_state *server,
+                                  ares_bool_t is_tcp);
+-static ares_bool_t same_questions(const unsigned char *qbuf, int qlen,
+-                                  const unsigned char *abuf, int alen);
++static ares_bool_t same_questions(const unsigned char *qbuf, size_t qlen,
++                                  const unsigned char *abuf, size_t alen);
+ static ares_bool_t same_address(struct sockaddr *sa, struct ares_addr *aa);
+-static int has_opt_rr(const unsigned char *abuf, int alen);
++static ares_bool_t has_opt_rr(const unsigned char *abuf, size_t alen);
+ static void end_query(ares_channel channel, struct query *query,
+-                      ares_status_t status, const unsigned char *abuf, int alen);
++                      ares_status_t status, const unsigned char *abuf, size_t alen);
+ static ares_ssize_t ares__socket_write(ares_channel channel, ares_socket_t s,
+                                        const void * data, size_t len);
+ 
+ /* return true if now is exactly check time or later */
+ ares_bool_t ares__timedout(struct timeval *now, struct timeval *check)
+ {
+-  long secs = (now->tv_sec - check->tv_sec);
++  time_t secs = (now->tv_sec - check->tv_sec);
+ 
+   if(secs > 0)
+     return ARES_TRUE; /* yes, timed out */
+@@ -106,9 +107,9 @@ ares_bool_t ares__timedout(struct timeval *now, struct timeval *check)
+ }
+ 
+ /* add the specific number of milliseconds to the time in the first argument */
+-static void timeadd(struct timeval *now, int millisecs)
++static void timeadd(struct timeval *now, size_t millisecs)
+ {
+-  now->tv_sec += millisecs/1000;
++  now->tv_sec += (time_t)millisecs/1000;
+   now->tv_usec += (millisecs%1000)*1000;
+ 
+   if(now->tv_usec >= 1000000) {
+@@ -187,7 +188,7 @@ static void write_tcp_data(ares_channel channel,
+                            struct timeval *now)
+ {
+   struct server_state *server;
+-  int i;
++  size_t i;
+ 
+   if(!write_fds && (write_fd == ARES_SOCKET_BAD))
+     /* no possible action */
+@@ -231,7 +232,7 @@ static void write_tcp_data(ares_channel channel,
+     }
+ 
+     /* Strip data written from the buffer */
+-    ares__buf_consume(server->tcp_send, count);
++    ares__buf_consume(server->tcp_send, (size_t)count);
+ 
+     /* Notify state callback all data is written */
+     if (ares__buf_len(server->tcp_send) == 0) {
+@@ -305,7 +306,7 @@ static void read_tcp_data(ares_channel channel, struct server_connection *conn,
+   }
+ 
+   /* Record amount of data read */
+-  ares__buf_append_finish(server->tcp_parser, count);
++  ares__buf_append_finish(server->tcp_parser, (size_t)count);
+ 
+   /* Process all queued answers */
+   while (1) {
+@@ -340,7 +341,7 @@ static void read_tcp_data(ares_channel channel, struct server_connection *conn,
+     data_len -= 2;
+ 
+     /* We finished reading this answer; process it */
+-    process_answer(channel, data, (int)data_len, conn, 1, now);
++    process_answer(channel, data, data_len, conn, ARES_TRUE, now);
+ 
+     /* Since we processed the answer, clear the tag so space can be reclaimed */
+     ares__buf_tag_clear(server->tcp_parser);
+@@ -370,7 +371,7 @@ static int socket_list_append(ares_socket_t **socketlist, ares_socket_t fd,
+ static ares_socket_t *channel_socket_list(ares_channel channel, size_t *num)
+ {
+   size_t         alloc_cnt = 1 << 4;
+-  int            i;
++  size_t         i;
+   ares_socket_t *out       = ares_malloc(alloc_cnt * sizeof(*out));
+ 
+   *num = 0;
+@@ -454,7 +455,7 @@ static void read_udp_packets_fd(ares_channel channel,
+ #endif
+ 
+     } else {
+-      process_answer(channel, buf, (int)read_len, conn, 0, now);
++      process_answer(channel, buf, (size_t)read_len, conn, ARES_FALSE, now);
+     }
+   /* process_answer may invalidate "conn" and close the file descriptor, so
+    * check to see if file descriptor is still valid before looping! */
+@@ -559,10 +560,12 @@ static void process_timeouts(ares_channel channel, struct timeval *now)
+ 
+ /* Handle an answer from a server. */
+ static void process_answer(ares_channel channel, const unsigned char *abuf,
+-                           int alen, struct server_connection *conn, int tcp,
++                           size_t alen, struct server_connection *conn,
++                           ares_bool_t tcp,
+                            struct timeval *now)
+ {
+-  int tc, rcode, packetsz;
++  int tc, rcode;
++  size_t packetsz;
+   unsigned short id;
+   struct query *query;
+   /* Cache these as once ares__send_query() gets called, it may end up
+@@ -608,10 +611,10 @@ static void process_answer(ares_channel channel, const unsigned char *abuf,
+    * without EDNS enabled. */
+   if (channel->flags & ARES_FLAG_EDNS)
+   {
+-      packetsz = channel->ednspsz;
+-      if (rcode == FORMERR && has_opt_rr(abuf, alen) != 1)
++      packetsz = (size_t)channel->ednspsz;
++      if (rcode == FORMERR && !has_opt_rr(abuf, alen))
+       {
+-          int qlen = (query->tcplen - 2) - EDNSFIXEDSZ;
++          size_t qlen = (query->tcplen - 2) - EDNSFIXEDSZ;
+           channel->flags ^= ARES_FLAG_EDNS;
+           query->tcplen -= EDNSFIXEDSZ;
+           query->qlen -= EDNSFIXEDSZ;
+@@ -666,7 +669,7 @@ static void process_answer(ares_channel channel, const unsigned char *abuf,
+               break;
+           }
+           skip_server(channel, query, server);
+-          if (query->server == (int)server->idx) /* Is this ever not true? */
++          if (query->server == server->idx) /* Is this ever not true? */
+             next_server(channel, query, now);
+           ares__check_cleanup_conn(channel, fd);
+           return;
+@@ -698,7 +701,7 @@ static void handle_error(struct server_connection *conn,
+   while ((node = ares__llist_node_first(list_copy)) != NULL) {
+     struct query       *query = ares__llist_node_val(node);
+ 
+-    assert(query->server == (int)server->idx);
++    assert(query->server == server->idx);
+     skip_server(channel, query, server);
+     /* next_server will remove the current node from the list */
+     next_server(channel, query, now);
+@@ -735,12 +738,12 @@ static ares_status_t next_server(ares_channel channel, struct query *query,
+    * this query. Use modular arithmetic to find the next server to try.
+    * A query can be requested be terminated at the next interval by setting
+    * query->no_retries */
+-  while (++(query->try_count) < (channel->nservers * channel->tries) &&
++  while (++(query->try_count) < ((size_t)channel->nservers * channel->tries) &&
+          !query->no_retries) {
+     struct server_state *server;
+ 
+     /* Move on to the next server. */
+-    query->server = (query->server + 1) % channel->nservers;
++    query->server = (query->server + 1) % (size_t)channel->nservers;
+     server = &channel->servers[query->server];
+ 
+     /* We don't want to use this server if (1) we've decided to skip this
+@@ -773,7 +776,7 @@ ares_status_t ares__send_query(ares_channel channel, struct query *query,
+ {
+   struct server_state *server;
+   struct server_connection *conn;
+-  int timeplus;
++  size_t timeplus;
+   ares_status_t status;
+ 
+   server = &channel->servers[query->server];
+@@ -872,7 +875,7 @@ ares_status_t ares__send_query(ares_channel channel, struct query *query,
+   timeplus = channel->timeout;
+   {
+     /* How many times do we want to double it?  Presume sane values here. */
+-    const int shift = query->try_count / channel->nservers;
++    const size_t shift = query->try_count / (size_t)channel->nservers;
+ 
+     /* Is there enough room to shift timeplus left that many times?
+      *
+@@ -883,7 +886,7 @@ ares_status_t ares__send_query(ares_channel channel, struct query *query,
+      *
+      * This has the side benefit of leaving negative numbers unchanged.
+      */
+-    if(shift <= (int)(sizeof(int) * CHAR_BIT - 1)
++    if(shift <= (sizeof(int) * CHAR_BIT - 1)
+        && (timeplus >> (sizeof(int) * CHAR_BIT - 1 - shift)) == 0)
+     {
+       timeplus <<= shift;
+@@ -1207,18 +1210,18 @@ static ares_status_t open_socket(ares_channel channel,
+ }
+ 
+ 
+-static ares_bool_t same_questions(const unsigned char *qbuf, int qlen,
+-                                  const unsigned char *abuf, int alen)
++static ares_bool_t same_questions(const unsigned char *qbuf, size_t qlen,
++                                  const unsigned char *abuf, size_t alen)
+ {
+   struct {
+     const unsigned char *p;
+-    int qdcount;
++    size_t qdcount;
+     char *name;
+-    long namelen;
++    size_t namelen;
+     int type;
+     int dnsclass;
+   } q, a;
+-  int i, j;
++  size_t i, j;
+ 
+   if (qlen < HFIXEDSZ || alen < HFIXEDSZ)
+     return ARES_FALSE;
+@@ -1234,7 +1237,7 @@ static ares_bool_t same_questions(const unsigned char *qbuf, int qlen,
+   for (i = 0; i < q.qdcount; i++)
+     {
+       /* Decode the question in the query. */
+-      if (ares_expand_name(q.p, qbuf, qlen, &q.name, &q.namelen)
++      if (ares__expand_name_for_response(q.p, qbuf, qlen, &q.name, &q.namelen, ARES_FALSE)
+           != ARES_SUCCESS)
+         return ARES_FALSE;
+       q.p += q.namelen;
+@@ -1252,7 +1255,7 @@ static ares_bool_t same_questions(const unsigned char *qbuf, int qlen,
+       for (j = 0; j < a.qdcount; j++)
+         {
+           /* Decode the question in the answer. */
+-          if (ares_expand_name(a.p, abuf, alen, &a.name, &a.namelen)
++          if (ares__expand_name_for_response(a.p, abuf, alen, &a.name, &a.namelen, ARES_FALSE)
+               != ARES_SUCCESS)
+             {
+               ares_free(q.name);
+@@ -1315,14 +1318,14 @@ static ares_bool_t same_address(struct sockaddr *sa, struct ares_addr *aa)
+ }
+ 
+ /* search for an OPT RR in the response */
+-static int has_opt_rr(const unsigned char *abuf, int alen)
++static ares_bool_t has_opt_rr(const unsigned char *abuf, size_t alen)
+ {
+-  unsigned int qdcount, ancount, nscount, arcount, i;
++  size_t qdcount, ancount, nscount, arcount, i;
+   const unsigned char *aptr;
+-  int status;
++  ares_status_t status;
+ 
+   if (alen < HFIXEDSZ)
+-    return -1;
++    return ARES_FALSE;
+ 
+   /* Parse the answer header. */
+   qdcount = DNS_HEADER_QDCOUNT(abuf);
+@@ -1336,13 +1339,13 @@ static int has_opt_rr(const unsigned char *abuf, int alen)
+   for (i = 0; i < qdcount; i++)
+     {
+       char* name;
+-      long len;
+-      status = ares_expand_name(aptr, abuf, alen, &name, &len);
++      size_t len;
++      status = ares__expand_name_for_response(aptr, abuf, alen, &name, &len, ARES_FALSE);
+       if (status != ARES_SUCCESS)
+-        return -1;
++        return ARES_FALSE;
+       ares_free_string(name);
+       if (aptr + len + QFIXEDSZ > abuf + alen)
+-        return -1;
++        return ARES_FALSE;
+       aptr += len + QFIXEDSZ;
+     }
+ 
+@@ -1350,19 +1353,19 @@ static int has_opt_rr(const unsigned char *abuf, int alen)
+   for (i = 0; i < ancount + nscount; i++)
+     {
+       char* name;
+-      long len;
+-      int dlen;
+-      status = ares_expand_name(aptr, abuf, alen, &name, &len);
++      size_t len;
++      size_t dlen;
++      status = ares__expand_name_for_response(aptr, abuf, alen, &name, &len, ARES_FALSE);
+       if (status != ARES_SUCCESS)
+-        return -1;
++        return ARES_FALSE;
+       ares_free_string(name);
+       if (aptr + len + RRFIXEDSZ > abuf + alen)
+-        return -1;
++        return ARES_FALSE;
+       aptr += len;
+       dlen = DNS_RR_LEN(aptr);
+       aptr += RRFIXEDSZ;
+       if (aptr + dlen > abuf + alen)
+-        return -1;
++        return ARES_FALSE;
+       aptr += dlen;
+     }
+ 
+@@ -1370,27 +1373,27 @@ static int has_opt_rr(const unsigned char *abuf, int alen)
+   for (i = 0; i < arcount; i++)
+     {
+       char* name;
+-      long len;
+-      int dlen;
+-      status = ares_expand_name(aptr, abuf, alen, &name, &len);
++      size_t len;
++      size_t dlen;
++      status = ares__expand_name_for_response(aptr, abuf, alen, &name, &len, ARES_FALSE);
+       if (status != ARES_SUCCESS)
+-        return -1;
++        return ARES_FALSE;
+       ares_free_string(name);
+       if (aptr + len + RRFIXEDSZ > abuf + alen)
+-        return -1;
++        return ARES_FALSE;
+       aptr += len;
+ 
+       if (DNS_RR_TYPE(aptr) == T_OPT)
+-        return 1;
++        return ARES_TRUE;
+ 
+       dlen = DNS_RR_LEN(aptr);
+       aptr += RRFIXEDSZ;
+       if (aptr + dlen > abuf + alen)
+-        return -1;
++        return ARES_FALSE;
+       aptr += dlen;
+     }
+ 
+-  return 0;
++  return ARES_FALSE;
+ }
+ 
+ static void ares_detach_query(struct query *query)
+@@ -1406,18 +1409,18 @@ static void ares_detach_query(struct query *query)
+ }
+ 
+ static void end_query(ares_channel channel, struct query *query,
+-                      ares_status_t status, const unsigned char *abuf, int alen)
++                      ares_status_t status, const unsigned char *abuf, size_t alen)
+ {
+   (void)channel;
+ 
+   ares_detach_query(query);
+ 
+   /* Invoke the callback. */
+-  query->callback(query->arg, status, query->timeouts,
++  query->callback(query->arg, (int)status, (int)query->timeouts,
+                   /* due to prior design flaws, abuf isn't meant to be modified,
+                    * but bad prototypes, ugh.  Lets cast off constfor compat. */
+                   (unsigned char *)((void *)((size_t)abuf)),
+-                  alen);
++                  (int)alen);
+   ares__free_query(query);
+ }
+ 
+diff --git a/src/lib/ares_query.c b/src/lib/ares_query.c
+index ca9ee52..89a4bc4 100644
+--- a/src/lib/ares_query.c
++++ b/src/lib/ares_query.c
+@@ -73,12 +73,12 @@ ares_status_t ares_query_qid(ares_channel channel, const char *name,
+ 
+   /* Compose the query. */
+   rd = !(channel->flags & ARES_FLAG_NORECURSE);
+-  status = ares_create_query(name, dnsclass, type, id, rd, &qbuf,
+-              &qlen, (channel->flags & ARES_FLAG_EDNS) ? channel->ednspsz : 0);
++  status = (ares_status_t)ares_create_query(name, dnsclass, type, id, rd, &qbuf,
++              &qlen, (channel->flags & ARES_FLAG_EDNS) ? (int)channel->ednspsz : 0);
+   if (status != ARES_SUCCESS)
+     {
+       if (qbuf != NULL) ares_free(qbuf);
+-      callback(arg, status, 0, NULL, 0);
++      callback(arg, (int)status, 0, NULL, 0);
+       return status;
+     }
+ 
+@@ -94,7 +94,7 @@ ares_status_t ares_query_qid(ares_channel channel, const char *name,
+   qquery->arg = arg;
+ 
+   /* Send it off.  qcallback will be called when we get an answer. */
+-  status = ares_send_ex(channel, qbuf, qlen, qcallback, qquery);
++  status = ares_send_ex(channel, qbuf, (size_t)qlen, qcallback, qquery);
+   ares_free_string(qbuf);
+ 
+   if (status == ARES_SUCCESS && qid)
+@@ -113,7 +113,7 @@ void ares_query(ares_channel channel, const char *name, int dnsclass,
+ static void qcallback(void *arg, int status, int timeouts, unsigned char *abuf, int alen)
+ {
+   struct qquery *qquery = (struct qquery *) arg;
+-  unsigned int ancount;
++  size_t ancount;
+   int rcode;
+ 
+   if (status != ARES_SUCCESS)
+diff --git a/src/lib/ares_rand.c b/src/lib/ares_rand.c
+index 2c5fa1c..c0414f8 100644
+--- a/src/lib/ares_rand.c
++++ b/src/lib/ares_rand.c
+@@ -291,7 +291,7 @@ static void ares__rand_bytes_fetch(ares_rand_state *state, unsigned char *buf,
+           if (rv <= 0)
+             continue; /* Just retry. */
+ 
+-          bytes_read += rv;
++          bytes_read += (size_t)rv;
+           if (bytes_read == len)
+             return;
+         }
+diff --git a/src/lib/ares_search.c b/src/lib/ares_search.c
+index ec13b63..3f2460f 100644
+--- a/src/lib/ares_search.c
++++ b/src/lib/ares_search.c
+@@ -44,16 +44,16 @@ struct search_query {
+   void *arg;
+ 
+   int status_as_is;             /* error status from trying as-is */
+-  int next_domain;              /* next search domain to try */
++  size_t next_domain;              /* next search domain to try */
+   ares_bool_t trying_as_is;     /* current query is for name as-is */
+-  int timeouts;                 /* number of timeouts we saw for this request */
++  size_t timeouts;                 /* number of timeouts we saw for this request */
+   ares_bool_t ever_got_nodata;  /* did we ever get ARES_ENODATA along the way? */
+ };
+ 
+ static void search_callback(void *arg, int status, int timeouts,
+                             unsigned char *abuf, int alen);
+-static void end_squery(struct search_query *squery, int status,
+-                       unsigned char *abuf, int alen);
++static void end_squery(struct search_query *squery, ares_status_t status,
++                       unsigned char *abuf, size_t alen);
+ 
+ void ares_search(ares_channel channel, const char *name, int dnsclass,
+                  int type, ares_callback callback, void *arg)
+@@ -62,7 +62,7 @@ void ares_search(ares_channel channel, const char *name, int dnsclass,
+   char *s;
+   const char *p;
+   ares_status_t status;
+-  int ndots;
++  size_t ndots;
+ 
+   /* Per RFC 7686, reject queries for ".onion" domain names with NXDOMAIN. */
+   if (ares__is_onion_domain(name))
+@@ -77,7 +77,7 @@ void ares_search(ares_channel channel, const char *name, int dnsclass,
+   status = ares__single_domain(channel, name, &s);
+   if (status != ARES_SUCCESS)
+     {
+-      callback(arg, status, 0, NULL, 0);
++      callback(arg, (int)status, 0, NULL, 0);
+       return;
+     }
+   if (s)
+@@ -124,7 +124,7 @@ void ares_search(ares_channel channel, const char *name, int dnsclass,
+    * then we try the name as-is first.  Otherwise, we try the name
+    * as-is last.
+    */
+-  if (ndots >= channel->ndots)
++  if (ndots >= (size_t)channel->ndots)
+     {
+       /* Try the name as-is first. */
+       squery->next_domain = 0;
+@@ -147,7 +147,7 @@ void ares_search(ares_channel channel, const char *name, int dnsclass,
+         /* failed, free the malloc()ed memory */
+         ares_free(squery->name);
+         ares_free(squery);
+-        callback(arg, status, 0, NULL, 0);
++        callback(arg, (int)status, 0, NULL, 0);
+       }
+     }
+ }
+@@ -159,12 +159,12 @@ static void search_callback(void *arg, int status, int timeouts,
+   ares_channel channel = squery->channel;
+   char *s;
+ 
+-  squery->timeouts += timeouts;
++  squery->timeouts += (size_t)timeouts;
+ 
+   /* Stop searching unless we got a non-fatal error. */
+   if (status != ARES_ENODATA && status != ARES_ESERVFAIL
+       && status != ARES_ENOTFOUND)
+-    end_squery(squery, status, abuf, alen);
++    end_squery(squery, (ares_status_t)status, abuf, (size_t)alen);
+   else
+     {
+       /* Save the status if we were trying as-is. */
+@@ -181,13 +181,14 @@ static void search_callback(void *arg, int status, int timeouts,
+       if (status == ARES_ENODATA)
+         squery->ever_got_nodata = ARES_TRUE;
+ 
+-      if (squery->next_domain < channel->ndomains)
++      if (squery->next_domain < (size_t)channel->ndomains)
+         {
++          ares_status_t mystatus;
+           /* Try the next domain. */
+-          status = ares__cat_domain(squery->name,
+-                              channel->domains[squery->next_domain], &s);
+-          if (status != ARES_SUCCESS)
+-            end_squery(squery, status, NULL, 0);
++          mystatus = ares__cat_domain(squery->name,
++                                      channel->domains[squery->next_domain], &s);
++          if (mystatus != ARES_SUCCESS)
++            end_squery(squery, mystatus, NULL, 0);
+           else
+             {
+               squery->trying_as_is = ARES_FALSE;
+@@ -209,15 +210,15 @@ static void search_callback(void *arg, int status, int timeouts,
+           end_squery(squery, ARES_ENODATA, NULL, 0);
+         }
+         else
+-          end_squery(squery, squery->status_as_is, NULL, 0);
++          end_squery(squery, (ares_status_t)squery->status_as_is, NULL, 0);
+       }
+     }
+ }
+ 
+-static void end_squery(struct search_query *squery, int status,
+-                       unsigned char *abuf, int alen)
++static void end_squery(struct search_query *squery, ares_status_t status,
++                       unsigned char *abuf, size_t alen)
+ {
+-  squery->callback(squery->arg, status, squery->timeouts, abuf, alen);
++  squery->callback(squery->arg, (int)status, (int)squery->timeouts, abuf, (int)alen);
+   ares_free(squery->name);
+   ares_free(squery);
+ }
+@@ -291,10 +292,10 @@ ares_status_t ares__single_domain(ares_channel channel, const char *name,
+                       q = p + 1;
+                       while (*q && !ISSPACE(*q))
+                         q++;
+-                      *s = ares_malloc(q - p + 1);
++                      *s = ares_malloc((size_t)(q - p + 1));
+                       if (*s)
+                         {
+-                          memcpy(*s, p, q - p);
++                          memcpy(*s, p, (size_t)(q - p));
+                           (*s)[q - p] = 0;
+                         }
+                       ares_free(line);
+diff --git a/src/lib/ares_send.c b/src/lib/ares_send.c
+index f0c302f..bd28791 100644
+--- a/src/lib/ares_send.c
++++ b/src/lib/ares_send.c
+@@ -38,10 +38,10 @@
+ #include "ares_private.h"
+ 
+ ares_status_t ares_send_ex(ares_channel channel, const unsigned char *qbuf,
+-                           int qlen, ares_callback callback, void *arg)
++                           size_t qlen, ares_callback callback, void *arg)
+ {
+   struct query *query;
+-  int i, packetsz;
++  size_t i, packetsz;
+   struct timeval now;
+ 
+   /* Verify that the query is at least long enough to hold the header. */
+@@ -71,7 +71,7 @@ ares_status_t ares_send_ex(ares_channel channel, const unsigned char *qbuf,
+       callback(arg, ARES_ENOMEM, 0, NULL, 0);
+       return ARES_ENOMEM;
+     }
+-  query->server_info = ares_malloc(channel->nservers *
++  query->server_info = ares_malloc((size_t)channel->nservers *
+                                    sizeof(query->server_info[0]));
+   if (!query->server_info)
+     {
+@@ -107,9 +107,9 @@ ares_status_t ares_send_ex(ares_channel channel, const unsigned char *qbuf,
+    * of the next server we want to use. */
+   query->server = channel->last_server;
+   if (channel->rotate == 1)
+-    channel->last_server = (channel->last_server + 1) % channel->nservers;
++    channel->last_server = (channel->last_server + 1) % (size_t)channel->nservers;
+ 
+-  for (i = 0; i < channel->nservers; i++)
++  for (i = 0; i < (size_t)channel->nservers; i++)
+     {
+       query->server_info[i].skip_server = ARES_FALSE;
+       query->server_info[i].tcp_connection_generation = 0;
+@@ -150,5 +150,5 @@ ares_status_t ares_send_ex(ares_channel channel, const unsigned char *qbuf,
+ void ares_send(ares_channel channel, const unsigned char *qbuf, int qlen,
+                ares_callback callback, void *arg)
+ {
+-  ares_send_ex(channel, qbuf, qlen, callback, arg);
++  ares_send_ex(channel, qbuf, (size_t)qlen, callback, arg);
+ }
+diff --git a/src/lib/ares_strerror.c b/src/lib/ares_strerror.c
+index 3527245..fd583c5 100644
+--- a/src/lib/ares_strerror.c
++++ b/src/lib/ares_strerror.c
+@@ -31,7 +31,7 @@
+ 
+ const char *ares_strerror(int code)
+ {
+-  ares_status_t status = code;
++  ares_status_t status = (ares_status_t)code;
+   switch (status) {
+     case ARES_SUCCESS:
+       return "Successful completion";
+diff --git a/src/lib/bitncmp.c b/src/lib/bitncmp.c
+index 5a5a07f..680e59e 100644
+--- a/src/lib/bitncmp.c
++++ b/src/lib/bitncmp.c
+@@ -34,15 +34,16 @@
+  * author:
+  *	Paul Vixie (ISC), June 1996
+  */
+-int ares__bitncmp(const void *l, const void *r, int n)
++int ares__bitncmp(const void *l, const void *r, size_t n)
+ {
+-  unsigned int lb, rb;
+-  int x, b;
++  size_t lb, rb;
++  ares_ssize_t x;
++  size_t b;
+ 
+   b = n / 8;
+   x = memcmp(l, r, b);
+   if (x || (n % 8) == 0)
+-    return (x);
++    return (int)x;
+ 
+   lb = ((const unsigned char *)l)[b];
+   rb = ((const unsigned char *)r)[b];
+diff --git a/src/lib/bitncmp.h b/src/lib/bitncmp.h
+index 8e39eb5..93932c1 100644
+--- a/src/lib/bitncmp.h
++++ b/src/lib/bitncmp.h
+@@ -27,7 +27,7 @@
+ #define __ARES_BITNCMP_H
+ 
+ #ifndef HAVE_BITNCMP
+-int ares__bitncmp(const void *l, const void *r, int n);
++int ares__bitncmp(const void *l, const void *r, size_t n);
+ #else
+ #define ares__bitncmp(x,y,z) bitncmp(x,y,z)
+ #endif
+diff --git a/src/lib/inet_net_pton.c b/src/lib/inet_net_pton.c
+index d3924c3..c4907c5 100644
+--- a/src/lib/inet_net_pton.c
++++ b/src/lib/inet_net_pton.c
+@@ -185,11 +185,11 @@ ares_inet_net_pton_ipv4(const char *src, unsigned char *dst, size_t size)
+ }
+ 
+ static int
+-getbits(const char *src, int *bitsp)
++getbits(const char *src, size_t *bitsp)
+ {
+   static const char digits[] = "0123456789";
+-  int n;
+-  int val;
++  size_t n;
++  size_t val;
+   char ch;
+ 
+   val = 0;
+@@ -202,7 +202,7 @@ getbits(const char *src, int *bitsp)
+       if (n++ != 0 && val == 0)       /* no leading zeros */
+         return (0);
+       val *= 10;
+-      val += aresx_sztosi(pch - digits);
++      val += (size_t)(pch - digits);
+       if (val > 128)                  /* range */
+         return (0);
+       continue;
+@@ -317,7 +317,7 @@ ares_inet_net_pton_ipv6(const char *src, unsigned char *dst, size_t size)
+ {
+   struct ares_in6_addr in6;
+   int                  ret;
+-  int                  bits;
++  size_t               bits;
+   size_t               bytes;
+   char                 buf[INET6_ADDRSTRLEN + sizeof("/128")];
+   char                *sep;
+@@ -351,7 +351,7 @@ ares_inet_net_pton_ipv6(const char *src, unsigned char *dst, size_t size)
+     return (-1);
+   }
+   memcpy(dst, &in6, bytes);
+-  return (bits);
++  return (int)bits;
+ }
+ 
+ /*
+diff --git a/src/tools/adig.c b/src/tools/adig.c
+index b867be6..bbd48ba 100644
+--- a/src/tools/adig.c
++++ b/src/tools/adig.c
+@@ -531,7 +531,9 @@ static const unsigned char *display_rr(const unsigned char *aptr,
+                                        const unsigned char *abuf, int alen)
+ {
+   const unsigned char *p;
+-  int type, dnsclass, ttl, dlen, status, i;
++  int type, dnsclass;
++  unsigned int ttl;
++  int dlen, status, i;
+   long len;
+   int vlen;
+   char addr[46];
+diff --git a/src/tools/ahost.c b/src/tools/ahost.c
+index 2924e5d..be5c9c5 100644
+--- a/src/tools/ahost.c
++++ b/src/tools/ahost.c
+@@ -101,7 +101,7 @@ int main(int argc, char **argv)
+           optmask |= ARES_OPT_DOMAINS;
+           options.ndomains++;
+           options.domains = (char **)realloc(options.domains,
+-                                             options.ndomains * sizeof(char *));
++                                             (size_t)options.ndomains * sizeof(char *));
+           options.domains[options.ndomains - 1] = strdup(optarg);
+           break;
+         case 't':

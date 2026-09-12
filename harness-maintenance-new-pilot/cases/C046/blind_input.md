@@ -1,0 +1,132 @@
+# Case ID
+
+C046
+
+## Existing Fuzz Harness H0
+
+### `test/ares-test-fuzz-name.c`
+
+~~~~c
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "ares_setup.h"
+#include "ares.h"
+// Include ares internal file for DNS protocol constants
+#include "ares_nameser.h"
+
+// Entrypoint for Clang's libfuzzer, exercising query creation.
+int LLVMFuzzerTestOneInput(const unsigned char *data,
+                           unsigned long size) {
+  // Null terminate the data.
+  char *name = malloc(size + 1);
+  name[size] = '\0';
+  memcpy(name, data, size);
+
+  unsigned char *buf = NULL;
+  int buflen = 0;
+  ares_create_query(name, ns_c_in, T_AAAA, 1234, 0, &buf, &buflen, 1024);
+  free(buf);
+  free(name);
+  return 0;
+}
+~~~~
+
+## Production Source Change (S0 -> S1)
+
+Harness changes, commit messages, tests, outcomes, and future evidence are excluded. The source diff is complete.
+
+~~~~diff
+diff --git a/src/lib/ares_create_query.c b/src/lib/ares_create_query.c
+index 71f5555..e3d874b 100644
+--- a/src/lib/ares_create_query.c
++++ b/src/lib/ares_create_query.c
+@@ -48,7 +48,7 @@
+  * of the remaining fields:
+  *      ID      Identifier to match responses with queries
+  *      QR      Query (0) or response (1)
+- *      Opcode  For our purposes, always QUERY
++ *      Opcode  For our purposes, always O_QUERY
+  *      RD      Recursion desired
+  *      Z       Reserved (zero)
+  *      QDCOUNT Number of queries
+@@ -107,7 +107,7 @@ int ares_create_query(const char *name, int dnsclass, int type,
+   q = buf;
+   memset(q, 0, HFIXEDSZ);
+   DNS_HEADER_SET_QID(q, id);
+-  DNS_HEADER_SET_OPCODE(q, QUERY);
++  DNS_HEADER_SET_OPCODE(q, O_QUERY);
+   if (rd) {
+     DNS_HEADER_SET_RD(q, 1);
+   }
+diff --git a/src/lib/ares_nameser.h b/src/lib/ares_nameser.h
+index fb4f0fe..5270e5a 100644
+--- a/src/lib/ares_nameser.h
++++ b/src/lib/ares_nameser.h
+@@ -219,11 +219,26 @@ typedef enum __ns_rcode {
+ #  define NAMESERVER_PORT  NS_DEFAULTPORT
+ #endif
+ 
+-#ifndef QUERY
+-#  define QUERY           ns_o_query
++
++/* opcodes */
++#ifndef O_QUERY
++#  define O_QUERY 0  /* ns_o_query */
++#endif
++#ifndef O_IQUERY
++#  define O_IQUERY 1 /* ns_o_iquery */
++#endif
++#ifndef O_STATUS
++#  define O_STATUS 2 /* ns_o_status */
++#endif
++#ifndef O_NOTIFY
++#  define O_NOTIFY 4 /* ns_o_notify */
++#endif
++#ifndef O_UPDATE
++#  define O_UPDATE 5 /* ns_o_update */
+ #endif
+ 
+ 
++/* response codes */
+ #ifndef SERVFAIL
+ #  define SERVFAIL        ns_r_servfail
+ #endif
+@@ -271,22 +286,26 @@ typedef enum __ns_rcode {
+ #  define TSIG_BADTIME    18 /* ns_r_badtime */
+ #endif
+ 
++
++/* classes */
+ #ifndef C_IN
+-#  define C_IN            ns_c_in
++#  define C_IN            1 /* ns_c_in */
+ #endif
+ #ifndef C_CHAOS
+-#  define C_CHAOS         ns_c_chaos
++#  define C_CHAOS         3 /* ns_c_chaos */
+ #endif
+ #ifndef C_HS
+-#  define C_HS            ns_c_hs
++#  define C_HS            4 /* ns_c_hs */
+ #endif
+ #ifndef C_NONE
+-#  define C_NONE          ns_c_none
++#  define C_NONE          254 /* ns_c_none */
+ #endif
+ #ifndef C_ANY
+-#  define C_ANY           ns_c_any
++#  define C_ANY           255 /*  ns_c_any */
+ #endif
+ 
++
++/* types */
+ #ifndef T_A
+ #  define T_A             1   /* ns_t_a */
+ #endif
+~~~~
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.

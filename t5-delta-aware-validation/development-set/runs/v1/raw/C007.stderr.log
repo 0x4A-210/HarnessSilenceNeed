@@ -1,0 +1,607 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/delta-dev-C007-_ih31xoa
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08ab8-e87d-7101-9dc0-81a00567b595
+--------
+user
+You are evaluating whether one production-source commit creates a fuzz-harness
+maintenance need. Use only the anonymous case below. Do not use tools, files,
+the network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+Follow this order exactly and keep one stable comparison scope throughout:
+
+1. Identify the commit's fuzz-relevant impact scope from the S0-to-S1 source
+   diff. Anchor it in concrete files, functions, states, configurations, input
+   semantics, or entry points. Do not search the rest of the project for an
+   unrelated harness omission.
+2. For that same scope, decide whether S0 + H0 has a material harness gap.
+3. For that identical scope, decide whether S1 + H0 has a material harness gap.
+4. Identify whether the commit creates a concrete new harness obligation: a
+   new entry/call, caller-supplied argument or buffer, call-order transition,
+   configuration action, compile-time enablement, or input construction that
+   H0 did not need in S0.
+5. Derive exactly one delta: NEW, AGGRAVATED, UNCHANGED, REMOVED, or NONE.
+6. Apply the fixed final rule.
+
+A harness gap concerns exposure or controllability, not the mere existence of
+changed lines. More internal code, a replacement algorithm, validation, error
+handling, a CPU fast path, or implementation state is not by itself an
+aggravation. If an existing public entry/API is omitted by the unchanged H0 on
+both sides and its caller-facing exposure requirement is unchanged, then the
+gap existed before and after: classify UNCHANGED even when the commit changes
+behavior inside that entry. Conversely, a genuinely new public entry, format,
+configuration, state protocol, or caller obligation that H0 cannot exercise is
+NEW (or AGGRAVATED when a demonstrably weaker same-scope gap already existed).
+
+AGGRAVATED requires concrete comparative evidence that S1 adds a harness action
+or reachability/control requirement absent in S0. Do not infer AGGRAVATED only
+from added LOC, a changed file, additional internal branches, or the fact that
+H0 omits the whole subsystem on both sides.
+
+Use this truth table unless concrete aggravation/removal evidence is present:
+
+- before=false, after=true  -> NEW
+- before=true,  after=true  -> UNCHANGED
+- before=true,  after=false -> REMOVED
+- before=false, after=false -> NONE
+
+Set maintenance_needed=true only if explicit_failure=true or delta_attribution
+is NEW or AGGRAVATED. Otherwise set it false. Return exactly one JSON object
+matching the schema. Give separate S0 and S1 evidence and do not collapse the
+two judgments into one narrative.
+
+--- BEGIN DEVELOPMENT CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+C007
+
+## Existing harness H0
+
+The complete project-owned harness translation unit is shown below. Framework
+main/CLI scaffolding is not expanded; directly included semantic helper files
+are shown separately under the fixed context rule.
+
+Path: `fuzz/c/std/jpeg_fuzzer.c`
+
+```c
+// Copyright 2023 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN jpeg_fuzzer.c
+./a.out ../../../test/data/*.jpeg
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__JPEG
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+#include "../fuzzlib/fuzzlib_image_decoder.c"
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_jpeg__decoder dec;
+  wuffs_base__status status = wuffs_jpeg__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  hash = wuffs_base__u64__rotate_right(hash, 1);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  return fuzz_image_decoder(
+      src, hash,
+      wuffs_jpeg__decoder__upcast_as__wuffs_base__image_decoder(&dec));
+}
+```
+
+### Direct H0 helper: `fuzz/c/fuzzlib/fuzzlib_image_decoder.c`
+
+```c
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+#ifndef WUFFS_INCLUDE_GUARD
+#error "Wuffs' .h files need to be included before this file"
+#endif
+
+static const char*  //
+fuzz_image_decoder(wuffs_base__io_buffer* src,
+                   uint64_t hash,
+                   wuffs_base__image_decoder* dec) {
+  const char* ret = NULL;
+  wuffs_base__slice_u8 pixbuf = ((wuffs_base__slice_u8){});
+  wuffs_base__slice_u8 workbuf = ((wuffs_base__slice_u8){});
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    wuffs_base__status status =
+        wuffs_base__image_decoder__decode_image_config(dec, &ic, src);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    // 50% of the time, choose BGRA_PREMUL instead of the native pixel config.
+    if (hash & 1) {
+      wuffs_base__pixel_config__set(
+          &ic.pixcfg, WUFFS_BASE__PIXEL_FORMAT__BGRA_PREMUL,
+          WUFFS_BASE__PIXEL_SUBSAMPLING__NONE,
+          wuffs_base__pixel_config__width(&ic.pixcfg),
+          wuffs_base__pixel_config__height(&ic.pixcfg));
+    }
+    hash >>= 1;
+
+    // Wuffs allows either statically or dynamically allocated work buffers.
+    // This program exercises dynamic allocation.
+    uint64_t n = wuffs_base__image_decoder__workbuf_len(dec).max_incl;
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      workbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!workbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    n = wuffs_base__pixel_config__pixbuf_len(&ic.pixcfg);
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      pixbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!pixbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    status = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, pixbuf);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      wuffs_base__frame_config fc = ((wuffs_base__frame_config){});
+      status = wuffs_base__image_decoder__decode_frame_config(dec, &fc, src);
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+
+      status = wuffs_base__image_decoder__decode_frame(
+          dec, &pb, src, WUFFS_BASE__PIXEL_BLEND__SRC, workbuf, NULL);
+
+      wuffs_base__rect_ie_u32 frame_rect =
+          wuffs_base__frame_config__bounds(&fc);
+      wuffs_base__rect_ie_u32 dirty_rect =
+          wuffs_base__image_decoder__frame_dirty_rect(dec);
+      if (!wuffs_base__rect_ie_u32__contains_rect(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not contain dirty_rect";
+        goto exit;
+      }
+
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+      seen_ok = true;
+
+      if (!wuffs_base__rect_ie_u32__equals(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not equal dirty_rect";
+        goto exit;
+      }
+    }
+  }
+
+exit:
+  free(workbuf.ptr);
+  free(pixbuf.ptr);
+  return ret;
+}
+```
+
+## Complete S0 -> S1 hand-written production-source diff
+
+The fixed rule includes every changed `std/**/*.wuffs` production file. It
+excludes generated release snapshots, tests, docs, examples, and commit text.
+
+```diff
+diff --git a/std/jpeg/decode_jpeg.wuffs b/std/jpeg/decode_jpeg.wuffs
+index 5616ec18..12e7a8d4 100644
+--- a/std/jpeg/decode_jpeg.wuffs
++++ b/std/jpeg/decode_jpeg.wuffs
+@@ -9,24 +9,25 @@
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
+ pub status "#bad DHT marker"
+ pub status "#bad DQT marker"
+ pub status "#bad DRI marker"
+ pub status "#bad SOF marker"
+ pub status "#bad SOS marker"
+ pub status "#bad header"
+ pub status "#bad marker"
+ pub status "#bad scan count"
+ pub status "#missing Huffman table"
+ pub status "#missing Quantization table"
++pub status "#rejected progressive JPEG"
+ pub status "#truncated input"
+ pub status "#unsupported arithmetic coding"
+ pub status "#unsupported color model"
+ pub status "#unsupported fractional sampling"
+ pub status "#unsupported hierarchical coding"
+ pub status "#unsupported implicit height"
+ pub status "#unsupported lossless coding"
+ pub status "#unsupported marker"
+ pub status "#unsupported precision (12 bits)"
+ pub status "#unsupported precision (16 bits)"
+ pub status "#unsupported precision"
+ pub status "#unsupported scan count"
+@@ -272,25 +273,26 @@ pub struct decoder? implements base.image_decoder(
+         seen_dht       : array[8] base.bool,
+ 
+         // These fields yield bitstream bits in Most Significant Bits order.
+         bitstream_bits   : base.u64,
+         bitstream_n_bits : base.u32,
+         bitstream_ri     : base.u32[..= 0x800],
+         bitstream_wi     : base.u32[..= 0x800],
+ 
+         bitstream_is_closed : base.bool,
+ 
+         expect_multiple_scans : base.bool,
+ 
+-        use_lower_quality : base.bool,
++        use_lower_quality        : base.bool,
++        reject_progressive_jpegs : base.bool,
+ 
+         swizzle_immediately           : base.bool,
+         swizzle_immediately_status    : base.status,
+         swizzle_immediately_b_offsets : array[10] base.u32[..= 576],
+         swizzle_immediately_c_offsets : array[5] base.u32,
+ 
+         // bitstream_padding is the number (per restart) of implicit zeroes
+         // remaining at the end of the bitstream. Its initial 12345 value is
+         // arbitrary.
+         bitstream_padding : base.u32[..= 12345],
+ 
+         quant_tables       : array[4] array[64] base.u16[..= 0xFF],
+@@ -333,58 +335,39 @@ pub struct decoder? implements base.image_decoder(
+         dht_temp_bit_lengths : array[256] base.u8,
+         // dht_temp_bit_strings[i] is the bit-string of the i'th code.
+         dht_temp_bit_strings : array[256] base.u16,
+ 
+         dst_palette : array[4 * 256] base.u8,
+ )
+ 
+ pub func decoder.get_quirk(key: base.u32) base.u64 {
+     if args.key == base.QUIRK_QUALITY {
+         if this.use_lower_quality {
+             return 0xFFFF_FFFF_FFFF_FFFF
+         }
++    } else if args.key == QUIRK_REJECT_PROGRESSIVE_JPEGS {
++        if this.reject_progressive_jpegs {
++            return 1
++        }
+     }
+     return 0
+ }
+ 
+-// If key is base.QUIRK_QUALITY then, when re-interpreting the value as a
+-// signed i64 value, a negative quirk value opts the decoder in to a slightly
+-// worse quality but leaner (less memory required) chroma upsampling algorithm.
+-//
+-// Negative (in i64 space) means >= 0x8000_0000_0000_0000 (in u64 space).
+-//
+-// Specifically, a negative quirk value uses a box filter. A non-negative quirk
+-// value (including the default value, zero) uses the same triangle filter that
+-// libjpeg-turbo also uses by default, which requires chroma upsampling on the
+-// edges of a MCU (Minimum Coded Unit) to remember adjacent MCU's values.
+-//
+-// Leaner means that for common (sequential) JPEG images, the range returned by
+-// decoder.workbuf_len can have a minimum value of zero, meaning that no work
+-// buffer memory needs to be allocated. Decoding rarer (progressive) JPEGs will
+-// still require a positive amount of work buffer memory. The exact amount
+-// required depends on factors like the JPEG image's width, height, component
+-// count and subsampling ratios.
+-//
+-// Regardless of the quirk value, as always, the workbuf_len method returns a
+-// range, whose min and max can be different. The caller is able to choose
+-// between providing the minimal amount of work buffer memory (for slightly
+-// slower decoding) or the maximal amount (for slightly faster decoding).
+-//
+-// Callers that never wish to allocate work buffer memory can simply reject
+-// progressive JPEGs (where workbuf_len().min_incl > 0 despite setting the
+-// base.QUIRK_QUALITY key to a negative quirk value) as unsupported.
+ pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+     if args.key == base.QUIRK_QUALITY {
+         this.use_lower_quality = args.value >= 0x8000_0000_0000_0000
+         return ok
++    } else if args.key == QUIRK_REJECT_PROGRESSIVE_JPEGS {
++        this.reject_progressive_jpegs = args.value <> 0
++        return ok
+     }
+     return base."#unsupported option"
+ }
+ 
+ pub func decoder.decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+     var status : base.status
+ 
+     while true {
+         status =? this.do_decode_image_config?(dst: args.dst, src: args.src)
+         if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+@@ -445,25 +428,27 @@ pri func decoder.do_decode_image_config?(dst: nptr base.image_config, src: base.
+             if this.payload_length < 2 {
+                 return "#bad marker"
+             }
+             this.payload_length -= 2
+         }
+ 
+         // Switch on the marker.
+         if marker < 0xC0 {
+             return "#unsupported marker"
+ 
+         } else if marker < 0xD0 {  // SOFn (Start of Frame) and friends.
+             if marker <= 0xC2 {
+-                if this.sof_marker <> 0 {
++                if (marker == 0xC2) and this.reject_progressive_jpegs {
++                    return "#rejected progressive JPEG"
++                } else if this.sof_marker <> 0 {
+                     return "#bad SOF marker"
+                 }
+                 this.sof_marker = marker
+                 this.decode_sof?(src: args.src)
+                 break
+ 
+             } else if marker == 0xC3 {
+                 return "#unsupported lossless coding"
+ 
+             } else if marker == 0xC4 {  // DHT (Define Huffman Table).
+                 // We shouldn't see DHT before SOF.
+                 return "#bad DHT marker"
+diff --git a/std/jpeg/decode_quirks.wuffs b/std/jpeg/decode_quirks.wuffs
+new file mode 100644
+index 00000000..16769474
+--- /dev/null
++++ b/std/jpeg/decode_quirks.wuffs
+@@ -0,0 +1,77 @@
++// Copyright 2024 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
++// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
++// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
++// option. This file may not be copied, modified, or distributed
++// except according to those terms.
++//
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++// --------
++
++// Quirks are discussed in (/doc/note/quirks.md).
++//
++// The base38 encoding of "jpeg" is 0x122FF6. Left shifting by 10 gives
++// 0x48BF_D800.
++pri const QUIRKS_BASE : base.u32 = 0x48BF_D800
++
++// --------
++
++// When this quirk value is non-zero, the decoder will not support progressive
++// JPEG images. When combined with setting base.QUIRK_QUALITY to "lower
++// quality", this means that decoding will never require any temporary "work
++// buffer" memory: decoder.workbuf_len will always return a range (a min and
++// max pair) whose minimum value is zero.
++//
++// The maximum value can still be positive, as using more memory might lead to
++// faster decoding, but a zero minimum means that it's valid for the caller to
++// not allocate any memory for a work buffer.
++//
++// When opted into lower quality decoding, the workbuf_len minimum will be zero
++// and positive for sequential and progressive JPEGs respectively, regardless
++// of this QUIRK_REJECT_PROGRESSIVE_JPEGS key's value. But setting this quirk
++// explicitly will produce a "#rejected progressive JPEG" error when
++// encountering a progressive JPEG. This results in more readable calling code,
++// instead of commenting about "positive work buffer minimum length implies a
++// progressive JPEG".
++pub const QUIRK_REJECT_PROGRESSIVE_JPEGS : base.u32 = 0x48BF_D800 | 0x00
++
++// --------
++
++// The base.QUIRK_QUALITY key is defined in the base package, not this package.
++// Still, here's some documentation on how this package responds to that (key,
++// value) quirk pair.
++//
++// If decoder.set_quirk is passed a base.QUIRK_QUALITY as the key argument
++// then, when re-interpreting the u64 value argument as a signed i64 number, a
++// negative number opts the decoder in to a slightly worse quality but leaner
++// (less memory required) chroma upsampling algorithm.
++//
++// Negative (in i64 space) means >= 0x8000_0000_0000_0000 (in u64 space).
++// base.QUIRK_QUALITY__VALUE__LOWER_QUALITY is one such value.
++//
++// Specifically, a negative quirk value uses a box filter. A non-negative quirk
++// value (including the default value, zero) uses the same triangle filter that
++// libjpeg-turbo also uses by default, which requires chroma upsampling on the
++// edges of a MCU (Minimum Coded Unit) to remember adjacent MCU's values.
++//
++// Leaner means that for common (sequential) JPEG images, the range returned by
++// decoder.workbuf_len will have a minimum value of zero, meaning that no work
++// buffer memory needs to be allocated. Decoding rarer (progressive) JPEGs will
++// still always require a positive amount of work buffer memory, for reasons
++// unrelated to chroma upsampling. The exact amount required depends on factors
++// like the JPEG image's width, height, component count and subsampling ratios.
++//
++// Regardless of the quirk value, as always, the workbuf_len method returns a
++// range, whose min and max can be different. The caller is able to choose
++// between providing the minimal amount of work buffer memory (for slightly
++// slower decoding) or the maximal amount (for slightly faster decoding).
++//
++// Callers that never wish to allocate work buffer memory can simply reject
++// progressive JPEGs (where "workbuf_len().min_incl > 0" despite setting the
++// base.QUIRK_QUALITY key to a negative quirk value) as unsupported. See also
++// QUIRK_REJECT_PROGRESSIVE_JPEGS.
++//
++// For some pictures comparing box and triangle filter decodings, see
++// https://nigeltao.github.io/blog/2024/jpeg-chroma-upsampling.html
+```
+
+## Uniform selected declaration context
+
+This same mechanically selected S0/S1 context is supplied for every case.
+
+### S0
+
+```text
+<no matching declaration in the selected S0 source file>
+```
+
+### S1
+
+```text
+lines 14-62
+000014: //
+000015: // The base38 encoding of "jpeg" is 0x122FF6. Left shifting by 10 gives
+000016: // 0x48BF_D800.
+000017: pri const QUIRKS_BASE : base.u32 = 0x48BF_D800
+000018: 
+000019: // --------
+000020: 
+000021: // When this quirk value is non-zero, the decoder will not support progressive
+000022: // JPEG images. When combined with setting base.QUIRK_QUALITY to "lower
+000023: // quality", this means that decoding will never require any temporary "work
+000024: // buffer" memory: decoder.workbuf_len will always return a range (a min and
+000025: // max pair) whose minimum value is zero.
+000026: //
+000027: // The maximum value can still be positive, as using more memory might lead to
+000028: // faster decoding, but a zero minimum means that it's valid for the caller to
+000029: // not allocate any memory for a work buffer.
+000030: //
+000031: // When opted into lower quality decoding, the workbuf_len minimum will be zero
+000032: // and positive for sequential and progressive JPEGs respectively, regardless
+000033: // of this QUIRK_REJECT_PROGRESSIVE_JPEGS key's value. But setting this quirk
+000034: // explicitly will produce a "#rejected progressive JPEG" error when
+000035: // encountering a progressive JPEG. This results in more readable calling code,
+000036: // instead of commenting about "positive work buffer minimum length implies a
+000037: // progressive JPEG".
+000038: pub const QUIRK_REJECT_PROGRESSIVE_JPEGS : base.u32 = 0x48BF_D800 | 0x00
+000039: 
+000040: // --------
+000041: 
+000042: // The base.QUIRK_QUALITY key is defined in the base package, not this package.
+000043: // Still, here's some documentation on how this package responds to that (key,
+000044: // value) quirk pair.
+000045: //
+000046: // If decoder.set_quirk is passed a base.QUIRK_QUALITY as the key argument
+000047: // then, when re-interpreting the u64 value argument as a signed i64 number, a
+000048: // negative number opts the decoder in to a slightly worse quality but leaner
+000049: // (less memory required) chroma upsampling algorithm.
+000050: //
+000051: // Negative (in i64 space) means >= 0x8000_0000_0000_0000 (in u64 space).
+000052: // base.QUIRK_QUALITY__VALUE__LOWER_QUALITY is one such value.
+000053: //
+000054: // Specifically, a negative quirk value uses a box filter. A non-negative quirk
+000055: // value (including the default value, zero) uses the same triangle filter that
+000056: // libjpeg-turbo also uses by default, which requires chroma upsampling on the
+000057: // edges of a MCU (Minimum Coded Unit) to remember adjacent MCU's values.
+000058: //
+000059: // Leaner means that for common (sequential) JPEG images, the range returned by
+000060: // decoder.workbuf_len will have a minimum value of zero, meaning that no work
+000061: // buffer memory needs to be allocated. Decoding rarer (progressive) JPEGs will
+000062: // still always require a positive amount of work buffer memory, for reasons
+```
+
+--- END DEVELOPMENT CASE ---
+
+codex
+{"case_id":"C007","impact_scope":[{"type":"configuration_change","files":["std/jpeg/decode_jpeg.wuffs","std/jpeg/decode_quirks.wuffs"],"functions":["decoder.get_quirk","decoder.set_quirk!","decoder.do_decode_image_config?"],"description":"S1 adds the public QUIRK_REJECT_PROGRESSIVE_JPEGS configuration key, stores and reports its enabled state, and makes decode_image_config reject progressive SOF2 JPEGs when enabled."},{"type":"input_semantic_change","files":["std/jpeg/decode_jpeg.wuffs"],"functions":["decoder.do_decode_image_config?"],"description":"A progressive JPEG can now produce the new #rejected progressive JPEG status, but only after the caller enables the new quirk."}],"gap_before":{"exists":false,"type":"none","evidence":["S0 has no QUIRK_REJECT_PROGRESSIVE_JPEGS declaration or corresponding decoder state.","In S0, decoder.set_quirk! recognizes only base.QUIRK_QUALITY, so H0 had no progressive-rejection configuration action to exercise."]},"gap_after":{"exists":true,"type":"configuration exposure gap","evidence":["S1 adds QUIRK_REJECT_PROGRESSIVE_JPEGS and accepts its caller-supplied key/value through decoder.set_quirk!.","H0 initializes the decoder and decodes input but never calls set_quirk!, so reject_progressive_jpegs remains disabled.","Consequently, H0 cannot exercise the enabled-quirk transition in decoder.do_decode_image_config? that returns #rejected progressive JPEG for an SOF2 input."]},"new_harness_obligation":{"exists":true,"description":"The harness must add a configuration action that calls decoder.set_quirk! with QUIRK_REJECT_PROGRESSIVE_JPEGS and a nonzero value before image-config decoding, with progressive JPEG input available to exercise the resulting rejection behavior; optional zero/nonzero selection can also cover disabled and enabled states.","evidence":["The configuration key and accepted key/value pair exist only in S1.","The rejection branch requires both caller-enabled reject_progressive_jpegs state and a progressive SOF2 marker.","H0 performs neither the new set_quirk! call nor any equivalent configuration action."]},"explicit_failure":false,"delta_attribution":"NEW","maintenance_needed":true,"confidence":99,"reason":"Within the stable scope of progressive-JPEG rejection configuration, S0 offered no such caller-controllable feature, while S1 introduces a new public quirk and state-dependent input behavior that unchanged H0 cannot enable. This creates a new configuration and reachability obligation rather than merely changing internal decoder logic."}
+tokens used
+10,180

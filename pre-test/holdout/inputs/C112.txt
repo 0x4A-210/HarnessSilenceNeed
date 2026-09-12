@@ -1,0 +1,318 @@
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C112
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `test/ares-test-fuzz.c`
+
+~~~~c
+#include <stddef.h>
+
+#include "ares.h"
+
+// Entrypoint for Clang's libfuzzer
+int LLVMFuzzerTestOneInput(const unsigned char *data,
+                           unsigned long size) {
+  // Feed the data into each of the ares_parse_*_reply functions.
+  struct hostent *host = NULL;
+  struct ares_addrttl info[5];
+  int count = 5;
+  ares_parse_a_reply(data, size, &host, info, &count);
+  if (host) ares_free_hostent(host);
+
+  host = NULL;
+  struct ares_addr6ttl info6[5];
+  count = 5;
+  ares_parse_aaaa_reply(data, size, &host, info6, &count);
+  if (host) ares_free_hostent(host);
+
+  host = NULL;
+  unsigned char addrv4[4] = {0x10, 0x20, 0x30, 0x40};
+  ares_parse_ptr_reply(data, size, addrv4, sizeof(addrv4), AF_INET, &host);
+  if (host) ares_free_hostent(host);
+
+  host = NULL;
+  ares_parse_ns_reply(data, size, &host);
+  if (host) ares_free_hostent(host);
+
+  struct ares_srv_reply* srv = NULL;
+  ares_parse_srv_reply(data, size, &srv);
+  if (srv) ares_free_data(srv);
+
+  struct ares_mx_reply* mx = NULL;
+  ares_parse_mx_reply(data, size, &mx);
+  if (mx) ares_free_data(mx);
+
+  struct ares_txt_reply* txt = NULL;
+  ares_parse_txt_reply(data, size, &txt);
+  if (txt) ares_free_data(txt);
+
+  struct ares_soa_reply* soa = NULL;
+  ares_parse_soa_reply(data, size, &soa);
+  if (soa) ares_free_data(soa);
+
+  struct ares_naptr_reply* naptr = NULL;
+  ares_parse_naptr_reply(data, size, &naptr);
+  if (naptr) ares_free_data(naptr);
+
+  return 0;
+}
+~~~~
+
+### `test/ares-test-fuzz-name.c`
+
+~~~~c
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "ares.h"
+// Include ares internal file for DNS protocol constants
+#include "nameser.h"
+
+// Entrypoint for Clang's libfuzzer, exercising query creation.
+int LLVMFuzzerTestOneInput(const unsigned char *data,
+                           unsigned long size) {
+  // Null terminate the data.
+  char *name = malloc(size + 1);
+  name[size] = '\0';
+  memcpy(name, data, size);
+
+  unsigned char *buf = NULL;
+  int buflen = 0;
+  ares_create_query(name, ns_c_in, ns_t_aaaa, 1234, 0, &buf, &buflen, 1024);
+  free(buf);
+  free(name);
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/c-ares/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2016 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+# Remove -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION from CFLAGS
+# as a workaround for https://github.com/google/oss-fuzz/issues/413.
+# It's unclear why the c-ares configure is that picky;
+# a better fix would probably be in the c-ares build system.
+CFLAGS=$(for f in $CFLAGS; do [ $f != "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION" ] && echo $f; done);
+
+# Build the project.
+./buildconf
+./configure --enable-debug
+make clean
+make -j$(nproc) V=1 all
+
+# Build the fuzzers.
+$CC $CFLAGS -I. -c $SRC/c-ares/test/ares-test-fuzz.c -o $WORK/ares-test-fuzz.o
+$CXX $CXXFLAGS -std=c++11 $WORK/ares-test-fuzz.o \
+    -o $OUT/ares_parse_reply_fuzzer \
+    -lFuzzingEngine $SRC/c-ares/.libs/libcares.a
+
+$CC $CFLAGS -I. -c $SRC/c-ares/test/ares-test-fuzz-name.c \
+    -o $WORK/ares-test-fuzz-name.o
+$CXX $CXXFLAGS -std=c++11 $WORK/ares-test-fuzz-name.o \
+    -o $OUT/ares_create_query_fuzzer \
+    -lFuzzingEngine $SRC/c-ares/.libs/libcares.a
+
+# Archive and copy to $OUT seed corpus if the build succeeded.
+zip -j $OUT/ares_parse_reply_fuzzer_seed_corpus.zip $SRC/c-ares/test/fuzzinput/*
+zip -j $OUT/ares_create_query_fuzzer_seed_corpus.zip \
+    $SRC/c-ares/test/fuzznames/*
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `ares_create_query.c`
+- `ares_gethostbyname.c`
+- `ares_getnameinfo.c`
+- `ares_private.h`
+- `ares_search.c`
+
+~~~~diff
+diff --git a/ares_create_query.c b/ares_create_query.c
+--- a/ares_create_query.c
++++ b/ares_create_query.c
+@@ -91,12 +91,16 @@ int ares_create_query(const char *name, int dnsclass, int type,
+   size_t len;
+   unsigned char *q;
+   const char *p;
+   size_t buflen;
+   unsigned char *buf;
+ 
++  /* Per RFC 7686, reject queries for ".onion" domain names with NXDOMAIN. */
++  if (ares__is_onion_domain(name))
++    return ARES_ENOTFOUND;
++
+   /* Set our results early, in case we bail out early with an error. */
+   *buflenp = 0;
+   *bufp = NULL;
+ 
+   /* Allocate a memory area for the maximum size this packet might need. +2
+    * is for the length byte and zero termination if no dots or ecscaping is
+diff --git a/ares_gethostbyname.c b/ares_gethostbyname.c
+--- a/ares_gethostbyname.c
++++ b/ares_gethostbyname.c
+@@ -92,12 +92,19 @@ void ares_gethostbyname(ares_channel channel, const char *name, int family,
+     break;
+   default:
+     callback(arg, ARES_ENOTIMP, 0, NULL);
+     return;
+   }
+ 
++  /* Per RFC 7686, reject queries for ".onion" domain names with NXDOMAIN. */
++  if (ares__is_onion_domain(name))
++    {
++      callback(arg, ARES_ENOTFOUND, 0, NULL);
++      return;
++    }
++
+   if (fake_hostent(name, family, callback, arg))
+     return;
+ 
+   /* Allocate and fill in the host query structure. */
+   hquery = ares_malloc(sizeof(struct host_query));
+   if (!hquery)
+@@ -336,12 +343,16 @@ static int file_lookup(const char *name, int family, struct hostent **host)
+ {
+   FILE *fp;
+   char **alias;
+   int status;
+   int error;
+ 
++  /* Per RFC 7686, reject queries for ".onion" domain names with NXDOMAIN. */
++  if (ares__is_onion_domain(name))
++    return ARES_ENOTFOUND;
++
+ #ifdef WIN32
+   char PATH_HOSTS[MAX_PATH];
+   win_platform platform;
+ 
+   PATH_HOSTS[0] = '\0';
+ 
+diff --git a/ares_getnameinfo.c b/ares_getnameinfo.c
+--- a/ares_getnameinfo.c
++++ b/ares_getnameinfo.c
+@@ -437,6 +437,17 @@ STATIC_TESTABLE char *ares_striendstr(const char *s1, const char *s2)
+           c1++;
+           c2++;
+         }
+     }
+   return (char *)c1_begin;
+ }
++
++int ares__is_onion_domain(const char *name)
++{
++  if (ares_striendstr(name, ".onion"))
++    return 1;
++
++  if (ares_striendstr(name, ".onion."))
++    return 1;
++
++  return 0;
++}
+diff --git a/ares_private.h b/ares_private.h
+--- a/ares_private.h
++++ b/ares_private.h
+@@ -327,12 +327,15 @@ struct ares_channeldata {
+   void *sock_func_cb_data;
+ 
+   /* Path for resolv.conf file, configurable via ares_options */
+   char *resolvconf_path;
+ };
+ 
++/* Does the domain end in ".onion" or ".onion."? Case-insensitive. */
++int ares__is_onion_domain(const char *name);
++
+ /* Memory management functions */
+ extern void *(*ares_malloc)(size_t size);
+ extern void *(*ares_realloc)(void *ptr, size_t size);
+ extern void (*ares_free)(void *ptr);
+ 
+ /* return true if now is exactly check time or later */
+diff --git a/ares_search.c b/ares_search.c
+--- a/ares_search.c
++++ b/ares_search.c
+@@ -51,12 +51,19 @@ void ares_search(ares_channel channel, const char *name, int dnsclass,
+ {
+   struct search_query *squery;
+   char *s;
+   const char *p;
+   int status, ndots;
+ 
++  /* Per RFC 7686, reject queries for ".onion" domain names with NXDOMAIN. */
++  if (ares__is_onion_domain(name))
++    {
++      callback(arg, ARES_ENOTFOUND, 0, NULL, 0);
++      return;
++    }
++
+   /* If name only yields one domain to search, then we don't have
+    * to keep extra state, so just do an ares_query().
+    */
+   status = single_domain(channel, name, &s);
+   if (status != ARES_SUCCESS)
+     {
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---

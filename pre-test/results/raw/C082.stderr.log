@@ -1,0 +1,822 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-blind-run-40ko0e9q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08554-c47d-74d1-9d90-27f8c3fa1f15
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C082
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `historical OSS-Fuzz:projects/tidy-html5/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+#
+# Copyright 2018 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+mkdir -p ${WORK}/tidy-html5
+cd ${WORK}/tidy-html5
+
+cmake -GNinja ${SRC}/tidy-html5/
+ninja
+
+for fuzzer in tidy_config_fuzzer tidy_fuzzer tidy_xml_fuzzer tidy_parse_string_fuzzer tidy_parse_file_fuzzer tidy_general_fuzzer; do
+    ${CC} ${CFLAGS} -c -I${SRC}/tidy-html5/include \
+        $SRC/${fuzzer}.c -o ${fuzzer}.o
+    ${CXX} ${CXXFLAGS} -std=c++11 ${fuzzer}.o \
+        -o $OUT/${fuzzer} \
+        $LIB_FUZZING_ENGINE libtidy.a
+done
+
+cp ${SRC}/*.options ${OUT}/
+~~~~
+
+### `historical OSS-Fuzz:projects/tidy-html5/tidy_fuzzer.c`
+
+~~~~c
+// Copyright 2018 Google Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "tidy.h"
+#include "tidybuffio.h"
+
+void run_tidy_parser(TidyBuffer* data_buffer,
+                     TidyBuffer* output_buffer,
+                     TidyBuffer* error_buffer) {
+    TidyDoc tdoc = tidyCreate();
+    if (tidySetErrorBuffer(tdoc, error_buffer) < 0) {
+        abort();
+    }
+    tidyOptSetBool(tdoc, TidyXhtmlOut, yes);
+    tidyOptSetBool(tdoc, TidyForceOutput, yes);
+
+    if (tidyParseBuffer(tdoc, data_buffer) >= 0 &&
+            tidyCleanAndRepair(tdoc) >= 0 &&
+            tidyRunDiagnostics(tdoc) >= 0) {
+        tidySaveBuffer(tdoc, output_buffer);
+    }
+    tidyRelease(tdoc);
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+    TidyBuffer data_buffer;
+    TidyBuffer output_buffer;
+    TidyBuffer error_buffer;
+    tidyBufInit(&data_buffer);
+    tidyBufInit(&output_buffer);
+    tidyBufInit(&error_buffer);
+
+    tidyBufAttach(&data_buffer, (byte*)data, size);
+    run_tidy_parser(&data_buffer, &output_buffer, &error_buffer);
+
+    tidyBufFree(&error_buffer);
+    tidyBufFree(&output_buffer);
+    tidyBufDetach(&data_buffer);
+    return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/tidy-html5/tidy_general_fuzzer.c`
+
+~~~~c
+/*
+ * Copyright 2021 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include <sys/types.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <unistd.h>
+#include "tidybuffio.h"
+#include "tidy.h"
+
+// All boolean options. These will be set randomly
+// based on the fuzzer data.
+TidyOptionId bool_options[] = {
+  TidyJoinClasses, 
+  TidyJoinStyles, 
+  TidyKeepFileTimes, 
+  TidyKeepTabs, 
+  TidyLiteralAttribs, 
+  TidyLogicalEmphasis, 
+  TidyLowerLiterals, 
+  TidyMakeBare, 
+  TidyFixUri, 
+  TidyForceOutput, 
+  TidyGDocClean, 
+  TidyHideComments,
+  TidyMark, 
+  TidyXmlTags, 
+  TidyMakeClean,
+  TidyAnchorAsName, 
+  TidyMergeEmphasis, 
+  TidyMakeBare, 
+  TidyMetaCharset, 
+  TidyMuteShow, 
+  TidyNCR, 
+  TidyNumEntities, 
+  TidyOmitOptionalTags, 
+  TidyPunctWrap, 
+  TidyQuiet,
+  TidyQuoteAmpersand,  
+  TidyQuoteMarks, 
+  TidyQuoteNbsp, 
+  TidyReplaceColor, 
+  TidyShowFilename, 
+  TidyShowInfo, 
+  TidyShowMarkup, 
+  TidyShowMetaChange, 
+  TidyShowWarnings, 
+  TidySkipNested, 
+  TidyUpperCaseTags, 
+  TidyWarnPropAttrs, 
+  TidyWord2000, 
+  TidyWrapAsp, 
+  TidyWrapAttVals, 
+  TidyWrapJste, 
+  TidyWrapPhp, 
+  TidyWrapScriptlets, 
+  TidyWrapSection, 
+  TidyWriteBack,
+};
+
+void set_option(const uint8_t** data, size_t *size, TidyDoc *tdoc, TidyOptionId tboolID) {
+  uint8_t decider;
+  decider = **data;
+  *data += 1; 
+  *size -= 1;
+  if (decider % 2 == 0) tidyOptSetBool( *tdoc, tboolID, yes );
+  else { tidyOptSetBool( *tdoc, tboolID, no ); }
+}
+
+int TidyXhtml(const uint8_t* data, size_t size, TidyBuffer* output, TidyBuffer* errbuf) {
+  uint8_t decider;
+
+  // We need enough data for picking all of the options. One byte per option.
+  if (size < 5+(sizeof(bool_options)/sizeof(bool_options[0]))) {
+    return 0;
+  }
+
+  TidyDoc tdoc = tidyCreate();
+
+  // Decide output format
+  decider = *data;
+  data++; size--;
+  if (decider % 3 == 0) tidyOptSetBool( tdoc, TidyXhtmlOut, yes );
+  else { tidyOptSetBool( tdoc, TidyXhtmlOut, no ); }
+
+  if (decider % 3 == 1) tidyOptSetBool( tdoc, TidyHtmlOut, yes );
+  else { tidyOptSetBool( tdoc, TidyHtmlOut, no ); }
+
+  if (decider % 3 == 2) tidyOptSetBool( tdoc, TidyXmlOut, yes );
+  else { tidyOptSetBool( tdoc, TidyXmlOut, no ); }
+
+  // Set options 
+  for (int i=0; i < sizeof(bool_options)/sizeof(TidyOptionId); i++) {
+    set_option(&data, &size, &tdoc, bool_options[i]);
+  }
+
+  // Set an error buffer.
+  tidySetErrorBuffer(tdoc, errbuf);
+
+  // Parse the data
+  decider = *data;
+  data++; size--;
+  switch (decider % 2) {
+    case 0: {
+      char filename[256];
+      sprintf(filename, "/tmp/libfuzzer.%d", getpid());
+
+      FILE *fp = fopen(filename, "wb");
+      if (!fp) {
+          return 0;
+      }
+      fwrite(data, size, 1, fp);
+      fclose(fp);
+
+      tidyParseFile(tdoc, filename);
+      unlink(filename);
+    }
+    break;
+    case 1: {
+      char *inp = malloc(size+1);
+      inp[size] = '\0';
+      memcpy(inp, data, size);
+      tidyParseString(tdoc, inp);
+      free(inp);
+    }
+  }
+
+  // Cleanup
+  tidyRelease( tdoc );
+
+  return 0;
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  TidyBuffer fuzz_toutput;
+  TidyBuffer fuzz_terror;
+
+  tidyBufInit(&fuzz_toutput);
+  tidyBufInit(&fuzz_terror);
+
+  TidyXhtml(data, size, &fuzz_toutput, &fuzz_terror);
+
+  tidyBufFree(&fuzz_toutput);
+  tidyBufFree(&fuzz_terror);
+
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/tidy-html5/tidy_parse_string_fuzzer.c`
+
+~~~~c
+/*
+ * Copyright 2021 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include <sys/types.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdint.h>
+#include "tidybuffio.h"
+#include "tidy.h"
+
+
+int TidyXhtml(const char* input, TidyBuffer* output, TidyBuffer* errbuf) {
+  TidyDoc tdoc = tidyCreate();
+  tidyOptSetBool( tdoc, TidyXhtmlOut, yes );
+  tidySetErrorBuffer(tdoc, errbuf);
+
+  tidyParseString(tdoc, input);
+
+  tidyCleanAndRepair(tdoc);
+  tidyRunDiagnostics(tdoc);
+  tidyOptSetBool(tdoc, TidyForceOutput, yes);
+  tidySaveBuffer(tdoc, output);
+  tidyRelease( tdoc );
+  return 0;
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  char *fuzz_inp = malloc(size+1);
+  memcpy(fuzz_inp, data, size);
+  fuzz_inp[size] = '\0';
+
+  TidyBuffer fuzz_toutput;
+  TidyBuffer fuzz_terror;
+
+  tidyBufInit(&fuzz_toutput);
+  tidyBufInit(&fuzz_terror);
+
+  TidyXhtml(fuzz_inp, &fuzz_toutput, &fuzz_terror);
+
+  tidyBufFree(&fuzz_toutput);
+  tidyBufFree(&fuzz_terror);
+  free(fuzz_inp);
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/tidy-html5/tidy_parse_file_fuzzer.c`
+
+~~~~c
+/*
+ * Copyright 2021 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include <sys/types.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <unistd.h>
+#include "tidybuffio.h"
+#include "tidy.h"
+
+
+int TidyXhtml(const uint8_t* data, size_t size, TidyBuffer* output, TidyBuffer* errbuf) {
+  Bool ok;
+
+  TidyDoc tdoc = tidyCreate();
+
+  ok = tidyOptSetBool( tdoc, TidyXhtmlOut, yes );
+  if (ok) tidySetErrorBuffer(tdoc, errbuf);
+ 
+  char filename[256];
+  sprintf(filename, "/tmp/libfuzzer.%d", getpid());
+
+  FILE *fp = fopen(filename, "wb");
+  if (!fp) {
+    return 0;
+  }
+  fwrite(data, size, 1, fp);
+  fclose(fp);
+
+  tidyParseFile(tdoc, filename);
+
+  tidyRelease( tdoc );
+  unlink(filename);
+
+  return 0;
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  TidyBuffer fuzz_toutput;
+  TidyBuffer fuzz_terror;
+
+  tidyBufInit(&fuzz_toutput);
+  tidyBufInit(&fuzz_terror);
+
+  TidyXhtml(data, size, &fuzz_toutput, &fuzz_terror);
+
+  tidyBufFree(&fuzz_toutput);
+  tidyBufFree(&fuzz_terror);
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/tidy-html5/tidy_xml_fuzzer.c`
+
+~~~~c
+/*
+ * Copyright 2021 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include <sys/types.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdint.h>
+#include "tidy.h"
+#include "tidybuffio.h"
+#include "tidyenum.h"
+#include "tidyplatform.h"
+
+void TidyXml(char *fuzz_inp, TidyBuffer *toutput,
+             TidyBuffer *terror) {
+  TidyDoc tdoc = tidyCreate();
+  tidyBufClear(toutput);
+  tidyBufClear(terror);
+  if (tidyOptSetBool(tdoc, TidyXmlOut, yes)) {
+    tidySetCharEncoding(tdoc, "utf8");
+    tidySetErrorBuffer(tdoc, terror);
+    tidyOptSetInt(tdoc, TidyWrapLen, 0);
+    tidyOptSetBool(tdoc, TidyXmlTags, yes);
+    tidyOptSetBool(tdoc, TidyQuoteNbsp, no);
+    tidyOptSetBool(tdoc, TidyNumEntities, yes);
+    tidyOptSetBool(tdoc, TidyQuiet, yes);
+    tidyOptSetBool(tdoc, TidyMark, no);
+    tidyOptSetBool(tdoc, TidyShowWarnings, no);
+    tidyParseString(tdoc, fuzz_inp);
+    tidyCleanAndRepair(tdoc);
+    tidyRunDiagnostics(tdoc);
+    tidySaveBuffer(tdoc, toutput);
+  }
+
+  tidyRelease(tdoc);
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+  char *fuzz_inp = malloc(size+1);
+  memcpy(fuzz_inp, data, size);
+  fuzz_inp[size] = '\0';
+
+  TidyBuffer fuzz_toutput;
+  TidyBuffer fuzz_terror;
+
+  tidyBufInit(&fuzz_toutput);
+  tidyBufInit(&fuzz_terror);
+
+  TidyXml(fuzz_inp, &fuzz_toutput, &fuzz_terror);
+
+  free(fuzz_inp);
+  tidyBufFree(&fuzz_toutput);
+  tidyBufFree(&fuzz_terror);
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/tidy-html5/tidy_config_fuzzer.c`
+
+~~~~c
+// Copyright 2018 Google Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "fuzzer_temp_file.h"
+#include "tidy.h"
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+    TidyDoc tdoc = tidyCreate();
+
+    // At the time this fuzzer was written, the configuration parser could
+    // only be exercised via a file interface.
+    char* tmpfile = fuzzer_get_tmpfile(data, size);
+    tidyLoadConfig(tdoc, tmpfile);
+    fuzzer_release_tmpfile(tmpfile);
+    tidyRelease(tdoc);
+    return 0;
+}
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `src/fileio.c`
+- `src/lexer.c`
+- `src/message.c`
+- `src/messageobj.c`
+- `src/parser.c`
+- `src/pprint.c`
+- `src/streamio.c`
+
+~~~~diff
+diff --git a/src/fileio.c b/src/fileio.c
+--- a/src/fileio.c
++++ b/src/fileio.c
+@@ -73,13 +73,14 @@ int TY_(initFileSource)( TidyAllocator *allocator, TidyInputSource* inp, FILE* f
+ void TY_(freeFileSource)( TidyInputSource* inp, Bool closeIt )
+ {
+     FileSource* fin = (FileSource*) inp->sourceData;
+     if ( closeIt && fin && fin->fp )
+       fclose( fin->fp );
+     tidyBufFree( &fin->unget );
+-    TidyFree( fin->unget.allocator, fin );
++    if (fin)
++        TidyFree( fin->unget.allocator, fin );
+ }
+ 
+ void TIDY_CALL TY_(filesink_putByte)( void* sinkData, byte bv )
+ {
+   FILE* fout = (FILE*) sinkData;
+   fputc( bv, fout );
+diff --git a/src/lexer.c b/src/lexer.c
+--- a/src/lexer.c
++++ b/src/lexer.c
+@@ -4474,13 +4474,13 @@ Stack* TY_(newStack)(TidyDocImpl *doc, uint capacity)
+  *  will panic the program automatically.
+  */
+ void TY_(growStack)(Stack *stack)
+ {
+     uint new_capacity = stack->capacity * 2;
+     
+-    Node **firstNode = (Node **)TidyAlloc(stack->allocator, new_capacity);
++    Node **firstNode = (Node **)TidyAlloc(stack->allocator, new_capacity * sizeof(Node**));
+     
+     memcpy( firstNode, stack->firstNode, sizeof(Node**) * (stack->top + 1) );
+     TidyFree(stack->allocator, stack->firstNode);
+ 
+     stack->firstNode = firstNode;
+     stack->capacity = new_capacity;
+diff --git a/src/message.c b/src/message.c
+--- a/src/message.c
++++ b/src/message.c
+@@ -789,25 +789,25 @@ TidyMessageImpl *formatStandard(TidyDocImpl* doc, Node *element, Node *node, uin
+         case ELEMENT_VERS_MISMATCH_ERROR:
+         case ELEMENT_VERS_MISMATCH_WARN:
+             return TY_(tidyMessageCreateWithNode)(doc, node, code, level, nodedesc, HTMLVersion(doc) );
+ 
+         case TAG_NOT_ALLOWED_IN:
+             /* Can we use `rpt` here? No; `element` has a value in every case. */
+-            return TY_(tidyMessageCreateWithNode)(doc, node, code, level, nodedesc, element->element );
++            return TY_(tidyMessageCreateWithNode)(doc, node, code, level, nodedesc, element ? element->element : NULL );
+ 
+         case INSERTING_TAG:
+         case MISSING_STARTTAG:
+         case TOO_MANY_ELEMENTS:
+         case UNEXPECTED_ENDTAG:
+         case UNEXPECTED_ENDTAG_ERR:  /* generated by XML docs */
+             /* Can we use `rpt` here? No; `element` has a value in every case. */
+             return TY_(tidyMessageCreateWithNode)(doc, node, code, level, node->element );
+ 
+         case UNEXPECTED_ENDTAG_IN:
+             /* Can we use `rpt` here? No; `element` has a value in every case. */
+-            return TY_(tidyMessageCreateWithNode)(doc, node, code, level, node->element, element->element );
++            return TY_(tidyMessageCreateWithNode)(doc, node, code, level, node->element, element ? element->element : NULL );
+ 
+         case BAD_CDATA_CONTENT:
+         case CONTENT_AFTER_BODY:
+         case DOCTYPE_AFTER_TAGS:
+         case DUPLICATE_FRAMESET:
+         case MALFORMED_COMMENT:
+@@ -845,22 +845,22 @@ TidyMessageImpl *formatStandard(TidyDocImpl* doc, Node *element, Node *node, uin
+         case UNKNOWN_ELEMENT_LOOKS_CUSTOM:
+             return TY_(tidyMessageCreateWithNode)(doc, rpt, code, level, nodedesc );
+ 
+         case MISSING_ENDTAG_FOR:
+         case MISSING_ENDTAG_OPTIONAL:
+         case PREVIOUS_LOCATION:
+-            return TY_(tidyMessageCreateWithNode)(doc, rpt, code, level, element->element );
++            return TY_(tidyMessageCreateWithNode)(doc, rpt, code, level, element? element->element : NULL );
+ 
+         case MISSING_ENDTAG_BEFORE:
+-            return TY_(tidyMessageCreateWithNode)(doc, rpt, code, level, element->element, nodedesc );
++            return TY_(tidyMessageCreateWithNode)(doc, rpt, code, level, element? element->element : NULL, nodedesc );
+ 
+         case COERCE_TO_ENDTAG:
+         case NON_MATCHING_ENDTAG:
+             return TY_(tidyMessageCreateWithNode)(doc, rpt, code, level, node->element, node->element );
+         case TOO_MANY_ELEMENTS_IN:
+-            return TY_(tidyMessageCreateWithNode)(doc, rpt, code, level, node->element, element->element);
++            return TY_(tidyMessageCreateWithNode)(doc, rpt, code, level, node->element, element ? element->element : NULL);
+ 
+     }
+ 
+     return NULL;
+ }
+ 
+@@ -1501,13 +1501,13 @@ uint TY_(getNextErrorCode)( TidyIterator* iter )
+     {
+         item = &tidyStringsKeys[itemIndex - 1];
+         itemIndex++;
+     }
+     
+     *iter = (TidyIterator)( itemIndex <= tidyErrorCodeListSize() ? itemIndex : (size_t)0 );
+-    return item->value;
++    return item ? item->value : 0;
+ }
+ 
+ 
+ /*********************************************************************
+  * Documentation of configuration options
+  *
+diff --git a/src/messageobj.c b/src/messageobj.c
+--- a/src/messageobj.c
++++ b/src/messageobj.c
+@@ -200,13 +200,12 @@ static TidyMessageImpl *tidyMessageCreateInitV( TidyDocImpl *doc,
+         i = TY_(tmbstrlen)(result->messageOutputDefault);
+         if (i < sizeMessageBuf)
+             TY_(tmbsnprintf)(result->messageOutputDefault + i, sizeMessageBuf - i, " (%s)", pc );
+         i = TY_(tmbstrlen)(result->messageOutput);
+         if (i < sizeMessageBuf)
+             TY_(tmbsnprintf)(result->messageOutput + i, sizeMessageBuf - i, " (%s)", pc );
+-        i = 0;
+     }
+ 
+     result->allowMessage = yes;
+ 
+     /* reportFilter is a simple error filter that provides minimal information
+        to callback functions, and includes the message buffer in LibTidy's
+diff --git a/src/parser.c b/src/parser.c
+--- a/src/parser.c
++++ b/src/parser.c
+@@ -2342,13 +2342,13 @@ void* TY_(oldParseDefList)(TidyDocImpl* doc, Node *list, GetTokenMode mode)
+             lexer->excludeBlocks = yes;
+ 
+             /* now create a new dl element,
+              * unless node has been blown away because the
+              * center was empty, as above.
+              */
+-            if (parent->last == node)
++            if (parent && parent->last == node)
+             {
+                 list = TY_(InferredTag)(doc, TidyTag_DL);
+                 TY_(InsertNodeAfterElement)(node, list);
+             }
+             continue;
+         }
+@@ -4222,20 +4222,20 @@ void* TY_(oldParseFrameSet)(TidyDocImpl* doc, Node *frameset, GetTokenMode ARG_U
+         {
+             TY_(UngetToken)( doc );
+             node = TY_(InferredTag)(doc, TidyTag_NOFRAMES);
+             TY_(Report)(doc, frameset, node, INSERTING_TAG);
+         }
+ 
+-        if (node->type == StartTag && (node->tag->model & CM_FRAMES))
++        if (node->type == StartTag && (node->tag && node->tag->model & CM_FRAMES))
+         {
+             TY_(InsertNodeAtEnd)(frameset, node);
+             lexer->excludeBlocks = no;
+             ParseTag(doc, node, MixedContent);
+             continue;
+         }
+-        else if (node->type == StartEndTag && (node->tag->model & CM_FRAMES))
++        else if (node->type == StartEndTag && (node->tag && node->tag->model & CM_FRAMES))
+         {
+             TY_(InsertNodeAtEnd)(frameset, node);
+             continue;
+         }
+ 
+         /* discard unexpected tags */
+@@ -4342,13 +4342,13 @@ Node* TY_(ParseHTML)( TidyDocImpl *doc, Node *html, GetTokenMode mode, Bool popS
+                     state = STATE_PARSE_HEAD;
+                     keepToken = yes;
+                     continue;
+                 }
+ 
+                 /* We did not expect to find an html closing tag here! */
+-                if (node->tag == html->tag && node->type == EndTag)
++                if (html && (node->tag == html->tag) && (node->type == EndTag))
+                 {
+                     TY_(Report)(doc, html, node, DISCARDING_UNEXPECTED);
+                     TY_(FreeNode)( doc, node);
+                     continue;
+                 }
+ 
+@@ -5379,13 +5379,14 @@ Node* TY_(ParseNamespace)( TidyDocImpl* doc, Node *basenode, GetTokenMode mode,
+                    assert(outside == yes ? n == basenode->parent : 1);
+                    =================================================== */
+ 
+                 if (outside == no)
+                 {
+                     /* EndTag for a node within the basenode subtree. Roll on... */
+-                    n->closed = yes;
++                    if (n)
++                        n->closed = yes;
+                     TY_(FreeNode)(doc, node);
+ 
+                     node = n;
+                     parent = node->parent;
+                 }
+                 else
+diff --git a/src/pprint.c b/src/pprint.c
+--- a/src/pprint.c
++++ b/src/pprint.c
+@@ -1187,14 +1187,12 @@ static void PPrintAttribute( TidyDocImpl* doc, uint indent,
+     {
+         if ( TY_(nodeIsElement)(node) && !first )
+         {
+             indent += xtra;
+             PCondFlushLineSmart( doc, indent );
+         }
+-        else
+-          indAttrs = no;
+     }
+ 
+     CheckWrapIndent( doc, indent );
+ 
+     if ( !xmlOut && !xhtmlOut && attr->dict )
+     {
+diff --git a/src/streamio.c b/src/streamio.c
+--- a/src/streamio.c
++++ b/src/streamio.c
+@@ -587,22 +587,20 @@ void TY_(WriteChar)( uint c, StreamOut* out )
+         int i, numChars = 1;
+         uint theChars[2];
+         
+         if ( !TY_(IsValidUTF16FromUCS4)(c) )
+         {
+             /* invalid UTF-16 value */
+-            c = 0;
+             numChars = 0;
+         }
+         else if ( TY_(IsCombinedChar)(c) )
+         {
+             /* output both, unless something goes wrong */
+             numChars = 2;
+             if ( !TY_(SplitSurrogatePair)(c, &theChars[0], &theChars[1]) )
+             {
+-                c = 0;
+                 numChars = 0;
+             }
+         }
+         else
+         {
+             /* just put the char out */
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C082","maintenance_needed":false,"confidence":98,"change_types":["bug_fix","defensive_null_checks","memory_allocation_correction"],"affected_functions":["TY_(freeFileSource)","TY_(growStack)","formatStandard","TY_(getNextErrorCode)","tidyMessageCreateInitV","TY_(oldParseDefList)","TY_(oldParseFrameSet)","TY_(ParseHTML)","TY_(ParseNamespace)","PPrintAttribute","TY_(WriteChar)"],"reason":"The commit consists of defensive null checks, a corrected stack-allocation size, and removal of redundant assignments. It introduces no new entry point, feature, configuration option, initialization requirement, API protocol, or input constraint. The existing fuzzers already drive the relevant high-level parsing, diagnostics, cleanup, and serialization paths using buffer, string, and file inputs, so no harness change is required to make the changed code reachable under its existing state model.","evidence":["tidy_fuzzer invokes tidyParseBuffer, tidyCleanAndRepair, tidyRunDiagnostics, and tidySaveBuffer, covering parser, message-generation, cleanup, and output paths affected by the diff.","tidy_parse_string_fuzzer and tidy_xml_fuzzer exercise tidyParseString followed by cleanup, diagnostics, and serialization; tidy_parse_file_fuzzer and tidy_general_fuzzer also exercise tidyParseFile.","TY_(growStack) only changes TidyAlloc from new_capacity bytes to new_capacity * sizeof(Node**) bytes; its caller-facing behavior and input requirements are unchanged.","Changes in parser.c and message.c add checks such as parent &&, node->tag &&, html &&, n checks, and conditional element access; they do not add a distinct mode or required setup.","The fileio.c, messageobj.c, pprint.c, and streamio.c edits are internal correctness fixes with unchanged public APIs and no new harness-controlled state."] ,"recommended_action":"Keep the existing fuzz harnesses unchanged; no maintenance is justified by this source diff alone."}
+tokens used
+10,298

@@ -1,0 +1,138 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8097-s30c6ofm
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093ff-4fc5-7ab0-8873-c7098d75a52f
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8097
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `contrib/oss-fuzz/libarchive_cab_fuzzer.cc`
+
+~~~~cpp
+/*
+ * CAB (Microsoft Cabinet) format fuzzer for libarchive
+ */
+#include <stddef.h>
+#include <stdint.h>
+#include <vector>
+
+#include "archive.h"
+#include "archive_entry.h"
+#include "fuzz_helpers.h"
+
+static constexpr size_t kMaxInputSize = 512 * 1024;
+
+
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *buf, size_t len) {
+  if (len == 0 || len > kMaxInputSize) {
+    return 0;
+  }
+
+  struct archive *a = archive_read_new();
+  if (a == NULL) {
+    return 0;
+  }
+
+  archive_read_support_format_cab(a);
+  archive_read_support_filter_all(a);
+
+  Buffer buffer = {buf, len, 0};
+  if (archive_read_open(a, &buffer, NULL, reader_callback, NULL) != ARCHIVE_OK) {
+    archive_read_free(a);
+    return 0;
+  }
+
+  std::vector<uint8_t> data_buffer(4096, 0);
+  struct archive_entry *entry;
+
+  while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+    archive_entry_pathname(entry);
+    archive_entry_size(entry);
+    archive_entry_mtime(entry);
+    archive_entry_mode(entry);
+
+    ssize_t r;
+    while ((r = archive_read_data(a, data_buffer.data(), data_buffer.size())) > 0)
+      ;
+  }
+
+  archive_read_free(a);
+  return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/libarchive/archive_read_support_format_cab.c b/libarchive/archive_read_support_format_cab.c
+index b566d59b..ede004ea 100644
+--- a/libarchive/archive_read_support_format_cab.c
++++ b/libarchive/archive_read_support_format_cab.c
+@@ -3256,22 +3256,23 @@ static int
+ lzx_huffman_init(struct huffman *hf, uint16_t symbol_count, uint8_t tbl_bits)
+ {
+ 	size_t tbl_size = (size_t)1 << tbl_bits;
+ 
+ 	if (hf->bitlen == NULL || hf->symbol_count != symbol_count) {
+ 		free(hf->bitlen);
+ 		hf->bitlen = calloc(symbol_count, sizeof(hf->bitlen[0]));
+ 		if (hf->bitlen == NULL)
+ 			return (ARCHIVE_FATAL);
+ 		hf->symbol_count = symbol_count;
+ 	} else
+ 		memset(hf->bitlen, 0, symbol_count * sizeof(hf->bitlen[0]));
+ 	if (hf->tbl == NULL) {
+ 		hf->tbl = calloc(tbl_size, sizeof(hf->tbl[0]));
+ 		if (hf->tbl == NULL)
+ 			return (ARCHIVE_FATAL);
+ 		hf->tbl_bits = tbl_bits;
+ 	} else
+-		memset(hf->tbl, 0, tbl_size * sizeof(hf->bitlen[0]));
++		memset(hf->tbl, 0,
++		    ((size_t)1 << hf->tbl_bits) * sizeof(hf->tbl[0]));
+ 	return (ARCHIVE_OK);
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8097","gap_exists":false,"gap_type":[],"confidence":97,"affected_functions":["lzx_huffman_init","LLVMFuzzerTestOneInput"],"reason":"H0 directly enables CAB parsing with archive_read_support_format_cab and consumes entry payloads through archive_read_data, which reaches CAB decompression internals such as lzx_huffman_init for suitable inputs. Its loop can process multiple entries and compressed blocks within one archive, so the existing-table reinitialization branch guarded by hf->tbl != NULL is fuzzable without a separate entry point, protocol, state, or configuration.","evidence":["S1 changes only lzx_huffman_init in libarchive/archive_read_support_format_cab.c.","H0 calls archive_read_support_format_cab(a), selecting the changed production format implementation.","H0 repeatedly calls archive_read_next_header and drains each entry with archive_read_data, exercising compressed CAB payload processing.","The changed branch depends on internal Huffman-table reuse through hf->tbl and hf->tbl_bits; no omitted public API or external configuration is shown in the supplied case."],"recommended_action":"Keep H0 as-is; use CAB corpus inputs containing LZX-compressed data with repeated Huffman-table initialization to improve reachability."}
+tokens used
+4,404

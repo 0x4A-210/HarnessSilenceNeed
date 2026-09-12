@@ -1,0 +1,198 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/maintenance-gap_only-C057-klz8rf69
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0863e-f3bb-7941-a3aa-404c7afcb83c
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C057
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `c/fuzz/decode_fuzzer.c`
+
+~~~~c
+// Copyright 2015 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#include <brotli/decode.h>
+
+// Entry point for LibFuzzer.
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  size_t addend = 0;
+  if (size > 0)
+    addend = data[size - 1] & 7;
+  const uint8_t* next_in = data;
+
+  const int kBufferSize = 1024;
+  uint8_t* buffer = (uint8_t*) malloc(kBufferSize);
+  if (!buffer) {
+    // OOM is out-of-scope here.
+    return 0;
+  }
+  /* The biggest "magic number" in brotli is 16MiB - 16, so no need to check
+     the cases with much longer output. */
+  const size_t total_out_limit = (addend == 0) ? (1 << 26) : (1 << 24);
+  size_t total_out = 0;
+
+  BrotliDecoderState* state = BrotliDecoderCreateInstance(0, 0, 0);
+
+  if (addend == 0)
+    addend = size;
+  /* Test both fast (addend == size) and slow (addend <= 7) decoding paths. */
+  for (size_t i = 0; i < size;) {
+    size_t next_i = i + addend;
+    if (next_i > size)
+      next_i = size;
+    size_t avail_in = next_i - i;
+    i = next_i;
+    BrotliDecoderResult result = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
+    while (result == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
+      size_t avail_out = kBufferSize;
+      uint8_t* next_out = buffer;
+      result = BrotliDecoderDecompressStream(
+          state, &avail_in, &next_in, &avail_out, &next_out, &total_out);
+      if (total_out > total_out_limit)
+        break;
+    }
+    if (total_out > total_out_limit)
+      break;
+    if (result != BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT)
+      break;
+  }
+
+  BrotliDecoderDestroyInstance(state);
+  free(buffer);
+  return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/brotli/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2016 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+cmake . -DBUILD_TESTING=OFF
+make clean
+make -j$(nproc) brotlidec-static
+
+$CC $CFLAGS -c -std=c99 -I. -I./c/include c/fuzz/decode_fuzzer.c 
+
+$CXX $CXXFLAGS ./decode_fuzzer.o  -o $OUT/decode_fuzzer \
+    $LIB_FUZZING_ENGINE ./libbrotlidec-static.a ./libbrotlicommon-static.a
+
+cp java/org/brotli/integration/fuzz_data.zip $OUT/decode_fuzzer_seed_corpus.zip
+chmod a-x $OUT/decode_fuzzer_seed_corpus.zip # we will try to run it otherwise
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `c/dec/decode.c`
+- `c/enc/encode.c`
+
+~~~~diff
+diff --git a/c/dec/decode.c b/c/dec/decode.c
+--- a/c/dec/decode.c
++++ b/c/dec/decode.c
+@@ -2030,14 +2030,16 @@ static BROTLI_NOINLINE BrotliDecoderErrorCode ProcessCommands(
+ static BROTLI_NOINLINE BrotliDecoderErrorCode SafeProcessCommands(
+     BrotliDecoderState* s) {
+   return ProcessCommandsInternal(1, s);
+ }
+ 
+ BrotliDecoderResult BrotliDecoderDecompress(
+-    size_t encoded_size, const uint8_t* encoded_buffer, size_t* decoded_size,
+-    uint8_t* decoded_buffer) {
++    size_t encoded_size,
++    const uint8_t encoded_buffer[BROTLI_ARRAY_PARAM(encoded_size)],
++    size_t* decoded_size,
++    uint8_t decoded_buffer[BROTLI_ARRAY_PARAM(*decoded_size)]) {
+   BrotliDecoderState s;
+   BrotliDecoderResult result;
+   size_t total_out = 0;
+   size_t available_in = encoded_size;
+   const uint8_t* next_in = encoded_buffer;
+   size_t available_out = *decoded_size;
+diff --git a/c/enc/encode.c b/c/enc/encode.c
+--- a/c/enc/encode.c
++++ b/c/enc/encode.c
+@@ -1467,14 +1467,15 @@ static size_t MakeUncompressedStream(
+   output[result++] = 3;
+   return result;
+ }
+ 
+ BROTLI_BOOL BrotliEncoderCompress(
+     int quality, int lgwin, BrotliEncoderMode mode, size_t input_size,
+-    const uint8_t* input_buffer, size_t* encoded_size,
+-    uint8_t* encoded_buffer) {
++    const uint8_t input_buffer[BROTLI_ARRAY_PARAM(input_size)],
++    size_t* encoded_size,
++    uint8_t encoded_buffer[BROTLI_ARRAY_PARAM(*encoded_size)]) {
+   BrotliEncoderState* s;
+   size_t out_size = *encoded_size;
+   const uint8_t* input_start = input_buffer;
+   uint8_t* output_start = encoded_buffer;
+   size_t max_out_size = BrotliEncoderMaxCompressedSize(input_size);
+   if (out_size == 0) {
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C057","gap_exists":true,"gap_type":["entry_point","API protocol","configuration","input/output size semantics","encoder attack surface"],"confidence":96,"affected_functions":["BrotliEncoderCompress","BrotliDecoderDecompress"],"reason":"H0 exercises only the streaming decoder through BrotliDecoderDecompressStream. S1 explicitly includes the one-shot encoder BrotliEncoderCompress and one-shot decoder BrotliDecoderDecompress, whose buffer extents are coupled to input_size, encoded_size, and decoded_size. The encoder is wholly unexercised, including quality, lgwin, mode, output-capacity, and zero-capacity behavior; the one-shot decoder wrapper and its decoded-buffer capacity protocol are also absent.","evidence":["decode_fuzzer.c calls BrotliDecoderCreateInstance, BrotliDecoderDecompressStream, and BrotliDecoderDestroyInstance, but never calls BrotliDecoderDecompress or BrotliEncoderCompress.","build.sh builds and links brotlidec-static and libbrotlicommon-static, but does not build or link an encoder library.","S1 changes BrotliEncoderCompress parameters to input_buffer[BROTLI_ARRAY_PARAM(input_size)] and encoded_buffer[BROTLI_ARRAY_PARAM(*encoded_size)], directly identifying caller-controlled size/buffer relationships.","The visible BrotliEncoderCompress body reads out_size from *encoded_size and has an explicit out_size == 0 branch, exposing output-capacity semantics not covered by H0.","S1 likewise changes BrotliDecoderDecompress to relate encoded_buffer to encoded_size and decoded_buffer to *decoded_size, while H0 covers only the distinct streaming API."],"recommended_action":"Add a one-shot encoder target that derives quality, lgwin, mode, and output capacity from fuzz input and calls BrotliEncoderCompress, preferably validating successful output by decoding it. Also add direct BrotliDecoderDecompress coverage with varied decoded_size capacities, including zero and undersized buffers, while supplying storage consistent with the declared extents."}
+tokens used
+5,399

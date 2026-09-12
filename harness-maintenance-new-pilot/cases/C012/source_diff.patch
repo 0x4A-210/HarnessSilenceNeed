@@ -1,0 +1,139 @@
+diff --git a/ares__get_hostent.c b/ares__get_hostent.c
+--- a/ares__get_hostent.c
++++ b/ares__get_hostent.c
+@@ -135,14 +135,13 @@ int ares__get_hostent(FILE *fp, int family, struct hostent **host)
+       /* Convert address string to network address for the requested family. */
+       addrlen = 0;
+       addr.family = AF_UNSPEC;
+       addr.addrV4.s_addr = INADDR_NONE;
+       if ((family == AF_INET) || (family == AF_UNSPEC))
+         {
+-          addr.addrV4.s_addr = inet_addr(txtaddr);
+-          if (addr.addrV4.s_addr != INADDR_NONE)
++          if (ares_inet_pton(AF_INET, txtaddr, &addr.addrV4) > 0)
+             {
+               /* Actual network address family and length. */
+               addr.family = AF_INET;
+               addrlen = sizeof(addr.addrV4);
+             }
+         }
+diff --git a/ares__readaddrinfo.c b/ares__readaddrinfo.c
+--- a/ares__readaddrinfo.c
++++ b/ares__readaddrinfo.c
+@@ -167,14 +167,13 @@ int ares__readaddrinfo(FILE *fp,
+        * Convert address string to network address for the requested families.
+        * Actual address family possible values are AF_INET and AF_INET6 only.
+        */
+       if ((hints->ai_family == AF_INET) || (hints->ai_family == AF_UNSPEC))
+         {
+           addr.sa4.sin_port = htons(port);
+-          addr.sa4.sin_addr.s_addr = inet_addr(txtaddr);
+-          if (addr.sa4.sin_addr.s_addr != INADDR_NONE)
++          if (ares_inet_pton(AF_INET, txtaddr, &addr.sa4.sin_addr) > 0)
+             {
+               node = ares__append_addrinfo_node(&nodes);
+               if(!node)
+                 {
+                   goto enomem;
+                 }
+diff --git a/ares_getaddrinfo.c b/ares_getaddrinfo.c
+--- a/ares_getaddrinfo.c
++++ b/ares_getaddrinfo.c
+@@ -310,20 +310,19 @@ static int fake_addrinfo(const char *name,
+             }
+         }
+ 
+       memset(&addr, 0, sizeof(addr));
+ 
+       /* if we don't have 3 dots, it is illegal
+-       * (although inet_addr doesn't think so).
++       * (although inet_pton doesn't think so).
+        */
+       if (numdots != 3 || !valid)
+         result = 0;
+       else
+         result =
+-            ((addr.sa4.sin_addr.s_addr = inet_addr(name)) == INADDR_NONE ? 0
+-                                                                         : 1);
++            (ares_inet_pton(AF_INET, name, &addr.sa4.sin_addr) < 1 ? 0 : 1);
+ 
+       if (result)
+         {
+           family = addr.sa.sa_family = AF_INET;
+           addr.sa4.sin_port = htons(port);
+           addrlen = sizeof(addr.sa4);
+diff --git a/ares_gethostbyname.c b/ares_gethostbyname.c
+--- a/ares_gethostbyname.c
++++ b/ares_gethostbyname.c
+@@ -210,13 +210,13 @@ static void host_callback(void *arg, int status, int timeouts,
+           }
+           if (host && channel->nsort)
+             sort6_addresses(host, channel->sortlist, channel->nsort);
+         }
+       if (status == ARES_SUCCESS && host && host->h_addr_list[0] == NULL)
+       {
+-        /* The query returned something but had no A/AAAA record 
++        /* The query returned something but had no A/AAAA record
+            (even after potentially retrying AAAA with A)
+            so we should treat this as an error */
+         status = ARES_ENODATA;
+       }
+       end_hquery(hquery, status, host);
+     }
+@@ -271,18 +271,18 @@ static int fake_hostent(const char *name, int family,
+           } else if (*p == '.') {
+             numdots++;
+           }
+         }
+ 
+       /* if we don't have 3 dots, it is illegal
+-       * (although inet_addr doesn't think so).
++       * (although inet_pton doesn't think so).
+        */
+       if (numdots != 3 || !valid)
+         result = 0;
+       else
+-        result = ((in.s_addr = inet_addr(name)) == INADDR_NONE ? 0 : 1);
++        result = (ares_inet_pton(AF_INET, name, &in) < 1 ? 0 : 1);
+ 
+       if (result)
+         family = AF_INET;
+     }
+   if (family == AF_INET6)
+     result = (ares_inet_pton(AF_INET6, name, &in6) < 1 ? 0 : 1);
+diff --git a/ares_init.c b/ares_init.c
+--- a/ares_init.c
++++ b/ares_init.c
+@@ -2294,13 +2294,13 @@ static int set_search(ares_channel channel, const char *str)
+     /* if we already have some domains present, free them first */
+     ares_strsplit_free(channel->domains, channel->ndomains);
+     channel->domains = NULL;
+     channel->ndomains = -1;
+   } /* LCOV_EXCL_STOP */
+ 
+-  channel->domains  = ares_strsplit(str, ", ", 1, &cnt); 
++  channel->domains  = ares_strsplit(str, ", ", 1, &cnt);
+   channel->ndomains = (int)cnt;
+   if (channel->domains == NULL || channel->ndomains == 0) {
+     channel->domains  = NULL;
+     channel->ndomains = -1;
+   }
+ 
+@@ -2420,15 +2420,15 @@ static int ip_addr(const char *ipbuf, ares_ssize_t len, struct in_addr *addr)
+ {
+ 
+   /* Four octets and three periods yields at most 15 characters. */
+   if (len > 15)
+     return -1;
+ 
+-  addr->s_addr = inet_addr(ipbuf);
+-  if (addr->s_addr == INADDR_NONE && strcmp(ipbuf, "255.255.255.255") != 0)
++  if (ares_inet_pton(AF_INET, ipbuf, addr) < 1)
+     return -1;
++
+   return 0;
+ }
+ 
+ static void natural_mask(struct apattern *pat)
+ {
+   struct in_addr addr;

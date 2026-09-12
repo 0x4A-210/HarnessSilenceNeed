@@ -1,0 +1,3637 @@
+diff --git a/src/lib/Makefile.inc b/src/lib/Makefile.inc
+index a60d61e..fe34b15 100644
+--- a/src/lib/Makefile.inc
++++ b/src/lib/Makefile.inc
+@@ -45,6 +45,7 @@ CSOURCES = ares_addrinfo2hostent.c	\
+   dsa/ares_array.c			\
+   dsa/ares_htable.c			\
+   dsa/ares_htable_asvp.c		\
++  dsa/ares_htable_dict.c		\
+   dsa/ares_htable_strvp.c		\
+   dsa/ares_htable_szvp.c		\
+   dsa/ares_htable_vpstr.c		\
+@@ -88,7 +89,8 @@ CSOURCES = ares_addrinfo2hostent.c	\
+   util/ares_threads.c			\
+   util/ares_timeval.c			\
+   util/ares_math.c			\
+-  util/ares_rand.c
++  util/ares_rand.c			\
++  util/ares_uri.c
+ 
+ HHEADERS = ares_android.h			\
+   ares_conn.h				\
+@@ -106,6 +108,7 @@ HHEADERS = ares_android.h			\
+   include/ares_array.h			\
+   include/ares_buf.h			\
+   include/ares_htable_asvp.h		\
++  include/ares_htable_dict.h		\
+   include/ares_htable_strvp.h		\
+   include/ares_htable_szvp.h		\
+   include/ares_htable_vpstr.h		\
+@@ -120,4 +123,5 @@ HHEADERS = ares_android.h			\
+   util/ares_math.h			\
+   util/ares_rand.h			\
+   util/ares_time.h			\
++  util/ares_uri.h			\
+   thirdparty/apple/dnsinfo.h
+diff --git a/src/lib/ares_private.h b/src/lib/ares_private.h
+index 4b4550a..2f20da3 100644
+--- a/src/lib/ares_private.h
++++ b/src/lib/ares_private.h
+@@ -51,6 +51,7 @@
+ #include "ares_htable_strvp.h"
+ #include "ares_htable_szvp.h"
+ #include "ares_htable_asvp.h"
++#include "ares_htable_dict.h"
+ #include "ares_htable_vpvp.h"
+ #include "ares_htable_vpstr.h"
+ #include "record/ares_dns_multistring.h"
+@@ -62,6 +63,7 @@
+ #include "ares_conn.h"
+ #include "ares_str.h"
+ #include "str/ares_strsplit.h"
++#include "util/ares_uri.h"
+ 
+ #ifndef HAVE_GETENV
+ #  include "ares_getenv.h"
+diff --git a/src/lib/ares_search.c b/src/lib/ares_search.c
+index 17bfb31..c605caf 100644
+--- a/src/lib/ares_search.c
++++ b/src/lib/ares_search.c
+@@ -512,11 +512,12 @@ ares_status_t ares_cat_domain(const char *name, const char *domain, char **s)
+ ares_status_t ares_lookup_hostaliases(const ares_channel_t *channel,
+                                       const char *name, char **alias)
+ {
+-  ares_status_t      status      = ARES_SUCCESS;
+-  const char        *hostaliases = NULL;
+-  ares_buf_t        *buf         = NULL;
+-  ares_llist_t      *lines       = NULL;
+-  ares_llist_node_t *node;
++  ares_status_t status      = ARES_SUCCESS;
++  const char   *hostaliases = NULL;
++  ares_buf_t   *buf         = NULL;
++  ares_array_t *lines       = NULL;
++  size_t        num;
++  size_t        i;
+ 
+   if (channel == NULL || name == NULL || alias == NULL) {
+     return ARES_EFORMERR; /* LCOV_EXCL_LINE: DefensiveCoding */
+@@ -565,11 +566,12 @@ ares_status_t ares_lookup_hostaliases(const ares_channel_t *channel,
+     goto done;
+   }
+ 
+-  for (node = ares_llist_node_first(lines); node != NULL;
+-       node = ares_llist_node_next(node)) {
+-    ares_buf_t *line         = ares_llist_node_val(node);
+-    char        hostname[64] = "";
+-    char        fqdn[256]    = "";
++  num = ares_array_len(lines);
++  for (i = 0; i < num; i++) {
++    ares_buf_t **bufptr       = ares_array_at(lines, i);
++    ares_buf_t  *line         = *bufptr;
++    char         hostname[64] = "";
++    char         fqdn[256]    = "";
+ 
+     /* Pull off hostname */
+     ares_buf_tag(line);
+@@ -615,7 +617,7 @@ ares_status_t ares_lookup_hostaliases(const ares_channel_t *channel,
+ 
+ done:
+   ares_buf_destroy(buf);
+-  ares_llist_destroy(lines);
++  ares_array_destroy(lines);
+ 
+   return status;
+ }
+diff --git a/src/lib/ares_sysconfig_files.c b/src/lib/ares_sysconfig_files.c
+index 731f90e..f80d715 100644
+--- a/src/lib/ares_sysconfig_files.c
++++ b/src/lib/ares_sysconfig_files.c
+@@ -212,10 +212,11 @@ static ares_status_t parse_sort(ares_buf_t *buf, struct apattern *pat)
+ ares_status_t ares_parse_sortlist(struct apattern **sortlist, size_t *nsort,
+                                   const char *str)
+ {
+-  ares_buf_t        *buf    = NULL;
+-  ares_llist_t      *list   = NULL;
+-  ares_status_t      status = ARES_SUCCESS;
+-  ares_llist_node_t *node   = NULL;
++  ares_buf_t   *buf    = NULL;
++  ares_status_t status = ARES_SUCCESS;
++  ares_array_t *arr    = NULL;
++  size_t        num    = 0;
++  size_t        i;
+ 
+   if (sortlist == NULL || nsort == NULL || str == NULL) {
+     return ARES_EFORMERR; /* LCOV_EXCL_LINE: DefensiveCoding */
+@@ -236,14 +237,15 @@ ares_status_t ares_parse_sortlist(struct apattern **sortlist, size_t *nsort,
+ 
+   /* Split on space or semicolon */
+   status = ares_buf_split(buf, (const unsigned char *)" ;", 2,
+-                          ARES_BUF_SPLIT_NONE, 0, &list);
++                          ARES_BUF_SPLIT_NONE, 0, &arr);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+-  for (node = ares_llist_node_first(list); node != NULL;
+-       node = ares_llist_node_next(node)) {
+-    ares_buf_t     *entry = ares_llist_node_val(node);
++  num = ares_array_len(arr);
++  for (i = 0; i < num; i++) {
++    ares_buf_t    **bufptr = ares_array_at(arr, i);
++    ares_buf_t     *entry  = *bufptr;
+ 
+     struct apattern pat;
+ 
+@@ -266,7 +268,7 @@ ares_status_t ares_parse_sortlist(struct apattern **sortlist, size_t *nsort,
+ 
+ done:
+   ares_buf_destroy(buf);
+-  ares_llist_destroy(list);
++  ares_array_destroy(arr);
+ 
+   if (status != ARES_SUCCESS) {
+     ares_free(*sortlist);
+@@ -319,31 +321,24 @@ static ares_status_t buf_fetch_string(ares_buf_t *buf, char *str,
+ static ares_status_t config_lookup(ares_sysconfig_t *sysconfig, ares_buf_t *buf,
+                                    const char *separators)
+ {
+-  ares_status_t      status;
+-  char               lookupstr[32];
+-  size_t             lookupstr_cnt = 0;
+-  ares_llist_t      *lookups       = NULL;
+-  ares_llist_node_t *node;
+-  size_t             separators_len = ares_strlen(separators);
+-
+-  status = ares_buf_split(buf, (const unsigned char *)separators,
+-                          separators_len, ARES_BUF_SPLIT_TRIM, 0, &lookups);
++  ares_status_t status;
++  char          lookupstr[32];
++  size_t        lookupstr_cnt = 0;
++  char        **lookups       = NULL;
++  size_t        num           = 0;
++  size_t        i;
++  size_t        separators_len = ares_strlen(separators);
++
++  status =
++    ares_buf_split_str(buf, (const unsigned char *)separators, separators_len,
++                       ARES_BUF_SPLIT_TRIM, 0, &lookups, &num);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+-  memset(lookupstr, 0, sizeof(lookupstr));
+-
+-  for (node = ares_llist_node_first(lookups); node != NULL;
+-       node = ares_llist_node_next(node)) {
+-    char        value[128];
++  for (i = 0; i < num; i++) {
++    const char *value = lookups[i];
+     char        ch;
+-    ares_buf_t *valbuf = ares_llist_node_val(node);
+-
+-    status = buf_fetch_string(valbuf, value, sizeof(value));
+-    if (status != ARES_SUCCESS) {
+-      continue;
+-    }
+ 
+     if (ares_strcaseeq(value, "dns") || ares_strcaseeq(value, "bind") ||
+         ares_strcaseeq(value, "resolv") || ares_strcaseeq(value, "resolve")) {
+@@ -363,10 +358,12 @@ static ares_status_t config_lookup(ares_sysconfig_t *sysconfig, ares_buf_t *buf,
+   }
+ 
+   if (lookupstr_cnt) {
++    lookupstr[lookupstr_cnt] = 0;
+     ares_free(sysconfig->lookups);
+     sysconfig->lookups = ares_strdup(lookupstr);
+     if (sysconfig->lookups == NULL) {
+-      return ARES_ENOMEM; /* LCOV_EXCL_LINE: OutOfMemory */
++      status = ARES_ENOMEM; /* LCOV_EXCL_LINE: OutOfMemory */
++      goto done;            /* LCOV_EXCL_LINE: OutOfMemory */
+     }
+   }
+ 
+@@ -376,35 +373,35 @@ done:
+   if (status != ARES_ENOMEM) {
+     status = ARES_SUCCESS;
+   }
+-  ares_llist_destroy(lookups);
++  ares_free_array(lookups, num, ares_free);
+   return status;
+ }
+ 
+ static ares_status_t process_option(ares_sysconfig_t *sysconfig,
+                                     ares_buf_t       *option)
+ {
+-  ares_llist_t *kv      = NULL;
+-  char          key[32] = "";
+-  char          val[32] = "";
+-  unsigned int  valint  = 0;
++  char        **kv  = NULL;
++  size_t        num = 0;
++  const char   *key;
++  const char   *val;
++  unsigned int  valint = 0;
+   ares_status_t status;
+ 
+   /* Split on : */
+-  status = ares_buf_split(option, (const unsigned char *)":", 1,
+-                          ARES_BUF_SPLIT_TRIM, 2, &kv);
++  status = ares_buf_split_str(option, (const unsigned char *)":", 1,
++                              ARES_BUF_SPLIT_TRIM, 2, &kv, &num);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+-  status = buf_fetch_string(ares_llist_first_val(kv), key, sizeof(key));
+-  if (status != ARES_SUCCESS) {
++  if (num < 1) {
++    status = ARES_EBADSTR;
+     goto done;
+   }
+-  if (ares_llist_len(kv) == 2) {
+-    status = buf_fetch_string(ares_llist_last_val(kv), val, sizeof(val));
+-    if (status != ARES_SUCCESS) {
+-      goto done;
+-    }
++
++  key = kv[0];
++  if (num == 2) {
++    val    = kv[1];
+     valint = (unsigned int)strtoul(val, NULL, 10);
+   }
+ 
+@@ -427,17 +424,18 @@ static ares_status_t process_option(ares_sysconfig_t *sysconfig,
+   }
+ 
+ done:
+-  ares_llist_destroy(kv);
++  ares_free_array(kv, num, ares_free);
+   return status;
+ }
+ 
+ ares_status_t ares_sysconfig_set_options(ares_sysconfig_t *sysconfig,
+                                          const char       *str)
+ {
+-  ares_buf_t        *buf     = NULL;
+-  ares_llist_t      *options = NULL;
+-  ares_status_t      status;
+-  ares_llist_node_t *node;
++  ares_buf_t   *buf     = NULL;
++  ares_array_t *options = NULL;
++  size_t        num;
++  size_t        i;
++  ares_status_t status;
+ 
+   buf = ares_buf_create_const((const unsigned char *)str, ares_strlen(str));
+   if (buf == NULL) {
+@@ -450,9 +448,10 @@ ares_status_t ares_sysconfig_set_options(ares_sysconfig_t *sysconfig,
+     goto done;
+   }
+ 
+-  for (node = ares_llist_node_first(options); node != NULL;
+-       node = ares_llist_node_next(node)) {
+-    ares_buf_t *valbuf = ares_llist_node_val(node);
++  num = ares_array_len(options);
++  for (i = 0; i < num; i++) {
++    ares_buf_t **bufptr = ares_array_at(options, i);
++    ares_buf_t  *valbuf = *bufptr;
+ 
+     status = process_option(sysconfig, valbuf);
+     /* Out of memory is the only fatal condition */
+@@ -464,7 +463,7 @@ ares_status_t ares_sysconfig_set_options(ares_sysconfig_t *sysconfig,
+   status = ARES_SUCCESS;
+ 
+ done:
+-  ares_llist_destroy(options);
++  ares_array_destroy(options);
+   ares_buf_destroy(buf);
+   return status;
+ }
+@@ -625,9 +624,10 @@ static ares_status_t parse_nsswitch_line(ares_sysconfig_t *sysconfig,
+                                          ares_buf_t       *line)
+ {
+   char          option[32];
+-  ares_buf_t   *buf;
+   ares_status_t status = ARES_SUCCESS;
+-  ares_llist_t *sects  = NULL;
++  ares_array_t *sects  = NULL;
++  ares_buf_t  **bufptr;
++  ares_buf_t   *buf;
+ 
+   /* Ignore lines beginning with a comment */
+   if (ares_buf_begins_with(line, (const unsigned char *)"#", 1)) {
+@@ -638,11 +638,13 @@ static ares_status_t parse_nsswitch_line(ares_sysconfig_t *sysconfig,
+   status = ares_buf_split(line, (const unsigned char *)":", 1,
+                           ARES_BUF_SPLIT_TRIM, 2, &sects);
+ 
+-  if (status != ARES_SUCCESS || ares_llist_len(sects) != 2) {
++  if (status != ARES_SUCCESS || ares_array_len(sects) != 2) {
+     goto done;
+   }
+ 
+-  buf    = ares_llist_first_val(sects);
++  bufptr = ares_array_at(sects, 0);
++  buf    = *bufptr;
++
+   status = buf_fetch_string(buf, option, sizeof(option));
+   if (status != ARES_SUCCESS) {
+     goto done;
+@@ -654,11 +656,12 @@ static ares_status_t parse_nsswitch_line(ares_sysconfig_t *sysconfig,
+   }
+ 
+   /* Values are space separated */
+-  buf    = ares_llist_last_val(sects);
++  bufptr = ares_array_at(sects, 1);
++  buf    = *bufptr;
+   status = config_lookup(sysconfig, buf, " \t");
+ 
+ done:
+-  ares_llist_destroy(sects);
++  ares_array_destroy(sects);
+   if (status != ARES_ENOMEM) {
+     status = ARES_SUCCESS;
+   }
+@@ -672,9 +675,10 @@ static ares_status_t parse_svcconf_line(ares_sysconfig_t *sysconfig,
+                                         ares_buf_t       *line)
+ {
+   char          option[32];
++  ares_buf_t  **bufptr;
+   ares_buf_t   *buf;
+   ares_status_t status = ARES_SUCCESS;
+-  ares_llist_t *sects  = NULL;
++  ares_array_t *sects  = NULL;
+ 
+   /* Ignore lines beginning with a comment */
+   if (ares_buf_begins_with(line, (const unsigned char *)"#", 1)) {
+@@ -685,11 +689,12 @@ static ares_status_t parse_svcconf_line(ares_sysconfig_t *sysconfig,
+   status = ares_buf_split(line, (const unsigned char *)"=", 1,
+                           ARES_BUF_SPLIT_TRIM, 2, &sects);
+ 
+-  if (status != ARES_SUCCESS || ares_llist_len(sects) != 2) {
++  if (status != ARES_SUCCESS || ares_array_len(sects) != 2) {
+     goto done;
+   }
+ 
+-  buf    = ares_llist_first_val(sects);
++  bufptr = ares_array_at(sects, 0);
++  buf    = *bufptr;
+   status = buf_fetch_string(buf, option, sizeof(option));
+   if (status != ARES_SUCCESS) {
+     goto done;
+@@ -701,11 +706,12 @@ static ares_status_t parse_svcconf_line(ares_sysconfig_t *sysconfig,
+   }
+ 
+   /* Values are comma separated */
+-  buf    = ares_llist_last_val(sects);
++  bufptr = ares_array_at(sects, 1);
++  buf    = *bufptr;
+   status = config_lookup(sysconfig, buf, ",");
+ 
+ done:
+-  ares_llist_destroy(sects);
++  ares_array_destroy(sects);
+   if (status != ARES_ENOMEM) {
+     status = ARES_SUCCESS;
+   }
+@@ -726,10 +732,11 @@ static ares_status_t process_config_lines(const char       *filename,
+                                           ares_sysconfig_t *sysconfig,
+                                           line_callback_t   cb)
+ {
+-  ares_status_t      status = ARES_SUCCESS;
+-  ares_llist_node_t *node;
+-  ares_llist_t      *lines = NULL;
+-  ares_buf_t        *buf   = NULL;
++  ares_status_t status = ARES_SUCCESS;
++  ares_array_t *lines  = NULL;
++  ares_buf_t   *buf    = NULL;
++  size_t        num;
++  size_t        i;
+ 
+   buf = ares_buf_create();
+   if (buf == NULL) {
+@@ -748,9 +755,10 @@ static ares_status_t process_config_lines(const char       *filename,
+     goto done;
+   }
+ 
+-  for (node = ares_llist_node_first(lines); node != NULL;
+-       node = ares_llist_node_next(node)) {
+-    ares_buf_t *line = ares_llist_node_val(node);
++  num = ares_array_len(lines);
++  for (i = 0; i < num; i++) {
++    ares_buf_t **bufptr = ares_array_at(lines, i);
++    ares_buf_t  *line   = *bufptr;
+ 
+     status = cb(sysconfig, line);
+     if (status != ARES_SUCCESS) {
+@@ -760,7 +768,7 @@ static ares_status_t process_config_lines(const char       *filename,
+ 
+ done:
+   ares_buf_destroy(buf);
+-  ares_llist_destroy(lines);
++  ares_array_destroy(lines);
+ 
+   return status;
+ }
+diff --git a/src/lib/ares_update_servers.c b/src/lib/ares_update_servers.c
+index 2fa7c9e..c5b45ad 100644
+--- a/src/lib/ares_update_servers.c
++++ b/src/lib/ares_update_servers.c
+@@ -39,6 +39,9 @@
+ #ifdef HAVE_NET_IF_H
+ #  include <net/if.h>
+ #endif
++#ifdef HAVE_STDINT_H
++#  include <stdint.h>
++#endif
+ 
+ #if defined(USE_WINSOCK)
+ #  if defined(HAVE_IPHLPAPI_H)
+@@ -192,6 +195,53 @@ static ares_bool_t ares_server_blacklisted(const struct ares_addr *addr)
+   return ARES_FALSE;
+ }
+ 
++static ares_status_t parse_nameserver_uri(ares_buf_t     *buf,
++                                          ares_sconfig_t *sconfig)
++{
++  ares_uri_t   *uri    = NULL;
++  ares_status_t status = ARES_SUCCESS;
++  const char   *port;
++  char         *ll_scope;
++  char          hoststr[256];
++  size_t        addrlen;
++
++  status = ares_uri_parse_buf(&uri, buf);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  if (!ares_streq("dns", ares_uri_get_scheme(uri))) {
++    status = ARES_EBADSTR;
++    goto done;
++  }
++
++  ares_strcpy(hoststr, ares_uri_get_host(uri), sizeof(hoststr));
++  ll_scope = strchr(hoststr, '%');
++  if (ll_scope != NULL) {
++    *ll_scope = 0;
++    ll_scope++;
++    ares_strcpy(sconfig->ll_iface, ll_scope, sizeof(sconfig->ll_iface));
++  }
++
++  /* Convert ip address from string to network byte order */
++  sconfig->addr.family = AF_UNSPEC;
++  if (ares_dns_pton(hoststr, &sconfig->addr, &addrlen) == NULL) {
++    status = ARES_EBADSTR;
++    goto done;
++  }
++
++  sconfig->udp_port = ares_uri_get_port(uri);
++  sconfig->tcp_port = sconfig->udp_port;
++  port              = ares_uri_get_query_key(uri, "tcpport");
++  if (port != NULL) {
++    sconfig->tcp_port = (unsigned short)atoi(port);
++  }
++
++done:
++  ares_uri_destroy(uri);
++  return status;
++}
++
+ /* Parse address and port in these formats, either ipv4 or ipv6 addresses
+  * are allowed:
+  *   ipaddr
+@@ -232,7 +282,7 @@ static ares_status_t parse_nameserver(ares_buf_t *buf, ares_sconfig_t *sconfig)
+ 
+     /* Consume until ] */
+     if (ares_buf_consume_until_charset(buf, (const unsigned char *)"]", 1,
+-                                       ARES_TRUE) == 0) {
++                                       ARES_TRUE) == SIZE_MAX) {
+       return ARES_EBADSTR;
+     }
+ 
+@@ -451,10 +501,11 @@ ares_status_t ares_sconfig_append_fromstr(ares_llist_t **sconfig,
+                                           const char    *str,
+                                           ares_bool_t    ignore_invalid)
+ {
+-  ares_status_t      status = ARES_SUCCESS;
+-  ares_buf_t        *buf    = NULL;
+-  ares_llist_t      *list   = NULL;
+-  ares_llist_node_t *node;
++  ares_status_t status = ARES_SUCCESS;
++  ares_buf_t   *buf    = NULL;
++  ares_array_t *list   = NULL;
++  size_t        num;
++  size_t        i;
+ 
+   /* On Windows, there may be more than one nameserver specified in the same
+    * registry key, so we parse input as a space or comma separated list.
+@@ -471,12 +522,17 @@ ares_status_t ares_sconfig_append_fromstr(ares_llist_t **sconfig,
+     goto done;
+   }
+ 
+-  for (node = ares_llist_node_first(list); node != NULL;
+-       node = ares_llist_node_next(node)) {
+-    ares_buf_t    *entry = ares_llist_node_val(node);
++  num = ares_array_len(list);
++  for (i = 0; i < num; i++) {
++    ares_buf_t   **bufptr = ares_array_at(list, i);
++    ares_buf_t    *entry  = *bufptr;
+     ares_sconfig_t s;
+ 
+-    status = parse_nameserver(entry, &s);
++    status = parse_nameserver_uri(entry, &s);
++    if (status != ARES_SUCCESS) {
++      status = parse_nameserver(entry, &s);
++    }
++
+     if (status != ARES_SUCCESS) {
+       if (ignore_invalid) {
+         continue;
+@@ -495,7 +551,7 @@ ares_status_t ares_sconfig_append_fromstr(ares_llist_t **sconfig,
+   status = ARES_SUCCESS;
+ 
+ done:
+-  ares_llist_destroy(list);
++  ares_array_destroy(list);
+   ares_buf_destroy(buf);
+   return status;
+ }
+@@ -915,12 +971,82 @@ fail:
+   /* LCOV_EXCL_STOP */
+ }
+ 
++static ares_bool_t ares_server_use_uri(const ares_server_t *server)
++{
++  /* Currently only reason to use new format is if the ports for udp and tcp
++   * are different */
++  if (server->tcp_port != server->udp_port) {
++    return ARES_TRUE;
++  }
++  return ARES_FALSE;
++}
++
++static ares_status_t ares_get_server_addr_uri(const ares_server_t *server,
++                                              ares_buf_t          *buf)
++{
++  ares_uri_t   *uri = NULL;
++  ares_status_t status;
++  char          addr[INET6_ADDRSTRLEN];
++
++  uri = ares_uri_create();
++  if (uri == NULL) {
++    return ARES_ENOMEM;
++  }
++
++  status = ares_uri_set_scheme(uri, "dns");
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  ares_inet_ntop(server->addr.family, &server->addr.addr, addr, sizeof(addr));
++
++  if (ares_strlen(server->ll_iface)) {
++    char addr_iface[256];
++
++    snprintf(addr_iface, sizeof(addr_iface), "%s%%%s", addr, server->ll_iface);
++    status = ares_uri_set_host(uri, addr_iface);
++  } else {
++    status = ares_uri_set_host(uri, addr);
++  }
++
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_set_port(uri, server->udp_port);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  if (server->udp_port != server->tcp_port) {
++    char port[6];
++    snprintf(port, sizeof(port), "%d", server->tcp_port);
++    status = ares_uri_set_query_key(uri, "tcpport", port);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++  }
++
++  status = ares_uri_write_buf(uri, buf);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++done:
++  ares_uri_destroy(uri);
++  return status;
++}
++
+ /* Write out the details of a server to a buffer */
+ ares_status_t ares_get_server_addr(const ares_server_t *server, ares_buf_t *buf)
+ {
+   ares_status_t status;
+   char          addr[INET6_ADDRSTRLEN];
+ 
++  if (ares_server_use_uri(server)) {
++    return ares_get_server_addr_uri(server, buf);
++  }
++
+   /* ipv4addr or [ipv6addr] */
+   if (server->addr.family == AF_INET6) {
+     status = ares_buf_append_byte(buf, '[');
+diff --git a/src/lib/dsa/ares_htable_dict.c b/src/lib/dsa/ares_htable_dict.c
+new file mode 100644
+index 0000000..93d7a20
+--- /dev/null
++++ b/src/lib/dsa/ares_htable_dict.c
+@@ -0,0 +1,228 @@
++/* MIT License
++ *
++ * Copyright (c) 2024 Brad House
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ *
++ * SPDX-License-Identifier: MIT
++ */
++#include "ares_private.h"
++#include "ares_htable.h"
++#include "ares_htable_dict.h"
++
++struct ares_htable_dict {
++  ares_htable_t *hash;
++};
++
++typedef struct {
++  char               *key;
++  char               *val;
++  ares_htable_dict_t *parent;
++} ares_htable_dict_bucket_t;
++
++void ares_htable_dict_destroy(ares_htable_dict_t *htable)
++{
++  if (htable == NULL) {
++    return; /* LCOV_EXCL_LINE: DefensiveCoding */
++  }
++
++  ares_htable_destroy(htable->hash);
++  ares_free(htable);
++}
++
++static unsigned int hash_func(const void *key, unsigned int seed)
++{
++  return ares_htable_hash_FNV1a_casecmp(key, ares_strlen(key), seed);
++}
++
++static const void *bucket_key(const void *bucket)
++{
++  const ares_htable_dict_bucket_t *arg = bucket;
++  return arg->key;
++}
++
++static void bucket_free(void *bucket)
++{
++  ares_htable_dict_bucket_t *arg = bucket;
++
++  ares_free(arg->key);
++  ares_free(arg->val);
++
++  ares_free(arg);
++}
++
++static ares_bool_t key_eq(const void *key1, const void *key2)
++{
++  return ares_strcaseeq(key1, key2);
++}
++
++ares_htable_dict_t *ares_htable_dict_create(void)
++{
++  ares_htable_dict_t *htable = ares_malloc(sizeof(*htable));
++  if (htable == NULL) {
++    goto fail; /* LCOV_EXCL_LINE: OutOfMemory */
++  }
++
++  htable->hash = ares_htable_create(hash_func, bucket_key, bucket_free, key_eq);
++  if (htable->hash == NULL) {
++    goto fail; /* LCOV_EXCL_LINE: OutOfMemory */
++  }
++
++  return htable;
++
++/* LCOV_EXCL_START: OutOfMemory */
++fail:
++  if (htable) {
++    ares_htable_destroy(htable->hash);
++    ares_free(htable);
++  }
++  return NULL;
++  /* LCOV_EXCL_STOP */
++}
++
++ares_bool_t ares_htable_dict_insert(ares_htable_dict_t *htable, const char *key,
++                                    const char *val)
++{
++  ares_htable_dict_bucket_t *bucket = NULL;
++
++  if (htable == NULL || ares_strlen(key) == 0) {
++    goto fail;
++  }
++
++  bucket = ares_malloc_zero(sizeof(*bucket));
++  if (bucket == NULL) {
++    goto fail;
++  }
++
++  bucket->parent = htable;
++  bucket->key    = ares_strdup(key);
++  if (bucket->key == NULL) {
++    goto fail;
++  }
++
++  if (val != NULL) {
++    bucket->val = ares_strdup(val);
++    if (bucket->val == NULL) {
++      goto fail;
++    }
++  }
++
++  if (!ares_htable_insert(htable->hash, bucket)) {
++    goto fail;
++  }
++
++  return ARES_TRUE;
++
++fail:
++  if (bucket) {
++    ares_free(bucket->val);
++    ares_free(bucket);
++  }
++  return ARES_FALSE;
++}
++
++ares_bool_t ares_htable_dict_get(const ares_htable_dict_t *htable,
++                                 const char *key, const char **val)
++{
++  const ares_htable_dict_bucket_t *bucket = NULL;
++
++  if (val) {
++    *val = NULL;
++  }
++
++  if (htable == NULL) {
++    return ARES_FALSE;
++  }
++
++  bucket = ares_htable_get(htable->hash, key);
++  if (bucket == NULL) {
++    return ARES_FALSE;
++  }
++
++  if (val) {
++    *val = bucket->val;
++  }
++  return ARES_TRUE;
++}
++
++const char *ares_htable_dict_get_direct(const ares_htable_dict_t *htable,
++                                        const char               *key)
++{
++  const char *val = NULL;
++  ares_htable_dict_get(htable, key, &val);
++  return val;
++}
++
++ares_bool_t ares_htable_dict_remove(ares_htable_dict_t *htable, const char *key)
++{
++  if (htable == NULL) {
++    return ARES_FALSE;
++  }
++
++  return ares_htable_remove(htable->hash, key);
++}
++
++size_t ares_htable_dict_num_keys(const ares_htable_dict_t *htable)
++{
++  if (htable == NULL) {
++    return 0;
++  }
++  return ares_htable_num_keys(htable->hash);
++}
++
++char **ares_htable_dict_keys(const ares_htable_dict_t *htable, size_t *num)
++{
++  const void **buckets = NULL;
++  size_t       cnt     = 0;
++  char       **out     = NULL;
++  size_t       i;
++
++  if (htable == NULL || num == NULL) {
++    return NULL; /* LCOV_EXCL_LINE: DefensiveCoding */
++  }
++
++  *num = 0;
++
++  buckets = ares_htable_all_buckets(htable->hash, &cnt);
++  if (buckets == NULL || cnt == 0) {
++    return NULL;
++  }
++
++  out = ares_malloc_zero(sizeof(*out) * cnt);
++  if (out == NULL) {
++    goto fail; /* LCOV_EXCL_LINE: OutOfMemory */
++  }
++
++  for (i = 0; i < cnt; i++) {
++    out[i] = ares_strdup(((const ares_htable_dict_bucket_t *)buckets[i])->key);
++    if (out[i] == NULL) {
++      goto fail;
++    }
++  }
++
++  ares_free(buckets);
++  *num = cnt;
++  return out;
++
++fail:
++  *num = 0;
++  ares_free_array(out, cnt, ares_free);
++  return NULL;
++}
+diff --git a/src/lib/include/ares_buf.h b/src/lib/include/ares_buf.h
+index 8108147..7836a31 100644
+--- a/src/lib/include/ares_buf.h
++++ b/src/lib/include/ares_buf.h
+@@ -27,7 +27,7 @@
+ #define __ARES__BUF_H
+ 
+ #include "ares.h"
+-#include "ares_llist.h"
++#include "ares_array.h"
+ 
+ /*! \addtogroup ares_buf Safe Data Builder and buffer
+  *
+@@ -279,18 +279,44 @@ CARES_EXTERN ares_status_t ares_buf_tag_fetch_bytes(const ares_buf_t *buf,
+ /*! Fetch the bytes starting from the tagged position up to the _current_
+  *  position as a NULL-terminated string using the provided buffer.  The data
+  *  is validated to be ASCII-printable data.  It will not unset the tagged
+- *  poition.
++ *  position.
+  *
+  *  \param[in]     buf    Initialized buffer object
+  *  \param[in,out] str    Buffer to hold data
+- *  \param[in]     len    On input, buffer size, on output, bytes place in
+- *                        buffer.
++ *  \param[in]     len    buffer size
+  *  \return ARES_SUCCESS if fetched, ARES_EFORMERR if insufficient buffer size,
+  *          ARES_EBADSTR if not printable ASCII
+  */
+ CARES_EXTERN ares_status_t ares_buf_tag_fetch_string(const ares_buf_t *buf,
+                                                      char *str, size_t len);
+ 
++/*! Fetch the bytes starting from the tagged position up to the _current_
++ *  position as a NULL-terminated string and placed into a newly allocated
++ *  buffer.  The data is validated to be ASCII-printable data.  It will not
++ *  unset the tagged position.
++ *
++ *  \param[in]  buf    Initialized buffer object
++ *  \param[out] str    New buffer to hold output, free with ares_free()
++ *
++ *  \return ARES_SUCCESS if fetched, ARES_EFORMERR if insufficient buffer size,
++ *          ARES_EBADSTR if not printable ASCII
++ */
++CARES_EXTERN ares_status_t ares_buf_tag_fetch_strdup(const ares_buf_t *buf,
++                                                     char            **str);
++
++/*! Fetch the bytes starting from the tagged position up to the _current_
++ *  position as const buffer.  Care must be taken to not append or destroy the
++ *  passed in buffer until the newly fetched buffer is no longer needed since
++ *  it points to memory inside the passed in buffer which could be invalidated.
++ *
++ *  \param[in]     buf    Initialized buffer object
++ *  \param[out]    newbuf New const buffer object, must be destroyed when done.
++
++ *  \return ARES_SUCCESS if fetched
++ */
++CARES_EXTERN ares_status_t ares_buf_tag_fetch_constbuf(const ares_buf_t *buf,
++                                                       ares_buf_t **newbuf);
++
+ /*! Consume the given number of bytes without reading them.
+  *
+  *  \param[in] buf    Initialized buffer object
+@@ -399,7 +425,7 @@ CARES_EXTERN size_t        ares_buf_consume_nonwhitespace(ares_buf_t *buf);
+  *  \param[in] require_charset    require we find a character from the charset.
+  *                                if ARES_FALSE it will simply consume the
+  *                                rest of the buffer.  If ARES_TRUE will return
+- *                                0 if not found.
++ *                                SIZE_MAX if not found.
+  *  \return number of characters consumed
+  */
+ CARES_EXTERN size_t        ares_buf_consume_until_charset(ares_buf_t          *buf,
+@@ -408,6 +434,23 @@ CARES_EXTERN size_t        ares_buf_consume_until_charset(ares_buf_t          *b
+                                                           ares_bool_t require_charset);
+ 
+ 
++/*! Consume until a sequence of bytes is encountered.  Does not include the
++ *  sequence of characters itself.
++ *
++ *  \param[in] buf                Initialized buffer object
++ *  \param[in] seq                sequence of bytes
++ *  \param[in] len                length of sequence
++ *  \param[in] require_charset    require we find the sequence.
++ *                                if ARES_FALSE it will simply consume the
++ *                                rest of the buffer.  If ARES_TRUE will return
++ *                                SIZE_MAX if not found.
++ *  \return number of characters consumed
++ */
++CARES_EXTERN size_t        ares_buf_consume_until_seq(ares_buf_t          *buf,
++                                                      const unsigned char *seq,
++                                                      size_t               len,
++                                                      ares_bool_t require_seq);
++
+ /*! Consume while the characters match the characters in the provided set.
+  *
+  *  \param[in] buf                Initialized buffer object
+@@ -470,16 +513,39 @@ typedef enum {
+  *                                character in the value.  A value of 1 would
+  *                                have little usefulness and would effectively
+  *                                ignore the delimiter itself.
+- *  \param[out] list              Result. Depending on flags, this may be a
+- *                                valid list with no elements.  Use
+- *                                ares_llist_destroy() to free the memory which
+- *                                will also free the contained ares_buf_t
+- *                                objects.
++ *  \param[out] arr               Result. Depending on flags, this may be a
++ *                                valid array with no elements.  Use
++ *                                ares_array_destroy() to free the memory which
++ *                                will also free the contained ares_buf_t *
++ *                                objects. Each buf object returned by
++ *                                ares_array_at() or similar is a pointer to
++ *                                an ares_buf_t * object, meaning you need to
++ *                                accept it as "ares_buf_t **" then dereference.
+  *  \return ARES_SUCCESS on success, or error like ARES_ENOMEM.
+  */
+ CARES_EXTERN ares_status_t ares_buf_split(
+   ares_buf_t *buf, const unsigned char *delims, size_t delims_len,
+-  ares_buf_split_t flags, size_t max_sections, ares_llist_t **list);
++  ares_buf_split_t flags, size_t max_sections, ares_array_t **arr);
++
++/*! Split the provided buffer into an ares_array_t of C strings.
++ *
++ *  \param[in]  buf               Initialized buffer object
++ *  \param[in]  delims            Possible delimiters
++ *  \param[in]  delims_len        Length of possible delimiters
++ *  \param[in]  flags             One more more flags
++ *  \param[in]  max_sections      Maximum number of sections.  Use 0 for
++ *                                unlimited. Useful for splitting key/value
++ *                                pairs where the delimiter may be a valid
++ *                                character in the value.  A value of 1 would
++ *                                have little usefulness and would effectively
++ *                                ignore the delimiter itself.
++ *  \param[out] arr               Array of strings. Free using
++ *                                ares_array_destroy().
++ *  \return ARES_SUCCESS on success, or error like ARES_ENOMEM.
++ */
++CARES_EXTERN ares_status_t ares_buf_split_str_array(
++  ares_buf_t *buf, const unsigned char *delims, size_t delims_len,
++  ares_buf_split_t flags, size_t max_sections, ares_array_t **arr);
+ 
+ /*! Split the provided buffer into a C array of C strings.
+  *
+@@ -533,6 +599,14 @@ CARES_EXTERN size_t               ares_buf_len(const ares_buf_t *buf);
+ CARES_EXTERN const unsigned char *ares_buf_peek(const ares_buf_t *buf,
+                                                 size_t           *len);
+ 
++/*! Retrieve the next byte in the buffer without moving forward.
++ *
++ *  \param[in]  buf  Initialized buffer object
++ *  \param[out] b    Single byte
++ *  \return \return ARES_SUCCESS on success, or error
++ */
++CARES_EXTERN ares_status_t        ares_buf_peek_byte(const ares_buf_t *buf,
++                                                     unsigned char    *b);
+ 
+ /*! Wipe any processed data from the beginning of the buffer.  This will
+  *  move any remaining data to the front of the internally allocated buffer.
+diff --git a/src/lib/include/ares_htable_dict.h b/src/lib/include/ares_htable_dict.h
+new file mode 100644
+index 0000000..cb6f1f0
+--- /dev/null
++++ b/src/lib/include/ares_htable_dict.h
+@@ -0,0 +1,123 @@
++/* MIT License
++ *
++ * Copyright (c) 2024 Brad House
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ *
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef __ARES__HTABLE_DICT_H
++#define __ARES__HTABLE_DICT_H
++
++/*! \addtogroup ares_htable_dict HashTable with case-insensitive string Key and
++ *  string value
++ *
++ * This data structure wraps the base ares_htable data structure in order to
++ * split the key and value data types as string and string, respectively.
++ *
++ * Average time complexity:
++ *  - Insert: O(1)
++ *  - Search: O(1)
++ *  - Delete: O(1)
++ *
++ * @{
++ */
++
++struct ares_htable_dict;
++
++/*! Opaque data type for string key, string value hash table
++ * implementation */
++typedef struct ares_htable_dict ares_htable_dict_t;
++
++/*! Destroy hashtable
++ *
++ *  \param[in] htable  Initialized hashtable
++ */
++CARES_EXTERN void ares_htable_dict_destroy(ares_htable_dict_t *htable);
++
++/*! Create void pointer key, string value hash table
++ *
++ */
++CARES_EXTERN ares_htable_dict_t *ares_htable_dict_create(void);
++
++/*! Insert key/value into hash table
++ *
++ *  \param[in] htable Initialized hash table
++ *  \param[in] key    key to associate with value
++ *  \param[in] val    value to store (duplicates).
++ *  \return ARES_TRUE on success, ARES_FALSE on failure or out of memory
++ */
++CARES_EXTERN ares_bool_t ares_htable_dict_insert(ares_htable_dict_t *htable,
++                                                 const char         *key,
++                                                 const char         *val);
++
++/*! Retrieve value from hashtable based on key
++ *
++ *  \param[in]  htable  Initialized hash table
++ *  \param[in]  key     key to use to search
++ *  \param[out] val     Optional.  Pointer to store value.
++ *  \return ARES_TRUE on success, ARES_FALSE on failure
++ */
++CARES_EXTERN ares_bool_t ares_htable_dict_get(const ares_htable_dict_t *htable,
++                                              const char               *key,
++                                              const char              **val);
++
++/*! Retrieve value from hashtable directly as return value.  Caveat to this
++ *  function over ares_htable_dict_get() is that if a NULL value is stored
++ *  you cannot determine if the key is not found or the value is NULL.
++ *
++ *  \param[in] htable  Initialized hash table
++ *  \param[in] key     key to use to search
++ *  \return value associated with key in hashtable or NULL
++ */
++CARES_EXTERN const char *
++  ares_htable_dict_get_direct(const ares_htable_dict_t *htable,
++                              const char               *key);
++
++/*! Remove a value from the hashtable by key
++ *
++ *  \param[in] htable  Initialized hash table
++ *  \param[in] key     key to use to search
++ *  \return ARES_TRUE if found, ARES_FALSE if not
++ */
++CARES_EXTERN ares_bool_t ares_htable_dict_remove(ares_htable_dict_t *htable,
++                                                 const char         *key);
++
++/*! Retrieve the number of keys stored in the hash table
++ *
++ *  \param[in] htable  Initialized hash table
++ *  \return count
++ */
++CARES_EXTERN size_t ares_htable_dict_num_keys(const ares_htable_dict_t *htable);
++
++/*! Retrieve an array of keys from the hashtable.
++ *
++ *  \param[in]  htable   Initialized hashtable
++ *  \param[out] num      Count of returned keys
++ *  \return Array of keys in the hashtable. Must be free'd with
++ *          ares_free_array(strs, num, ares_free);
++ */
++CARES_EXTERN char **ares_htable_dict_keys(const ares_htable_dict_t *htable,
++                                          size_t                   *num);
++
++
++/*! @} */
++
++#endif /* __ARES__HTABLE_DICT_H */
+diff --git a/src/lib/include/ares_str.h b/src/lib/include/ares_str.h
+index 1b4c3b7..ea75b3b 100644
+--- a/src/lib/include/ares_str.h
++++ b/src/lib/include/ares_str.h
+@@ -43,16 +43,24 @@ CARES_EXTERN size_t ares_strlen(const char *str);
+  */
+ CARES_EXTERN size_t ares_strcpy(char *dest, const char *src, size_t dest_size);
+ 
+-CARES_EXTERN ares_bool_t   ares_str_isnum(const char *str);
+-
+-CARES_EXTERN void          ares_str_ltrim(char *str);
+-CARES_EXTERN void          ares_str_rtrim(char *str);
+-CARES_EXTERN void          ares_str_trim(char *str);
+-
+-CARES_EXTERN unsigned char ares_tolower(unsigned char c);
+-CARES_EXTERN ares_bool_t   ares_memeq_ci(const unsigned char *ptr,
+-                                         const unsigned char *val, size_t len);
+-CARES_EXTERN ares_bool_t   ares_is_hostname(const char *str);
++CARES_EXTERN ares_bool_t    ares_str_isnum(const char *str);
++CARES_EXTERN ares_bool_t    ares_str_isalnum(const char *str);
++
++CARES_EXTERN void           ares_str_ltrim(char *str);
++CARES_EXTERN void           ares_str_rtrim(char *str);
++CARES_EXTERN void           ares_str_trim(char *str);
++CARES_EXTERN void           ares_str_lower(char *str);
++
++CARES_EXTERN unsigned char  ares_tolower(unsigned char c);
++CARES_EXTERN unsigned char *ares_memmem(const unsigned char *big,
++                                        size_t               big_len,
++                                        const unsigned char *little,
++                                        size_t               little_len);
++CARES_EXTERN ares_bool_t    ares_memeq(const unsigned char *ptr,
++                                       const unsigned char *val, size_t len);
++CARES_EXTERN ares_bool_t    ares_memeq_ci(const unsigned char *ptr,
++                                          const unsigned char *val, size_t len);
++CARES_EXTERN ares_bool_t    ares_is_hostname(const char *str);
+ 
+ /*! Validate the string provided is printable.  The length specified must be
+  *  at least the size of the buffer provided.  If a NULL-terminator is hit
+@@ -65,7 +73,7 @@ CARES_EXTERN ares_bool_t   ares_is_hostname(const char *str);
+  *                  If 0, will return TRUE since it did not hit an exception.
+  *  \return ARES_TRUE if the entire string is printable, ARES_FALSE if not.
+  */
+-CARES_EXTERN ares_bool_t   ares_str_isprint(const char *str, size_t len);
++CARES_EXTERN ares_bool_t    ares_str_isprint(const char *str, size_t len);
+ 
+ /* We only care about ASCII rules */
+ #define ares_isascii(x) (((unsigned char)x) <= 127)
+diff --git a/src/lib/str/ares_buf.c b/src/lib/str/ares_buf.c
+index ca8ea34..9a761a7 100644
+--- a/src/lib/str/ares_buf.c
++++ b/src/lib/str/ares_buf.c
+@@ -416,6 +416,23 @@ ares_status_t ares_buf_tag_fetch_bytes(const ares_buf_t *buf,
+   return ARES_SUCCESS;
+ }
+ 
++ares_status_t ares_buf_tag_fetch_constbuf(const ares_buf_t *buf,
++                                          ares_buf_t      **newbuf)
++{
++  size_t               ptr_len = 0;
++  const unsigned char *ptr     = ares_buf_tag_fetch(buf, &ptr_len);
++
++  if (ptr == NULL || newbuf == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  *newbuf = ares_buf_create_const(ptr, ptr_len);
++  if (*newbuf == NULL) {
++    return ARES_ENOMEM;
++  }
++  return ARES_SUCCESS;
++}
++
+ ares_status_t ares_buf_tag_fetch_string(const ares_buf_t *buf, char *str,
+                                         size_t len)
+ {
+@@ -448,6 +465,31 @@ ares_status_t ares_buf_tag_fetch_string(const ares_buf_t *buf, char *str,
+   return ARES_SUCCESS;
+ }
+ 
++ares_status_t ares_buf_tag_fetch_strdup(const ares_buf_t *buf, char **str)
++{
++  size_t               ptr_len = 0;
++  const unsigned char *ptr     = ares_buf_tag_fetch(buf, &ptr_len);
++
++  if (ptr == NULL || str == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  if (!ares_str_isprint((const char *)ptr, ptr_len)) {
++    return ARES_EBADSTR;
++  }
++
++  *str = ares_malloc(ptr_len + 1);
++  if (*str == NULL) {
++    return ARES_ENOMEM;
++  }
++
++  if (ptr_len > 0) {
++    memcpy(*str, ptr, ptr_len);
++  }
++  (*str)[ptr_len] = 0;
++  return ARES_SUCCESS;
++}
++
+ static const unsigned char *ares_buf_fetch(const ares_buf_t *buf, size_t *len)
+ {
+   if (len != NULL) {
+@@ -691,17 +733,29 @@ size_t ares_buf_consume_until_charset(ares_buf_t          *buf,
+ {
+   size_t               remaining_len = 0;
+   const unsigned char *ptr           = ares_buf_fetch(buf, &remaining_len);
+-  size_t               i;
++  size_t               pos;
+   ares_bool_t          found = ARES_FALSE;
+ 
+   if (ptr == NULL || charset == NULL || len == 0) {
+     return 0;
+   }
+ 
+-  for (i = 0; i < remaining_len; i++) {
++  /* Optimize for single character searches */
++  if (len == 1) {
++    const unsigned char *p = memchr(ptr, charset[0], remaining_len);
++    if (p != NULL) {
++      found = ARES_TRUE;
++      pos   = (size_t)(p - ptr);
++    } else {
++      pos = remaining_len;
++    }
++    goto done;
++  }
++
++  for (pos = 0; pos < remaining_len; pos++) {
+     size_t j;
+     for (j = 0; j < len; j++) {
+-      if (ptr[i] == charset[j]) {
++      if (ptr[pos] == charset[j]) {
+         found = ARES_TRUE;
+         goto done;
+       }
+@@ -710,13 +764,43 @@ size_t ares_buf_consume_until_charset(ares_buf_t          *buf,
+ 
+ done:
+   if (require_charset && !found) {
++    return SIZE_MAX;
++  }
++
++  if (pos > 0) {
++    ares_buf_consume(buf, pos);
++  }
++  return pos;
++}
++
++size_t ares_buf_consume_until_seq(ares_buf_t *buf, const unsigned char *seq,
++                                  size_t len, ares_bool_t require_seq)
++{
++  size_t               remaining_len = 0;
++  const unsigned char *ptr           = ares_buf_fetch(buf, &remaining_len);
++  const unsigned char *p;
++  size_t               consume_len = 0;
++
++  if (ptr == NULL || seq == NULL || len == 0) {
+     return 0;
+   }
+ 
+-  if (i > 0) {
+-    ares_buf_consume(buf, i);
++  p = ares_memmem(ptr, remaining_len, seq, len);
++  if (require_seq && p == NULL) {
++    return SIZE_MAX;
+   }
+-  return i;
++
++  if (p != NULL) {
++    consume_len = (size_t)(p - ptr);
++  } else {
++    consume_len = remaining_len;
++  }
++
++  if (consume_len > 0) {
++    ares_buf_consume(buf, consume_len);
++  }
++
++  return consume_len;
+ }
+ 
+ size_t ares_buf_consume_charset(ares_buf_t *buf, const unsigned char *charset,
+@@ -751,21 +835,23 @@ size_t ares_buf_consume_charset(ares_buf_t *buf, const unsigned char *charset,
+ 
+ static void ares_buf_destroy_cb(void *arg)
+ {
+-  ares_buf_destroy(arg);
++  ares_buf_t **buf = arg;
++  ares_buf_destroy(*buf);
+ }
+ 
+-static ares_bool_t ares_buf_split_isduplicate(ares_llist_t        *list,
++static ares_bool_t ares_buf_split_isduplicate(ares_array_t        *arr,
+                                               const unsigned char *val,
+                                               size_t               len,
+                                               ares_buf_split_t     flags)
+ {
+-  ares_llist_node_t *node;
++  size_t i;
++  size_t num = ares_array_len(arr);
+ 
+-  for (node = ares_llist_node_first(list); node != NULL;
+-       node = ares_llist_node_next(node)) {
+-    const ares_buf_t    *buf  = ares_llist_node_val(node);
+-    size_t               plen = 0;
+-    const unsigned char *ptr  = ares_buf_peek(buf, &plen);
++  for (i = 0; i < num; i++) {
++    ares_buf_t         **bufptr = ares_array_at(arr, i);
++    ares_buf_t          *buf    = *bufptr;
++    size_t               plen   = 0;
++    const unsigned char *ptr    = ares_buf_peek(buf, &plen);
+ 
+     /* Can't be duplicate if lengths mismatch */
+     if (plen != len) {
+@@ -777,27 +863,28 @@ static ares_bool_t ares_buf_split_isduplicate(ares_llist_t        *list,
+         return ARES_TRUE;
+       }
+     } else {
+-      if (memcmp(ptr, val, len) == 0) {
++      if (ares_memeq(ptr, val, len)) {
+         return ARES_TRUE;
+       }
+     }
+   }
++
+   return ARES_FALSE;
+ }
+ 
+ ares_status_t ares_buf_split(ares_buf_t *buf, const unsigned char *delims,
+                              size_t delims_len, ares_buf_split_t flags,
+-                             size_t max_sections, ares_llist_t **list)
++                             size_t max_sections, ares_array_t **arr)
+ {
+   ares_status_t status = ARES_SUCCESS;
+   ares_bool_t   first  = ARES_TRUE;
+ 
+-  if (buf == NULL || delims == NULL || delims_len == 0 || list == NULL) {
++  if (buf == NULL || delims == NULL || delims_len == 0 || arr == NULL) {
+     return ARES_EFORMERR; /* LCOV_EXCL_LINE: DefensiveCoding */
+   }
+ 
+-  *list = ares_llist_create(ares_buf_destroy_cb);
+-  if (*list == NULL) {
++  *arr = ares_array_create(sizeof(ares_buf_t *), ares_buf_destroy_cb);
++  if (*arr == NULL) {
+     status = ARES_ENOMEM;
+     goto done;
+   }
+@@ -821,7 +908,7 @@ ares_status_t ares_buf_split(ares_buf_t *buf, const unsigned char *delims,
+       }
+     }
+ 
+-    if (max_sections && ares_llist_len(*list) >= max_sections - 1) {
++    if (max_sections && ares_array_len(*arr) >= max_sections - 1) {
+       ares_buf_consume(buf, ares_buf_len(buf));
+     } else {
+       ares_buf_consume_until_charset(buf, delims, delims_len, ARES_FALSE);
+@@ -856,7 +943,7 @@ ares_status_t ares_buf_split(ares_buf_t *buf, const unsigned char *delims,
+       ares_buf_t *data;
+ 
+       if (!(flags & ARES_BUF_SPLIT_NO_DUPLICATES) ||
+-          !ares_buf_split_isduplicate(*list, ptr, len, flags)) {
++          !ares_buf_split_isduplicate(*arr, ptr, len, flags)) {
+         /* Since we don't allow const buffers of 0 length, and user wants
+          * 0-length buffers, swap what we do here */
+         if (len) {
+@@ -870,9 +957,9 @@ ares_status_t ares_buf_split(ares_buf_t *buf, const unsigned char *delims,
+           goto done;
+         }
+ 
+-        if (ares_llist_insert_last(*list, data) == NULL) {
++        status = ares_array_insertdata_last(*arr, &data);
++        if (status != ARES_SUCCESS) {
+           ares_buf_destroy(data);
+-          status = ARES_ENOMEM;
+           goto done;
+         }
+       }
+@@ -883,8 +970,8 @@ ares_status_t ares_buf_split(ares_buf_t *buf, const unsigned char *delims,
+ 
+ done:
+   if (status != ARES_SUCCESS) {
+-    ares_llist_destroy(*list);
+-    *list = NULL;
++    ares_array_destroy(*arr);
++    *arr = NULL;
+   }
+ 
+   return status;
+@@ -896,45 +983,46 @@ static void ares_free_split_array(void *arg)
+   ares_free(*ptr);
+ }
+ 
+-ares_status_t ares_buf_split_str(ares_buf_t *buf, const unsigned char *delims,
+-                                 size_t delims_len, ares_buf_split_t flags,
+-                                 size_t max_sections, char ***strs,
+-                                 size_t *nstrs)
++ares_status_t ares_buf_split_str_array(ares_buf_t          *buf,
++                                       const unsigned char *delims,
++                                       size_t               delims_len,
++                                       ares_buf_split_t     flags,
++                                       size_t max_sections, ares_array_t **arr)
+ {
+-  ares_status_t      status;
+-  ares_llist_t      *list = NULL;
+-  ares_llist_node_t *node;
+-  ares_array_t      *arr = NULL;
++  ares_status_t status;
++  ares_array_t *split = NULL;
++  size_t        i;
++  size_t        len;
+ 
+-  if (strs == NULL || nstrs == NULL) {
++  if (arr == NULL) {
+     return ARES_EFORMERR;
+   }
+ 
+-  *strs  = NULL;
+-  *nstrs = 0;
++  *arr = NULL;
+ 
+-  status = ares_buf_split(buf, delims, delims_len, flags, max_sections, &list);
++  status = ares_buf_split(buf, delims, delims_len, flags, max_sections, &split);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+-  arr = ares_array_create(sizeof(char *), ares_free_split_array);
+-  if (arr == NULL) {
++  *arr = ares_array_create(sizeof(char *), ares_free_split_array);
++  if (*arr == NULL) {
+     status = ARES_ENOMEM;
+     goto done;
+   }
+ 
+-  for (node = ares_llist_node_first(list); node != NULL;
+-       node = ares_llist_node_next(node)) {
+-    ares_buf_t *lbuf = ares_llist_node_val(node);
+-    char       *str  = NULL;
++  len = ares_array_len(split);
++  for (i = 0; i < len; i++) {
++    ares_buf_t **bufptr = ares_array_at(split, i);
++    ares_buf_t  *lbuf   = *bufptr;
++    char        *str    = NULL;
+ 
+     status = ares_buf_fetch_str_dup(lbuf, ares_buf_len(lbuf), &str);
+     if (status != ARES_SUCCESS) {
+       goto done;
+     }
+ 
+-    status = ares_array_insertdata_last(arr, &str);
++    status = ares_array_insertdata_last(*arr, &str);
+     if (status != ARES_SUCCESS) {
+       ares_free(str);
+       goto done;
+@@ -942,7 +1030,37 @@ ares_status_t ares_buf_split_str(ares_buf_t *buf, const unsigned char *delims,
+   }
+ 
+ done:
+-  ares_llist_destroy(list);
++  ares_array_destroy(split);
++  if (status != ARES_SUCCESS) {
++    ares_array_destroy(*arr);
++    *arr = NULL;
++  }
++  return status;
++}
++
++ares_status_t ares_buf_split_str(ares_buf_t *buf, const unsigned char *delims,
++                                 size_t delims_len, ares_buf_split_t flags,
++                                 size_t max_sections, char ***strs,
++                                 size_t *nstrs)
++{
++  ares_status_t status;
++  ares_array_t *arr = NULL;
++
++  if (strs == NULL || nstrs == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  *strs  = NULL;
++  *nstrs = 0;
++
++  status = ares_buf_split_str_array(buf, delims, delims_len, flags,
++                                    max_sections, &arr);
++
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++done:
+   if (status == ARES_SUCCESS) {
+     *strs = ares_array_finish(arr, nstrs);
+   } else {
+@@ -986,6 +1104,22 @@ const unsigned char *ares_buf_peek(const ares_buf_t *buf, size_t *len)
+   return ares_buf_fetch(buf, len);
+ }
+ 
++ares_status_t ares_buf_peek_byte(const ares_buf_t *buf, unsigned char *b)
++{
++  size_t               remaining_len = 0;
++  const unsigned char *ptr           = ares_buf_fetch(buf, &remaining_len);
++
++  if (buf == NULL || b == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  if (remaining_len == 0) {
++    return ARES_EBADRESP;
++  }
++  *b = ptr[0];
++  return ARES_SUCCESS;
++}
++
+ size_t ares_buf_get_position(const ares_buf_t *buf)
+ {
+   if (buf == NULL) {
+diff --git a/src/lib/str/ares_str.c b/src/lib/str/ares_str.c
+index 5cdbf06..f6bfabf 100644
+--- a/src/lib/str/ares_str.c
++++ b/src/lib/str/ares_str.c
+@@ -101,7 +101,23 @@ ares_bool_t ares_str_isnum(const char *str)
+   }
+ 
+   for (i = 0; str[i] != 0; i++) {
+-    if (str[i] < '0' || str[i] > '9') {
++    if (!ares_isdigit(str[i])) {
++      return ARES_FALSE;
++    }
++  }
++  return ARES_TRUE;
++}
++
++ares_bool_t ares_str_isalnum(const char *str)
++{
++  size_t i;
++
++  if (str == NULL || *str == 0) {
++    return ARES_FALSE;
++  }
++
++  for (i = 0; str[i] != 0; i++) {
++    if (!ares_isdigit(str[i]) && !ares_isalpha(str[i])) {
+       return ARES_FALSE;
+     }
+   }
+@@ -186,6 +202,62 @@ unsigned char ares_tolower(unsigned char c)
+   return ares_tolower_lookup[c];
+ }
+ 
++void ares_str_lower(char *str)
++{
++  size_t i;
++
++  if (str == NULL) {
++    return;
++  }
++
++  for (i = 0; str[i] != 0; i++) {
++    str[i] = (char)ares_tolower((unsigned char)str[i]);
++  }
++}
++
++unsigned char *ares_memmem(const unsigned char *big, size_t big_len,
++                           const unsigned char *little, size_t little_len)
++{
++  unsigned char *ptr;
++
++  if (big == NULL || little == NULL || big_len == 0 || little_len == 0) {
++    return NULL;
++  }
++
++#ifdef HAVE_MEMMEM
++  ptr = memmem(big, big_len, little, little_len);
++  return ptr;
++#else
++  while (1) {
++    ptr = memchr(big, little[0], big_len);
++    if (ptr == NULL) {
++      break;
++    }
++
++    big_len -= (size_t)(ptr - big);
++    big      = ptr;
++    if (big_len < little_len) {
++      break;
++    }
++
++    if (memcmp(big, little, little_len) == 0) {
++      return ptr;
++    }
++
++    big++;
++    big_len--;
++  }
++
++  return NULL;
++#endif
++}
++
++ares_bool_t ares_memeq(const unsigned char *ptr, const unsigned char *val,
++                       size_t len)
++{
++  return memcmp(ptr, val, len) == 0 ? ARES_TRUE : ARES_FALSE;
++}
++
+ ares_bool_t ares_memeq_ci(const unsigned char *ptr, const unsigned char *val,
+                           size_t len)
+ {
+diff --git a/src/lib/str/ares_strsplit.c b/src/lib/str/ares_strsplit.c
+index 4ae2975..4431c50 100644
+--- a/src/lib/str/ares_strsplit.c
++++ b/src/lib/str/ares_strsplit.c
+@@ -57,13 +57,9 @@ char **ares_strsplit_duplicate(char **elms, size_t num_elm)
+ 
+ char **ares_strsplit(const char *in, const char *delms, size_t *num_elm)
+ {
+-  ares_status_t      status;
+-  ares_buf_t        *buf   = NULL;
+-  ares_llist_t      *llist = NULL;
+-  ares_llist_node_t *node;
+-  char             **out = NULL;
+-  size_t             cnt = 0;
+-  size_t             idx = 0;
++  ares_status_t status;
++  ares_buf_t   *buf = NULL;
++  char        **out = NULL;
+ 
+   if (in == NULL || delms == NULL || num_elm == NULL) {
+     return NULL; /* LCOV_EXCL_LINE: DefensiveCoding */
+@@ -76,47 +72,17 @@ char **ares_strsplit(const char *in, const char *delms, size_t *num_elm)
+     return NULL;
+   }
+ 
+-  status = ares_buf_split(
++  status = ares_buf_split_str(
+     buf, (const unsigned char *)delms, ares_strlen(delms),
+-    ARES_BUF_SPLIT_NO_DUPLICATES | ARES_BUF_SPLIT_CASE_INSENSITIVE, 0, &llist);
++    ARES_BUF_SPLIT_NO_DUPLICATES | ARES_BUF_SPLIT_CASE_INSENSITIVE, 0, &out,
++    num_elm);
+   if (status != ARES_SUCCESS) {
+     goto done;
+   }
+ 
+-  cnt = ares_llist_len(llist);
+-  if (cnt == 0) {
+-    status = ARES_EFORMERR;
+-    goto done;
+-  }
+-
+-
+-  out = ares_malloc_zero(cnt * sizeof(*out));
+-  if (out == NULL) {
+-    status = ARES_ENOMEM; /* LCOV_EXCL_LINE: OutOfMemory */
+-    goto done;            /* LCOV_EXCL_LINE: OutOfMemory */
+-  }
+-
+-  for (node = ares_llist_node_first(llist); node != NULL;
+-       node = ares_llist_node_next(node)) {
+-    ares_buf_t *val  = ares_llist_node_val(node);
+-    char       *temp = NULL;
+-
+-    status = ares_buf_fetch_str_dup(val, ares_buf_len(val), &temp);
+-    if (status != ARES_SUCCESS) {
+-      goto done;
+-    }
+-
+-    out[idx++] = temp;
+-  }
+-
+-  *num_elm = cnt;
+-  status   = ARES_SUCCESS;
+-
+ done:
+-  ares_llist_destroy(llist);
+   ares_buf_destroy(buf);
+   if (status != ARES_SUCCESS) {
+-    ares_strsplit_free(out, cnt);
+     out = NULL;
+   }
+ 
+diff --git a/src/lib/util/ares_uri.c b/src/lib/util/ares_uri.c
+new file mode 100644
+index 0000000..509ae28
+--- /dev/null
++++ b/src/lib/util/ares_uri.c
+@@ -0,0 +1,1626 @@
++/* MIT License
++ *
++ * Copyright (c) 2024 Brad house
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ *
++ * SPDX-License-Identifier: MIT
++ */
++
++
++#include "ares_private.h"
++#include "ares_uri.h"
++#ifdef HAVE_STDINT_H
++#  include <stdint.h>
++#endif
++
++struct ares_uri {
++  char                scheme[16];
++  char               *username;
++  char               *password;
++  unsigned short      port;
++  char                host[256];
++  char               *path;
++  ares_htable_dict_t *query;
++  char               *fragment;
++};
++
++/* RFC3986 character set notes:
++ *    gen-delims  = ":" / "/" / "?" / "#" / "[" / "]" / "@"
++ *    sub-delims  = "!" / "$" / "&" / "'" / "(" / ")"
++ *                / "*" / "+" / "," / ";" / "="
++ *    reserved    = gen-delims / sub-delims
++ *    unreserved  = ALPHA / DIGIT / "-" / "." / "_" / "~"
++ *    scheme      = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
++ *    authority   = [ userinfo "@" ] host [ ":" port ]
++ *    userinfo    = *( unreserved / pct-encoded / sub-delims / ":" )
++ *    NOTE: Use of the format "user:password" in the userinfo field is
++ *          deprecated.  Applications should not render as clear text any data
++ *          after the first colon (":") character found within a userinfo
++ *          subcomponent unless the data after the colon is the empty string
++ *           (indicating no password).
++ *    pchar         = unreserved / pct-encoded / sub-delims / ":" / "@"
++ *    query       = *( pchar / "/" / "?" )
++ *    fragment    = *( pchar / "/" / "?" )
++ *
++ *   NOTE: Due to ambiguity, "+" in a query must be percent-encoded, as old
++ *         URLs used that for spaces.
++ */
++
++
++static ares_bool_t ares_uri_chis_subdelim(char x)
++{
++  switch (x) {
++    case '!':
++      return ARES_TRUE;
++    case '$':
++      return ARES_TRUE;
++    case '&':
++      return ARES_TRUE;
++    case '\'':
++      return ARES_TRUE;
++    case '(':
++      return ARES_TRUE;
++    case ')':
++      return ARES_TRUE;
++    case '*':
++      return ARES_TRUE;
++    case '+':
++      return ARES_TRUE;
++    case ',':
++      return ARES_TRUE;
++    case ';':
++      return ARES_TRUE;
++    case '=':
++      return ARES_TRUE;
++    default:
++      break;
++  }
++  return ARES_FALSE;
++}
++
++/* These don't actually appear to be referenced in any logic */
++#if 0
++static ares_bool_t ares_uri_chis_gendelim(char x)
++{
++  switch (x) {
++    case ':':
++      return ARES_TRUE;
++    case '/':
++      return ARES_TRUE;
++    case '?':
++      return ARES_TRUE;
++    case '#':
++      return ARES_TRUE;
++    case '[':
++      return ARES_TRUE;
++    case ']':
++      return ARES_TRUE;
++    case '@':
++      return ARES_TRUE;
++    default:
++      break;
++  }
++  return ARES_FALSE;
++}
++
++
++static ares_bool_t ares_uri_chis_reserved(char x)
++{
++  return ares_uri_chis_gendelim(x) || ares_uri_chis_subdelim(x);
++}
++#endif
++
++static ares_bool_t ares_uri_chis_unreserved(char x)
++{
++  switch (x) {
++    case '-':
++      return ARES_TRUE;
++    case '.':
++      return ARES_TRUE;
++    case '_':
++      return ARES_TRUE;
++    case '~':
++      return ARES_TRUE;
++    default:
++      break;
++  }
++  return ares_isalpha(x) || ares_isdigit(x);
++}
++
++static ares_bool_t ares_uri_chis_scheme(char x)
++{
++  switch (x) {
++    case '+':
++      return ARES_TRUE;
++    case '-':
++      return ARES_TRUE;
++    case '.':
++      return ARES_TRUE;
++    default:
++      break;
++  }
++  return ares_isalpha(x) || ares_isdigit(x);
++}
++
++static ares_bool_t ares_uri_chis_authority(char x)
++{
++  /* This one here isn't well defined.  We are going to include the valid
++   * characters of the subfields plus known delimiters */
++  return ares_uri_chis_unreserved(x) || ares_uri_chis_subdelim(x) || x == '%' ||
++         x == '[' || x == ']' || x == '@' || x == ':';
++}
++
++static ares_bool_t ares_uri_chis_userinfo(char x)
++{
++  /* NOTE: we don't include ':' here since we are using that as our
++   *       username/password delimiter */
++  return ares_uri_chis_unreserved(x) || ares_uri_chis_subdelim(x);
++}
++
++static ares_bool_t ares_uri_chis_path(char x)
++{
++  switch (x) {
++    case ':':
++      return ARES_TRUE;
++    case '@':
++      return ARES_TRUE;
++    /* '/' isn't in the spec as a path character since its technically a
++     * delimiter but we're not splitting on '/' so we accept it as valid */
++    case '/':
++      return ARES_TRUE;
++    default:
++      break;
++  }
++  return ares_uri_chis_unreserved(x) || ares_uri_chis_subdelim(x);
++}
++
++static ares_bool_t ares_uri_chis_path_enc(char x)
++{
++  return ares_uri_chis_path(x) || x == '%';
++}
++
++static ares_bool_t ares_uri_chis_query(char x)
++{
++  switch (x) {
++    case '/':
++      return ARES_TRUE;
++    case '?':
++      return ARES_TRUE;
++    default:
++      break;
++  }
++
++  /* Exclude & and = used as delimiters, they're valid characters in the
++   * set, just not for the individual pieces */
++  return ares_uri_chis_path(x) && x != '&' && x != '=';
++}
++
++static ares_bool_t ares_uri_chis_query_enc(char x)
++{
++  return ares_uri_chis_query(x) || x == '%';
++}
++
++static ares_bool_t ares_uri_chis_fragment(char x)
++{
++  switch (x) {
++    case '/':
++      return ARES_TRUE;
++    case '?':
++      return ARES_TRUE;
++    default:
++      break;
++  }
++  return ares_uri_chis_path(x);
++}
++
++static ares_bool_t ares_uri_chis_fragment_enc(char x)
++{
++  return ares_uri_chis_fragment(x) || x == '%';
++}
++
++ares_uri_t *ares_uri_create(void)
++{
++  ares_uri_t *uri = ares_malloc_zero(sizeof(*uri));
++
++  if (uri == NULL) {
++    return NULL;
++  }
++
++  uri->query = ares_htable_dict_create();
++  if (uri->query == NULL) {
++    ares_free(uri);
++    return NULL;
++  }
++
++  return uri;
++}
++
++void ares_uri_destroy(ares_uri_t *uri)
++{
++  if (uri == NULL) {
++    return;
++  }
++
++  ares_free(uri->username);
++  ares_free(uri->password);
++  ares_free(uri->path);
++  ares_free(uri->fragment);
++  ares_htable_dict_destroy(uri->query);
++  ares_free(uri);
++}
++
++static ares_bool_t ares_uri_scheme_is_valid(const char *uri)
++{
++  size_t i;
++
++  if (ares_strlen(uri) == 0) {
++    return ARES_FALSE;
++  }
++
++  if (!ares_isalpha(*uri)) {
++    return ARES_FALSE;
++  }
++
++  for (i = 0; uri[i] != 0; i++) {
++    if (!ares_uri_chis_scheme(uri[i])) {
++      return ARES_FALSE;
++    }
++  }
++  return ARES_TRUE;
++}
++
++static ares_bool_t ares_uri_str_isvalid(const char *str, size_t max_len,
++                                        ares_bool_t (*ischr)(char))
++{
++  size_t i;
++
++  if (str == NULL) {
++    return ARES_FALSE;
++  }
++
++  for (i = 0; i != max_len && str[i] != 0; i++) {
++    if (!ischr(str[i])) {
++      return ARES_FALSE;
++    }
++  }
++  return ARES_TRUE;
++}
++
++ares_status_t ares_uri_set_scheme(ares_uri_t *uri, const char *scheme)
++{
++  if (uri == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  if (!ares_uri_scheme_is_valid(scheme)) {
++    return ARES_EBADSTR;
++  }
++
++  ares_strcpy(uri->scheme, scheme, sizeof(uri->scheme));
++  ares_str_lower(uri->scheme);
++
++  return ARES_SUCCESS;
++}
++
++const char *ares_uri_get_scheme(ares_uri_t *uri)
++{
++  if (uri == NULL) {
++    return NULL;
++  }
++
++  return uri->scheme;
++}
++
++static ares_status_t ares_uri_set_username_own(ares_uri_t *uri, char *username)
++{
++  if (uri == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  if (username != NULL && (!ares_str_isprint(username, ares_strlen(username)) ||
++                           ares_strlen(username) == 0)) {
++    return ARES_EBADSTR;
++  }
++
++
++  ares_free(uri->username);
++  uri->username = username;
++  return ARES_SUCCESS;
++}
++
++ares_status_t ares_uri_set_username(ares_uri_t *uri, const char *username)
++{
++  ares_status_t status;
++  char         *temp = NULL;
++
++  if (uri == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  if (username != NULL) {
++    temp = ares_strdup(username);
++    if (temp == NULL) {
++      return ARES_ENOMEM;
++    }
++  }
++
++  status = ares_uri_set_username_own(uri, temp);
++  if (status != ARES_SUCCESS) {
++    ares_free(temp);
++  }
++
++  return status;
++}
++
++const char *ares_uri_get_username(ares_uri_t *uri)
++{
++  if (uri == NULL) {
++    return NULL;
++  }
++
++  return uri->username;
++}
++
++static ares_status_t ares_uri_set_password_own(ares_uri_t *uri, char *password)
++{
++  if (uri == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  if (password != NULL && !ares_str_isprint(password, ares_strlen(password))) {
++    return ARES_EBADSTR;
++  }
++
++  ares_free(uri->password);
++  uri->password = password;
++  return ARES_SUCCESS;
++}
++
++ares_status_t ares_uri_set_password(ares_uri_t *uri, const char *password)
++{
++  ares_status_t status;
++  char         *temp = NULL;
++
++  if (uri == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  if (password != NULL) {
++    temp = ares_strdup(password);
++    if (temp == NULL) {
++      return ARES_ENOMEM;
++    }
++  }
++
++  status = ares_uri_set_password_own(uri, temp);
++  if (status != ARES_SUCCESS) {
++    ares_free(temp);
++  }
++
++  return status;
++}
++
++const char *ares_uri_get_password(ares_uri_t *uri)
++{
++  if (uri == NULL) {
++    return NULL;
++  }
++
++  return uri->password;
++}
++
++ares_status_t ares_uri_set_host(ares_uri_t *uri, const char *host)
++{
++  struct ares_addr addr;
++  size_t           addrlen;
++  char             hoststr[256];
++  char            *ll_scope;
++
++  if (uri == NULL || ares_strlen(host) == 0 ||
++      ares_strlen(host) >= sizeof(hoststr)) {
++    return ARES_EFORMERR;
++  }
++
++  ares_strcpy(hoststr, host, sizeof(hoststr));
++
++  /* Look for '%' which could be a link-local scope for ipv6 addresses and
++   * parse it off */
++  ll_scope = strchr(hoststr, '%');
++  if (ll_scope != NULL) {
++    *ll_scope = 0;
++    ll_scope++;
++    if (!ares_str_isalnum(ll_scope)) {
++      return ARES_EBADNAME;
++    }
++  }
++
++  /* If its an IP address, normalize it */
++  memset(&addr, 0, sizeof(addr));
++  addr.family = AF_UNSPEC;
++  if (ares_dns_pton(hoststr, &addr, &addrlen) != NULL) {
++    char ipaddr[INET6_ADDRSTRLEN];
++    ares_inet_ntop(addr.family, &addr.addr, ipaddr, sizeof(ipaddr));
++    /* Only IPv6 is allowed to have a scope */
++    if (ll_scope != NULL && addr.family != AF_INET6) {
++      return ARES_EBADNAME;
++    }
++
++    if (ll_scope != NULL) {
++      snprintf(uri->host, sizeof(uri->host), "%s%%%s", ipaddr, ll_scope);
++    } else {
++      ares_strcpy(uri->host, ipaddr, sizeof(uri->host));
++    }
++    return ARES_SUCCESS;
++  }
++
++  /* If its a hostname, make sure its a valid charset */
++  if (!ares_is_hostname(host)) {
++    return ARES_EBADNAME;
++  }
++
++  ares_strcpy(uri->host, host, sizeof(uri->host));
++  return ARES_SUCCESS;
++}
++
++const char *ares_uri_get_host(ares_uri_t *uri)
++{
++  if (uri == NULL) {
++    return NULL;
++  }
++
++  return uri->host;
++}
++
++ares_status_t ares_uri_set_port(ares_uri_t *uri, unsigned short port)
++{
++  if (uri == NULL) {
++    return ARES_EFORMERR;
++  }
++  uri->port = port;
++  return ARES_SUCCESS;
++}
++
++unsigned short ares_uri_get_port(ares_uri_t *uri)
++{
++  if (uri == NULL) {
++    return 0;
++  }
++  return uri->port;
++}
++
++
++/* URI spec says path normalization is a requirement */
++static char *ares_uri_path_normalize(const char *path)
++{
++  ares_status_t status;
++  ares_array_t *arr     = NULL;
++  ares_buf_t   *outpath = NULL;
++  ares_buf_t   *inpath  = NULL;
++  ares_ssize_t  i;
++  size_t        j;
++  size_t        len;
++
++  inpath =
++    ares_buf_create_const((const unsigned char *)path, ares_strlen(path));
++  if (inpath == NULL) {
++    status = ARES_ENOMEM;
++    goto done;
++  }
++
++  outpath = ares_buf_create();
++  if (outpath == NULL) {
++    status = ARES_ENOMEM;
++    goto done;
++  }
++
++  status = ares_buf_split_str_array(inpath, (const unsigned char *)"/", 1,
++                                    ARES_BUF_SPLIT_TRIM, 0, &arr);
++  if (status != ARES_SUCCESS) {
++    return NULL;
++  }
++
++  for (i = 0; i < (ares_ssize_t)ares_array_len(arr); i++) {
++    const char **strptr = ares_array_at(arr, (size_t)i);
++    const char  *str    = *strptr;
++
++    if (ares_streq(str, ".")) {
++      ares_array_remove_at(arr, (size_t)i);
++      i--;
++    } else if (ares_streq(str, "..")) {
++      if (i != 0) {
++        ares_array_remove_at(arr, (size_t)i-1);
++        i--;
++      }
++      ares_array_remove_at(arr, (size_t)i);
++      i--;
++    }
++  }
++
++  status = ares_buf_append_byte(outpath, '/');
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  len = ares_array_len(arr);
++  for (j = 0; j < len; j++) {
++    const char **strptr = ares_array_at(arr, j);
++    const char  *str    = *strptr;
++    status              = ares_buf_append_str(outpath, str);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++
++    /* Path separator, but on the last entry, we need to check if it was
++     * originally terminated or not because they have different meanings */
++    if (j != len - 1 || path[ares_strlen(path) - 1] == '/') {
++      status = ares_buf_append_byte(outpath, '/');
++      if (status != ARES_SUCCESS) {
++        goto done;
++      }
++    }
++  }
++
++done:
++  ares_array_destroy(arr);
++  ares_buf_destroy(inpath);
++  if (status != ARES_SUCCESS) {
++    ares_buf_destroy(outpath);
++    return NULL;
++  }
++
++  return ares_buf_finish_str(outpath, NULL);
++}
++
++ares_status_t ares_uri_set_path(ares_uri_t *uri, const char *path)
++{
++  char *temp = NULL;
++
++  if (uri == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  if (path != NULL && !ares_str_isprint(path, ares_strlen(path))) {
++    return ARES_EBADSTR;
++  }
++
++  if (path != NULL) {
++    temp = ares_uri_path_normalize(path);
++    if (temp == NULL) {
++      return ARES_ENOMEM;
++    }
++  }
++
++  ares_free(uri->path);
++  uri->path = temp;
++
++  return ARES_SUCCESS;
++}
++
++const char *ares_uri_get_path(ares_uri_t *uri)
++{
++  if (uri == NULL) {
++    return NULL;
++  }
++
++  return uri->path;
++}
++
++ares_status_t ares_uri_set_query_key(ares_uri_t *uri, const char *key,
++                                     const char *val)
++{
++  if (uri == NULL || key == NULL || *key == 0) {
++    return ARES_EFORMERR;
++  }
++
++  if (!ares_str_isprint(key, ares_strlen(key)) ||
++      (val != NULL && !ares_str_isprint(val, ares_strlen(val)))) {
++    return ARES_EBADSTR;
++  }
++
++  if (!ares_htable_dict_insert(uri->query, key, val)) {
++    return ARES_ENOMEM;
++  }
++  return ARES_SUCCESS;
++}
++
++ares_status_t ares_uri_del_query_key(ares_uri_t *uri, const char *key)
++{
++  if (uri == NULL || key == NULL || *key == 0 ||
++      !ares_str_isprint(key, ares_strlen(key))) {
++    return ARES_EFORMERR;
++  }
++
++  if (!ares_htable_dict_remove(uri->query, key)) {
++    return ARES_ENOTFOUND;
++  }
++
++  return ARES_SUCCESS;
++}
++
++const char *ares_uri_get_query_key(ares_uri_t *uri, const char *key)
++{
++  if (uri == NULL || key == NULL || *key == 0 ||
++      !ares_str_isprint(key, ares_strlen(key))) {
++    return NULL;
++  }
++
++  return ares_htable_dict_get_direct(uri->query, key);
++}
++
++char **ares_uri_get_query_keys(ares_uri_t *uri, size_t *num)
++{
++  if (uri == NULL || num == NULL) {
++    return NULL;
++  }
++
++  return ares_htable_dict_keys(uri->query, num);
++}
++
++static ares_status_t ares_uri_set_fragment_own(ares_uri_t *uri, char *fragment)
++{
++  if (uri == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  if (fragment != NULL && !ares_str_isprint(fragment, ares_strlen(fragment))) {
++    return ARES_EBADSTR;
++  }
++
++  ares_free(uri->fragment);
++  uri->fragment = fragment;
++  return ARES_SUCCESS;
++}
++
++ares_status_t ares_uri_set_fragment(ares_uri_t *uri, const char *fragment)
++{
++  ares_status_t status;
++  char         *temp = NULL;
++
++  if (uri == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  if (fragment != NULL) {
++    temp = ares_strdup(fragment);
++    if (temp == NULL) {
++      return ARES_ENOMEM;
++    }
++  }
++
++  status = ares_uri_set_fragment_own(uri, temp);
++  if (status != ARES_SUCCESS) {
++    ares_free(temp);
++  }
++
++  return status;
++}
++
++const char *ares_uri_get_fragment(ares_uri_t *uri)
++{
++  if (uri == NULL) {
++    return NULL;
++  }
++  return uri->fragment;
++}
++
++static ares_status_t ares_uri_encode_buf(ares_buf_t *buf, const char *str,
++                                         ares_bool_t (*ischr)(char))
++{
++  size_t i;
++
++  if (buf == NULL || str == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  for (i = 0; str[i] != 0; i++) {
++    if (ischr(str[i])) {
++      if (ares_buf_append_byte(buf, (unsigned char)str[i]) != ARES_SUCCESS) {
++        return ARES_ENOMEM;
++      }
++    } else {
++      if (ares_buf_append_byte(buf, '%') != ARES_SUCCESS) {
++        return ARES_ENOMEM;
++      }
++      if (ares_buf_append_num_hex(buf, (size_t)str[i], 2) != ARES_SUCCESS) {
++        return ARES_ENOMEM;
++      }
++    }
++  }
++  return ARES_SUCCESS;
++}
++
++static ares_status_t ares_uri_write_scheme(ares_uri_t *uri, ares_buf_t *buf)
++{
++  ares_status_t status;
++
++  status = ares_buf_append_str(buf, uri->scheme);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  status = ares_buf_append_str(buf, "://");
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  return status;
++}
++
++static ares_status_t ares_uri_write_authority(ares_uri_t *uri, ares_buf_t *buf)
++{
++  ares_status_t status;
++  ares_bool_t   is_ipv6 = ARES_FALSE;
++
++  if (ares_strlen(uri->username)) {
++    status = ares_uri_encode_buf(buf, uri->username, ares_uri_chis_userinfo);
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++  }
++
++  if (ares_strlen(uri->password)) {
++    status = ares_buf_append_byte(buf, ':');
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++
++    status = ares_uri_encode_buf(buf, uri->password, ares_uri_chis_userinfo);
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++  }
++
++  if (ares_strlen(uri->username) || ares_strlen(uri->password)) {
++    status = ares_buf_append_byte(buf, '@');
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++  }
++
++  /* We need to write ipv6 addresses with [ ] */
++  if (strchr(uri->host, '%') != NULL) {
++    /* If we have a % in the name, it must be ipv6 link local scope, so we
++     * don't need to check anything else */
++    is_ipv6 = ARES_TRUE;
++  } else {
++    /* Parse the host to see if it is an ipv6 address */
++    struct ares_addr addr;
++    size_t           addrlen;
++    memset(&addr, 0, sizeof(addr));
++    addr.family = AF_INET6;
++    if (ares_dns_pton(uri->host, &addr, &addrlen) != NULL) {
++      is_ipv6 = ARES_TRUE;
++    }
++  }
++
++  if (is_ipv6) {
++    status = ares_buf_append_byte(buf, '[');
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++  }
++
++  status = ares_buf_append_str(buf, uri->host);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  if (is_ipv6) {
++    status = ares_buf_append_byte(buf, ']');
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++  }
++
++  if (uri->port > 0) {
++    status = ares_buf_append_byte(buf, ':');
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++    status = ares_buf_append_num_dec(buf, uri->port, 0);
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++  }
++
++  return status;
++}
++
++static ares_status_t ares_uri_write_path(ares_uri_t *uri, ares_buf_t *buf)
++{
++  ares_status_t status;
++
++  if (ares_strlen(uri->path) == 0) {
++    return ARES_SUCCESS;
++  }
++
++  if (*uri->path != '/') {
++    status = ares_buf_append_byte(buf, '/');
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++  }
++
++  status = ares_uri_encode_buf(buf, uri->path, ares_uri_chis_path);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  return ARES_SUCCESS;
++}
++
++static ares_status_t ares_uri_write_query(ares_uri_t *uri, ares_buf_t *buf)
++{
++  ares_status_t status;
++  char        **keys;
++  size_t        num_keys = 0;
++  size_t        i;
++
++  if (ares_htable_dict_num_keys(uri->query) == 0) {
++    return ARES_SUCCESS;
++  }
++
++  keys = ares_uri_get_query_keys(uri, &num_keys);
++  if (keys == NULL || num_keys == 0) {
++    return ARES_ENOMEM;
++  }
++
++  status = ares_buf_append_byte(buf, '?');
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  for (i = 0; i < num_keys; i++) {
++    const char *val;
++
++    if (i != 0) {
++      status = ares_buf_append_byte(buf, '&');
++      if (status != ARES_SUCCESS) {
++        goto done;
++      }
++    }
++
++    status = ares_uri_encode_buf(buf, keys[i], ares_uri_chis_query);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++
++    val = ares_uri_get_query_key(uri, keys[i]);
++    if (val != NULL) {
++      status = ares_buf_append_byte(buf, '=');
++      if (status != ARES_SUCCESS) {
++        goto done;
++      }
++
++      status = ares_uri_encode_buf(buf, val, ares_uri_chis_query);
++      if (status != ARES_SUCCESS) {
++        goto done;
++      }
++    }
++  }
++
++done:
++  ares_free_array(keys, num_keys, ares_free);
++  return status;
++}
++
++static ares_status_t ares_uri_write_fragment(ares_uri_t *uri, ares_buf_t *buf)
++{
++  ares_status_t status;
++
++  if (!ares_strlen(uri->fragment)) {
++    return ARES_SUCCESS;
++  }
++
++  status = ares_buf_append_byte(buf, '#');
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  status = ares_uri_encode_buf(buf, uri->fragment, ares_uri_chis_fragment);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  return ARES_SUCCESS;
++}
++
++ares_status_t ares_uri_write_buf(ares_uri_t *uri, ares_buf_t *buf)
++{
++  ares_status_t status;
++  size_t        orig_len;
++
++  if (uri == NULL || buf == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  if (ares_strlen(uri->scheme) == 0 || ares_strlen(uri->host) == 0) {
++    return ARES_ENODATA;
++  }
++
++  orig_len = ares_buf_len(buf);
++
++  status = ares_uri_write_scheme(uri, buf);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_write_authority(uri, buf);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_write_path(uri, buf);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_write_query(uri, buf);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_write_fragment(uri, buf);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++done:
++  if (status != ARES_SUCCESS) {
++    ares_buf_set_length(buf, orig_len);
++  }
++  return status;
++}
++
++ares_status_t ares_uri_write(char **out, ares_uri_t *uri)
++{
++  ares_buf_t   *buf;
++  ares_status_t status;
++
++  if (out == NULL || uri == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  *out = NULL;
++
++  buf = ares_buf_create();
++  if (buf == NULL) {
++    return ARES_ENOMEM;
++  }
++
++  status = ares_uri_write_buf(uri, buf);
++  if (status != ARES_SUCCESS) {
++    ares_buf_destroy(buf);
++    return status;
++  }
++
++  *out = ares_buf_finish_str(buf, NULL);
++  return ARES_SUCCESS;
++}
++
++#define xdigit_val(x)     \
++  ((x >= '0' && x <= '9') \
++     ? (x - '0')          \
++     : ((x >= 'A' && x <= 'F') ? (x - 'A' + 10) : (x - 'a' + 10)))
++
++static ares_status_t ares_uri_decode_inplace(char *str, ares_bool_t is_query,
++                                             ares_bool_t must_be_printable,
++                                             size_t     *out_len)
++{
++  size_t i;
++  size_t len = 0;
++
++  for (i = 0; str[i] != 0; i++) {
++    if (is_query && str[i] == '+') {
++      str[len++] = ' ';
++      continue;
++    }
++
++    if (str[i] != '%') {
++      str[len++] = str[i];
++      continue;
++    }
++
++    if (!ares_isxdigit(str[i + 1]) || !ares_isxdigit(str[i + 2])) {
++      return ARES_EBADSTR;
++    }
++
++    str[len] = (char)(xdigit_val(str[i + 1]) << 4 | xdigit_val(str[i + 2]));
++
++    if (must_be_printable && !ares_isprint(str[len])) {
++      return ARES_EBADSTR;
++    }
++
++    len++;
++
++    i += 2;
++  }
++
++  str[len] = 0;
++
++  *out_len = len;
++  return ARES_SUCCESS;
++}
++
++static ares_status_t ares_uri_parse_scheme(ares_uri_t *uri, ares_buf_t *buf)
++{
++  ares_status_t status;
++  size_t        bytes;
++  char          scheme[sizeof(uri->scheme)];
++
++  ares_buf_tag(buf);
++
++  bytes =
++    ares_buf_consume_until_seq(buf, (const unsigned char *)"://", 3, ARES_TRUE);
++  if (bytes == SIZE_MAX || bytes > sizeof(uri->scheme)) {
++    return ARES_EBADSTR;
++  }
++
++  status = ares_buf_tag_fetch_string(buf, scheme, sizeof(scheme));
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  status = ares_uri_set_scheme(uri, scheme);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  /* Consume :// */
++  ares_buf_consume(buf, 3);
++
++  return ARES_SUCCESS;
++}
++
++static ares_status_t ares_uri_parse_userinfo(ares_uri_t *uri, ares_buf_t *buf)
++{
++  size_t        userinfo_len;
++  size_t        username_len;
++  ares_bool_t   has_password = ARES_FALSE;
++  char         *temp         = NULL;
++  ares_status_t status;
++  size_t        len;
++
++  ares_buf_tag(buf);
++
++  /* Search for @, if its not found, return */
++  userinfo_len = ares_buf_consume_until_charset(buf, (const unsigned char *)"@",
++                                                1, ARES_TRUE);
++
++  if (userinfo_len == SIZE_MAX) {
++    return ARES_SUCCESS;
++  }
++
++  /* Rollback since now we know there really is userinfo */
++  ares_buf_tag_rollback(buf);
++
++  /* Search for ':', if it isn't found or its past the '@' then we only have
++   * a username and no password */
++  ares_buf_tag(buf);
++  username_len = ares_buf_consume_until_charset(buf, (const unsigned char *)":",
++                                                1, ARES_TRUE);
++  if (username_len < userinfo_len) {
++    has_password = ARES_TRUE;
++    status       = ares_buf_tag_fetch_strdup(buf, &temp);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++
++    status = ares_uri_decode_inplace(temp, ARES_FALSE, ARES_TRUE, &len);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++
++    status = ares_uri_set_username_own(uri, temp);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++    temp = NULL;
++
++    /* Consume : */
++    ares_buf_consume(buf, 1);
++  }
++
++  ares_buf_tag(buf);
++  ares_buf_consume_until_charset(buf, (const unsigned char *)"@", 1, ARES_TRUE);
++  status = ares_buf_tag_fetch_strdup(buf, &temp);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_decode_inplace(temp, ARES_FALSE, ARES_TRUE, &len);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  if (has_password) {
++    status = ares_uri_set_password_own(uri, temp);
++  } else {
++    status = ares_uri_set_username_own(uri, temp);
++  }
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++  temp = NULL;
++
++  /* Consume @ */
++  ares_buf_consume(buf, 1);
++
++done:
++  ares_free(temp);
++  return status;
++}
++
++static ares_status_t ares_uri_parse_hostport(ares_uri_t *uri, ares_buf_t *buf)
++{
++  unsigned char b;
++  char          host[256];
++  char          port[6];
++  size_t        len;
++  ares_status_t status;
++
++  status = ares_buf_peek_byte(buf, &b);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  /* Bracketed syntax for ipv6 addresses */
++  if (b == '[') {
++    ares_buf_consume(buf, 1);
++    ares_buf_tag(buf);
++    len = ares_buf_consume_until_charset(buf, (const unsigned char *)"]", 1,
++                                         ARES_TRUE);
++    if (len == SIZE_MAX) {
++      return ARES_EBADSTR;
++    }
++
++    status = ares_buf_tag_fetch_string(buf, host, sizeof(host));
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++    /* Consume ']' */
++    ares_buf_consume(buf, 1);
++  } else {
++    /* Either ipv4 or hostname */
++    ares_buf_tag(buf);
++    ares_buf_consume_until_charset(buf, (const unsigned char *)":", 1,
++                                   ARES_FALSE);
++
++    status = ares_buf_tag_fetch_string(buf, host, sizeof(host));
++    if (status != ARES_SUCCESS) {
++      return status;
++    }
++  }
++
++  status = ares_uri_set_host(uri, host);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  /* No port if nothing left to consume */
++  if (!ares_buf_len(buf)) {
++    return status;
++  }
++
++  status = ares_buf_peek_byte(buf, &b);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  /* Only valid extra character at this point is ':' */
++  if (b != ':') {
++    return ARES_EBADSTR;
++  }
++  ares_buf_consume(buf, 1);
++
++  len = ares_buf_len(buf);
++  if (len == 0 || len > sizeof(port) - 1) {
++    return ARES_EBADSTR;
++  }
++
++  status = ares_buf_fetch_bytes(buf, (unsigned char *)port, len);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++  port[len] = 0;
++
++  if (!ares_str_isnum(port)) {
++    return ARES_EBADSTR;
++  }
++
++  status = ares_uri_set_port(uri, (unsigned short)atoi(port));
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  return ARES_SUCCESS;
++}
++
++static ares_status_t ares_uri_parse_authority(ares_uri_t *uri, ares_buf_t *buf)
++{
++  ares_status_t        status;
++  size_t               bytes;
++  ares_buf_t          *auth = NULL;
++  const unsigned char *ptr;
++  size_t               ptr_len;
++
++  ares_buf_tag(buf);
++
++  bytes = ares_buf_consume_until_charset(buf, (const unsigned char *)"/?#", 3,
++                                         ARES_FALSE);
++  if (bytes == 0) {
++    return ARES_EBADSTR;
++  }
++
++  status = ares_buf_tag_fetch_constbuf(buf, &auth);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  ptr = ares_buf_peek(auth, &ptr_len);
++  if (!ares_uri_str_isvalid((const char *)ptr, ptr_len,
++                            ares_uri_chis_authority)) {
++    status = ARES_EBADSTR;
++    goto done;
++  }
++
++  status = ares_uri_parse_userinfo(uri, auth);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_parse_hostport(uri, auth);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  /* NOTE: the /, ?, or # is still in the buffer at this point so it can
++   *       be used to determine what parser should be called next */
++
++done:
++  ares_buf_destroy(auth);
++  return status;
++}
++
++static ares_status_t ares_uri_parse_path(ares_uri_t *uri, ares_buf_t *buf)
++{
++  unsigned char b;
++  char         *path = NULL;
++  ares_status_t status;
++  size_t        len;
++
++  if (ares_buf_len(buf) == 0) {
++    return ARES_SUCCESS;
++  }
++
++  status = ares_buf_peek_byte(buf, &b);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  /* Not a path, must be one of the others */
++  if (b != '/') {
++    return ARES_SUCCESS;
++  }
++
++  ares_buf_tag(buf);
++  ares_buf_consume_until_charset(buf, (const unsigned char *)"?#", 2,
++                                 ARES_FALSE);
++  status = ares_buf_tag_fetch_strdup(buf, &path);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  if (!ares_uri_str_isvalid(path, SIZE_MAX, ares_uri_chis_path_enc)) {
++    status = ARES_EBADSTR;
++    goto done;
++  }
++
++  status = ares_uri_decode_inplace(path, ARES_FALSE, ARES_TRUE, &len);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_set_path(uri, path);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++done:
++  ares_free(path);
++  return status;
++}
++
++static ares_status_t ares_uri_parse_query_buf(ares_uri_t *uri, ares_buf_t *buf)
++{
++  ares_status_t status = ARES_SUCCESS;
++  char         *key    = NULL;
++  char         *val    = NULL;
++
++  while (ares_buf_len(buf) > 0) {
++    unsigned char b = 0;
++    size_t        len;
++
++    ares_buf_tag(buf);
++
++    /* Its valid to have only a key with no value, so we search for both
++     * delims */
++    len = ares_buf_consume_until_charset(buf, (const unsigned char *)"&=", 2,
++                                         ARES_FALSE);
++    if (len == 0) {
++      /* If we're here, we have a zero length key which is invalid */
++      status = ARES_EBADSTR;
++      goto done;
++    }
++
++    if (ares_buf_len(buf) > 0) {
++      /* Determine if we stopped on & or = */
++      status = ares_buf_peek_byte(buf, &b);
++      if (status != ARES_SUCCESS) {
++        goto done;
++      }
++    }
++
++    status = ares_buf_tag_fetch_strdup(buf, &key);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++
++    if (!ares_uri_str_isvalid(key, SIZE_MAX, ares_uri_chis_query_enc)) {
++      status = ARES_EBADSTR;
++      goto done;
++    }
++
++    status = ares_uri_decode_inplace(key, ARES_TRUE, ARES_TRUE, &len);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++
++    /* Fetch Value */
++    if (b == '=') {
++      /* Skip delimiter */
++      ares_buf_consume(buf, 1);
++      ares_buf_tag(buf);
++      len = ares_buf_consume_until_charset(buf, (const unsigned char *)"&", 1,
++                                           ARES_FALSE);
++      if (len > 0) {
++        status = ares_buf_tag_fetch_strdup(buf, &val);
++        if (status != ARES_SUCCESS) {
++          goto done;
++        }
++
++        if (!ares_uri_str_isvalid(val, SIZE_MAX, ares_uri_chis_query_enc)) {
++          status = ARES_EBADSTR;
++          goto done;
++        }
++
++        status = ares_uri_decode_inplace(val, ARES_TRUE, ARES_TRUE, &len);
++        if (status != ARES_SUCCESS) {
++          goto done;
++        }
++      }
++    }
++
++    if (b != 0) {
++      /* Consume '&' */
++      ares_buf_consume(buf, 1);
++    }
++
++    status = ares_uri_set_query_key(uri, key, val);
++    if (status != ARES_SUCCESS) {
++      goto done;
++    }
++
++    ares_free(key);
++    key = NULL;
++    ares_free(val);
++    val = NULL;
++  }
++
++done:
++  ares_free(key);
++  ares_free(val);
++  return status;
++}
++
++static ares_status_t ares_uri_parse_query(ares_uri_t *uri, ares_buf_t *buf)
++{
++  unsigned char b;
++  ares_status_t status;
++  ares_buf_t   *query = NULL;
++  size_t        len;
++
++  if (ares_buf_len(buf) == 0) {
++    return ARES_SUCCESS;
++  }
++
++  status = ares_buf_peek_byte(buf, &b);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  /* Not a query, must be one of the others */
++  if (b != '?') {
++    return ARES_SUCCESS;
++  }
++
++  /* Only possible terminator is fragment indicator of '#' */
++  ares_buf_consume(buf, 1);
++  ares_buf_tag(buf);
++  len = ares_buf_consume_until_charset(buf, (const unsigned char *)"#", 1,
++                                       ARES_FALSE);
++  if (len == 0) {
++    /* No data, return */
++    return ARES_SUCCESS;
++  }
++
++  status = ares_buf_tag_fetch_constbuf(buf, &query);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  status = ares_uri_parse_query_buf(uri, query);
++  ares_buf_destroy(query);
++
++  return status;
++}
++
++static ares_status_t ares_uri_parse_fragment(ares_uri_t *uri, ares_buf_t *buf)
++{
++  unsigned char b;
++  char         *fragment = NULL;
++  ares_status_t status;
++  size_t        len;
++
++  if (ares_buf_len(buf) == 0) {
++    return ARES_SUCCESS;
++  }
++
++  status = ares_buf_peek_byte(buf, &b);
++  if (status != ARES_SUCCESS) {
++    return status;
++  }
++
++  /* Not a fragment, must be one of the others */
++  if (b != '#') {
++    return ARES_SUCCESS;
++  }
++
++  ares_buf_consume(buf, 1);
++
++  if (ares_buf_len(buf) == 0) {
++    return ARES_SUCCESS;
++  }
++
++  /* Rest of the buffer is the fragment */
++  status = ares_buf_fetch_str_dup(buf, ares_buf_len(buf), &fragment);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  if (!ares_uri_str_isvalid(fragment, SIZE_MAX, ares_uri_chis_fragment_enc)) {
++    status = ARES_EBADSTR;
++    goto done;
++  }
++
++  status = ares_uri_decode_inplace(fragment, ARES_FALSE, ARES_TRUE, &len);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_set_fragment_own(uri, fragment);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++  fragment = NULL;
++
++done:
++  ares_free(fragment);
++  return status;
++}
++
++ares_status_t ares_uri_parse_buf(ares_uri_t **out, ares_buf_t *buf)
++{
++  ares_status_t status;
++  ares_uri_t   *uri = NULL;
++  size_t        orig_pos;
++
++  if (out == NULL || buf == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  *out = NULL;
++
++  orig_pos = ares_buf_get_position(buf);
++
++  uri = ares_uri_create();
++  if (uri == NULL) {
++    status = ARES_ENOMEM;
++    goto done;
++  }
++
++  status = ares_uri_parse_scheme(uri, buf);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_parse_authority(uri, buf);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_parse_path(uri, buf);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_parse_query(uri, buf);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_parse_fragment(uri, buf);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++done:
++  if (status != ARES_SUCCESS) {
++    ares_buf_set_position(buf, orig_pos);
++    ares_uri_destroy(uri);
++  } else {
++    *out = uri;
++  }
++  return status;
++}
++
++ares_status_t ares_uri_parse(ares_uri_t **out, const char *str)
++{
++  ares_status_t status;
++  ares_buf_t   *buf = NULL;
++
++  if (out == NULL || str == NULL) {
++    return ARES_EFORMERR;
++  }
++
++  *out = NULL;
++
++  buf = ares_buf_create();
++  if (buf == NULL) {
++    status = ARES_ENOMEM;
++    goto done;
++  }
++
++  status = ares_buf_append_str(buf, str);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++  status = ares_uri_parse_buf(out, buf);
++  if (status != ARES_SUCCESS) {
++    goto done;
++  }
++
++done:
++  ares_buf_destroy(buf);
++
++  return status;
++}
+diff --git a/src/lib/util/ares_uri.h b/src/lib/util/ares_uri.h
+new file mode 100644
+index 0000000..c969f94
+--- /dev/null
++++ b/src/lib/util/ares_uri.h
+@@ -0,0 +1,252 @@
++/* MIT License
++ *
++ * Copyright (c) 2024 Brad House
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ *
++ * SPDX-License-Identifier: MIT
++ */
++#ifndef __ARES_URI_H
++#define __ARES_URI_H
++
++/*! \addtogroup ares_uri URI parser and writer implementation
++ *
++ * This is a fairly complete URI parser and writer implementation (RFC 3986) for
++ * schemes which use the :// syntax. Does not currently support URIs without an
++ * authority section, such as "mailto:person@example.com".
++ *
++ * Its implementation is overkill for our current needs to be able to express
++ * DNS server configuration, but there was really no reason not to support
++ * a greater subset of the specification.
++ *
++ * @{
++ */
++
++
++struct ares_uri;
++
++/*! URI object */
++typedef struct ares_uri ares_uri_t;
++
++/*! Create a new URI object
++ *
++ *  \return new ares_uri_t, must be freed with ares_uri_destroy()
++ */
++ares_uri_t             *ares_uri_create(void);
++
++/*! Destroy an initialized URI object
++ *
++ *  \param[in] uri  Initialized URI object
++ */
++void                    ares_uri_destroy(ares_uri_t *uri);
++
++/*! Set the URI scheme.  Automatically lower-cases the scheme provided.
++ *  Only allows Alpha, Digit, +, -, and . characters.  Maximum length is
++ *  15 characters.  This is required to be set to write a URI.
++ *
++ *  \param[in] uri    Initialized URI object
++ *  \param[in] scheme Scheme to set the object to use
++ *  \return ARES_SUCCESS on success
++ */
++ares_status_t  ares_uri_set_scheme(ares_uri_t *uri, const char *scheme);
++
++/*! Retrieve the currently configured URI scheme.
++ *
++ *  \param[in] uri    Initialized URI object
++ *  \return string containing URI scheme
++ */
++const char    *ares_uri_get_scheme(ares_uri_t *uri);
++
++/*! Set the username in the URI object
++ *
++ *  \param[in] uri      Initialized URI object
++ *  \param[in] username Username to set. May be NULL to unset existing username.
++ *  \return ARES_SUCCESS on success
++ */
++ares_status_t  ares_uri_set_username(ares_uri_t *uri, const char *username);
++
++/*! Retrieve the currently configured username.
++ *
++ *  \param[in] uri    Initialized URI object
++ *  \return string containing username, maybe NULL if not set.
++ */
++const char    *ares_uri_get_username(ares_uri_t *uri);
++
++/*! Set the password in the URI object
++ *
++ *  \param[in] uri      Initialized URI object
++ *  \param[in] password Password to set. May be NULL to unset existing password.
++ *  \return ARES_SUCCESS on success
++ */
++ares_status_t  ares_uri_set_password(ares_uri_t *uri, const char *password);
++
++/*! Retrieve the currently configured password.
++ *
++ *  \param[in] uri    Initialized URI object
++ *  \return string containing password, maybe NULL if not set.
++ */
++const char    *ares_uri_get_password(ares_uri_t *uri);
++
++/*! Set the host or ip address in the URI object.  This is required to be
++ *  set to write a URI.  The character set is strictly validated.
++ *
++ *  \param[in] uri      Initialized URI object
++ *  \param[in] host     IPv4, IPv6, or hostname to set.
++ *  \return ARES_SUCCESS on success
++ */
++ares_status_t  ares_uri_set_host(ares_uri_t *uri, const char *host);
++
++/*! Retrieve the currently configured host (or ip address).  IPv6 addresses
++ *  May include a link-local scope (e.g. fe80::b542:84df:1719:65e3%en0).
++ *
++ *  \param[in] uri    Initialized URI object
++ *  \return string containing host, maybe NULL if not set.
++ */
++const char    *ares_uri_get_host(ares_uri_t *uri);
++
++/*! Set the port to use in the URI object.  A port value of 0 will omit
++ *  the port from the URI when written, thus using the scheme's default.
++ *
++ *  \param[in] uri  Initialized URI object
++ *  \param[in] port Port to set. Use 0 to unset.
++ *  \return ARES_SUCCESS on success
++ */
++ares_status_t  ares_uri_set_port(ares_uri_t *uri, unsigned short port);
++
++/*! Retrieve the currently configured port
++ *
++ *  \param[in] uri    Initialized URI object
++ *  \return port number, or 0 if not set.
++ */
++unsigned short ares_uri_get_port(ares_uri_t *uri);
++
++/*! Set the path in the URI object.  Unsupported characters will be URI-encoded
++ *  when written.
++ *
++ *  \param[in] uri  Initialized URI object
++ *  \param[in] path Path to set. May be NULL to unset existing path.
++ *  \return ARES_SUCCESS on success
++ */
++ares_status_t  ares_uri_set_path(ares_uri_t *uri, const char *path);
++
++/*! Retrieves the path in the URI object.  If retrieved after parse, this
++ *  value will be URI-decoded already.
++ *
++ *  \param[in] uri Initialized URI object
++ *  \return path string, or NULL if not set.
++ */
++const char    *ares_uri_get_path(ares_uri_t *uri);
++
++/*! Set a new query key/value pair.  There is no set order for query keys
++ *  when output in the URI, they will be emitted in a random order.  Keys are
++ *  case-insensitive. Query keys and values will be automatically URI-encoded
++ *  when written.
++ *
++ *  \param[in] uri  Initialized URI object
++ *  \param[in] key  Query key to use, must be non-zero length.
++ *  \param[in] val  Query value to use, may be NULL.
++ *  \return ARES_SUCCESS on success
++ */
++ares_status_t  ares_uri_set_query_key(ares_uri_t *uri, const char *key,
++                                      const char *val);
++
++/*! Delete a specific query key.
++ *
++ *  \param[in] uri Initialized URI object
++ *  \param[in] key Key to delete.
++ *  \return ARES_SUCCESS if deleted, ARES_ENOTFOUND if not found
++ */
++ares_status_t  ares_uri_del_query_key(ares_uri_t *uri, const char *key);
++
++/*! Retrieve the value associted with a query key. Keys are case-insensitive.
++ *
++ *  \param[in] uri Initialized URI object
++ *  \param[in] key Key to retrieve.
++ *  \return string representing value, may be NULL if either not found or
++ *          NULL value set.  There is currently no way to indicate the
++ *          difference.
++ */
++const char    *ares_uri_get_query_key(ares_uri_t *uri, const char *key);
++
++/*! Retrieve a complete list of query keys.
++ *
++ *  \param[in]  uri Initialized URI object
++ *  \param[out] num Number of keys.
++ *  \return NULL on failure or no keys. Use
++ *          ares_free_array(keys, num, ares_free) when done with array.
++ */
++char         **ares_uri_get_query_keys(ares_uri_t *uri, size_t *num);
++
++/*! Set the fragment in the URI object.  Unsupported characters will be
++ *  URI-encoded when written.
++ *
++ *  \param[in] uri      Initialized URI object
++ *  \param[in] fragment Fragment to set. May be NULL to unset existing fragment.
++ *  \return ARES_SUCCESS on success
++ */
++ares_status_t  ares_uri_set_fragment(ares_uri_t *uri, const char *fragment);
++
++/*! Retrieves the fragment in the URI object.  If retrieved after parse, this
++ *  value will be URI-decoded already.
++ *
++ *  \param[in] uri Initialized URI object
++ *  \return fragment string, or NULL if not set.
++ */
++const char    *ares_uri_get_fragment(ares_uri_t *uri);
++
++/*! Parse the provided URI buffer into a new URI object.
++ *
++ *  \param[out] out  Returned new URI object. free with ares_uri_destroy().
++ *  \param[in]  buf  Buffer object containing the URI
++ *  \return ARES_SUCCESS on successful parse. On failure the 'buf' object will
++ *          be restored to its initial state in case another parser needs to
++ *          be attempted.
++ */
++ares_status_t  ares_uri_parse_buf(ares_uri_t **out, ares_buf_t *buf);
++
++/*! Parse the provided URI string into a new URI object.
++ *
++ *  \param[out] out  Returned new URI object. free with ares_uri_destroy().
++ *  \param[in]  uri  URI string to parse
++ *  \return ARES_SUCCESS on successful parse
++ */
++ares_status_t  ares_uri_parse(ares_uri_t **out, const char *uri);
++
++/*! Write URI object to a new string buffer.  Requires at least the scheme
++ *  and host to be set for this to succeed.
++ *
++ *  \param[out] out  Returned new URI string. Free with ares_free().
++ *  \param[in]  uri  Initialized URI object.
++ *  \return ARES_SUCCESS on successful write.
++ */
++ares_status_t  ares_uri_write(char **out, ares_uri_t *uri);
++
++/*! Write URI object to an existing ares_buf_t object.  Requires at least the
++ *  scheme and host to be set for this to succeed.
++ *
++ *  \param[in]     uri  Initialized URI object.
++ *  \param[in,out] buf  Destination buf object.
++ *  \return ARES_SUCCESS on successful write.
++ */
++ares_status_t  ares_uri_write_buf(ares_uri_t *uri, ares_buf_t *buf);
++
++/*! @} */
++
++#endif /* __ARES_URI_H */

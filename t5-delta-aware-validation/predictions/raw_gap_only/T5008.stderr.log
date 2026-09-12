@@ -1,0 +1,506 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t5-gap_only-T5008-vltfpgye
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08ae9-8242-77c2-8e20-fd3b3015fcdc
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T5008
+
+## Existing harness H0
+
+Every project-owned C/C++ path containing `fuzz` at the pre-change snapshot is shown below. Framework and build-script scaffolding are not expanded.
+
+### H0 path: `tools/clusterfuzz.cpp`
+
+~~~~cpp
+#include "../src/meshoptimizer.h"
+
+#include <float.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* buffer, size_t size)
+{
+	if (size == 0)
+		return 0;
+
+	srand(buffer[0]);
+
+	float vb[100][4];
+
+	for (int i = 0; i < 100; ++i)
+	{
+		vb[i][0] = rand() % 10;
+		vb[i][1] = rand() % 10;
+		vb[i][2] = rand() % 10;
+		vb[i][3] = rand() % 10;
+	}
+
+	unsigned int ib[999];
+	int indices = (size - 1) < 999 ? (size - 1) / 3 * 3 : 999;
+
+	for (int i = 0; i < indices; ++i)
+		ib[i] = buffer[1 + i] % 100;
+
+	meshopt_Meshlet ml[333];
+	unsigned int mv[333 * 3];
+	unsigned char mt[333 * 4];
+
+	meshopt_buildMeshlets(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 4, /* max_triangles= */ 4, 0.f);
+
+	meshopt_buildMeshletsScan(ml, mv, mt, ib, indices, 100, /* max_vertices= */ 4, /* max_triangles= */ 4);
+	meshopt_buildMeshletsScan(ml, mv, mt, ib, indices, 100, /* max_vertices= */ 4, /* max_triangles= */ 8);
+
+	meshopt_buildMeshletsFlex(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 4, /* min_triangles= */ 4, /* max_triangles= */ 8, 0.f, 2.f);
+	meshopt_buildMeshletsFlex(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 8, /* min_triangles= */ 8, /* max_triangles= */ 16, 0.f, 2.f);
+	meshopt_buildMeshletsFlex(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 16, /* min_triangles= */ 8, /* max_triangles= */ 32, 0.f, 2.f);
+	meshopt_buildMeshletsFlex(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 16, /* min_triangles= */ 16, /* max_triangles= */ 32, 0.f, 2.f);
+
+	meshopt_buildMeshletsSpatial(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 4, /* min_triangles= */ 4, /* max_triangles= */ 8, 0.f);
+	meshopt_buildMeshletsSpatial(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 8, /* min_triangles= */ 4, /* max_triangles= */ 32, 0.f);
+	meshopt_buildMeshletsSpatial(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 8, /* min_triangles= */ 8, /* max_triangles= */ 32, 0.f);
+	meshopt_buildMeshletsSpatial(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 8, /* min_triangles= */ 12, /* max_triangles= */ 32, 0.f);
+	meshopt_buildMeshletsSpatial(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 16, /* min_triangles= */ 16, /* max_triangles= */ 32, 0.f);
+	meshopt_buildMeshletsSpatial(ml, mv, mt, ib, indices, vb[0], 100, sizeof(float) * 4, /* max_vertices= */ 16, /* min_triangles= */ 32, /* max_triangles= */ 32, 0.f);
+
+	unsigned int part[333];
+	unsigned int clsize[333];
+
+	// treat each triangle as a cluster
+	for (int i = 0; i < indices; ++i)
+		clsize[i / 3] = 3;
+
+	meshopt_partitionClusters(part, ib, indices, clsize, indices / 3, vb[0], 100, sizeof(float) * 4, /* target_group_size= */ 12);
+
+	return 0;
+}
+~~~~
+
+### H0 path: `tools/codecfuzz.cpp`
+
+~~~~cpp
+#include "../src/meshoptimizer.h"
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+void fuzzDecoder(const uint8_t* data, size_t size, size_t stride, int (*decode)(void*, size_t, size_t, const unsigned char*, size_t))
+{
+	size_t count = 66; // must be divisible by 3 for decodeIndexBuffer; should be >=64 to cover large vertex blocks
+
+	void* destination = malloc(count * stride);
+	assert(destination);
+
+	int rc = decode(destination, count, stride, reinterpret_cast<const unsigned char*>(data), size);
+	(void)rc;
+
+	free(destination);
+}
+
+void fuzzRoundtrip(const uint8_t* data, size_t size, size_t stride, int level)
+{
+	size_t count = size / stride;
+
+	size_t bound = meshopt_encodeVertexBufferBound(count, stride);
+	void* encoded = malloc(bound);
+	void* decoded = malloc(count * stride);
+	assert(encoded && decoded);
+
+	size_t res = meshopt_encodeVertexBufferLevel(static_cast<unsigned char*>(encoded), bound, data, count, stride, level, -1);
+	assert(res > 0 && res <= bound);
+
+	// encode again at the boundary to check for memory safety
+	// this should produce the same output because encoder is deterministic
+	size_t rese = meshopt_encodeVertexBufferLevel(static_cast<unsigned char*>(encoded) + bound - res, res, data, count, stride, level, -1);
+	assert(rese == res);
+
+	int rc = meshopt_decodeVertexBuffer(decoded, count, stride, static_cast<unsigned char*>(encoded) + bound - res, res);
+	assert(rc == 0);
+
+	assert(memcmp(data, decoded, count * stride) == 0);
+
+	free(decoded);
+	free(encoded);
+}
+
+size_t align(size_t value, size_t alignment)
+{
+	return (value + alignment - 1) & ~(alignment - 1);
+}
+
+void fuzzDecodeMeshlet(size_t vertex_count, size_t triangle_count, const unsigned char* data, size_t size)
+{
+	// raw decoding: allowed to write align(count, 4) elements
+	unsigned int rt[256];
+	unsigned int rv[256];
+	meshopt_decodeMeshletRaw(rv + 256 - align(vertex_count, 4), vertex_count, rt + 256 - align(triangle_count, 4), triangle_count, data, size);
+
+	// regular decoding: allowed to write align(count * size, 4) bytes
+	// with variations for 3-byte triangles and 2-byte vertex references
+	unsigned short rsv[256];
+	unsigned char rbt[256 * 3];
+
+	meshopt_decodeMeshlet(rv + 256 - vertex_count, vertex_count, 4, rt + 256 - triangle_count, triangle_count, 4, data, size);
+	meshopt_decodeMeshlet(rsv + 256 - align(vertex_count, 2), vertex_count, 2, rt + 256 - triangle_count, triangle_count, 4, data, size);
+	meshopt_decodeMeshlet(rv + 256 - vertex_count, vertex_count, 4, rbt + 256 * 3 - align(triangle_count * 3, 4), triangle_count, 3, data, size);
+	meshopt_decodeMeshlet(rsv + 256 - align(vertex_count, 2), vertex_count, 2, rbt + 256 * 3 - align(triangle_count * 3, 4), triangle_count, 3, data, size);
+}
+
+void fuzzRoundtripMeshlet(const uint8_t* data, size_t size)
+{
+	size_t triangle_count = size / 3;
+	if (triangle_count > 256)
+		triangle_count = 256;
+
+	unsigned char buf[4096];
+	size_t enc = meshopt_encodeMeshlet(buf, sizeof(buf), NULL, 0, reinterpret_cast<const unsigned char*>(data), triangle_count);
+	assert(enc > 0);
+	assert(enc <= meshopt_encodeMeshletBound(0, triangle_count));
+
+	unsigned int rt4[256];
+	int rc4 = meshopt_decodeMeshlet(static_cast<unsigned int*>(NULL), 0, rt4, triangle_count, buf, enc);
+	assert(rc4 == 0);
+
+	for (size_t i = 0; i < triangle_count; ++i)
+	{
+		unsigned char a = data[i * 3 + 0], b = data[i * 3 + 1], c = data[i * 3 + 2];
+
+		unsigned int abc = (a << 0) | (b << 8) | (c << 16);
+		unsigned int bca = (b << 0) | (c << 8) | (a << 16);
+		unsigned int cba = (c << 0) | (a << 8) | (b << 16);
+
+		unsigned int tri = rt4[i];
+
+		assert(tri == abc || tri == bca || tri == cba);
+	}
+
+	unsigned char rt3[256 * 3];
+	int rc3 = meshopt_decodeMeshlet(static_cast<unsigned int*>(NULL), 0, rt3, triangle_count, buf, enc);
+	assert(rc3 == 0);
+
+	for (size_t i = 0; i < triangle_count; ++i)
+	{
+		unsigned char a = data[i * 3 + 0], b = data[i * 3 + 1], c = data[i * 3 + 2];
+
+		unsigned int abc = (a << 0) | (b << 8) | (c << 16);
+		unsigned int bca = (b << 0) | (c << 8) | (a << 16);
+		unsigned int cba = (c << 0) | (a << 8) | (b << 16);
+
+		unsigned int tri = rt3[i * 3 + 0] | (rt3[i * 3 + 1] << 8) | (rt3[i * 3 + 2] << 16);
+
+		assert(tri == abc || tri == bca || tri == cba);
+	}
+}
+
+void fuzzRoundtripMeshletV(const uint8_t* data, size_t size)
+{
+	size_t vertex_count = size / 4;
+	if (vertex_count > 256)
+		vertex_count = 256;
+
+	unsigned char tri[4] = {0, 1, 2};
+
+	unsigned char buf[4096];
+	size_t enc = meshopt_encodeMeshlet(buf, sizeof(buf), reinterpret_cast<const uint32_t*>(data), vertex_count, tri, 1);
+	assert(enc > 0);
+	assert(enc <= meshopt_encodeMeshletBound(vertex_count, 1));
+
+	unsigned int rv4[256];
+	int rc4 = meshopt_decodeMeshlet(rv4, vertex_count, tri, 1, buf, enc);
+	assert(rc4 == 0);
+
+	for (size_t i = 0; i < vertex_count; ++i)
+		assert(rv4[i] == reinterpret_cast<const uint32_t*>(data)[i]);
+
+	unsigned short rv2[256];
+	int rc2 = meshopt_decodeMeshlet(rv2, vertex_count, tri, 1, buf, enc);
+	assert(rc2 == 0);
+
+	for (size_t i = 0; i < vertex_count; ++i)
+		assert(rv2[i] == uint16_t(reinterpret_cast<const uint32_t*>(data)[i]));
+}
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+	// decodeIndexBuffer supports 2 and 4-byte indices
+	fuzzDecoder(data, size, 2, meshopt_decodeIndexBuffer);
+	fuzzDecoder(data, size, 4, meshopt_decodeIndexBuffer);
+
+	// decodeIndexSequence supports 2 and 4-byte indices
+	fuzzDecoder(data, size, 2, meshopt_decodeIndexSequence);
+	fuzzDecoder(data, size, 4, meshopt_decodeIndexSequence);
+
+	// decodeVertexBuffer supports any strides divisible by 4 in 4-256 interval
+	// it's a waste of time to check all of them, so we'll just check a few with different alignment mod 16
+	fuzzDecoder(data, size, 4, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 16, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 24, meshopt_decodeVertexBuffer);
+	fuzzDecoder(data, size, 32, meshopt_decodeVertexBuffer);
+
+	// encodeVertexBuffer/decodeVertexBuffer should roundtrip for any stride, check a few with different alignment mod 16
+	// this also checks memory safety properties of the encoder
+	// to conserve time, we only check one version/level combination, biased towards version 1
+	uint8_t data0 = size > 0 ? data[0] : 0;
+	int level = data0 % 5;
+
+	meshopt_encodeVertexVersion(level < 4 ? 1 : 0);
+
+	fuzzRoundtrip(data, size, 4, level);
+	fuzzRoundtrip(data, size, 16, level);
+	fuzzRoundtrip(data, size, 24, level);
+	fuzzRoundtrip(data, size, 32, level);
+
+	// validate that decodeMeshlet works on untrusted data and is memory safe within documented limits
+	if (size > 2)
+		fuzzDecodeMeshlet(data[0] + 1, data[1] + 1, reinterpret_cast<const unsigned char*>(data + 2), size - 2);
+
+	// validate that index data roundtrips in meshlet encoding modulo rotation
+	fuzzRoundtripMeshlet(data, size);
+
+	// validate that vertex data roundtrips in meshlet encoding
+	fuzzRoundtripMeshletV(data, size);
+
+	return 0;
+}
+~~~~
+
+### H0 path: `tools/simplifyfuzz.cpp`
+
+~~~~cpp
+#include "../src/meshoptimizer.h"
+
+#include <float.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* buffer, size_t size)
+{
+	if (size == 0)
+		return 0;
+
+	srand(buffer[0]);
+
+	float vb[100][4];
+
+	for (int i = 0; i < 100; ++i)
+	{
+		vb[i][0] = rand() % 10;
+		vb[i][1] = rand() % 10;
+		vb[i][2] = rand() % 10;
+		vb[i][3] = rand() % 10;
+	}
+
+	unsigned int ib[999];
+	int indices = (size - 1) < 999 ? (size - 1) / 3 * 3 : 999;
+
+	for (int i = 0; i < indices; ++i)
+		ib[i] = buffer[1 + i] % 100;
+
+	unsigned int res[999];
+
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, 1e-1f, 0, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, 0, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifyLockBorder, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifySparse, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifyPrune, NULL);
+	meshopt_simplify(res, ib, indices, vb[0], 100, sizeof(float) * 4, 0, FLT_MAX, meshopt_SimplifyPermissive, NULL);
+
+	float aw = 1;
+	meshopt_simplifyWithAttributes(res, ib, indices, vb[0], 100, sizeof(float) * 4, vb[0] + 3, sizeof(float) * 4, &aw, 1, NULL, 0, FLT_MAX, 0, NULL);
+
+	// must be last, as it modifies all inputs in place
+	meshopt_simplifyWithUpdate(ib, indices, vb[0], 100, sizeof(float) * 4, vb[0] + 3, sizeof(float) * 4, &aw, 1, NULL, 0, FLT_MAX, 0, NULL);
+
+	return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed C/C++ production paths and all hunks are included. Function-context mode expands changed C/C++ function bodies; tests, examples, documentation, build files, and Harness files are excluded by the frozen rule.
+
+~~~~diff
+diff --git a/src/meshoptimizer.h b/src/meshoptimizer.h
+index e6aa58e..38f5df0 100644
+--- a/src/meshoptimizer.h
++++ b/src/meshoptimizer.h
+@@ -497,40 +497,45 @@ enum
+ /**
+  * Mesh simplifier
+  * Reduces the number of triangles in the mesh, attempting to preserve mesh appearance as much as possible
+  * The algorithm tries to preserve mesh topology and can stop short of the target goal based on topology constraints or target error.
+  * If not all attributes from the input mesh are needed, it's recommended to reindex the mesh without them prior to simplification.
+  * Returns the number of indices after simplification, with destination containing new index data
+  *
+  * The resulting index buffer references vertices from the original vertex buffer.
+  * If the original vertex data isn't needed, creating a compact vertex buffer using meshopt_optimizeVertexFetch is recommended.
+  *
+  * destination must contain enough space for the target index buffer, worst case is index_count elements (*not* target_index_count)!
+  * vertex_positions should have float3 position in the first 12 bytes of each vertex
+  * target_error represents the error relative to mesh extents that can be tolerated, e.g. 0.01 = 1% deformation (unless absolute error option is used)
+  * options must be a bitmask composed of meshopt_SimplifyX options; 0 is a safe default
+  * result_error can be NULL; when it's not NULL, it will contain the resulting (relative/absolute) error after simplification
+  */
+ MESHOPTIMIZER_API size_t meshopt_simplify(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, size_t target_index_count, float target_error, unsigned int options, float* result_error);
+ 
++/**
++ * Experimental: Voxel remesher
++ */
++MESHOPTIMIZER_API size_t meshopt_remesh(float* destination, size_t max_triangle_count, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, int resolution, unsigned int options);
++
+ /**
+  * Mesh simplifier with attribute metric
+  * Reduces the number of triangles in the mesh, attempting to preserve mesh appearance as much as possible.
+  * Similar to meshopt_simplify, but incorporates attribute values into the error metric used to prioritize simplification order.
+  * The algorithm tries to preserve mesh topology and can stop short of the target goal based on topology constraints or target error.
+  * If not all attributes from the input mesh are needed, it's recommended to reindex the mesh without them prior to simplification.
+  * Returns the number of indices after simplification, with destination containing new index data
+  *
+  * The resulting index buffer references vertices from the original vertex buffer.
+  * If the original vertex data isn't needed, creating a compact vertex buffer using meshopt_optimizeVertexFetch is recommended.
+  * Note that the number of attributes with non-zero weights affects memory requirements and running time.
+  *
+  * destination must contain enough space for the target index buffer, worst case is index_count elements (*not* target_index_count)!
+  * vertex_positions should have float3 position in the first 12 bytes of each vertex
+  * vertex_attributes should have attribute_count floats for each vertex
+  * attribute_weights should have attribute_count floats in total; the weights determine relative priority of attributes between each other and wrt position
+  * attribute_count must be <= 32
+  * vertex_lock can be NULL; when it's not NULL, it should have a value for each vertex composed of meshopt_SimplifyVertex_* flags
+  * target_error represents the error relative to mesh extents that can be tolerated, e.g. 0.01 = 1% deformation (unless absolute error option is used)
+  * options must be a bitmask composed of meshopt_SimplifyX options; 0 is a safe default
+  * result_error can be NULL; when it's not NULL, it will contain the resulting (relative/absolute) error after simplification
+  */
+diff --git a/src/remesher.cpp b/src/remesher.cpp
+new file mode 100644
+index 0000000..9e14c3c
+--- /dev/null
++++ b/src/remesher.cpp
+@@ -0,0 +1,28 @@
++// This file is part of meshoptimizer library; see meshoptimizer.h for version/license details
++#include "meshoptimizer.h"
++
++#include <assert.h>
++#include <float.h>
++#include <math.h>
++#include <string.h>
++
++#ifndef TRACE
++#define TRACE 0
++#endif
++
++#if TRACE
++#include <stdio.h>
++#endif
++
++// This work is based on:
++// TODO
++
++size_t meshopt_remesh(float* destination, size_t max_triangle_count, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, int resolution, unsigned int options)
++{
++	assert(index_count % 3 == 0);
++	assert(vertex_positions_stride >= 12 && vertex_positions_stride <= 256);
++	assert(vertex_positions_stride % sizeof(float) == 0);
++	assert(resolution > 0 && resolution <= 250); // TBD
++
++	return 0;
++}
+~~~~
+
+## Uniform selected declaration context
+
+The same mechanical rule is used for every case: in lexicographic changed-production-path order, show +/-24 lines around the first literal identity match in each snapshot.
+
+### S0
+
+~~~~text
+<no matching declaration in the selected production files>
+~~~~
+
+### S1
+
+Path: `src/meshoptimizer.h`; lines 494-542
+
+~~~~text
+000494: 	meshopt_SimplifyVertex_Priority = 1 << 2,
+000495: };
+000496: 
+000497: /**
+000498:  * Mesh simplifier
+000499:  * Reduces the number of triangles in the mesh, attempting to preserve mesh appearance as much as possible
+000500:  * The algorithm tries to preserve mesh topology and can stop short of the target goal based on topology constraints or target error.
+000501:  * If not all attributes from the input mesh are needed, it's recommended to reindex the mesh without them prior to simplification.
+000502:  * Returns the number of indices after simplification, with destination containing new index data
+000503:  *
+000504:  * The resulting index buffer references vertices from the original vertex buffer.
+000505:  * If the original vertex data isn't needed, creating a compact vertex buffer using meshopt_optimizeVertexFetch is recommended.
+000506:  *
+000507:  * destination must contain enough space for the target index buffer, worst case is index_count elements (*not* target_index_count)!
+000508:  * vertex_positions should have float3 position in the first 12 bytes of each vertex
+000509:  * target_error represents the error relative to mesh extents that can be tolerated, e.g. 0.01 = 1% deformation (unless absolute error option is used)
+000510:  * options must be a bitmask composed of meshopt_SimplifyX options; 0 is a safe default
+000511:  * result_error can be NULL; when it's not NULL, it will contain the resulting (relative/absolute) error after simplification
+000512:  */
+000513: MESHOPTIMIZER_API size_t meshopt_simplify(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, size_t target_index_count, float target_error, unsigned int options, float* result_error);
+000514: 
+000515: /**
+000516:  * Experimental: Voxel remesher
+000517:  */
+000518: MESHOPTIMIZER_API size_t meshopt_remesh(float* destination, size_t max_triangle_count, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, int resolution, unsigned int options);
+000519: 
+000520: /**
+000521:  * Mesh simplifier with attribute metric
+000522:  * Reduces the number of triangles in the mesh, attempting to preserve mesh appearance as much as possible.
+000523:  * Similar to meshopt_simplify, but incorporates attribute values into the error metric used to prioritize simplification order.
+000524:  * The algorithm tries to preserve mesh topology and can stop short of the target goal based on topology constraints or target error.
+000525:  * If not all attributes from the input mesh are needed, it's recommended to reindex the mesh without them prior to simplification.
+000526:  * Returns the number of indices after simplification, with destination containing new index data
+000527:  *
+000528:  * The resulting index buffer references vertices from the original vertex buffer.
+000529:  * If the original vertex data isn't needed, creating a compact vertex buffer using meshopt_optimizeVertexFetch is recommended.
+000530:  * Note that the number of attributes with non-zero weights affects memory requirements and running time.
+000531:  *
+000532:  * destination must contain enough space for the target index buffer, worst case is index_count elements (*not* target_index_count)!
+000533:  * vertex_positions should have float3 position in the first 12 bytes of each vertex
+000534:  * vertex_attributes should have attribute_count floats for each vertex
+000535:  * attribute_weights should have attribute_count floats in total; the weights determine relative priority of attributes between each other and wrt position
+000536:  * attribute_count must be <= 32
+000537:  * vertex_lock can be NULL; when it's not NULL, it should have a value for each vertex composed of meshopt_SimplifyVertex_* flags
+000538:  * target_error represents the error relative to mesh extents that can be tolerated, e.g. 0.01 = 1% deformation (unless absolute error option is used)
+000539:  * options must be a bitmask composed of meshopt_SimplifyX options; 0 is a safe default
+000540:  * result_error can be NULL; when it's not NULL, it will contain the resulting (relative/absolute) error after simplification
+000541:  */
+000542: MESHOPTIMIZER_API size_t meshopt_simplifyWithAttributes(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, const float* vertex_attributes, size_t vertex_attributes_stride, const float* attribute_weights, size_t attribute_count, const unsigned char* vertex_lock, size_t target_index_count, float target_error, unsigned int options, float* result_error);
+~~~~
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T5008","gap_exists":true,"gap_type":["entry_point","configuration","input_semantics"],"confidence":99,"affected_functions":["meshopt_remesh"],"reason":"S1 exposes the new production API meshopt_remesh, but no H0 harness invokes it. Its mesh-index and vertex-buffer inputs plus resolution, stride, capacity, and options parameters define a distinct fuzz-worthy input protocol that the existing meshlet, codec, and simplification calls do not exercise.","evidence":["src/meshoptimizer.h declares meshopt_remesh(float* destination, size_t max_triangle_count, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, int resolution, unsigned int options).","src/remesher.cpp enforces meshopt_remesh-specific boundaries: index_count % 3 == 0, vertex_positions_stride between 12 and 256 and divisible by sizeof(float), and resolution between 1 and 250.","tools/simplifyfuzz.cpp invokes meshopt_simplify, meshopt_simplifyWithAttributes, and meshopt_simplifyWithUpdate, but not meshopt_remesh; the other H0 paths also contain no meshopt_remesh call."],"recommended_action":"Add a meshopt_remesh fuzz path that derives valid triangle indices and vertex positions from fuzzer bytes, allocates destination according to varied max_triangle_count values, and varies resolution across its valid boundary values, vertex_positions_stride, options, mesh sizes, and degenerate geometry."}
+tokens used
+20,700

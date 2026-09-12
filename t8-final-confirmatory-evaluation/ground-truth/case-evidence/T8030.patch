@@ -1,0 +1,688 @@
+PROJECT simdjson
+COMMIT 94c429aa70d27e269bb15772a3b1d4863841ea80
+PARENT 72e51a9a81e7954c2f24d6494a68d52a801b04b6
+SUBJECT finishing up the new streaming (#2674)
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/include/simdjson/base.h b/include/simdjson/base.h
+index 5c946892..464d84ac 100644
+--- a/include/simdjson/base.h
++++ b/include/simdjson/base.h
+@@ -56,7 +56,13 @@ enum class stage1_mode;
+ enum class stream_format {
+   whitespace_delimited, ///< Whitespace-delimited JSON documents (default, includes NDJSON/JSONL)
+   json_sequence,        ///< RFC 7464 JSON text sequences (RS-delimited)
+-  comma_delimited       ///< Comma-separated JSON documents (e.g., `{...},{...},{...}`)
++  comma_delimited,      ///< Comma-separated JSON documents (e.g., `{...},{...},{...}`)
++  comma_delimited_array ///< A single JSON array whose elements are iterated as
++                        ///< comma-separated documents (e.g., `[{...},{...},{...}]`).
++                        ///< The parser strips the outer `[` / `]` plus any
++                        ///< surrounding JSON whitespace (space, tab, LF, CR)
++                        ///< and then behaves like `comma_delimited` over the
++                        ///< remaining bytes.
+ };
+ 
+ namespace internal {
+diff --git a/include/simdjson/dom/document_stream-inl.h b/include/simdjson/dom/document_stream-inl.h
+index 1c222873..3e849dd5 100644
+--- a/include/simdjson/dom/document_stream-inl.h
++++ b/include/simdjson/dom/document_stream-inl.h
+@@ -227,7 +227,14 @@ simdjson_inline std::string_view document_stream::iterator::source() const noexc
+   } else {
+     size_t next_doc_index = stream->batch_start + stream->parser->implementation->structural_indexes[stream->parser->implementation->next_structural_index];
+     size_t svlen = next_doc_index - current_index();
+-    while(svlen > 1 && (std::isspace(start[svlen-1]) || start[svlen-1] == '\0')) {
++    // Trim trailing whitespace, NUL, and RS (0x1E). In RFC 7464 json_sequence
++    // mode the scanner classifies RS as a scalar character, so an RS-prefixed
++    // scalar document (number/true/false/null/string) has no closing structural
++    // index and the slice runs all the way up to the next document's RS. RS
++    // cannot legally appear in a JSON value at the source level (control
++    // characters in strings must be escaped as \u001E), so stripping it is
++    // safe in every stream_format.
++    while(svlen > 1 && (std::isspace(start[svlen-1]) || start[svlen-1] == '\0' || static_cast<uint8_t>(start[svlen-1]) == 0x1E)) {
+       svlen--;
+     }
+     return std::string_view(start, svlen);
+diff --git a/include/simdjson/dom/parser-inl.h b/include/simdjson/dom/parser-inl.h
+index 0d1d33be..141c3db8 100644
+--- a/include/simdjson/dom/parser-inl.h
++++ b/include/simdjson/dom/parser-inl.h
+@@ -188,6 +188,24 @@ inline simdjson_result<document_stream> parser::parse_many(const uint8_t *buf, s
+     buf += 3;
+     len -= 3;
+   }
++  if (format == stream_format::comma_delimited_array) {
++    // Strip leading JSON whitespace.
++    while (len > 0 && (buf[0] == ' ' || buf[0] == '\t' || buf[0] == '\n' || buf[0] == '\r')) {
++      buf++; len--;
++    }
++    // Expect the opening '['.
++    if (len == 0 || buf[0] != '[') { return TAPE_ERROR; }
++    buf++; len--;
++    // Strip trailing JSON whitespace.
++    while (len > 0 && (buf[len-1] == ' ' || buf[len-1] == '\t' || buf[len-1] == '\n' || buf[len-1] == '\r')) {
++      len--;
++    }
++    // Expect the closing ']'.
++    if (len == 0 || buf[len-1] != ']') { return TAPE_ERROR; }
++    len--;
++    // Fall through to comma_delimited over the array contents.
++    format = stream_format::comma_delimited;
++  }
+   return document_stream(*this, buf, len, batch_size, format);
+ }
+ inline simdjson_result<document_stream> parser::parse_many(const char *buf, size_t len, size_t batch_size, stream_format format) noexcept {
+diff --git a/include/simdjson/generic/ondemand/document_stream-inl.h b/include/simdjson/generic/ondemand/document_stream-inl.h
+index f88063a5..38176c79 100644
+--- a/include/simdjson/generic/ondemand/document_stream-inl.h
++++ b/include/simdjson/generic/ondemand/document_stream-inl.h
+@@ -384,14 +384,21 @@ simdjson_inline std::string_view document_stream::iterator::source() const noexc
+         depth--;
+         break;
+       default:    // Scalar value document
+-        // TODO: We could remove trailing whitespaces
+         // This returns a string spanning from start of value to the beginning of the next document (excluded)
+         {
+           auto next_index = stream->parser->implementation->structural_indexes[++cur_struct_index];
+           // normally the length would be next_index - current_index() - 1, except for the last document
+           size_t svlen = next_index - current_index();
+           const char *start = reinterpret_cast<const char*>(stream->buf) + current_index();
+-          while(svlen > 1 && (std::isspace(start[svlen-1]) || start[svlen-1] == '\0')) {
++          // Trim trailing whitespace, NUL, and RS (0x1E). In RFC 7464
++          // json_sequence mode the scanner classifies RS as a scalar
++          // character, so an RS-prefixed scalar document (number / true /
++          // false / null / string) has no closing structural index and the
++          // slice runs all the way up to the next document's RS. RS cannot
++          // legally appear in a JSON value at the source level (control
++          // characters in strings must be escaped as \u001E), so stripping
++          // it is safe in every stream_format.
++          while(svlen > 1 && (std::isspace(start[svlen-1]) || start[svlen-1] == '\0' || static_cast<uint8_t>(start[svlen-1]) == 0x1E)) {
+             svlen--;
+           }
+           return std::string_view(start, svlen);
+diff --git a/include/simdjson/generic/ondemand/parser-inl.h b/include/simdjson/generic/ondemand/parser-inl.h
+index 30aef65a..d606ba38 100644
+--- a/include/simdjson/generic/ondemand/parser-inl.h
++++ b/include/simdjson/generic/ondemand/parser-inl.h
+@@ -201,6 +201,24 @@ inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf,
+     buf += 3;
+     len -= 3;
+   }
++  if (format == stream_format::comma_delimited_array) {
++    // Strip leading JSON whitespace.
++    while (len > 0 && (buf[0] == ' ' || buf[0] == '\t' || buf[0] == '\n' || buf[0] == '\r')) {
++      buf++; len--;
++    }
++    // Expect the opening '['.
++    if (len == 0 || buf[0] != '[') { return TAPE_ERROR; }
++    buf++; len--;
++    // Strip trailing JSON whitespace.
++    while (len > 0 && (buf[len-1] == ' ' || buf[len-1] == '\t' || buf[len-1] == '\n' || buf[len-1] == '\r')) {
++      len--;
++    }
++    // Expect the closing ']'.
++    if (len == 0 || buf[len-1] != ']') { return TAPE_ERROR; }
++    len--;
++    // Fall through to comma_delimited over the array contents.
++    format = stream_format::comma_delimited;
++  }
+   return document_stream(*this, buf, len, batch_size, false, format);
+ }
+ inline simdjson_result<document_stream> parser::iterate_many(const char *buf, size_t len, size_t batch_size, stream_format format) noexcept {
+diff --git a/src/fallback.cpp b/src/fallback.cpp
+index 824be07c..c3ba641a 100644
+--- a/src/fallback.cpp
++++ b/src/fallback.cpp
+@@ -226,9 +226,15 @@ simdjson_warn_unused simdjson_inline error_code scan() {
+       add_structural();
+     // Primitive or invalid character (invalid characters will be checked in stage 2)
+     } else {
+-      // Anything else, add the structural and go until we find the next one
++      // Anything else, add the structural and go until we find the next one.
++      // We also stop on RS (0x1E) so that RFC 7464 json_sequence inputs
++      // like `\x1e"a"\x1e"b"` produce a separate structural for each RS
++      // rather than being absorbed into a single primitive run. RS is a
++      // control character that is invalid in normal JSON, so breaking
++      // the run here has no effect on well-formed non-json_sequence
++      // inputs.
+       add_structural();
+-      while (idx+1<len && !char_is_space_or_operator(buf[idx+1])) {
++      while (idx+1<len && !char_is_space_or_operator(buf[idx+1]) && buf[idx+1] != 0x1e) {
+         idx++;
+       };
+     }
+diff --git a/src/generic/stage1/find_next_document_index.h b/src/generic/stage1/find_next_document_index.h
+index faa1b8a5..bcca5c0d 100644
+--- a/src/generic/stage1/find_next_document_index.h
++++ b/src/generic/stage1/find_next_document_index.h
+@@ -147,28 +147,66 @@ simdjson_inline uint32_t find_next_document_index_json_sequence(
+   for (uint32_t read_idx = 0; read_idx < parser.n_structural_indexes; read_idx++) {
+     const uint32_t pos = parser.structural_indexes[read_idx];
+     if (parser.buf[pos] == 0x1E) {
+-      // This is an RS character - find the actual JSON value start
++      // This is an RS character - find the actual JSON value start.
+       last_rs_pos = pos;
+       rs_count++;
+-      // Skip RS and any whitespace to find the actual value start
++      // Skip past this RS and any whitespace *and any additional RSes*
++      // to locate the real value. Consecutive RSes are degenerate
++      // "empty records" per RFC 7464; we collapse them here. They do
++      // not always appear as separate entries in structural_indexes
++      // because the scanner groups runs of adjacent non-whitespace
++      // scalar bytes (including RS) into a single scalar start.
+       uint32_t value_start = pos + 1;
+       while (value_start < len) {
+         const uint8_t c = parser.buf[value_start];
+-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { value_start++; }
+-        else { break; }
++        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
++          value_start++;
++        } else if (c == 0x1E) {
++          // Collapsed empty record. Still count it so rs_count reflects
++          // the true number of record markers and last_rs_pos tracks
++          // the final one.
++          last_rs_pos = value_start;
++          rs_count++;
++          value_start++;
++        } else {
++          break;
++        }
++      }
++      // If the scanner emitted additional structurals inside the
++      // whitespace+RS run we just walked over (i.e., isolated RSes
++      // separated by whitespace), skip past them so we do not
++      // double-count or double-emit.
++      while (read_idx + 1 < parser.n_structural_indexes &&
++             parser.structural_indexes[read_idx + 1] < value_start) {
++        read_idx++;
+       }
+-      // Check if the value start is an operator (already in structural_indexes),
+-      // another RS (empty record), or a scalar (needs to be added).
++      // Check if the value start is an operator (always present in
++      // scanner structural_indexes) or a scalar-like start (which may
++      // be missing from structural_indexes and must be added here).
++      // Note: '"' is NOT always in structural_indexes. The scanner
++      // classifies '"' as a scalar character and emits it as a
++      // structural only when it is a *scalar start* (preceded by
++      // whitespace or an operator). When '"' immediately follows an
++      // RS (which the scanner also classifies as scalar), it is
++      // treated as a scalar continuation and not emitted - so we
++      // must add it here just like any other scalar value.
+       if (value_start < len) {
+         const uint8_t c = parser.buf[value_start];
+-        const bool is_operator = (c == '{' || c == '}' || c == '[' || c == ']' || c == ':' || c == ',');
+-        const bool is_rs = (c == 0x1E);
+-        if (!is_operator && !is_rs) {
+-          // Scalar value - add its position since scanner missed it
++        const bool is_operator =
++            (c == '{' || c == '}' || c == '[' || c == ']' ||
++             c == ':' || c == ',');
++        // If the next scanner structural is exactly at value_start,
++        // the scanner already emitted it (it followed whitespace) and
++        // we must not add a duplicate - a subsequent iteration will
++        // copy it into write_idx.
++        const bool already_emitted =
++            (read_idx + 1 < parser.n_structural_indexes &&
++             parser.structural_indexes[read_idx + 1] == value_start);
++        if (!is_operator && !already_emitted) {
++          // Scalar value (number/true/false/null/string) - add its
++          // position since scanner missed it.
+           parser.structural_indexes[write_idx++] = value_start;
+         }
+-        // For operators, they will appear later in structural_indexes
+-        // For RS, it will be processed in a subsequent iteration
+       }
+     } else {
+       // Not RS, copy to output
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/tests/document_stream_fuzz_test_common.h b/tests/document_stream_fuzz_test_common.h
+new file mode 100644
+index 00000000..f809ec36
+--- /dev/null
++++ b/tests/document_stream_fuzz_test_common.h
+@@ -0,0 +1,230 @@
++#ifndef SIMDJSON_TESTS_DOCUMENT_STREAM_FUZZ_TEST_COMMON_H
++#define SIMDJSON_TESTS_DOCUMENT_STREAM_FUZZ_TEST_COMMON_H
++
++#include <cstdint>
++#include <random>
++#include <string>
++#include <vector>
++
++#include "simdjson.h"
++
++namespace document_stream_fuzz {
++
++constexpr uint64_t fixed_seed = 0x5eed1234ULL;
++constexpr size_t batch_size = 512;
++constexpr size_t minimum_total_bytes = 4096;
++constexpr size_t minimum_document_count = 128;
++
++struct stream_case {
++  const char *name;
++  simdjson::stream_format format;
++  std::string input;
++  std::vector<std::string> expected_documents;
++};
++
++inline char random_char(std::mt19937_64 &rng) {
++  static constexpr char alphabet[] =
++      "abcdefghijklmnopqrstuvwxyz"
++      "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
++      "0123456789 _-/.";
++  std::uniform_int_distribution<size_t> dist(0, sizeof(alphabet) - 2);
++  return alphabet[dist(rng)];
++}
++
++inline std::string make_ascii_text(std::mt19937_64 &rng, size_t min_length, size_t max_length) {
++  std::uniform_int_distribution<size_t> length_dist(min_length, max_length);
++  const size_t length = length_dist(rng);
++  std::string text;
++  text.reserve(length);
++  for (size_t i = 0; i < length; i++) {
++    text.push_back(random_char(rng));
++  }
++  return text;
++}
++
++inline std::string quote_json_string(const std::string &text) {
++  std::string quoted;
++  quoted.reserve(text.size() + 2);
++  quoted.push_back('"');
++  for (char ch : text) {
++    if (ch == '\\' || ch == '"') {
++      quoted.push_back('\\');
++    }
++    quoted.push_back(ch);
++  }
++  quoted.push_back('"');
++  return quoted;
++}
++
++inline std::string make_integer_literal(std::mt19937_64 &rng) {
++  std::uniform_int_distribution<int64_t> dist(-1000000, 1000000);
++  return std::to_string(dist(rng));
++}
++
++inline std::string make_float_literal(std::mt19937_64 &rng) {
++  std::uniform_int_distribution<int64_t> whole_dist(-250000, 250000);
++  std::uniform_int_distribution<int64_t> fraction_dist(1, 9999);
++  return std::to_string(whole_dist(rng)) + "." + std::to_string(fraction_dist(rng));
++}
++
++inline std::string make_scalar(std::mt19937_64 &rng) {
++  std::uniform_int_distribution<int> type_dist(0, 4);
++  switch (type_dist(rng)) {
++    case 0: return quote_json_string(make_ascii_text(rng, 0, 20));
++    case 1: return make_integer_literal(rng);
++    case 2: return make_float_literal(rng);
++    case 3: return (rng() & 1) ? "true" : "false";
++    default: return "null";
++  }
++}
++
++inline std::string make_value(std::mt19937_64 &rng, int depth);
++
++inline std::string make_array(std::mt19937_64 &rng, int depth) {
++  std::uniform_int_distribution<int> count_dist(0, depth == 0 ? 5 : 3);
++  const int count = count_dist(rng);
++  std::string out = "[";
++  for (int i = 0; i < count; i++) {
++    if (i > 0) {
++      out.push_back(',');
++    }
++    out += make_value(rng, depth + 1);
++  }
++  out.push_back(']');
++  return out;
++}
++
++inline std::string make_object(std::mt19937_64 &rng, int depth) {
++  std::uniform_int_distribution<int> count_dist(0, depth == 0 ? 5 : 3);
++  const int count = count_dist(rng);
++  std::string out = "{";
++  for (int i = 0; i < count; i++) {
++    if (i > 0) {
++      out.push_back(',');
++    }
++    std::string key = "k";
++    key += std::to_string(depth);
++    key += '_';
++    key += std::to_string(i);
++    key += '_';
++    key += make_ascii_text(rng, 1, 6);
++    out += quote_json_string(key);
++    out.push_back(':');
++    out += make_value(rng, depth + 1);
++  }
++  out.push_back('}');
++  return out;
++}
++
++inline std::string make_value(std::mt19937_64 &rng, int depth) {
++  if (depth >= 3) {
++    return make_scalar(rng);
++  }
++  std::uniform_int_distribution<int> type_dist(0, 6);
++  switch (type_dist(rng)) {
++    case 0: return quote_json_string(make_ascii_text(rng, 0, 20));
++    case 1: return make_integer_literal(rng);
++    case 2: return make_float_literal(rng);
++    case 3: return (rng() & 1) ? "true" : "false";
++    case 4: return "null";
++    case 5: return make_array(rng, depth);
++    default: return make_object(rng, depth);
++  }
++}
++
++inline std::vector<std::string> make_documents() {
++  std::vector<std::string> docs = {
++    "0",
++    "-17",
++    "3.125",
++    "true",
++    "false",
++    "null",
++    "\"alpha beta\"",
++    "[]",
++    "[1,true,\"x\"]",
++    "{}",
++    "{\"a\":1,\"b\":[2,3],\"c\":{\"d\":false}}"
++  };
++
++  size_t total_bytes = 0;
++  for (const auto &doc : docs) {
++    total_bytes += doc.size();
++  }
++
++  std::mt19937_64 rng(fixed_seed);
++  while (docs.size() < minimum_document_count || total_bytes < minimum_total_bytes) {
++    docs.push_back(make_value(rng, 0));
++    total_bytes += docs.back().size();
++  }
++  return docs;
++}
++
++inline std::vector<std::string> make_wrapped_documents(const std::vector<std::string> &docs) {
++  std::vector<std::string> wrapped;
++  wrapped.reserve(docs.size());
++  for (size_t i = 0; i < docs.size(); i++) {
++    wrapped.push_back("{\"id\":" + std::to_string(i) + ",\"value\":" + docs[i] + "}");
++  }
++  return wrapped;
++}
++
++inline std::string build_whitespace_input(const std::vector<std::string> &docs) {
++  static const char *separators[] = {" ", "\n", "\r\n", "\t", " \n\t", "\r\t "};
++  std::string out = " \n\t";
++  for (size_t i = 0; i < docs.size(); i++) {
++    out += docs[i];
++    if (i + 1 < docs.size()) {
++      out += separators[i % (sizeof(separators) / sizeof(separators[0]))];
++    }
++  }
++  out += "\n\t ";
++  return out;
++}
++
++inline std::string build_json_sequence_input(const std::vector<std::string> &docs) {
++  std::string out;
++  for (size_t i = 0; i < docs.size(); i++) {
++    out.push_back('\x1e');
++    out += docs[i];
++    out.push_back('\n');
++  }
++  return out;
++}
++
++inline std::string build_comma_delimited_input(const std::vector<std::string> &docs) {
++  std::string out;
++  for (size_t i = 0; i < docs.size(); i++) {
++    if (i > 0) {
++      out += (i % 3 == 0) ? ",\n" : ", ";
++    }
++    out += docs[i];
++  }
++  return out;
++}
++
++inline std::string build_comma_delimited_array_input(const std::vector<std::string> &docs) {
++  std::string out = " \t\n[";
++  for (size_t i = 0; i < docs.size(); i++) {
++    if (i > 0) {
++      out += (i % 4 == 0) ? ",\n" : ", ";
++    }
++    out += docs[i];
++  }
++  out += "]\r\n";
++  return out;
++}
++
++inline std::vector<stream_case> make_stream_cases(const std::vector<std::string> &docs) {
++  std::vector<std::string> whitespace_docs = make_wrapped_documents(docs);
++  return {
++    {"whitespace_delimited", simdjson::stream_format::whitespace_delimited, build_whitespace_input(whitespace_docs), whitespace_docs},
++    {"json_sequence", simdjson::stream_format::json_sequence, build_json_sequence_input(whitespace_docs), whitespace_docs},
++    {"comma_delimited", simdjson::stream_format::comma_delimited, build_comma_delimited_input(whitespace_docs), whitespace_docs},
++    {"comma_delimited_array", simdjson::stream_format::comma_delimited_array, build_comma_delimited_array_input(whitespace_docs), whitespace_docs}
++  };
++}
++
++} // namespace document_stream_fuzz
++
++#endif
+\ No newline at end of file
+diff --git a/tests/dom/document_stream_fuzz_tests.cpp b/tests/dom/document_stream_fuzz_tests.cpp
+new file mode 100644
+index 00000000..a7f21c07
+--- /dev/null
++++ b/tests/dom/document_stream_fuzz_tests.cpp
+@@ -0,0 +1,97 @@
++#include <string>
++#include <vector>
++
++#include "simdjson.h"
++#include "test_macros.h"
++#include "test_main.h"
++#include "document_stream_fuzz_test_common.h"
++
++namespace document_stream_fuzz_tests {
++
++std::string strip_stream_artifacts(simdjson::stream_format format, std::string_view text) {
++  size_t start = 0;
++  size_t end = text.size();
++  while (start < end && (text[start] == ' ' || text[start] == '\t' || text[start] == '\n' || text[start] == '\r' || text[start] == '\x1e')) {
++    start++;
++  }
++  while (end > start && (text[end - 1] == ' ' || text[end - 1] == '\t' || text[end - 1] == '\n' || text[end - 1] == '\r' || text[end - 1] == '\x1e')) {
++    end--;
++  }
++  std::string cleaned(text.substr(start, end - start));
++  if (format == simdjson::stream_format::comma_delimited || format == simdjson::stream_format::comma_delimited_array) {
++    while (!cleaned.empty() && cleaned.back() == ',') {
++      cleaned.pop_back();
++      while (!cleaned.empty() && (cleaned.back() == ' ' || cleaned.back() == '\t' || cleaned.back() == '\n' || cleaned.back() == '\r')) {
++        cleaned.pop_back();
++      }
++    }
++  }
++  return cleaned;
++}
++
++std::string canonicalize_document(simdjson::stream_format format, std::string_view text) {
++  std::string cleaned = strip_stream_artifacts(format, text);
++  simdjson::dom::parser parser;
++  simdjson::dom::element doc;
++  if (parser.parse(cleaned).get(doc)) {
++    return std::string("PARSE_ERROR:") + cleaned;
++  }
++  return simdjson::minify(doc);
++}
++
++const std::vector<std::string> &expected_documents() {
++  static const std::vector<std::string> docs = document_stream_fuzz::make_documents();
++  return docs;
++}
++
++const std::vector<document_stream_fuzz::stream_case> &stream_cases() {
++  static const std::vector<document_stream_fuzz::stream_case> cases =
++      document_stream_fuzz::make_stream_cases(expected_documents());
++  return cases;
++}
++
++bool verify_case(const document_stream_fuzz::stream_case &test_case) {
++  TEST_START();
++  const auto &expected = test_case.expected_documents;
++  ASSERT_TRUE(test_case.input.size() > document_stream_fuzz::batch_size * 4);
++
++  simdjson::padded_string input(test_case.input);
++  simdjson::dom::parser parser;
++
++  for (int pass = 0; pass < 2; pass++) {
++    simdjson::dom::document_stream stream;
++    ASSERT_SUCCESS(parser.parse_many(input, document_stream_fuzz::batch_size, test_case.format).get(stream));
++
++    size_t index = 0;
++    for (auto doc : stream) {
++      ASSERT_SUCCESS(doc.error());
++      ASSERT_TRUE(index < expected.size());
++      simdjson::dom::element el;
++      ASSERT_SUCCESS(doc.get(el));
++      ASSERT_EQUAL(
++          canonicalize_document(test_case.format, simdjson::minify(el)),
++          canonicalize_document(test_case.format, expected[index])
++      );
++      index++;
++    }
++    ASSERT_EQUAL(index, expected.size());
++  }
++
++  TEST_SUCCEED();
++}
++
++bool run() {
++  for (const auto &test_case : stream_cases()) {
++    std::cout << "Running fuzz corpus against stream format: " << test_case.name << std::endl;
++    if (!verify_case(test_case)) {
++      return false;
++    }
++  }
++  return true;
++}
++
++} // namespace document_stream_fuzz_tests
++
++int main(int argc, char *argv[]) {
++  return test_main(argc, argv, document_stream_fuzz_tests::run);
++}
+\ No newline at end of file
+diff --git a/tests/ondemand/ondemand_document_stream_fuzz_tests.cpp b/tests/ondemand/ondemand_document_stream_fuzz_tests.cpp
+new file mode 100644
+index 00000000..2c5253f6
+--- /dev/null
++++ b/tests/ondemand/ondemand_document_stream_fuzz_tests.cpp
+@@ -0,0 +1,101 @@
++#include <string>
++#include <vector>
++
++#include "simdjson.h"
++#include "test_ondemand.h"
++#include "document_stream_fuzz_test_common.h"
++
++namespace document_stream_fuzz_tests {
++
++std::string strip_stream_artifacts(simdjson::stream_format format, std::string_view text) {
++  size_t start = 0;
++  size_t end = text.size();
++  while (start < end && (text[start] == ' ' || text[start] == '\t' || text[start] == '\n' || text[start] == '\r' || text[start] == '\x1e')) {
++    start++;
++  }
++  while (end > start && (text[end - 1] == ' ' || text[end - 1] == '\t' || text[end - 1] == '\n' || text[end - 1] == '\r' || text[end - 1] == '\x1e')) {
++    end--;
++  }
++  std::string cleaned(text.substr(start, end - start));
++  if (format == simdjson::stream_format::comma_delimited || format == simdjson::stream_format::comma_delimited_array) {
++    while (!cleaned.empty() && cleaned.back() == ',') {
++      cleaned.pop_back();
++      while (!cleaned.empty() && (cleaned.back() == ' ' || cleaned.back() == '\t' || cleaned.back() == '\n' || cleaned.back() == '\r')) {
++        cleaned.pop_back();
++      }
++    }
++  }
++  return cleaned;
++}
++
++std::string canonicalize_document(simdjson::stream_format format, std::string_view text) {
++  std::string cleaned = strip_stream_artifacts(format, text);
++  simdjson::dom::parser parser;
++  simdjson::dom::element doc;
++  if (parser.parse(cleaned).get(doc)) {
++    return std::string("PARSE_ERROR:") + cleaned;
++  }
++  return simdjson::minify(doc);
++}
++
++const std::vector<std::string> &expected_documents() {
++  static const std::vector<std::string> docs = document_stream_fuzz::make_documents();
++  return docs;
++}
++
++const std::vector<document_stream_fuzz::stream_case> &stream_cases() {
++  static const std::vector<document_stream_fuzz::stream_case> cases =
++      document_stream_fuzz::make_stream_cases(expected_documents());
++  return cases;
++}
++
++bool verify_case(const document_stream_fuzz::stream_case &test_case) {
++  TEST_START();
++  const auto &expected = test_case.expected_documents;
++  ASSERT_TRUE(test_case.input.size() > document_stream_fuzz::batch_size * 4);
++
++  simdjson::padded_string input(test_case.input);
++  simdjson::ondemand::parser parser;
++
++  for (int pass = 0; pass < 2; pass++) {
++    simdjson::ondemand::document_stream stream;
++    ASSERT_SUCCESS(parser.iterate_many(input, document_stream_fuzz::batch_size, test_case.format).get(stream));
++
++    size_t index = 0;
++    for (auto it = stream.begin(); it != stream.end(); ++it) {
++      auto doc_result = *it;
++      ASSERT_SUCCESS(doc_result.error());
++      ASSERT_TRUE(index < expected.size());
++
++      simdjson::ondemand::document_reference doc;
++      ASSERT_SUCCESS(doc_result.get(doc));
++
++      std::string_view actual;
++      ASSERT_SUCCESS(simdjson::to_json_string(doc).get(actual));
++      ASSERT_EQUAL(
++          canonicalize_document(test_case.format, actual),
++          canonicalize_document(test_case.format, expected[index])
++      );
++      index++;
++    }
++    ASSERT_EQUAL(index, expected.size());
++  }
++
++  TEST_SUCCEED();
++}
++
++bool run() {
++  for (const auto &test_case : stream_cases()) {
++    std::cout << "Running fuzz corpus against stream format: " << test_case.name << std::endl;
++    if (!verify_case(test_case)) {
++      return false;
++    }
++  }
++  return true;
++}
++
++} // namespace document_stream_fuzz_tests
++
++int main(int argc, char *argv[]) {
++  return test_main(argc, argv, document_stream_fuzz_tests::run);
++}
+\ No newline at end of file

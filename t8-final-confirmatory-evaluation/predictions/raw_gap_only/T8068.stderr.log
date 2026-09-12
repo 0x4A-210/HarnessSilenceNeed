@@ -1,0 +1,392 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8068-18tjk2pp
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fc-7c81-7d60-93c0-0c069bc9ecaa
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8068
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `fuzz/schema.c`
+
+~~~~cpp
+/*
+ * schema.c: a libFuzzer target to test the XML Schema processor.
+ *
+ * See Copyright for the status of this software.
+ */
+
+#ifndef XML_DEPRECATED
+  #define XML_DEPRECATED
+#endif
+
+#include <libxml/catalog.h>
+#include <libxml/xmlschemas.h>
+#include <libxml/xmlschemastypes.h>
+#include "fuzz.h"
+
+int
+LLVMFuzzerInitialize(int *argc ATTRIBUTE_UNUSED,
+                     char ***argv ATTRIBUTE_UNUSED) {
+    xmlFuzzMemSetup();
+    xmlInitParser();
+#ifdef LIBXML_CATALOG_ENABLED
+    xmlInitializeCatalog();
+    xmlCatalogSetDefaults(XML_CATA_ALLOW_NONE);
+#endif
+
+    return 0;
+}
+
+int
+LLVMFuzzerTestOneInput(const char *data, size_t size) {
+    xmlSchemaParserCtxtPtr pctxt;
+    xmlSchemaPtr schema;
+    size_t failurePos;
+
+    if (size > 200000)
+        return(0);
+
+    xmlFuzzDataInit(data, size);
+
+    failurePos = xmlFuzzReadInt(4) % (size + 100);
+
+    xmlFuzzReadEntities();
+
+    xmlFuzzInjectFailure(failurePos);
+    pctxt = xmlSchemaNewParserCtxt(xmlFuzzMainUrl());
+    xmlSchemaSetParserStructuredErrors(pctxt, xmlFuzzSErrorFunc, NULL);
+    xmlSchemaSetResourceLoader(pctxt, xmlFuzzResourceLoader, NULL);
+    schema = xmlSchemaParse(pctxt);
+    xmlSchemaFreeParserCtxt(pctxt);
+
+    if (schema != NULL) {
+        xmlSchemaValidCtxtPtr vctxt;
+        xmlParserCtxtPtr ctxt;
+        xmlDocPtr doc;
+
+        ctxt = xmlNewParserCtxt();
+        xmlCtxtSetErrorHandler(ctxt, xmlFuzzSErrorFunc, NULL);
+        xmlCtxtSetResourceLoader(ctxt, xmlFuzzResourceLoader, NULL);
+        doc = xmlCtxtReadFile(ctxt, xmlFuzzSecondaryUrl(), NULL,
+                              XML_PARSE_NOENT);
+        xmlFreeParserCtxt(ctxt);
+
+        vctxt = xmlSchemaNewValidCtxt(schema);
+        xmlSchemaSetValidStructuredErrors(vctxt, xmlFuzzSErrorFunc, NULL);
+        xmlSchemaValidateDoc(vctxt, doc);
+        xmlSchemaFreeValidCtxt(vctxt);
+
+        xmlFreeDoc(doc);
+        xmlSchemaFree(schema);
+    }
+
+    xmlFuzzInjectFailure(0);
+    xmlFuzzDataCleanup();
+    xmlResetLastError();
+    xmlSchemaCleanupTypes();
+
+    return(0);
+}
+
+size_t
+LLVMFuzzerCustomMutator(char *data, size_t size, size_t maxSize,
+                        unsigned seed) {
+    static const xmlFuzzChunkDesc chunks[] = {
+        { 4, XML_FUZZ_PROB_ONE / 10 }, /* failurePos */
+        { 0, 0 }
+    };
+
+    return xmlFuzzMutateChunks(chunks, data, size, maxSize, seed,
+                               LLVMFuzzerMutate);
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/schematron.c b/schematron.c
+index 1a079d07..d99780e2 100644
+--- a/schematron.c
++++ b/schematron.c
+@@ -337,53 +337,54 @@ static xmlSchematronTestPtr
+ xmlSchematronAddTest(xmlSchematronParserCtxtPtr ctxt,
+                      xmlSchematronTestType type,
+                      xmlSchematronRulePtr rule,
+                      xmlNodePtr node, xmlChar *test, xmlChar *report)
+ {
+     xmlSchematronTestPtr ret;
+     xmlXPathCompExprPtr comp;
+ 
+     if ((ctxt == NULL) || (rule == NULL) || (node == NULL) ||
+         (test == NULL))
+         return(NULL);
+ 
+     /*
+      * try first to compile the test expression
+      */
+     comp = xmlXPathCtxtCompile(ctxt->xctxt, test);
+     if (comp == NULL) {
+         xmlSchematronPErr(ctxt, node,
+             XML_SCHEMAP_NOROOT,
+             "Failed to compile test expression %s",
+             test, NULL);
+         return(NULL);
+     }
+ 
+     ret = (xmlSchematronTestPtr) xmlMalloc(sizeof(xmlSchematronTest));
+     if (ret == NULL) {
+         xmlSchematronPErrMemory(ctxt);
++        xmlXPathFreeCompExpr(comp);
+         return (NULL);
+     }
+     memset(ret, 0, sizeof(xmlSchematronTest));
+     ret->type = type;
+     ret->node = node;
+     ret->test = test;
+     ret->comp = comp;
+     ret->report = report;
+     ret->next = NULL;
+     if (rule->tests == NULL) {
+         rule->tests = ret;
+     } else {
+         xmlSchematronTestPtr prev = rule->tests;
+ 
+         while (prev->next != NULL)
+              prev = prev->next;
+         prev->next = ret;
+     }
+     return (ret);
+ }
+ 
+ /**
+  * Free a list of tests.
+  *
+  * @param tests  a list of tests
+  */
+@@ -921,177 +922,181 @@ static void
+ xmlSchematronParseRule(xmlSchematronParserCtxtPtr ctxt,
+                        xmlSchematronPatternPtr pattern,
+                        xmlNodePtr rule)
+ {
+     xmlNodePtr cur;
+     int nbChecks = 0;
+     xmlChar *test;
+     xmlChar *context;
+     xmlChar *report;
+     xmlChar *name;
+     xmlChar *value;
+     xmlSchematronRulePtr ruleptr;
+     xmlSchematronTestPtr testptr;
+ 
+     if ((ctxt == NULL) || (rule == NULL)) return;
+ 
+     context = xmlGetNoNsProp(rule, BAD_CAST "context");
+     if (context == NULL) {
+         xmlSchematronPErr(ctxt, rule,
+             XML_SCHEMAP_NOROOT,
+             "rule has no context attribute",
+             NULL, NULL);
+         return;
+     } else if (context[0] == 0) {
+         xmlSchematronPErr(ctxt, rule,
+             XML_SCHEMAP_NOROOT,
+             "rule has an empty context attribute",
+             NULL, NULL);
+         xmlFree(context);
+         return;
+     } else {
+         ruleptr = xmlSchematronAddRule(ctxt, ctxt->schema, pattern,
+                                        rule, context, NULL);
+         if (ruleptr == NULL) {
+             xmlFree(context);
+             return;
+         }
+     }
+ 
+     cur = rule->children;
+     NEXT_SCHEMATRON(cur);
+     while (cur != NULL) {
+         if (IS_SCHEMATRON(cur, "let")) {
+             xmlXPathCompExprPtr var_comp;
+             xmlSchematronLetPtr let;
+ 
+             name = xmlGetNoNsProp(cur, BAD_CAST "name");
+             if (name == NULL) {
+                 xmlSchematronPErr(ctxt, cur,
+                                   XML_SCHEMAP_NOROOT,
+                                   "let has no name attribute",
+                                   NULL, NULL);
+                 return;
+             } else if (name[0] == 0) {
+                 xmlSchematronPErr(ctxt, cur,
+                                   XML_SCHEMAP_NOROOT,
+                                   "let has an empty name attribute",
+                                   NULL, NULL);
+                 xmlFree(name);
+                 return;
+             }
+             value = xmlGetNoNsProp(cur, BAD_CAST "value");
+             if (value == NULL) {
+                 xmlSchematronPErr(ctxt, cur,
+                                   XML_SCHEMAP_NOROOT,
+                                   "let has no value attribute",
+                                   NULL, NULL);
+                 xmlFree(name);
+                 return;
+             } else if (value[0] == 0) {
+                 xmlSchematronPErr(ctxt, cur,
+                                   XML_SCHEMAP_NOROOT,
+                                   "let has an empty value attribute",
+                                   NULL, NULL);
+                 xmlFree(name);
+                 xmlFree(value);
+                 return;
+             }
+ 
+             var_comp = xmlXPathCtxtCompile(ctxt->xctxt, value);
+             if (var_comp == NULL) {
+                 xmlSchematronPErr(ctxt, cur,
+                                   XML_SCHEMAP_NOROOT,
+                                   "Failed to compile let expression %s",
+                                   value, NULL);
+                 xmlFree(name);
+                 xmlFree(value);
+                 return;
+             }
+ 
+             let = (xmlSchematronLetPtr) xmlMalloc(sizeof(xmlSchematronLet));
+             if (let == NULL) {
+                 xmlSchematronPErrMemory(ctxt);
+                 xmlFree(name);
+                 xmlFree(value);
+                 xmlXPathFreeCompExpr(var_comp);
+                 return;
+             }
+             let->name = name;
+             let->comp = var_comp;
+             let->next = NULL;
+ 
+             /* add new let variable to the beginning of the list */
+             if (ruleptr->lets != NULL) {
+                 let->next = ruleptr->lets;
+             }
+             ruleptr->lets = let;
+ 
+             xmlFree(value);
+         } else if (IS_SCHEMATRON(cur, "assert")) {
+             nbChecks++;
+             test = xmlGetNoNsProp(cur, BAD_CAST "test");
+             if (test == NULL) {
+                 xmlSchematronPErr(ctxt, cur,
+                     XML_SCHEMAP_NOROOT,
+                     "assert has no test attribute",
+                     NULL, NULL);
+             } else if (test[0] == 0) {
+                 xmlSchematronPErr(ctxt, cur,
+                     XML_SCHEMAP_NOROOT,
+                     "assert has an empty test attribute",
+                     NULL, NULL);
+                 xmlFree(test);
+             } else {
+                 xmlSchematronParseTestReportMsg(ctxt, cur);
+                 report = xmlNodeGetContent(cur);
+ 
+                 testptr = xmlSchematronAddTest(ctxt, XML_SCHEMATRON_ASSERT,
+                                                ruleptr, cur, test, report);
+-                if (testptr == NULL)
++                if (testptr == NULL) {
+                     xmlFree(test);
++                    xmlFree(report);
++                }
+             }
+         } else if (IS_SCHEMATRON(cur, "report")) {
+             nbChecks++;
+             test = xmlGetNoNsProp(cur, BAD_CAST "test");
+             if (test == NULL) {
+                 xmlSchematronPErr(ctxt, cur,
+                     XML_SCHEMAP_NOROOT,
+                     "assert has no test attribute",
+                     NULL, NULL);
+             } else if (test[0] == 0) {
+                 xmlSchematronPErr(ctxt, cur,
+                     XML_SCHEMAP_NOROOT,
+                     "assert has an empty test attribute",
+                     NULL, NULL);
+                 xmlFree(test);
+             } else {
+                 xmlSchematronParseTestReportMsg(ctxt, cur);
+                 report = xmlNodeGetContent(cur);
+ 
+                 testptr = xmlSchematronAddTest(ctxt, XML_SCHEMATRON_REPORT,
+                                                ruleptr, cur, test, report);
+-                if (testptr == NULL)
++                if (testptr == NULL) {
+                     xmlFree(test);
++                    xmlFree(report);
++                }
+             }
+         } else {
+             xmlSchematronPErr(ctxt, cur,
+                 XML_SCHEMAP_NOROOT,
+                 "Expecting an assert or a report element instead of %s",
+                 cur->name, NULL);
+         }
+         cur = cur->next;
+         NEXT_SCHEMATRON(cur);
+     }
+     if (nbChecks == 0) {
+         xmlSchematronPErr(ctxt, rule,
+             XML_SCHEMAP_NOROOT,
+             "rule has no assert nor report element", NULL, NULL);
+     }
+ }
+ 
+ /**
+  * parse a pattern element
+  *
+  * @param ctxt  a schema validation context
+  * @param pat  the pattern node
+  */
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8068","gap_exists":true,"gap_type":["entry_point","API_protocol","input_semantics","fault_injection"],"confidence":99,"affected_functions":["xmlSchematronAddTest","xmlSchematronParseRule"],"reason":"H0 exclusively exercises the XML Schema pipeline through xmlSchemaNewParserCtxt, xmlSchemaParse, and xmlSchemaValidateDoc. It never invokes the Schematron parser, so it cannot reach the changed ownership and cleanup paths for compiled XPath expressions, test strings, and report strings. These paths are fuzz-worthy because the changes specifically handle xmlMalloc failure after xmlXPathCtxtCompile and xmlSchematronAddTest failure while parsing assert/report elements.","evidence":["The production changes are in schematron.c, specifically xmlSchematronAddTest and xmlSchematronParseRule.","H0 includes libxml/xmlschemas.h and calls XML Schema APIs, but contains no xmlSchematron parser or validation API call.","xmlSchematronAddTest now frees comp with xmlXPathFreeCompExpr(comp) when xmlMalloc(sizeof(xmlSchematronTest)) fails.","xmlSchematronParseRule now frees report as well as test when xmlSchematronAddTest returns NULL for both XML_SCHEMATRON_ASSERT and XML_SCHEMATRON_REPORT.","H0 injects allocation failure with xmlFuzzInjectFailure(failurePos), but only around the XML Schema flow, leaving the changed Schematron allocation-failure paths unreachable.","The relevant input semantics include Schematron rule context attributes, let name/value XPath expressions, and assert/report test attributes and message content; H0 supplies XML Schema and secondary validation documents instead."],"recommended_action":"Add a dedicated Schematron fuzz target that parses attacker-controlled Schematron documents containing rule, let, assert, and report elements, compiles their XPath expressions, optionally validates a secondary XML document, and applies xmlFuzzInjectFailure across parsing so failures after xmlXPathCtxtCompile and during xmlSchematronAddTest allocation are exercised."}
+tokens used
+17,208

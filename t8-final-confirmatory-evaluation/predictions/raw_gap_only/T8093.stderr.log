@@ -1,0 +1,168 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8093-xdvzujyp
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fe-e412-75d1-994d-4880730c5876
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8093
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `libsepol/fuzz/secilc-fuzzer.c`
+
+~~~~cpp
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <getopt.h>
+#include <sys/stat.h>
+
+#include <sepol/cil/cil.h>
+#include <sepol/policydb.h>
+
+static void log_handler(__attribute__((unused)) int lvl,
+			__attribute__((unused)) const char *msg)
+{
+	/* be quiet */
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+	enum cil_log_level log_level = CIL_ERR;
+	struct sepol_policy_file *pf = NULL;
+	FILE *dev_null = NULL;
+	int target = SEPOL_TARGET_SELINUX;
+	int disable_dontaudit = 0;
+	int multiple_decls = 0;
+	int disable_neverallow = 0;
+	int preserve_tunables = 0;
+	int policyvers = POLICYDB_VERSION_MAX;
+	int mls = -1;
+	int attrs_expand_generated = 0;
+	struct cil_db *db = NULL;
+	sepol_policydb_t *pdb = NULL;
+
+	cil_set_log_level(log_level);
+	cil_set_log_handler(log_handler);
+
+	cil_db_init(&db);
+	cil_set_disable_dontaudit(db, disable_dontaudit);
+	cil_set_multiple_decls(db, multiple_decls);
+	cil_set_disable_neverallow(db, disable_neverallow);
+	cil_set_preserve_tunables(db, preserve_tunables);
+	cil_set_mls(db, mls);
+	cil_set_target_platform(db, target);
+	cil_set_policy_version(db, policyvers);
+	cil_set_attrs_expand_generated(db, attrs_expand_generated);
+
+	if (cil_add_file(db, "fuzz", (const char *)data, size) != SEPOL_OK)
+		goto exit;
+
+	if (cil_compile(db) != SEPOL_OK)
+		goto exit;
+
+	if (cil_build_policydb(db, &pdb) != SEPOL_OK)
+		goto exit;
+
+	if (sepol_policydb_optimize(pdb) != SEPOL_OK)
+		goto exit;
+
+	dev_null = fopen("/dev/null", "w");
+	if (dev_null == NULL)
+		goto exit;
+
+	if (sepol_policy_file_create(&pf) != 0)
+		goto exit;
+
+	sepol_policy_file_set_fp(pf, dev_null);
+
+	if (sepol_policydb_write(pdb, pf) != 0)
+		goto exit;
+exit:
+	if (dev_null != NULL)
+		fclose(dev_null);
+
+	cil_db_destroy(&db);
+	sepol_policydb_free(pdb);
+	sepol_policy_file_free(pf);
+	return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/libsepol/cil/src/cil.c b/libsepol/cil/src/cil.c
+index 18b98fe2..d9a5a825 100644
+--- a/libsepol/cil/src/cil.c
++++ b/libsepol/cil/src/cil.c
+@@ -545,26 +545,26 @@ void cil_root_destroy(struct cil_root *root)
+ int cil_add_file(cil_db_t *db, const char *name, const char *data, size_t size)
+ {
+ 	char *buffer = NULL;
+ 	int rc;
+ 
+ 	cil_log(CIL_INFO, "Parsing %s\n", name);
+ 
+-	if (size > SIZE_MAX - 2) {
++	if (size > UINT32_MAX - 2) {
+ 		cil_log(CIL_ERR, "File size is too large\n");
+ 		return SEPOL_ERR;
+ 	}
+ 
+ 	buffer = cil_malloc(size + 2);
+ 	memcpy(buffer, data, size);
+ 	memset(buffer + size, 0, 2);
+ 
+ 	rc = cil_parser(name, buffer, size + 2, &db->parse);
+ 	if (rc != SEPOL_OK) {
+ 		cil_log(CIL_INFO, "Failed to parse %s\n", name);
+ 		goto exit;
+ 	}
+ 
+ 	free(buffer);
+ 	buffer = NULL;
+ 
+ 	rc = SEPOL_OK;
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8093","gap_exists":true,"gap_type":["input-size boundary","API argument semantics"],"confidence":94,"affected_functions":["cil_add_file","LLVMFuzzerTestOneInput"],"reason":"H0 reaches cil_add_file, but it can exercise the newly significant UINT32_MAX boundary only by supplying an actual fuzz buffer larger than UINT32_MAX - 2. Because H0 couples data allocation length and the size argument, it lacks a practical boundary-focused path for oversized size values and the rejection behavior before size + 2 is passed to cil_parser.","evidence":["cil_add_file changed its upper-bound check from size > SIZE_MAX - 2 to size > UINT32_MAX - 2.","H0 calls cil_add_file(db, \"fuzz\", (const char *)data, size) using the fuzzer-provided buffer length directly.","H0 contains no targeted construction or alternate API driver for size values at UINT32_MAX - 2, UINT32_MAX - 1, or UINT32_MAX."],"recommended_action":"Add a focused harness or unit-style fuzz adapter for cil_add_file size semantics that explicitly exercises values around UINT32_MAX - 2 while ensuring oversized values are rejected before memcpy, allocation, or parser access requires a correspondingly huge buffer."}
+tokens used
+4,682

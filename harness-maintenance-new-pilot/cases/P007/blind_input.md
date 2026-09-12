@@ -1,0 +1,1443 @@
+# Case ID
+
+P007
+
+## Existing Fuzz Harness H0
+
+### `test/ares-fuzz.c`
+
+~~~~c
+/*
+ * General driver to allow command-line fuzzer (i.e. afl) to
+ * exercise the libFuzzer entrypoint.
+ */
+
+#include <sys/types.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
+#define kMaxAflInputSize (1 << 20)
+static unsigned char afl_buffer[kMaxAflInputSize];
+
+#ifdef __AFL_LOOP
+/* If we are built with afl-clang-fast, use persistent mode */
+#define KEEP_FUZZING(count)  __AFL_LOOP(1000)
+#else
+/* If we are built with afl-clang, execute each input once */
+#define KEEP_FUZZING(count) ((count) < 1)
+#endif
+
+/* In ares-test-fuzz.c and ares-test-fuzz-name.c: */
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+static void ProcessFile(int fd) {
+  int count = read(fd, afl_buffer, kMaxAflInputSize);
+  /*
+   * Make a copy of the data so that it's not part of a larger
+   * buffer (where buffer overflows would go unnoticed).
+   */
+  unsigned char *copied_data = (unsigned char *)malloc(count);
+  memcpy(copied_data, afl_buffer, count);
+  LLVMFuzzerTestOneInput(copied_data, count);
+  free(copied_data);
+}
+
+int main(int argc, char *argv[]) {
+  if (argc == 1) {
+    int count = 0;
+    while (KEEP_FUZZING(count)) {
+      ProcessFile(fileno(stdin));
+      count++;
+    }
+  } else {
+    int ii;
+    for (ii = 1; ii < argc; ++ii) {
+      int fd = open(argv[ii], O_RDONLY);
+      if (fd < 0) {
+        fprintf(stderr, "Failed to open '%s'\n", argv[ii]);
+        continue;
+      }
+      ProcessFile(fd);
+      close(fd);
+    }
+  }
+  return 0;
+}
+~~~~
+### `test/ares-test-fuzz-name.c`
+
+~~~~c
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "ares.h"
+// Include ares internal file for DNS protocol constants
+#include "ares_nameser.h"
+
+// Entrypoint for Clang's libfuzzer, exercising query creation.
+int LLVMFuzzerTestOneInput(const unsigned char *data,
+                           unsigned long size) {
+  // Null terminate the data.
+  char *name = malloc(size + 1);
+  name[size] = '\0';
+  memcpy(name, data, size);
+
+  unsigned char *buf = NULL;
+  int buflen = 0;
+  ares_create_query(name, C_IN, T_AAAA, 1234, 0, &buf, &buflen, 1024);
+  free(buf);
+  free(name);
+  return 0;
+}
+~~~~
+### `test/ares-test-fuzz.c`
+
+~~~~c
+#include <stddef.h>
+
+#include "ares.h"
+
+// Entrypoint for Clang's libfuzzer
+int LLVMFuzzerTestOneInput(const unsigned char *data,
+                           unsigned long size) {
+  // Feed the data into each of the ares_parse_*_reply functions.
+  struct hostent *host = NULL;
+  struct ares_addrttl info[5];
+  int count = 5;
+  ares_parse_a_reply(data, size, &host, info, &count);
+  if (host) ares_free_hostent(host);
+
+  host = NULL;
+  struct ares_addr6ttl info6[5];
+  count = 5;
+  ares_parse_aaaa_reply(data, size, &host, info6, &count);
+  if (host) ares_free_hostent(host);
+
+  host = NULL;
+  unsigned char addrv4[4] = {0x10, 0x20, 0x30, 0x40};
+  ares_parse_ptr_reply(data, size, addrv4, sizeof(addrv4), AF_INET, &host);
+  if (host) ares_free_hostent(host);
+
+  host = NULL;
+  ares_parse_ns_reply(data, size, &host);
+  if (host) ares_free_hostent(host);
+
+  struct ares_srv_reply* srv = NULL;
+  ares_parse_srv_reply(data, size, &srv);
+  if (srv) ares_free_data(srv);
+
+  struct ares_mx_reply* mx = NULL;
+  ares_parse_mx_reply(data, size, &mx);
+  if (mx) ares_free_data(mx);
+
+  struct ares_txt_reply* txt = NULL;
+  ares_parse_txt_reply(data, size, &txt);
+  if (txt) ares_free_data(txt);
+
+  struct ares_soa_reply* soa = NULL;
+  ares_parse_soa_reply(data, size, &soa);
+  if (soa) ares_free_data(soa);
+
+  struct ares_naptr_reply* naptr = NULL;
+  ares_parse_naptr_reply(data, size, &naptr);
+  if (naptr) ares_free_data(naptr);
+
+  struct ares_caa_reply* caa = NULL;
+  ares_parse_caa_reply(data, size, &caa);
+  if (caa) ares_free_data(caa);
+
+  struct ares_uri_reply* uri = NULL;
+  ares_parse_uri_reply(data, size, &uri);
+  if (uri) ares_free_data(uri);
+
+  return 0;
+}
+~~~~
+
+## Production Source Change (S0 -> S1)
+
+Harness changes, commit messages, tests, outcomes, and future evidence are excluded. The source diff is complete.
+
+~~~~diff
+diff --git a/include/ares.h b/include/ares.h
+index 8c7520e..256104b 100644
+--- a/include/ares.h
++++ b/include/ares.h
+@@ -1,6 +1,5 @@
+-
+-/* Copyright 1998 by the Massachusetts Institute of Technology.
+- * Copyright (C) 2007-2013 by Daniel Stenberg
++/* Copyright (C) the Massachusetts Institute of Technology.
++ * Copyright (C) Daniel Stenberg
+  *
+  * Permission to use, copy, modify, and distribute this
+  * software and its documentation for any purpose and without
+@@ -13,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #ifndef ARES__H
+diff --git a/include/ares_dns.h b/include/ares_dns.h
+index bc8aa7b..669058e 100644
+--- a/include/ares_dns.h
++++ b/include/ares_dns.h
+@@ -14,6 +14,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ /*
+diff --git a/include/ares_nameser.h b/include/ares_nameser.h
+index 18a9e5a..d8edb6c 100644
+--- a/include/ares_nameser.h
++++ b/include/ares_nameser.h
+@@ -1,3 +1,20 @@
++/* Copyright (C) the Massachusetts Institute of Technology.
++ * Copyright (C) Daniel Stenberg
++ *
++ * Permission to use, copy, modify, and distribute this
++ * software and its documentation for any purpose and without
++ * fee is hereby granted, provided that the above copyright
++ * notice appear in all copies and that both that copyright
++ * notice and this permission notice appear in supporting
++ * documentation, and that the name of M.I.T. not be used in
++ * advertising or publicity pertaining to distribution of the
++ * software without specific, written prior permission.
++ * M.I.T. makes no representations about the suitability of
++ * this software for any purpose.  It is provided "as is"
++ * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
++ */
+ 
+ #ifndef ARES_NAMESER_H
+ #define ARES_NAMESER_H
+diff --git a/include/ares_rules.h b/include/ares_rules.h
+index 1706ab7..c39e18e 100644
+--- a/include/ares_rules.h
++++ b/include/ares_rules.h
+@@ -13,6 +13,8 @@
+  * written prior permission.  M.I.T. makes no representations about the
+  * suitability of this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ /* ================================================================ */
+diff --git a/include/ares_version.h b/include/ares_version.h
+index 9db836e..5c662ec 100644
+--- a/include/ares_version.h
++++ b/include/ares_version.h
+@@ -1,3 +1,20 @@
++/*
++ * Copyright (C) Daniel Stenberg
++ *
++ * Permission to use, copy, modify, and distribute this
++ * software and its documentation for any purpose and without
++ * fee is hereby granted, provided that the above copyright
++ * notice appear in all copies and that both that copyright
++ * notice and this permission notice appear in supporting
++ * documentation, and that the name of M.I.T. not be used in
++ * advertising or publicity pertaining to distribution of the
++ * software without specific, written prior permission.
++ * M.I.T. makes no representations about the suitability of
++ * this software for any purpose.  It is provided "as is"
++ * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
++ */
+ 
+ #ifndef ARES__VERSION_H
+ #define ARES__VERSION_H
+diff --git a/msvc_ver.inc b/msvc_ver.inc
+index 595cbdf..61bdb59 100644
+--- a/msvc_ver.inc
++++ b/msvc_ver.inc
+@@ -1,3 +1,5 @@
++# Copyright (C) The c-ares project and its contributors
++# SPDX-License-Identifier: MIT
+ # -----------------------------------------------
+ # Detect NMAKE version deducing old MSVC versions
+ # -----------------------------------------------
+diff --git a/src/lib/Makefile.inc b/src/lib/Makefile.inc
+index 02d8d58..a6a4792 100644
+--- a/src/lib/Makefile.inc
++++ b/src/lib/Makefile.inc
+@@ -1,3 +1,5 @@
++# Copyright (C) The c-ares project and its contributors
++# SPDX-License-Identifier: MIT
+ 
+ CSOURCES = ares__addrinfo2hostent.c	\
+   ares__addrinfo_localhost.c	\
+diff --git a/src/lib/ares__addrinfo2hostent.c b/src/lib/ares__addrinfo2hostent.c
+index efb145c..966eecb 100644
+--- a/src/lib/ares__addrinfo2hostent.c
++++ b/src/lib/ares__addrinfo2hostent.c
+@@ -14,6 +14,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares__addrinfo_localhost.c b/src/lib/ares__addrinfo_localhost.c
+index 5bc1e0b..cc151b0 100644
+--- a/src/lib/ares__addrinfo_localhost.c
++++ b/src/lib/ares__addrinfo_localhost.c
+@@ -1,4 +1,6 @@
+-/* Copyright (C) 2021
++/*
++ * Copyright (C) the Massachusetts Institute of Technology.
++ * Copyright (C) Daniel Stenberg
+  *
+  * Permission to use, copy, modify, and distribute this
+  * software and its documentation for any purpose and without
+@@ -11,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares__close_sockets.c b/src/lib/ares__close_sockets.c
+index 0477174..14c4901 100644
+--- a/src/lib/ares__close_sockets.c
++++ b/src/lib/ares__close_sockets.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares__get_hostent.c b/src/lib/ares__get_hostent.c
+index 367f390..1c58b7b 100644
+--- a/src/lib/ares__get_hostent.c
++++ b/src/lib/ares__get_hostent.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares__parse_into_addrinfo.c b/src/lib/ares__parse_into_addrinfo.c
+index 4393f04..60cb892 100644
+--- a/src/lib/ares__parse_into_addrinfo.c
++++ b/src/lib/ares__parse_into_addrinfo.c
+@@ -11,6 +11,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares__read_line.c b/src/lib/ares__read_line.c
+index c62ad2a..0471c05 100644
+--- a/src/lib/ares__read_line.c
++++ b/src/lib/ares__read_line.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares__readaddrinfo.c b/src/lib/ares__readaddrinfo.c
+index f0b3dcf..5ad06cc 100644
+--- a/src/lib/ares__readaddrinfo.c
++++ b/src/lib/ares__readaddrinfo.c
+@@ -11,6 +11,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares__sortaddrinfo.c b/src/lib/ares__sortaddrinfo.c
+index 3f050ca..d178867 100644
+--- a/src/lib/ares__sortaddrinfo.c
++++ b/src/lib/ares__sortaddrinfo.c
+@@ -32,6 +32,8 @@
+  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+  * SUCH DAMAGE.
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares__timeval.c b/src/lib/ares__timeval.c
+index 94efb7d..1768ab7 100644
+--- a/src/lib/ares__timeval.c
++++ b/src/lib/ares__timeval.c
+@@ -10,6 +10,8 @@
+  * written prior permission.  M.I.T. makes no representations about the
+  * suitability of this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_android.c b/src/lib/ares_android.c
+index 5b00b80..3765117 100644
+--- a/src/lib/ares_android.c
++++ b/src/lib/ares_android.c
+@@ -11,6 +11,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ #if defined(ANDROID) || defined(__ANDROID__)
+ 
+diff --git a/src/lib/ares_android.h b/src/lib/ares_android.h
+index 93fb75f..c81b317 100644
+--- a/src/lib/ares_android.h
++++ b/src/lib/ares_android.h
+@@ -11,6 +11,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #ifndef __ARES_ANDROID_H__
+diff --git a/src/lib/ares_cancel.c b/src/lib/ares_cancel.c
+index 465cc9e..54d8bf1 100644
+--- a/src/lib/ares_cancel.c
++++ b/src/lib/ares_cancel.c
+@@ -10,6 +10,8 @@
+  * written prior permission.  M.I.T. makes no representations about the
+  * suitability of this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_create_query.c b/src/lib/ares_create_query.c
+index e3d874b..e4d4e83 100644
+--- a/src/lib/ares_create_query.c
++++ b/src/lib/ares_create_query.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_data.c b/src/lib/ares_data.c
+index 69dff06..7e7becb 100644
+--- a/src/lib/ares_data.c
++++ b/src/lib/ares_data.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ 
+diff --git a/src/lib/ares_data.h b/src/lib/ares_data.h
+index a682ad5..d8e9f78 100644
+--- a/src/lib/ares_data.h
++++ b/src/lib/ares_data.h
+@@ -15,6 +15,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ typedef enum {
+diff --git a/src/lib/ares_destroy.c b/src/lib/ares_destroy.c
+index 62c899f..f49bb21 100644
+--- a/src/lib/ares_destroy.c
++++ b/src/lib/ares_destroy.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_expand_name.c b/src/lib/ares_expand_name.c
+index ad1c97f..f869101 100644
+--- a/src/lib/ares_expand_name.c
++++ b/src/lib/ares_expand_name.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_expand_string.c b/src/lib/ares_expand_string.c
+index 03e3929..e3f8ee7 100644
+--- a/src/lib/ares_expand_string.c
++++ b/src/lib/ares_expand_string.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_fds.c b/src/lib/ares_fds.c
+index f405fc0..61a9ba2 100644
+--- a/src/lib/ares_fds.c
++++ b/src/lib/ares_fds.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_free_hostent.c b/src/lib/ares_free_hostent.c
+index ea28ff0..1239f19 100644
+--- a/src/lib/ares_free_hostent.c
++++ b/src/lib/ares_free_hostent.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_free_string.c b/src/lib/ares_free_string.c
+index 024992e..46b5dc1 100644
+--- a/src/lib/ares_free_string.c
++++ b/src/lib/ares_free_string.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_freeaddrinfo.c b/src/lib/ares_freeaddrinfo.c
+index ab87136..d2b12a2 100644
+--- a/src/lib/ares_freeaddrinfo.c
++++ b/src/lib/ares_freeaddrinfo.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_getaddrinfo.c b/src/lib/ares_getaddrinfo.c
+index 7ba8e91..6b2f8ee 100644
+--- a/src/lib/ares_getaddrinfo.c
++++ b/src/lib/ares_getaddrinfo.c
+@@ -14,6 +14,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_getenv.c b/src/lib/ares_getenv.c
+index f6e4dc2..22b7f04 100644
+--- a/src/lib/ares_getenv.c
++++ b/src/lib/ares_getenv.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_getenv.h b/src/lib/ares_getenv.h
+index 6da6cc5..4d12f1f 100644
+--- a/src/lib/ares_getenv.h
++++ b/src/lib/ares_getenv.h
+@@ -15,6 +15,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_gethostbyaddr.c b/src/lib/ares_gethostbyaddr.c
+index 8714bae..c93754c 100644
+--- a/src/lib/ares_gethostbyaddr.c
++++ b/src/lib/ares_gethostbyaddr.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ #include "ares_setup.h"
+ 
+diff --git a/src/lib/ares_gethostbyname.c b/src/lib/ares_gethostbyname.c
+index 8c71cc6..481db68 100644
+--- a/src/lib/ares_gethostbyname.c
++++ b/src/lib/ares_gethostbyname.c
+@@ -11,6 +11,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_getnameinfo.c b/src/lib/ares_getnameinfo.c
+index 92f4315..b632895 100644
+--- a/src/lib/ares_getnameinfo.c
++++ b/src/lib/ares_getnameinfo.c
+@@ -1,5 +1,5 @@
+ 
+-/* Copyright 2005 by Dominick Meglio
++/* Copyright 2005, 2023 by Dominick Meglio
+  *
+  * Permission to use, copy, modify, and distribute this
+  * software and its documentation for any purpose and without
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ #include "ares_setup.h"
+ 
+diff --git a/src/lib/ares_getsock.c b/src/lib/ares_getsock.c
+index 22d3446..1362a42 100644
+--- a/src/lib/ares_getsock.c
++++ b/src/lib/ares_getsock.c
+@@ -10,6 +10,8 @@
+  * written prior permission.  M.I.T. makes no representations about the
+  * suitability of this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_inet_net_pton.h b/src/lib/ares_inet_net_pton.h
+index 90da2cc..5c07684 100644
+--- a/src/lib/ares_inet_net_pton.h
++++ b/src/lib/ares_inet_net_pton.h
+@@ -14,6 +14,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #ifdef HAVE_INET_NET_PTON
+diff --git a/src/lib/ares_init.c b/src/lib/ares_init.c
+index 0519f43..3e2033c 100644
+--- a/src/lib/ares_init.c
++++ b/src/lib/ares_init.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_iphlpapi.h b/src/lib/ares_iphlpapi.h
+index 343aee3..81bb164 100644
+--- a/src/lib/ares_iphlpapi.h
++++ b/src/lib/ares_iphlpapi.h
+@@ -15,6 +15,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #if defined(USE_WINSOCK)
+diff --git a/src/lib/ares_ipv6.h b/src/lib/ares_ipv6.h
+index fdbc21f..d929c3c 100644
+--- a/src/lib/ares_ipv6.h
++++ b/src/lib/ares_ipv6.h
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #ifndef ARES_IPV6_H
+diff --git a/src/lib/ares_library_init.c b/src/lib/ares_library_init.c
+index bbfcbee..e2051f7 100644
+--- a/src/lib/ares_library_init.c
++++ b/src/lib/ares_library_init.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_llist.c b/src/lib/ares_llist.c
+index 36ca84c..9829936 100644
+--- a/src/lib/ares_llist.c
++++ b/src/lib/ares_llist.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_llist.h b/src/lib/ares_llist.h
+index 20f4d1c..e151c14 100644
+--- a/src/lib/ares_llist.h
++++ b/src/lib/ares_llist.h
+@@ -15,6 +15,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ 
+diff --git a/src/lib/ares_mkquery.c b/src/lib/ares_mkquery.c
+index 5aea914..8fe2bc0 100644
+--- a/src/lib/ares_mkquery.c
++++ b/src/lib/ares_mkquery.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_nowarn.c b/src/lib/ares_nowarn.c
+index f63d913..e9ec44b 100644
+--- a/src/lib/ares_nowarn.c
++++ b/src/lib/ares_nowarn.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ 
+diff --git a/src/lib/ares_nowarn.h b/src/lib/ares_nowarn.h
+index 505e622..8e1536a 100644
+--- a/src/lib/ares_nowarn.h
++++ b/src/lib/ares_nowarn.h
+@@ -15,6 +15,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ long  aresx_uztosl(size_t uznum);
+diff --git a/src/lib/ares_options.c b/src/lib/ares_options.c
+index de49de4..f9fec54 100644
+--- a/src/lib/ares_options.c
++++ b/src/lib/ares_options.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ 
+diff --git a/src/lib/ares_parse_a_reply.c b/src/lib/ares_parse_a_reply.c
+index ee903c7..8b5d43d 100644
+--- a/src/lib/ares_parse_a_reply.c
++++ b/src/lib/ares_parse_a_reply.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_parse_aaaa_reply.c b/src/lib/ares_parse_aaaa_reply.c
+index 091065d..10e91ca 100644
+--- a/src/lib/ares_parse_aaaa_reply.c
++++ b/src/lib/ares_parse_aaaa_reply.c
+@@ -14,6 +14,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_parse_caa_reply.c b/src/lib/ares_parse_caa_reply.c
+index f6d4d3c..f38a25d 100644
+--- a/src/lib/ares_parse_caa_reply.c
++++ b/src/lib/ares_parse_caa_reply.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_parse_mx_reply.c b/src/lib/ares_parse_mx_reply.c
+index a497f55..b1d7ab8 100644
+--- a/src/lib/ares_parse_mx_reply.c
++++ b/src/lib/ares_parse_mx_reply.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_parse_naptr_reply.c b/src/lib/ares_parse_naptr_reply.c
+index dd984c0..3c844c3 100644
+--- a/src/lib/ares_parse_naptr_reply.c
++++ b/src/lib/ares_parse_naptr_reply.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_parse_ns_reply.c b/src/lib/ares_parse_ns_reply.c
+index 47d1299..085010b 100644
+--- a/src/lib/ares_parse_ns_reply.c
++++ b/src/lib/ares_parse_ns_reply.c
+@@ -11,6 +11,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ /*
+diff --git a/src/lib/ares_parse_ptr_reply.c b/src/lib/ares_parse_ptr_reply.c
+index ae78edf..62a41b4 100644
+--- a/src/lib/ares_parse_ptr_reply.c
++++ b/src/lib/ares_parse_ptr_reply.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_parse_soa_reply.c b/src/lib/ares_parse_soa_reply.c
+index 3935eec..1caf60b 100644
+--- a/src/lib/ares_parse_soa_reply.c
++++ b/src/lib/ares_parse_soa_reply.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_parse_srv_reply.c b/src/lib/ares_parse_srv_reply.c
+index 0d8f4d2..8072e43 100644
+--- a/src/lib/ares_parse_srv_reply.c
++++ b/src/lib/ares_parse_srv_reply.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_parse_txt_reply.c b/src/lib/ares_parse_txt_reply.c
+index 6848a09..ff4a9a8 100644
+--- a/src/lib/ares_parse_txt_reply.c
++++ b/src/lib/ares_parse_txt_reply.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_parse_uri_reply.c b/src/lib/ares_parse_uri_reply.c
+index bb28267..9a1026f 100644
+--- a/src/lib/ares_parse_uri_reply.c
++++ b/src/lib/ares_parse_uri_reply.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_platform.c b/src/lib/ares_platform.c
+index 6c749dc..43785a7 100644
+--- a/src/lib/ares_platform.c
++++ b/src/lib/ares_platform.c
+@@ -14,6 +14,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_platform.h b/src/lib/ares_platform.h
+index e6885ae..c4b84b4 100644
+--- a/src/lib/ares_platform.h
++++ b/src/lib/ares_platform.h
+@@ -2,7 +2,7 @@
+ #define HEADER_CARES_PLATFORM_H
+ 
+ 
+-/* Copyright 1998 by the Massachusetts Institute of Technology.
++/* Copyright 1998, 2023 by the Massachusetts Institute of Technology.
+  * Copyright (C) 2004 - 2011 by Daniel Stenberg et al
+  *
+  * Permission to use, copy, modify, and distribute this
+@@ -16,6 +16,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_private.h b/src/lib/ares_private.h
+index b6eab8a..79ba045 100644
+--- a/src/lib/ares_private.h
++++ b/src/lib/ares_private.h
+@@ -16,6 +16,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ /*
+diff --git a/src/lib/ares_process.c b/src/lib/ares_process.c
+index 6cac0a9..84e7036 100644
+--- a/src/lib/ares_process.c
++++ b/src/lib/ares_process.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_query.c b/src/lib/ares_query.c
+index 42323be..dbcbc3a 100644
+--- a/src/lib/ares_query.c
++++ b/src/lib/ares_query.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_rand.c b/src/lib/ares_rand.c
+index f07d419..933ad36 100644
+--- a/src/lib/ares_rand.c
++++ b/src/lib/ares_rand.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_search.c b/src/lib/ares_search.c
+index c4b0424..d9e6591 100644
+--- a/src/lib/ares_search.c
++++ b/src/lib/ares_search.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_send.c b/src/lib/ares_send.c
+index 542cf45..088d232 100644
+--- a/src/lib/ares_send.c
++++ b/src/lib/ares_send.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_setup.h b/src/lib/ares_setup.h
+index 6ad2cee..9baa69e 100644
+--- a/src/lib/ares_setup.h
++++ b/src/lib/ares_setup.h
+@@ -13,6 +13,8 @@
+  * written prior permission.  M.I.T. makes no representations about the
+  * suitability of this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ /*
+diff --git a/src/lib/ares_strcasecmp.c b/src/lib/ares_strcasecmp.c
+index f9c85e2..8f8dc24 100644
+--- a/src/lib/ares_strcasecmp.c
++++ b/src/lib/ares_strcasecmp.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_strcasecmp.h b/src/lib/ares_strcasecmp.h
+index 57d86f9..49c90fc 100644
+--- a/src/lib/ares_strcasecmp.h
++++ b/src/lib/ares_strcasecmp.h
+@@ -15,6 +15,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_strdup.c b/src/lib/ares_strdup.c
+index 39fc869..9acb020 100644
+--- a/src/lib/ares_strdup.c
++++ b/src/lib/ares_strdup.c
+@@ -13,6 +13,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_strdup.h b/src/lib/ares_strdup.h
+index 67f2a74..ccdc8e5 100644
+--- a/src/lib/ares_strdup.h
++++ b/src/lib/ares_strdup.h
+@@ -15,6 +15,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_strerror.c b/src/lib/ares_strerror.c
+index c3ecbd7..a654a23 100644
+--- a/src/lib/ares_strerror.c
++++ b/src/lib/ares_strerror.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_strsplit.c b/src/lib/ares_strsplit.c
+index d3e90c4..63e07b2 100644
+--- a/src/lib/ares_strsplit.c
++++ b/src/lib/ares_strsplit.c
+@@ -11,6 +11,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #if defined(__MVS__)
+diff --git a/src/lib/ares_strsplit.h b/src/lib/ares_strsplit.h
+index 009ee51..ff098c4 100644
+--- a/src/lib/ares_strsplit.h
++++ b/src/lib/ares_strsplit.h
+@@ -14,6 +14,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_timeout.c b/src/lib/ares_timeout.c
+index 293e4af..46a0ba0 100644
+--- a/src/lib/ares_timeout.c
++++ b/src/lib/ares_timeout.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_version.c b/src/lib/ares_version.c
+index 4f8c42f..e395dfd 100644
+--- a/src/lib/ares_version.c
++++ b/src/lib/ares_version.c
+@@ -1,4 +1,9 @@
+-
++/***********************
++ * Copyright (C) the Massachusetts Institute of Technology.
++ * Copyright (C) Daniel Stenberg
++ *
++ * SPDX-License-Identifier: MIT
++ */
+ #include "ares_setup.h"
+ #include "ares.h"
+ 
+diff --git a/src/lib/ares_writev.c b/src/lib/ares_writev.c
+index e812c09..530d7d8 100644
+--- a/src/lib/ares_writev.c
++++ b/src/lib/ares_writev.c
+@@ -1,5 +1,3 @@
+-
+-
+ /* Copyright 1998 by the Massachusetts Institute of Technology.
+  *
+  * Permission to use, copy, modify, and distribute this
+@@ -13,6 +11,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/ares_writev.h b/src/lib/ares_writev.h
+index 65cea87..8bb342c 100644
+--- a/src/lib/ares_writev.h
++++ b/src/lib/ares_writev.h
+@@ -15,6 +15,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/bitncmp.c b/src/lib/bitncmp.c
+index 1468d49..8e853ce 100644
+--- a/src/lib/bitncmp.c
++++ b/src/lib/bitncmp.c
+@@ -14,6 +14,8 @@
+  * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+  * OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #ifndef HAVE_BITNCMP
+diff --git a/src/lib/bitncmp.h b/src/lib/bitncmp.h
+index 7b8d66c..25513cf 100644
+--- a/src/lib/bitncmp.h
++++ b/src/lib/bitncmp.h
+@@ -15,6 +15,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #ifndef HAVE_BITNCMP
+diff --git a/src/lib/config-dos.h b/src/lib/config-dos.h
+index b241d69..50b039f 100644
+--- a/src/lib/config-dos.h
++++ b/src/lib/config-dos.h
+@@ -2,9 +2,12 @@
+ #define HEADER_CONFIG_DOS_H
+ 
+ 
+-/* ================================================================ */
+-/*       ares/config-dos.h - Hand crafted config file for DOS       */
+-/* ================================================================ */
++/* ================================================================
++ *       ares/config-dos.h - Hand crafted config file for DOS
++ *
++ * Copyright (C) The c-ares project and its contributors
++ * SPDX-License-Identifier: MIT
++ * ================================================================ */
+ 
+ #define PACKAGE  "c-ares"
+ 
+diff --git a/src/lib/config-win32.h b/src/lib/config-win32.h
+index cc8e443..7b71a8f 100644
+--- a/src/lib/config-win32.h
++++ b/src/lib/config-win32.h
+@@ -12,6 +12,8 @@
+  * written prior permission.  M.I.T. makes no representations about the
+  * suitability of this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ /* ================================================================ */
+diff --git a/src/lib/inet_net_pton.c b/src/lib/inet_net_pton.c
+index 7130f0f..f633ad8 100644
+--- a/src/lib/inet_net_pton.c
++++ b/src/lib/inet_net_pton.c
+@@ -15,6 +15,8 @@
+  * PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS
+  * ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS
+  * SOFTWARE.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/inet_ntop.c b/src/lib/inet_ntop.c
+index e33dda5..246d630 100644
+--- a/src/lib/inet_ntop.c
++++ b/src/lib/inet_ntop.c
+@@ -13,6 +13,8 @@
+  * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+  * OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/lib/setup_once.h b/src/lib/setup_once.h
+index 4b0f9ce..d633da1 100644
+--- a/src/lib/setup_once.h
++++ b/src/lib/setup_once.h
+@@ -13,6 +13,8 @@
+  * written prior permission.  M.I.T. makes no representations about the
+  * suitability of this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ 
+diff --git a/src/lib/windows_port.c b/src/lib/windows_port.c
+index 03acd1c..1d7503a 100644
+--- a/src/lib/windows_port.c
++++ b/src/lib/windows_port.c
+@@ -1,3 +1,11 @@
++/**********************************************************************
++ *
++ * Copyright (C) the Massachusetts Institute of Technology.
++ * Copyright (C) Daniel Stenberg
++ *
++ * SPDX-License-Identifier: MIT
++ *
++ */
+ #include "ares_setup.h"
+ 
+ 
+diff --git a/src/tools/Makefile.inc b/src/tools/Makefile.inc
+index 7aea8e5..4e3850e 100644
+--- a/src/tools/Makefile.inc
++++ b/src/tools/Makefile.inc
+@@ -1,3 +1,5 @@
++# Copyright (C) The c-ares project and its contributors
++# SPDX-License-Identifier: MIT
+ SAMPLESOURCES = ares_getopt.c		\
+   ../lib/ares_nowarn.c				\
+   ../lib/ares_strcasecmp.c
+diff --git a/src/tools/acountry.c b/src/tools/acountry.c
+index 6314e06..7722287 100644
+--- a/src/tools/acountry.c
++++ b/src/tools/acountry.c
+@@ -15,7 +15,7 @@
+  *
+  * Ref: http://countries.nerd.dk/more.html
+  *
+- * Written by G. Vanem <gvanem@yahoo.no> 2006, 2007
++ * Copyright (C) G. Vanem <gvanem@yahoo.no>
+  *
+  * NB! This program may not be big-endian aware.
+  *
+@@ -30,6 +30,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/tools/adig.c b/src/tools/adig.c
+index cf5bd4d..146638a 100644
+--- a/src/tools/adig.c
++++ b/src/tools/adig.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/tools/ahost.c b/src/tools/ahost.c
+index 8ac2106..2a0c361 100644
+--- a/src/tools/ahost.c
++++ b/src/tools/ahost.c
+@@ -12,6 +12,8 @@
+  * M.I.T. makes no representations about the suitability of
+  * this software for any purpose.  It is provided "as is"
+  * without express or implied warranty.
++ *
++ * SPDX-License-Identifier: MIT
+  */
+ 
+ #include "ares_setup.h"
+diff --git a/src/tools/ares_getopt.c b/src/tools/ares_getopt.c
+index 1e02d08..f715439 100644
+--- a/src/tools/ares_getopt.c
++++ b/src/tools/ares_getopt.c
+@@ -36,6 +36,8 @@
+  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  * POSSIBILITY OF SUCH DAMAGE.
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
+ /* #if !defined(lint)
+diff --git a/src/tools/ares_getopt.h b/src/tools/ares_getopt.h
+index 63acb3b..7f06e7e 100644
+--- a/src/tools/ares_getopt.h
++++ b/src/tools/ares_getopt.h
+@@ -28,6 +28,8 @@
+  * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  * POSSIBILITY OF SUCH DAMAGE.
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
+  */
+~~~~
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.

@@ -1,0 +1,175 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8063-d9h5zvi1
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fb-f083-7103-9ae6-7c4b9b7a58fd
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8063
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `contrib/oss-fuzz/libarchive_fuzzer.cc`
+
+~~~~cpp
+#include <stddef.h>
+#include <stdint.h>
+#include <vector>
+
+#include "archive.h"
+#include "fuzz_helpers.h"
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *buf, size_t len) {
+  int ret;
+  ssize_t r;
+  struct archive *a = archive_read_new();
+
+  archive_read_support_filter_all(a);
+  archive_read_support_format_all(a);
+
+  Buffer buffer = {buf, len, 0};
+  archive_read_open(a, &buffer, NULL, reader_callback, NULL);
+
+  std::vector<uint8_t> data_buffer(getpagesize(), 0);
+  struct archive_entry *entry;
+  while(1) {
+    ret = archive_read_next_header(a, &entry);
+    if (ret == ARCHIVE_EOF || ret == ARCHIVE_FATAL)
+      break;
+    if (ret == ARCHIVE_RETRY)
+      continue;
+    while ((r = archive_read_data(a, data_buffer.data(),
+            data_buffer.size())) > 0)
+      ;
+    if (r == ARCHIVE_FATAL)
+      break;
+  }
+
+  archive_read_free(a);
+  return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/tar/write.c b/tar/write.c
+index e4ed5670..3afa5519 100644
+--- a/tar/write.c
++++ b/tar/write.c
+@@ -765,73 +765,74 @@ static int
+ copy_file_data_block(struct bsdtar *bsdtar, struct archive *a,
+     struct archive *in_a, struct archive_entry *entry)
+ {
+ 	size_t	bytes_read;
+ 	ssize_t	bytes_written;
+ 	int64_t	offset, progress = 0;
+ 	char *null_buff = NULL;
+ 	const void *buff;
+ 	int r;
+ 
+ 	while ((r = archive_read_data_block(in_a, &buff,
+ 	    &bytes_read, &offset)) == ARCHIVE_OK) {
+ 		if (need_report())
+ 			report_write(bsdtar, a, entry, progress);
+ 
+ 		if (offset > progress) {
+ 			int64_t sparse = offset - progress;
+ 			size_t ns;
+ 
+ 			if (null_buff == NULL) {
+ 				null_buff = bsdtar->buff;
+ 				memset(null_buff, 0, bsdtar->buff_size);
+ 			}
+ 
+ 			while (sparse > 0) {
+ 				if (sparse > (int64_t)bsdtar->buff_size)
+ 					ns = bsdtar->buff_size;
+ 				else
+ 					ns = (size_t)sparse;
+ 				bytes_written =
+ 				    archive_write_data(a, null_buff, ns);
+ 				if (bytes_written < 0) {
+ 					/* Write failed; this is bad */
+ 					lafe_warnc(0, "%s",
+ 					     archive_error_string(a));
+ 					return (-1);
+ 				}
+ 				if ((size_t)bytes_written < ns) {
+ 					/* Write was truncated; warn but
+ 					 * continue. */
+ 					lafe_warnc(0,
+ 					    "%s: Truncated write; file may "
+ 					    "have grown while being archived",
+ 					    archive_entry_pathname(entry));
+ 					return (0);
+ 				}
+ 				progress += bytes_written;
+ 				sparse -= bytes_written;
+ 			}
+ 		}
+ 
+ 		bytes_written = archive_write_data(a, buff, bytes_read);
+ 		if (bytes_written < 0) {
+ 			/* Write failed; this is bad */
+ 			lafe_warnc(0, "%s", archive_error_string(a));
+ 			return (-1);
+ 		}
+ 		if ((size_t)bytes_written < bytes_read) {
+ 			/* Write was truncated; warn but continue. */
+ 			lafe_warnc(0,
+ 			    "%s: Truncated write; file may have grown "
+ 			    "while being archived",
+ 			    archive_entry_pathname(entry));
+ 			return (0);
+ 		}
+ 		progress += bytes_written;
+ 	}
+ 	if (r < ARCHIVE_WARN) {
+-		lafe_warnc(archive_errno(a), "%s", archive_error_string(a));
++		lafe_warnc(archive_errno(in_a), "%s",
++		    archive_error_string(in_a));
+ 		return (-1);
+ 	}
+ 	return (0);
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8063","gap_exists":true,"gap_type":["API protocol","sparse/block input semantics","error-state handling"],"confidence":91,"affected_functions":["copy_file_data_block","archive_read_data_block","archive_errno","archive_error_string"],"reason":"H0 exercises archive_read_data but never the archive_read_data_block protocol used by copy_file_data_block. It therefore does not directly fuzz block-returned bytes_read/offset values, sparse offset handling, or the error state attached to in_a when archive_read_data_block returns below ARCHIVE_WARN—the exact state whose reporting is corrected in S1.","evidence":["copy_file_data_block repeatedly calls archive_read_data_block(in_a, &buff, &bytes_read, &offset).","The returned offset drives sparse-gap arithmetic and zero filling through offset, progress, sparse, and bytes_read.","On r < ARCHIVE_WARN, S1 changes archive_errno(a) and archive_error_string(a) to archive_errno(in_a) and archive_error_string(in_a), implicating input-archive error-state semantics.","H0 calls archive_read_data(a, data_buffer.data(), data_buffer.size()) and contains no call to archive_read_data_block or observation of block offsets."],"recommended_action":"Add a harness path that opens attacker-controlled input and consumes entries with archive_read_data_block, validating progress across returned offsets and continuing through retry, warning, EOF, and fatal/error outcomes while querying archive_errno and archive_error_string on the input archive."}
+tokens used
+4,754

@@ -1,0 +1,33 @@
+PROJECT c-ares
+COMMIT 2c1a20bbc43a61eb61bb6eaf077e0e0e8c8d8280
+PARENT 51e7590610de500db3cc6607168332f7aa125110
+SUBJECT thread safety: during ares_destroy() when we cleanup the config change monitoring, it needs to be surrounded by a channel lock
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/src/lib/ares_destroy.c b/src/lib/ares_destroy.c
+index ade986df..8198eea8 100644
+--- a/src/lib/ares_destroy.c
++++ b/src/lib/ares_destroy.c
+@@ -39,6 +39,7 @@ void ares_destroy(ares_channel_t *channel)
+   }
+ 
+   /* Disable configuration change monitoring */
++  ares__channel_lock(channel);
+   if (channel->optmask & ARES_OPT_EVENT_THREAD) {
+     ares_event_thread_t *e = channel->sock_state_cb_data;
+     if (e && e->configchg) {
+@@ -46,8 +47,10 @@ void ares_destroy(ares_channel_t *channel)
+       e->configchg = NULL;
+     }
+   }
++  ares__channel_unlock(channel);
+ 
+-  /* Wait for reinit thread to exit if there was one pending */
++  /* Wait for reinit thread to exit if there was one pending, can't be
++   * holding a lock as the thread may take locks. */
+   if (channel->reinit_thread != NULL) {
+     void *rv;
+     ares__thread_join(channel->reinit_thread, &rv);
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===

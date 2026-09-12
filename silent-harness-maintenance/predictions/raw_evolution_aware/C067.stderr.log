@@ -1,0 +1,1193 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/silent-maintenance-evolution_aware-C067-t4sf458_
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a089a5-b2f2-7123-a8bf-fe80f01a7ad3
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous Fuzz-Harness Maintenance Case
+
+Case ID
+
+C067
+
+## Evidence boundary
+
+The material below contains only the complete existing harness H0 and the complete production source diff from S0 to S1. No developer-updated harness, commit message, build result, coverage result, reachability result, or label is supplied.
+
+## Existing Harness H0
+
+### `fuzz/c/std/bzip2_fuzzer.c`
+
+```text
+// Copyright 2022 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN bzip2_fuzzer.c
+./a.out ../../../test/data/*.bzip2
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__BZIP2
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+
+// 64 KiB.
+#define DST_BUFFER_ARRAY_SIZE 65536
+
+// Wuffs allows either statically or dynamically allocated work buffers. This
+// program exercises static allocation.
+#define WORK_BUFFER_ARRAY_SIZE \
+  WUFFS_BZIP2__DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE
+#if WORK_BUFFER_ARRAY_SIZE > 0
+uint8_t g_work_buffer_array[WORK_BUFFER_ARRAY_SIZE];
+#else
+// Not all C/C++ compilers support 0-length arrays.
+uint8_t g_work_buffer_array[1];
+#endif
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_bzip2__decoder dec;
+  wuffs_base__status status = wuffs_bzip2__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+
+  // Ignore the checksum for 99.99%-ish of all input. When fuzzers generate
+  // random input, the checkum is very unlikely to match. Still, it's useful to
+  // verify that checksumming does not lead to e.g. buffer overflows.
+  wuffs_bzip2__decoder__set_quirk(&dec, WUFFS_BASE__QUIRK_IGNORE_CHECKSUM,
+                                  hash & 0xFFFE);
+
+  static uint8_t dst_buffer[DST_BUFFER_ARRAY_SIZE];
+  wuffs_base__io_buffer dst =
+      wuffs_base__ptr_u8__writer(&dst_buffer[0], DST_BUFFER_ARRAY_SIZE);
+
+  while (true) {
+    dst.meta.wi = 0;
+    status = wuffs_bzip2__decoder__transform_io(
+        &dec, &dst, src,
+        wuffs_base__make_slice_u8(g_work_buffer_array, WORK_BUFFER_ARRAY_SIZE));
+    if (status.repr != wuffs_base__suspension__short_write) {
+      break;
+    }
+    if (dst.meta.wi == 0) {
+      fprintf(stderr, "wuffs_bzip2__decoder__transform_io made no progress\n");
+      intentional_segfault();
+    }
+  }
+  return wuffs_base__status__message(&status);
+}
+
+```
+
+## Complete production source diff S0 -> S1
+
+The fixed `--function-context` rule includes the complete diff and expanded changed-function bodies where Git recognizes them.
+
+```diff
+diff --git a/release/c/wuffs-unsupported-snapshot.c b/release/c/wuffs-unsupported-snapshot.c
+index 67193e5c0676d09fc0f52333d99e0d85de8ecb4e..2c5d5335f53f9db51c8c28dcc3001225cfdf4afe 100644
+--- a/release/c/wuffs-unsupported-snapshot.c
++++ b/release/c/wuffs-unsupported-snapshot.c
+@@ -37938,7 +37938,7 @@ const char wuffs_bzip2__error__internal_error_inconsistent_huffman_decoder_state
+ // ---------------- Private Consts
+ 
+ static const uint8_t
+-WUFFS_BZIP2__CLAMP_TO_5[8] WUFFS_BASE__POTENTIALLY_UNUSED = {
++WUFFS_BZIP2__CLAMP_NO_MORE_THAN_5[8] WUFFS_BASE__POTENTIALLY_UNUSED = {
+   0u, 1u, 2u, 3u, 4u, 5u, 5u, 5u,
+ };
+ 
+@@ -38285,235 +38285,235 @@ static wuffs_base__status
+ wuffs_bzip2__decoder__do_transform_io(
+     wuffs_bzip2__decoder* self,
+     wuffs_base__io_buffer* a_dst,
+     wuffs_base__io_buffer* a_src,
+     wuffs_base__slice_u8 a_workbuf) {
+   wuffs_base__status status = wuffs_base__make_status(NULL);
+ 
+   uint8_t v_c8 = 0;
+   uint32_t v_i = 0;
+   uint64_t v_tag = 0;
+   wuffs_base__status v_status = wuffs_base__make_status(NULL);
+   uint32_t v_final_checksum_want = 0;
+ 
+   const uint8_t* iop_a_src = NULL;
+   const uint8_t* io0_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io1_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io2_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   if (a_src && a_src->data.ptr) {
+     io0_a_src = a_src->data.ptr;
+     io1_a_src = io0_a_src + a_src->meta.ri;
+     iop_a_src = io1_a_src;
+     io2_a_src = io0_a_src + a_src->meta.wi;
+   }
+ 
+   uint32_t coro_susp_point = self->private_impl.p_do_transform_io;
+   if (coro_susp_point) {
+     v_i = self->private_data.s_do_transform_io.v_i;
+     v_tag = self->private_data.s_do_transform_io.v_tag;
+     v_final_checksum_want = self->private_data.s_do_transform_io.v_final_checksum_want;
+   }
+   switch (coro_susp_point) {
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT_0;
+ 
+     {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(1);
+       if (WUFFS_BASE__UNLIKELY(iop_a_src == io2_a_src)) {
+         status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+         goto suspend;
+       }
+       uint8_t t_0 = *iop_a_src++;
+       v_c8 = t_0;
+     }
+     if (v_c8 != 66u) {
+       status = wuffs_base__make_status(wuffs_bzip2__error__bad_header);
+       goto exit;
+     }
+     {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(2);
+       if (WUFFS_BASE__UNLIKELY(iop_a_src == io2_a_src)) {
+         status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+         goto suspend;
+       }
+       uint8_t t_1 = *iop_a_src++;
+       v_c8 = t_1;
+     }
+     if (v_c8 != 90u) {
+       status = wuffs_base__make_status(wuffs_bzip2__error__bad_header);
+       goto exit;
+     }
+     {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(3);
+       if (WUFFS_BASE__UNLIKELY(iop_a_src == io2_a_src)) {
+         status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+         goto suspend;
+       }
+       uint8_t t_2 = *iop_a_src++;
+       v_c8 = t_2;
+     }
+     if (v_c8 != 104u) {
+       status = wuffs_base__make_status(wuffs_bzip2__error__bad_header);
+       goto exit;
+     }
+     {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(4);
+       if (WUFFS_BASE__UNLIKELY(iop_a_src == io2_a_src)) {
+         status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+         goto suspend;
+       }
+       uint8_t t_3 = *iop_a_src++;
+       v_c8 = t_3;
+     }
+     if ((v_c8 < 49u) || (57u < v_c8)) {
+       status = wuffs_base__make_status(wuffs_bzip2__error__bad_header);
+       goto exit;
+     }
+     self->private_impl.f_max_incl_block_size = (((uint32_t)(((uint8_t)(v_c8 - 48u)))) * 100000u);
+     while (true) {
+       v_tag = 0u;
+       v_i = 0u;
+       while (v_i < 48u) {
+         if (self->private_impl.f_n_bits <= 0u) {
+           {
+             WUFFS_BASE__COROUTINE_SUSPENSION_POINT(5);
+             if (WUFFS_BASE__UNLIKELY(iop_a_src == io2_a_src)) {
+               status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+               goto suspend;
+             }
+             uint8_t t_4 = *iop_a_src++;
+             v_c8 = t_4;
+           }
+           self->private_impl.f_bits = (((uint32_t)(v_c8)) << 24u);
+           self->private_impl.f_n_bits = 8u;
+         }
+         v_tag <<= 1u;
+         v_tag |= ((uint64_t)((self->private_impl.f_bits >> 31u)));
+         self->private_impl.f_bits <<= 1u;
+         self->private_impl.f_n_bits -= 1u;
+         v_i += 1u;
+       }
+       if (v_tag == 25779555029136u) {
+         break;
+       } else if (v_tag != 54156738319193u) {
+         status = wuffs_base__make_status(wuffs_bzip2__error__bad_block_header);
+         goto exit;
+       }
+       if (a_src) {
+         a_src->meta.ri = ((size_t)(iop_a_src - a_src->data.ptr));
+       }
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(6);
+       status = wuffs_bzip2__decoder__prepare_block(self, a_src);
+       if (a_src) {
+         iop_a_src = a_src->data.ptr + a_src->meta.ri;
+       }
+       if (status.repr) {
+         goto suspend;
+       }
+       self->private_impl.f_block_size = 0u;
+       self->private_impl.f_decode_huffman_finished = false;
+-      self->private_impl.f_decode_huffman_which = WUFFS_BZIP2__CLAMP_TO_5[((uint8_t)(self->private_data.f_huffman_selectors[0u] & 7u))];
++      self->private_impl.f_decode_huffman_which = WUFFS_BZIP2__CLAMP_NO_MORE_THAN_5[((uint8_t)(self->private_data.f_huffman_selectors[0u] & 7u))];
+       self->private_impl.f_decode_huffman_ticks = 50u;
+       self->private_impl.f_decode_huffman_section = 0u;
+       self->private_impl.f_decode_huffman_run_shift = 0u;
+       while ( ! self->private_impl.f_decode_huffman_finished) {
+         if (a_src) {
+           a_src->meta.ri = ((size_t)(iop_a_src - a_src->data.ptr));
+         }
+         v_status = wuffs_bzip2__decoder__decode_huffman_fast(self, a_src);
+         if (a_src) {
+           iop_a_src = a_src->data.ptr + a_src->meta.ri;
+         }
+         if (wuffs_base__status__is_error(&v_status)) {
+           status = v_status;
+           goto exit;
+         } else if (self->private_impl.f_decode_huffman_finished) {
+           break;
+         }
+         if (a_src) {
+           a_src->meta.ri = ((size_t)(iop_a_src - a_src->data.ptr));
+         }
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT(7);
+         status = wuffs_bzip2__decoder__decode_huffman_slow(self, a_src);
+         if (a_src) {
+           iop_a_src = a_src->data.ptr + a_src->meta.ri;
+         }
+         if (status.repr) {
+           goto suspend;
+         }
+       }
+       wuffs_bzip2__decoder__invert_bwt(self);
+       self->private_impl.f_block_checksum_have = 4294967295u;
+       if (self->private_impl.f_original_pointer >= self->private_impl.f_block_size) {
+         status = wuffs_base__make_status(wuffs_bzip2__error__bad_block_length);
+         goto exit;
+       }
+       self->private_impl.f_flush_pointer = (self->private_data.f_bwt[self->private_impl.f_original_pointer] >> 12u);
+       self->private_impl.f_flush_repeat_count = 0u;
+       self->private_impl.f_flush_prev = 0u;
+       while (self->private_impl.f_block_size > 0u) {
+         wuffs_bzip2__decoder__flush_fast(self, a_dst);
+         if (self->private_impl.f_block_size <= 0u) {
+           break;
+         }
+         WUFFS_BASE__COROUTINE_SUSPENSION_POINT(8);
+         status = wuffs_bzip2__decoder__flush_slow(self, a_dst);
+         if (status.repr) {
+           goto suspend;
+         }
+       }
+       self->private_impl.f_block_checksum_have ^= 4294967295u;
+       if ( ! self->private_impl.f_ignore_checksum && (self->private_impl.f_block_checksum_have != self->private_impl.f_block_checksum_want)) {
+         status = wuffs_base__make_status(wuffs_bzip2__error__bad_checksum);
+         goto exit;
+       }
+       self->private_impl.f_final_checksum_have = (self->private_impl.f_block_checksum_have ^ ((self->private_impl.f_final_checksum_have >> 31u) | ((uint32_t)(self->private_impl.f_final_checksum_have << 1u))));
+     }
+     v_final_checksum_want = 0u;
+     v_i = 0u;
+     while (v_i < 32u) {
+       if (self->private_impl.f_n_bits <= 0u) {
+         {
+           WUFFS_BASE__COROUTINE_SUSPENSION_POINT(9);
+           if (WUFFS_BASE__UNLIKELY(iop_a_src == io2_a_src)) {
+             status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+             goto suspend;
+           }
+           uint8_t t_5 = *iop_a_src++;
+           v_c8 = t_5;
+         }
+         self->private_impl.f_bits = (((uint32_t)(v_c8)) << 24u);
+         self->private_impl.f_n_bits = 8u;
+       }
+       v_final_checksum_want <<= 1u;
+       v_final_checksum_want |= (self->private_impl.f_bits >> 31u);
+       self->private_impl.f_bits <<= 1u;
+       self->private_impl.f_n_bits -= 1u;
+       v_i += 1u;
+     }
+     if ( ! self->private_impl.f_ignore_checksum && (self->private_impl.f_final_checksum_have != v_final_checksum_want)) {
+       status = wuffs_base__make_status(wuffs_bzip2__error__bad_checksum);
+       goto exit;
+     }
+ 
+     goto ok;
+     ok:
+     self->private_impl.p_do_transform_io = 0;
+     goto exit;
+   }
+ 
+   goto suspend;
+   suspend:
+   self->private_impl.p_do_transform_io = wuffs_base__status__is_suspension(&status) ? coro_susp_point : 0;
+   self->private_data.s_do_transform_io.v_i = v_i;
+   self->private_data.s_do_transform_io.v_tag = v_tag;
+   self->private_data.s_do_transform_io.v_final_checksum_want = v_final_checksum_want;
+ 
+   goto exit;
+   exit:
+   if (a_src && a_src->data.ptr) {
+     a_src->meta.ri = ((size_t)(iop_a_src - a_src->data.ptr));
+   }
+ 
+   return status;
+ }
+ 
+ // -------- func bzip2.decoder.prepare_block
+@@ -39318,126 +39318,126 @@ static wuffs_base__status
+ wuffs_bzip2__decoder__decode_huffman_fast(
+     wuffs_bzip2__decoder* self,
+     wuffs_base__io_buffer* a_src) {
+   wuffs_base__status status = wuffs_base__make_status(NULL);
+ 
+   uint32_t v_bits = 0;
+   uint32_t v_n_bits = 0;
+   uint32_t v_block_size = 0;
+   uint8_t v_which = 0;
+   uint32_t v_ticks = 0;
+   uint32_t v_section = 0;
+   uint32_t v_run_shift = 0;
+   uint16_t v_table_entry = 0;
+   uint16_t v_child = 0;
+   uint32_t v_child_ff = 0;
+   uint32_t v_i = 0;
+   uint32_t v_j = 0;
+   uint32_t v_output = 0;
+   uint32_t v_run = 0;
+   uint32_t v_mtft0 = 0;
+ 
+   const uint8_t* iop_a_src = NULL;
+   const uint8_t* io0_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io1_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io2_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   if (a_src && a_src->data.ptr) {
+     io0_a_src = a_src->data.ptr;
+     io1_a_src = io0_a_src + a_src->meta.ri;
+     iop_a_src = io1_a_src;
+     io2_a_src = io0_a_src + a_src->meta.wi;
+   }
+ 
+   v_bits = self->private_impl.f_bits;
+   v_n_bits = self->private_impl.f_n_bits;
+   v_block_size = self->private_impl.f_block_size;
+   v_which = self->private_impl.f_decode_huffman_which;
+   v_ticks = self->private_impl.f_decode_huffman_ticks;
+   v_section = self->private_impl.f_decode_huffman_section;
+   v_run_shift = self->private_impl.f_decode_huffman_run_shift;
+   while (((uint64_t)(io2_a_src - iop_a_src)) >= 4u) {
+     if (v_ticks > 0u) {
+       v_ticks -= 1u;
+     } else {
+       v_ticks = 49u;
+       v_section += 1u;
+       if (v_section >= self->private_impl.f_num_sections) {
+         status = wuffs_base__make_status(wuffs_bzip2__error__bad_number_of_sections);
+         goto exit;
+       }
+-      v_which = WUFFS_BZIP2__CLAMP_TO_5[((uint8_t)(self->private_data.f_huffman_selectors[(v_section & 32767u)] & 7u))];
++      v_which = WUFFS_BZIP2__CLAMP_NO_MORE_THAN_5[((uint8_t)(self->private_data.f_huffman_selectors[(v_section & 32767u)] & 7u))];
+     }
+     v_bits |= (wuffs_base__peek_u32be__no_bounds_check(iop_a_src) >> v_n_bits);
+     iop_a_src += ((31u - v_n_bits) >> 3u);
+     v_n_bits |= 24u;
+     v_table_entry = self->private_data.f_huffman_tables[v_which][(v_bits >> 24u)];
+     v_bits <<= ((uint16_t)(v_table_entry >> 12u));
+     v_n_bits -= ((uint32_t)(((uint16_t)(v_table_entry >> 12u))));
+     v_child = ((uint16_t)(v_table_entry & 1023u));
+     while (v_child < 257u) {
+       v_child = self->private_data.f_huffman_trees[v_which][v_child][(v_bits >> 31u)];
+       v_bits <<= 1u;
+       if (v_n_bits <= 0u) {
+         status = wuffs_base__make_status(wuffs_bzip2__error__internal_error_inconsistent_huffman_decoder_state);
+         goto exit;
+       }
+       v_n_bits -= 1u;
+     }
+     if (v_child < 768u) {
+       v_child_ff = ((uint32_t)(((uint16_t)(v_child & 255u))));
+       v_output = ((uint32_t)(self->private_data.f_mtft[v_child_ff]));
+       wuffs_private_impl__slice_u8__copy_from_slice(wuffs_base__make_slice_u8_ij(self->private_data.f_mtft, 1, (1u + v_child_ff)), wuffs_base__make_slice_u8(self->private_data.f_mtft, v_child_ff));
+       self->private_data.f_mtft[0u] = ((uint8_t)(v_output));
+       self->private_data.f_letter_counts[v_output] += 1u;
+       self->private_data.f_bwt[v_block_size] = v_output;
+       if (v_block_size >= self->private_impl.f_max_incl_block_size) {
+         status = wuffs_base__make_status(wuffs_bzip2__error__bad_block_length);
+         goto exit;
+       }
+       v_block_size += 1u;
+       v_run_shift = 0u;
+       continue;
+     } else if (v_child == 768u) {
+       self->private_impl.f_decode_huffman_finished = true;
+       break;
+     }
+     if (v_run_shift >= 23u) {
+       status = wuffs_base__make_status(wuffs_bzip2__error__bad_block_length);
+       goto exit;
+     }
+     v_run = ((((uint32_t)(v_child)) & 3u) << v_run_shift);
+     v_run_shift += 1u;
+     v_i = v_block_size;
+     v_j = (v_run + v_block_size);
+     if (v_j > self->private_impl.f_max_incl_block_size) {
+       status = wuffs_base__make_status(wuffs_bzip2__error__bad_block_length);
+       goto exit;
+     }
+     v_block_size = v_j;
+     v_mtft0 = ((uint32_t)(self->private_data.f_mtft[0u]));
+     self->private_data.f_letter_counts[v_mtft0] += v_run;
+     while (v_i < v_j) {
+       self->private_data.f_bwt[v_i] = v_mtft0;
+       v_i += 1u;
+     }
+   }
+   self->private_impl.f_bits = v_bits;
+   self->private_impl.f_n_bits = v_n_bits;
+   self->private_impl.f_block_size = v_block_size;
+   self->private_impl.f_decode_huffman_which = v_which;
+   self->private_impl.f_decode_huffman_ticks = v_ticks;
+   self->private_impl.f_decode_huffman_section = v_section;
+   self->private_impl.f_decode_huffman_run_shift = v_run_shift;
+   status = wuffs_base__make_status(NULL);
+   goto ok;
+ 
+   ok:
+   goto exit;
+   exit:
+   if (a_src && a_src->data.ptr) {
+     a_src->meta.ri = ((size_t)(iop_a_src - a_src->data.ptr));
+   }
+ 
+   return status;
+ }
+ 
+ // -------- func bzip2.decoder.decode_huffman_slow
+@@ -39447,133 +39447,133 @@ static wuffs_base__status
+ wuffs_bzip2__decoder__decode_huffman_slow(
+     wuffs_bzip2__decoder* self,
+     wuffs_base__io_buffer* a_src) {
+   wuffs_base__status status = wuffs_base__make_status(NULL);
+ 
+   uint8_t v_c8 = 0;
+   uint32_t v_node_index = 0;
+   uint16_t v_child = 0;
+   uint32_t v_child_ff = 0;
+   uint32_t v_i = 0;
+   uint32_t v_j = 0;
+   uint32_t v_output = 0;
+   uint32_t v_run = 0;
+   uint32_t v_mtft0 = 0;
+ 
+   const uint8_t* iop_a_src = NULL;
+   const uint8_t* io0_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io1_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   const uint8_t* io2_a_src WUFFS_BASE__POTENTIALLY_UNUSED = NULL;
+   if (a_src && a_src->data.ptr) {
+     io0_a_src = a_src->data.ptr;
+     io1_a_src = io0_a_src + a_src->meta.ri;
+     iop_a_src = io1_a_src;
+     io2_a_src = io0_a_src + a_src->meta.wi;
+   }
+ 
+   uint32_t coro_susp_point = self->private_impl.p_decode_huffman_slow;
+   if (coro_susp_point) {
+     v_node_index = self->private_data.s_decode_huffman_slow.v_node_index;
+   }
+   switch (coro_susp_point) {
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT_0;
+ 
+     while ( ! (self->private_impl.p_decode_huffman_slow != 0)) {
+       if (self->private_impl.f_decode_huffman_ticks > 0u) {
+         self->private_impl.f_decode_huffman_ticks -= 1u;
+       } else {
+         self->private_impl.f_decode_huffman_ticks = 49u;
+         self->private_impl.f_decode_huffman_section += 1u;
+         if (self->private_impl.f_decode_huffman_section >= self->private_impl.f_num_sections) {
+           status = wuffs_base__make_status(wuffs_bzip2__error__bad_number_of_sections);
+           goto exit;
+         }
+-        self->private_impl.f_decode_huffman_which = WUFFS_BZIP2__CLAMP_TO_5[((uint8_t)(self->private_data.f_huffman_selectors[(self->private_impl.f_decode_huffman_section & 32767u)] & 7u))];
++        self->private_impl.f_decode_huffman_which = WUFFS_BZIP2__CLAMP_NO_MORE_THAN_5[((uint8_t)(self->private_data.f_huffman_selectors[(self->private_impl.f_decode_huffman_section & 32767u)] & 7u))];
+       }
+       v_node_index = 0u;
+       while (true) {
+         if (self->private_impl.f_n_bits <= 0u) {
+           {
+             WUFFS_BASE__COROUTINE_SUSPENSION_POINT(1);
+             if (WUFFS_BASE__UNLIKELY(iop_a_src == io2_a_src)) {
+               status = wuffs_base__make_status(wuffs_base__suspension__short_read);
+               goto suspend;
+             }
+             uint8_t t_0 = *iop_a_src++;
+             v_c8 = t_0;
+           }
+           self->private_impl.f_bits = (((uint32_t)(v_c8)) << 24u);
+           self->private_impl.f_n_bits = 8u;
+         }
+         v_child = self->private_data.f_huffman_trees[self->private_impl.f_decode_huffman_which][v_node_index][(self->private_impl.f_bits >> 31u)];
+         self->private_impl.f_bits <<= 1u;
+         self->private_impl.f_n_bits -= 1u;
+         if (v_child < 257u) {
+           v_node_index = ((uint32_t)(v_child));
+           continue;
+         } else if (v_child < 768u) {
+           v_child_ff = ((uint32_t)(((uint16_t)(v_child & 255u))));
+           v_output = ((uint32_t)(self->private_data.f_mtft[v_child_ff]));
+           wuffs_private_impl__slice_u8__copy_from_slice(wuffs_base__make_slice_u8_ij(self->private_data.f_mtft, 1, (1u + v_child_ff)), wuffs_base__make_slice_u8(self->private_data.f_mtft, v_child_ff));
+           self->private_data.f_mtft[0u] = ((uint8_t)(v_output));
+           self->private_data.f_letter_counts[v_output] += 1u;
+           self->private_data.f_bwt[self->private_impl.f_block_size] = v_output;
+           if (self->private_impl.f_block_size >= self->private_impl.f_max_incl_block_size) {
+             status = wuffs_base__make_status(wuffs_bzip2__error__bad_block_length);
+             goto exit;
+           }
+           self->private_impl.f_block_size += 1u;
+           self->private_impl.f_decode_huffman_run_shift = 0u;
+           break;
+         } else if (v_child == 768u) {
+           self->private_impl.f_decode_huffman_finished = true;
+           goto label__outer__break;
+         }
+         if (self->private_impl.f_decode_huffman_run_shift >= 23u) {
+           status = wuffs_base__make_status(wuffs_bzip2__error__bad_block_length);
+           goto exit;
+         }
+         v_run = ((((uint32_t)(v_child)) & 3u) << self->private_impl.f_decode_huffman_run_shift);
+         self->private_impl.f_decode_huffman_run_shift += 1u;
+         v_i = self->private_impl.f_block_size;
+         v_j = (v_run + self->private_impl.f_block_size);
+         if (v_j > self->private_impl.f_max_incl_block_size) {
+           status = wuffs_base__make_status(wuffs_bzip2__error__bad_block_length);
+           goto exit;
+         }
+         self->private_impl.f_block_size = v_j;
+         v_mtft0 = ((uint32_t)(self->private_data.f_mtft[0u]));
+         self->private_data.f_letter_counts[v_mtft0] += v_run;
+         while (v_i < v_j) {
+           self->private_data.f_bwt[v_i] = v_mtft0;
+           v_i += 1u;
+         }
+         break;
+       }
+     }
+     label__outer__break:;
+ 
+     goto ok;
+     ok:
+     self->private_impl.p_decode_huffman_slow = 0;
+     goto exit;
+   }
+ 
+   goto suspend;
+   suspend:
+   self->private_impl.p_decode_huffman_slow = wuffs_base__status__is_suspension(&status) ? coro_susp_point : 0;
+   self->private_data.s_decode_huffman_slow.v_node_index = v_node_index;
+ 
+   goto exit;
+   exit:
+   if (a_src && a_src->data.ptr) {
+     a_src->meta.ri = ((size_t)(iop_a_src - a_src->data.ptr));
+   }
+ 
+   return status;
+ }
+ 
+ #endif  // !defined(WUFFS_CONFIG__MODULES) || defined(WUFFS_CONFIG__MODULE__BZIP2)
+ 
+ #if !defined(WUFFS_CONFIG__MODULES) || defined(WUFFS_CONFIG__MODULE__CBOR)
+ 
+ // ---------------- Status Codes Implementations
+@@ -80970,7 +80970,7 @@ WUFFS_VP8__RENORM_RANGE_M1[256] WUFFS_BASE__POTENTIALLY_UNUSED = {
+ };
+ 
+ static const uint8_t
+-WUFFS_VP8__CLIP_9[16] WUFFS_BASE__POTENTIALLY_UNUSED = {
++WUFFS_VP8__CLAMP_NO_MORE_THAN_9[16] WUFFS_BASE__POTENTIALLY_UNUSED = {
+   0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u,
+   8u, 9u, 9u, 9u, 9u, 9u, 9u, 9u,
+ };
+@@ -82496,45 +82496,45 @@ static wuffs_base__empty_struct
+ wuffs_vp8__decoder__decode_subblock_modes(
+     wuffs_vp8__decoder* self,
+     wuffs_base__slice_u8 a_workbuf,
+     uint32_t a_mbx,
+     uint32_t a_luma_mode) {
+   uint32_t v_i = 0;
+   uint8_t v_top_mode = 0;
+   uint8_t v_left_mode = 0;
+   uint8_t v_mode = 0;
+ 
+   if (a_luma_mode < 4u) {
+     self->private_data.f_mb_states_top[a_mbx] = (((uint32_t)(v_mode)) * 4369u);
+     self->private_data.f_mb_states_left = (((uint32_t)(v_mode)) * 4369u);
+     return wuffs_base__make_empty_struct();
+   }
+   v_i = 0u;
+   while (v_i < 16u) {
+     if (v_i < 4u) {
+-      v_top_mode = WUFFS_VP8__CLIP_9[(15u & (self->private_data.f_mb_states_top[a_mbx] >> (v_i * 4u)))];
++      v_top_mode = WUFFS_VP8__CLAMP_NO_MORE_THAN_9[(15u & (self->private_data.f_mb_states_top[a_mbx] >> (v_i * 4u)))];
+     } else {
+       v_top_mode = self->private_impl.f_mb_subblock_modes[(v_i - 4u)];
+     }
+     if ((v_i & 3u) == 0u) {
+-      v_left_mode = WUFFS_VP8__CLIP_9[(15u & (self->private_data.f_mb_states_left >> (v_i & 12u)))];
++      v_left_mode = WUFFS_VP8__CLAMP_NO_MORE_THAN_9[(15u & (self->private_data.f_mb_states_left >> (v_i & 12u)))];
+     } else {
+       v_left_mode = self->private_impl.f_mb_subblock_modes[(((uint32_t)(v_i + 15u)) & 15u)];
+     }
+     v_mode = wuffs_vp8__decoder__decode_one_subblock_mode(self, a_workbuf, v_top_mode, v_left_mode);
+     self->private_impl.f_mb_subblock_modes[v_i] = v_mode;
+     v_i += 1u;
+   }
+   self->private_data.f_mb_states_top[a_mbx] = ((self->private_data.f_mb_states_top[a_mbx] & 4294901760u) |
+       ((uint32_t)(self->private_impl.f_mb_subblock_modes[12u])) |
+       (((uint32_t)(self->private_impl.f_mb_subblock_modes[13u])) << 4u) |
+       (((uint32_t)(self->private_impl.f_mb_subblock_modes[14u])) << 8u) |
+       (((uint32_t)(self->private_impl.f_mb_subblock_modes[15u])) << 12u));
+   self->private_data.f_mb_states_left = ((self->private_data.f_mb_states_left & 4294901760u) |
+       ((uint32_t)(self->private_impl.f_mb_subblock_modes[3u])) |
+       (((uint32_t)(self->private_impl.f_mb_subblock_modes[7u])) << 4u) |
+       (((uint32_t)(self->private_impl.f_mb_subblock_modes[11u])) << 8u) |
+       (((uint32_t)(self->private_impl.f_mb_subblock_modes[15u])) << 12u));
+   return wuffs_base__make_empty_struct();
+ }
+ 
+ // -------- func vp8.decoder.decode_one_subblock_mode
+diff --git a/std/bzip2/decode_bzip2.wuffs b/std/bzip2/decode_bzip2.wuffs
+index f6d2e8da6f306f5770d177d481b767177c1902df..c477f5bc49d87ec7649f8a6eb9eb295957eea43e 100644
+--- a/std/bzip2/decode_bzip2.wuffs
++++ b/std/bzip2/decode_bzip2.wuffs
+@@ -23,7 +23,9 @@ pri status "#internal error: inconsistent Huffman decoder state"
+ pub const DECODER_DST_HISTORY_RETAIN_LENGTH_MAX_INCL_WORST_CASE : base.u64 = 0
+ pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE               : base.u64 = 0
+ 
+-pri const CLAMP_TO_5 : roarray[8] base.u8[..= 5] = [0, 1, 2, 3, 4, 5, 5, 5]
++pri const CLAMP_NO_MORE_THAN_5 : roarray[8] base.u8[..= 5] = [
++        0, 1, 2, 3, 4, 5, 5, 5,
++]
+ 
+ pub struct decoder? implements base.io_transformer(
+         bits   : base.u32,
+@@ -146,116 +148,116 @@ pub func decoder.transform_io?(dst: base.io_writer, src: base.io_reader, workbuf
+ pri func decoder.do_transform_io?(dst: base.io_writer, src: base.io_reader, workbuf: slice base.u8) {
+     var c8                  : base.u8
+     var i                   : base.u32
+     var tag                 : base.u64
+     var status              : base.status
+     var final_checksum_want : base.u32
+ 
+     // Read the header.
+     c8 = args.src.read_u8?()
+     if c8 <> 0x42 {
+         return "#bad header"
+     }
+     c8 = args.src.read_u8?()
+     if c8 <> 0x5A {
+         return "#bad header"
+     }
+     c8 = args.src.read_u8?()
+     if c8 <> 0x68 {
+         return "#bad header"
+     }
+     c8 = args.src.read_u8?()
+     if (c8 < '1') or ('9' < c8) {
+         return "#bad header"
+     }
+     this.max_incl_block_size = ((c8 - '0') as base.u32) * 100000
+ 
+     while true {
+         // Read the 48-bit tag.
+         tag = 0
+         i = 0
+         while i < 48 {
+             if this.n_bits <= 0 {
+                 c8 = args.src.read_u8?()
+                 this.bits = (c8 as base.u32) << 24
+                 this.n_bits = 8
+                 assert this.n_bits > 0
+             }
+             tag ~mod<<= 1
+             tag |= (this.bits >> 31) as base.u64
+             this.bits ~mod<<= 1
+             this.n_bits -= 1
+             i += 1
+         }
+ 
+         if tag == 0x1772_4538_5090 {
+             break
+         } else if tag <> 0x3141_5926_5359 {
+             return "#bad block header"
+         }
+ 
+         this.prepare_block?(src: args.src)
+ 
+         this.block_size = 0
+         this.decode_huffman_finished = false
+-        this.decode_huffman_which = CLAMP_TO_5[this.huffman_selectors[0] & 7]
++        this.decode_huffman_which = CLAMP_NO_MORE_THAN_5[this.huffman_selectors[0] & 7]
+         this.decode_huffman_ticks = 50
+         this.decode_huffman_section = 0
+         this.decode_huffman_run_shift = 0
+         while not this.decode_huffman_finished {
+             status = this.decode_huffman_fast!(src: args.src)
+             if status.is_error() {
+                 return status
+             } else if this.decode_huffman_finished {
+                 break
+             }
+             this.decode_huffman_slow?(src: args.src)
+         }
+ 
+         this.invert_bwt!()
+ 
+         this.block_checksum_have = 0xFFFF_FFFF
+         if this.original_pointer >= this.block_size {
+             return "#bad block length"
+         }
+         assert this.original_pointer < 900000 via "a < b: a < c; c <= b"(c: this.block_size)
+         this.flush_pointer = this.bwt[this.original_pointer] >> 12
+         this.flush_repeat_count = 0
+         this.flush_prev = 0
+ 
+         while this.block_size > 0 {
+             this.flush_fast!(dst: args.dst)
+             if this.block_size <= 0 {
+                 break
+             }
+             this.flush_slow?(dst: args.dst)
+         }
+ 
+         this.block_checksum_have ^= 0xFFFF_FFFF
+         if (not this.ignore_checksum) and (this.block_checksum_have <> this.block_checksum_want) {
+             return "#bad checksum"
+         }
+         this.final_checksum_have = this.block_checksum_have ^ (
+                 (this.final_checksum_have >> 31) |
+                 (this.final_checksum_have ~mod<< 1))
+     }
+ 
+     // Read the 32-bit final checksum.
+     final_checksum_want = 0
+     i = 0
+     while i < 32 {
+         if this.n_bits <= 0 {
+             c8 = args.src.read_u8?()
+             this.bits = (c8 as base.u32) << 24
+             this.n_bits = 8
+             assert this.n_bits > 0
+         }
+         final_checksum_want ~mod<<= 1
+         final_checksum_want |= this.bits >> 31
+         this.bits ~mod<<= 1
+         this.n_bits -= 1
+         i += 1
+     }
+     if (not this.ignore_checksum) and (this.final_checksum_have <> final_checksum_want) {
+         return "#bad checksum"
+     }
+ }
+diff --git a/std/bzip2/decode_huffman_fast.wuffs b/std/bzip2/decode_huffman_fast.wuffs
+index 47bb72c878ce92ebfbedf96d5e5eaa63929f9983..61f93fae6667cf9578b91faa9ccb5ade6dc7eddb 100644
+--- a/std/bzip2/decode_huffman_fast.wuffs
++++ b/std/bzip2/decode_huffman_fast.wuffs
+@@ -11,113 +11,113 @@
+ pri func decoder.decode_huffman_fast!(src: base.io_reader) base.status {
+     var bits       : base.u32
+     var n_bits     : base.u32[..= 31]
+     var block_size : base.u32[..= 900000]
+     var which      : base.u8[..= 5]
+     var ticks      : base.u32[..= 50]
+     var section    : base.u32
+     var run_shift  : base.u32[..= 23]
+ 
+     var table_entry : base.u16
+     var child       : base.u16
+     var child_ff    : base.u32[..= 255]
+     var i           : base.u32
+     var j           : base.u32
+     var output      : base.u32[..= 255]
+     var run         : base.u32[..= 12_582912]  // 12_582912 = (3 << 22)
+     var mtft0       : base.u32[..= 255]
+ 
+     bits = this.bits
+     n_bits = this.n_bits
+     block_size = this.block_size
+     which = this.decode_huffman_which
+     ticks = this.decode_huffman_ticks
+     section = this.decode_huffman_section
+     run_shift = this.decode_huffman_run_shift
+ 
+     // Apply the Huffman trees.
+     while.outer args.src.length() >= 4 {
+         if ticks > 0 {
+             ticks -= 1
+         } else {
+             ticks = 49
+             section ~mod+= 1
+             if section >= this.num_sections {
+                 return "#bad number of sections"
+             }
+-            which = CLAMP_TO_5[this.huffman_selectors[section & 32767] & 7]
++            which = CLAMP_NO_MORE_THAN_5[this.huffman_selectors[section & 32767] & 7]
+         }
+ 
+         bits |= args.src.peek_u32be() >> n_bits
+         args.src.skip_u32_fast!(actual: (31 - n_bits) >> 3, worst_case: 4)
+         n_bits |= 24
+ 
+         table_entry = this.huffman_tables[which][bits >> 24]
+         bits ~mod<<= table_entry >> 12
+         n_bits -= (table_entry >> 12) as base.u32
+         child = table_entry & 0x3FF
+         while child < 257 {
+             child = this.huffman_trees[which][child][bits >> 31]
+             bits ~mod<<= 1
+             if n_bits <= 0 {
+                 return "#internal error: inconsistent Huffman decoder state"
+             }
+             n_bits -= 1
+         }
+ 
+         if child < 0x300 {  // mNN symbol.
+             // Move to front.
+             child_ff = (child & 0xFF) as base.u32
+             output = this.mtft[child_ff] as base.u32
+             this.mtft[1 .. 1 + child_ff].copy_from_slice!(
+                     s: this.mtft[.. child_ff])
+             this.mtft[0] = output as base.u8
+ 
+             this.letter_counts[output] ~mod+= 1
+             this.bwt[block_size] = output
+             if block_size >= this.max_incl_block_size {
+                 return "#bad block length"
+             }
+             assert block_size < 900000 via "a < b: a < c; c <= b"(c: this.max_incl_block_size)
+             block_size += 1
+             run_shift = 0
+             continue.outer
+         } else if child == 0x300 {  // EOB symbol.
+             this.decode_huffman_finished = true
+             break.outer
+         }
+ 
+         // RUNA or RUNB symbol.
+         if run_shift >= 23 {
+             return "#bad block length"
+         }
+         run = ((child as base.u32) & 3) << run_shift
+         run_shift += 1
+         i = block_size
+         j = run + block_size
+         if j > this.max_incl_block_size {
+             return "#bad block length"
+         }
+         assert j <= 900000 via "a <= b: a <= c; c <= b"(c: this.max_incl_block_size)
+         block_size = j
+ 
+         mtft0 = this.mtft[0] as base.u32
+         this.letter_counts[mtft0] ~mod+= run
+         while i < j,
+                 pre j <= 900000,
+         {
+             assert i < 900000 via "a < b: a < c; c <= b"(c: j)
+             this.bwt[i] = mtft0
+             i += 1
+         }
+     }.outer
+ 
+     this.bits = bits
+     this.n_bits = n_bits
+     this.block_size = block_size
+     this.decode_huffman_which = which
+     this.decode_huffman_ticks = ticks
+     this.decode_huffman_section = section
+     this.decode_huffman_run_shift = run_shift
+ 
+     return ok
+ }
+diff --git a/std/bzip2/decode_huffman_slow.wuffs b/std/bzip2/decode_huffman_slow.wuffs
+index 3f32413910f95468de7ae7bc291de336285ba4cf..aff92efe18afe682704d702037bf74c41454018d 100644
+--- a/std/bzip2/decode_huffman_slow.wuffs
++++ b/std/bzip2/decode_huffman_slow.wuffs
+@@ -11,91 +11,91 @@
+ pri func decoder.decode_huffman_slow?(src: base.io_reader) {
+     var c8         : base.u8
+     var node_index : base.u32[..= 256]
+ 
+     var child    : base.u16
+     var child_ff : base.u32[..= 255]
+     var i        : base.u32
+     var j        : base.u32
+     var output   : base.u32[..= 255]
+     var run      : base.u32[..= 12_582912]  // 12_582912 = (3 << 22)
+     var mtft0    : base.u32[..= 255]
+ 
+     // Apply the Huffman trees.
+     while.outer not coroutine_resumed {
+         if this.decode_huffman_ticks > 0 {
+             this.decode_huffman_ticks -= 1
+         } else {
+             this.decode_huffman_ticks = 49
+             this.decode_huffman_section ~mod+= 1
+             if this.decode_huffman_section >= this.num_sections {
+                 return "#bad number of sections"
+             }
+-            this.decode_huffman_which = CLAMP_TO_5[this.huffman_selectors[this.decode_huffman_section & 32767] & 7]
++            this.decode_huffman_which = CLAMP_NO_MORE_THAN_5[this.huffman_selectors[this.decode_huffman_section & 32767] & 7]
+         }
+ 
+         node_index = 0
+         while true {
+             if this.n_bits <= 0 {
+                 c8 = args.src.read_u8?()
+                 this.bits = (c8 as base.u32) << 24
+                 this.n_bits = 8
+                 assert this.n_bits > 0
+             }
+             child = this.huffman_trees[this.decode_huffman_which][node_index][this.bits >> 31]
+             this.bits ~mod<<= 1
+             this.n_bits -= 1
+ 
+             if child < 257 {  // Branch node.
+                 node_index = child as base.u32
+                 continue
+ 
+             } else if child < 0x300 {  // mNN symbol.
+                 // Move to front.
+                 child_ff = (child & 0xFF) as base.u32
+                 output = this.mtft[child_ff] as base.u32
+                 this.mtft[1 .. 1 + child_ff].copy_from_slice!(
+                         s: this.mtft[.. child_ff])
+                 this.mtft[0] = output as base.u8
+ 
+                 this.letter_counts[output] ~mod+= 1
+                 this.bwt[this.block_size] = output
+                 if this.block_size >= this.max_incl_block_size {
+                     return "#bad block length"
+                 }
+                 assert this.block_size < 900000 via "a < b: a < c; c <= b"(c: this.max_incl_block_size)
+                 this.block_size += 1
+                 this.decode_huffman_run_shift = 0
+                 break
+ 
+             } else if child == 0x300 {  // EOB symbol.
+                 this.decode_huffman_finished = true
+                 break.outer
+             }
+ 
+             // RUNA or RUNB symbol.
+             if this.decode_huffman_run_shift >= 23 {
+                 return "#bad block length"
+             }
+             run = ((child as base.u32) & 3) << this.decode_huffman_run_shift
+             this.decode_huffman_run_shift += 1
+             i = this.block_size
+             j = run + this.block_size
+             if j > this.max_incl_block_size {
+                 return "#bad block length"
+             }
+             assert j <= 900000 via "a <= b: a <= c; c <= b"(c: this.max_incl_block_size)
+             this.block_size = j
+ 
+             mtft0 = this.mtft[0] as base.u32
+             this.letter_counts[mtft0] ~mod+= run
+             while i < j,
+                     pre j <= 900000,
+             {
+                 assert i < 900000 via "a < b: a < c; c <= b"(c: j)
+                 this.bwt[i] = mtft0
+                 i += 1
+             }
+             break
+         }
+     }.outer
+ }
+diff --git a/std/vp8/common_consts.wuffs b/std/vp8/common_consts.wuffs
+index 8787329382f770c2a4b84aade6136e8f079fb3e8..a849d60bcd95a700597153f48d10137e558f5540 100644
+--- a/std/vp8/common_consts.wuffs
++++ b/std/vp8/common_consts.wuffs
+@@ -107,31 +107,31 @@ pri const RENORM_RANGE_M1 : roarray[256] base.u8[127 ..= 254] = [
+         254,
+ ]
+ 
+-pri const CLIP_9 : roarray[16] base.u8[..= 9] = [
++pri const CLAMP_NO_MORE_THAN_9 : roarray[16] base.u8[..= 9] = [
+         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 9, 9, 9, 9,
+ ]
+ 
+ // RFC 6386 Section 11.5. Subblock Mode Probability Table.
+ //
+ // Note that the specification (the RFC) differs from the implementation
+ // (libwebp's src/dec/tree_dec.c). The mode enumeration, ranging in 0 ..= 9,
+ // has been re-ordered. This implementation follows libwebp.
+ //
+ // Here's the sequence of SUBBLOCK_MODE_PROBS[m][0][0] values:
+ //
+ // 231, 134, 88, 193, 125, 138, 104, 102, 164, 190.  RFC's kf_bmode_prob.
+ // 231, 134, 88, 193, 138, 104, 125, 102, 164, 190.  libwebp's kBModesProba.
+ //                    ^^^  ^^^  ^^^                  Note the difference.
+ //
+ //
+ // A libwebp commit message from 2010 says "lot of cosmetics" and "use HE and
+ // VE naming for prediction mode instead of H and V" but it also does this
+ // re-ordering. It has this diff:
+ //
+ //   VP8PredFunc VP8PredLuma4[11] = {
+ // -   DC4, TM4, V4,  H4,  LD4, RD4, VR4, VL4, HD4, HU4
+ // +   DC4, TM4, VE4, HE4, RD4, VR4, LD4, VL4, HD4, HU4
+ //   };
+ //                         ^^^  ^^^  ^^^                  Note the difference.
+ //
+ // https://chromium.googlesource.com/webm/libwebp/+/f67b5939ad92e608b546b291b29bca1db3b54772%5E%21
+diff --git a/std/vp8/decode_macroblocks.wuffs b/std/vp8/decode_macroblocks.wuffs
+index f56f454af253578b7b262536e058e0c3a052e147..258afb158390ffcda557d5a92f8709be95ec5aa5 100644
+--- a/std/vp8/decode_macroblocks.wuffs
++++ b/std/vp8/decode_macroblocks.wuffs
+@@ -149,49 +149,49 @@ pri func decoder.decode_chroma_mode!(workbuf: slice base.u8) base.u32[..= 3] {
+ // RFC 6386 Section 11.2. Luma Modes.
+ pri func decoder.decode_subblock_modes!(
+         workbuf: slice base.u8,
+         mbx: base.u32[..= 0x3FF],
+         luma_mode: base.u32[..= 4]) {
+     var i         : base.u32
+     var top_mode  : base.u8[..= 9]
+     var left_mode : base.u8[..= 9]
+     var mode      : base.u8[..= 9]
+ 
+     if args.luma_mode < 4 {
+         this.mb_states_top[args.mbx] = (mode as base.u32) * 0x1111
+         this.mb_states_left = (mode as base.u32) * 0x1111
+         return nothing
+     }
+ 
+     i = 0
+     while i < 16 {
+         if i < 4 {
+-            top_mode = CLIP_9[15 & (this.mb_states_top[args.mbx] >> (i * 4))]
++            top_mode = CLAMP_NO_MORE_THAN_9[15 & (this.mb_states_top[args.mbx] >> (i * 4))]
+         } else {
+             top_mode = this.mb_subblock_modes[i - 4]
+         }
+ 
+         if (i & 3) == 0 {
+-            left_mode = CLIP_9[15 & (this.mb_states_left >> (i & 12))]
++            left_mode = CLAMP_NO_MORE_THAN_9[15 & (this.mb_states_left >> (i & 12))]
+         } else {
+             left_mode = this.mb_subblock_modes[(i ~mod+ 15) & 15]
+         }
+ 
+         mode = this.decode_one_subblock_mode!(workbuf: args.workbuf, top_mode: top_mode, left_mode: left_mode)
+         this.mb_subblock_modes[i] = mode
+ 
+         i += 1
+     }
+ 
+     this.mb_states_top[args.mbx] = (this.mb_states_top[args.mbx] & 0xFFFF_0000) |
+             ((this.mb_subblock_modes[0xC] as base.u32) << 0x0) |
+             ((this.mb_subblock_modes[0xD] as base.u32) << 0x4) |
+             ((this.mb_subblock_modes[0xE] as base.u32) << 0x8) |
+             ((this.mb_subblock_modes[0xF] as base.u32) << 0xC)
+     this.mb_states_left = (this.mb_states_left & 0xFFFF_0000) |
+             ((this.mb_subblock_modes[0x3] as base.u32) << 0x0) |
+             ((this.mb_subblock_modes[0x7] as base.u32) << 0x4) |
+             ((this.mb_subblock_modes[0xB] as base.u32) << 0x8) |
+             ((this.mb_subblock_modes[0xF] as base.u32) << 0xC)
+ }
+ 
+ // RFC 6386 Section 11.3. Subblock Mode Contexts.
+
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C067","gap_exists":false,"gap_type":[],"commit_induced":"NO","maintenance_needed":false,"confidence":99,"affected_functions":["wuffs_bzip2__decoder__do_transform_io","wuffs_bzip2__decoder__decode_huffman_fast","wuffs_bzip2__decoder__decode_huffman_slow","wuffs_vp8__decoder__decode_subblock_modes"],"reason":"The commit only renames lookup-table constants without changing their values, indexing, control flow, API, state, configuration, input semantics, or attack surface. H0 still drives the bzip2 decoder through wuffs_bzip2__decoder__transform_io with arbitrary source bytes, checksum-quirk variation, initialization variation, and repeated short-write handling. The VP8 edits are likewise name-only and introduce no new behavior requiring coverage.","evidence":["WUFFS_BZIP2__CLAMP_TO_5 is renamed to WUFFS_BZIP2__CLAMP_NO_MORE_THAN_5 while retaining the exact values {0u, 1u, 2u, 3u, 4u, 5u, 5u, 5u}.","All three bzip2 call sites preserve the same index expressions based on f_huffman_selectors and only substitute the renamed constant.","CLAMP_TO_5 is identically renamed to CLAMP_NO_MORE_THAN_5 in decode_bzip2.wuffs, decode_huffman_fast.wuffs, and decode_huffman_slow.wuffs.","WUFFS_VP8__CLIP_9 is renamed to WUFFS_VP8__CLAMP_NO_MORE_THAN_9 with the same 16 entries, and decode_subblock_modes preserves both index expressions.","H0 initializes wuffs_bzip2__decoder, varies initialization and WUFFS_BASE__QUIRK_IGNORE_CHECKSUM via hash, and passes fuzz-controlled src to wuffs_bzip2__decoder__transform_io."],"recommended_action":"No harness maintenance is needed for this commit."}
+tokens used
+17,245

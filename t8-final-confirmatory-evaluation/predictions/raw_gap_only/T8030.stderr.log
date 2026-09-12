@@ -1,0 +1,1642 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8030-7klcmp6m
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093f8-b2cc-7560-aa55-ac408de89df9
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8030
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `fuzz/FuzzUtils.h`
+
+~~~~cpp
+#ifndef SIMDJSON_FUZZUTILS_H
+#define SIMDJSON_FUZZUTILS_H
+
+#include <cstdint>
+#include <vector>
+#include <string_view>
+#include <cstring> //memcpy
+
+// view data as a byte pointer
+template <typename T> inline const std::uint8_t* as_bytes(const T* data) {
+  return static_cast<const std::uint8_t*>(static_cast<const void*>(data));
+}
+
+// view data as a char pointer
+template <typename T> inline const char* as_chars(const T* data) {
+  return static_cast<const char*>(static_cast<const void*>(data));
+}
+
+
+
+
+// Splits the input into strings, using a four byte separator which is human
+// readable. Makes for nicer debugging of fuzz data.
+// See https://github.com/google/fuzzing/blob/master/docs/split-inputs.md#magic-separator
+// for background. Note: don't use memmem, it is not standard C++.
+inline std::vector<std::string_view> split(const char* Data, size_t Size) {
+
+  std::vector<std::string_view> ret;
+
+    using namespace std::literals;
+    constexpr auto sep="\n~~\n"sv;
+
+    std::string_view all(Data,Size);
+    auto pos=all.find(sep);
+    while(pos!=std::string_view::npos) {
+      ret.push_back(all.substr(0,pos));
+      all=all.substr(pos+sep.size());
+      pos=all.find(sep);
+    }
+    ret.push_back(all);
+    return ret;
+}
+
+// Generic helper to split fuzz data into usable parts, like ints etc.
+// Note that it does not throw, instead it sets the data pointer to null
+// if the input is exhausted.
+struct FuzzData {
+  // data may not be null, even if size is zero.
+  FuzzData(const uint8_t* data,
+           size_t size) : Data(data),Size(size){}
+
+  ///range is inclusive
+  template<int Min, int Max>
+  int getInt() {
+    static_assert (Min<Max,"min must be <max");
+
+    // make this constexpr, can't overflow because that is UB and is forbidden
+    // in constexpr evaluation
+    constexpr int range=(Max-Min)+1;
+    constexpr unsigned int urange=range;
+
+    // don't use std::uniform_int_distribution, we don't want to pay for
+    // over consumption of random data. Accept the slightly non-uniform distribution.
+    if(range<256)
+      return Min+static_cast<int>(get<uint8_t>()%urange);
+    if(range<65536)
+      return Min+static_cast<int>(get<uint16_t>()%urange);
+
+    return Min+static_cast<int>(get<uint32_t>()%urange);
+  }
+
+  template<typename T>
+  T get() {
+    const auto Nbytes=sizeof(T);
+    T ret{};
+    if(Size<Nbytes) {
+      //don't throw, signal with null instead.
+      Data=nullptr;
+      Size=0;
+      return ret;
+    }
+    std::memcpy(&ret,Data,Nbytes);
+    Data+=Nbytes;
+    Size-=Nbytes;
+    return ret;
+  }
+
+  // gets a string view with length in [Min,Max]
+  template<int Min, int Max>
+  std::string_view get_stringview() {
+    static_assert (Min>=0,"Min must be positive");
+    const int len=getInt<Min,Max>();
+    const unsigned int ulen=static_cast<unsigned int>(len);
+    if(ulen<Size) {
+      std::string_view ret(chardata(),ulen);
+      Data+=len;
+      Size-=ulen;
+      return ret;
+    }
+
+    //mark that there is too little data to fulfill the request
+    Data=nullptr;
+    Size=0;
+
+    return {};
+  }
+
+  // consumes the rest of the data as a string view
+  std::string_view remainder_as_stringview() {
+    std::string_view ret{chardata(),Size};
+    Data+=Size;
+    Size=0;
+    return ret;
+  }
+
+  // split the remainder of the data into string views,
+  std::vector<std::string_view> splitIntoStrings() {
+    std::vector<std::string_view> ret;
+    if(Size>0) {
+      ret=split(chardata(),Size);
+      // all data consumed.
+      Data+=Size;
+      Size=0;
+    }
+    return ret;
+  }
+
+  //are we good?
+  explicit operator bool() const { return Data!=nullptr;}
+
+  //we are a URBG
+  // https://en.cppreference.com/w/cpp/named_req/UniformRandomBitGenerator
+  //The type G satisfies UniformRandomBitGenerator if    Given
+  //   T, the type named by G::result_type
+  //    g, a value of type G
+  //
+  //  The following expressions must be valid and have their specified effects
+  //  Expression 	Return type 	Requirements
+  //  G::result_type 	T 	T is an unsigned integer type
+  using result_type=uint8_t;
+  //  G::min() 	T 	Returns the smallest value that G's operator() may return. The value is strictly less than G::max(). The function must be constexpr.
+  static constexpr result_type min() {return 0;}
+  //  G::max() 	T 	Returns the largest value that G's operator() may return. The value is strictly greater than G::min(). The function must be constexpr.
+  static constexpr result_type max() {return 255;}
+  //  g() 	T 	Returns a value in the closed interval [G::min(), G::max()]. Has amortized constant complexity.
+  result_type operator()() {
+    if(Size==0) {
+      // return something varying, otherwise uniform_int_distribution may get
+      // stuck
+      return failcount++;
+    }
+    const result_type ret=Data[0];
+    Data++;
+    Size--;
+    return ret;
+  }
+  // returns a pointer to data as const char* to avoid those cstyle casts
+  const char* chardata() const {return static_cast<const char*>(static_cast<const void*>(Data));}
+  // members
+  const uint8_t* Data;
+  size_t Size;
+  uint8_t failcount=0;
+};
+
+
+#endif // SIMDJSON_FUZZUTILS_H
+~~~~
+
+### H0 path: `fuzz/NullBuffer.h`
+
+~~~~cpp
+
+#pragma once
+
+#include <iostream>
+
+// from https://stackoverflow.com/a/8244052
+class NulStreambuf : public std::streambuf {
+  char dummyBuffer[64];
+
+protected:
+  virtual int overflow(int c) override final{
+    setp(dummyBuffer, dummyBuffer + sizeof(dummyBuffer));
+    return (c == traits_type::eof()) ? '\0' : c;
+  }
+};
+
+class NulOStream final : private NulStreambuf, public std::ostream {
+public:
+  NulOStream() : std::ostream(this) {}
+  NulStreambuf *rdbuf() { return this; }
+};
+~~~~
+
+### H0 path: `fuzz/fuzz_atpointer.cpp`
+
+~~~~cpp
+#include "FuzzUtils.h"
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <string_view>
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+
+  // Split data into two strings, JSON Pointer and the document string.
+  // Might end up with none, either or both being empty, important for
+  // covering edge cases such as
+  // https://github.com/simdjson/simdjson/issues/1142 Inputs missing the
+  // separator line will get an empty JSON Pointer but the all the input put in
+  // the document string. This means test data from other fuzzers that take json
+  // input works for this fuzzer as well.
+  FuzzData fd(Data, Size);
+  auto strings = fd.splitIntoStrings();
+  while (strings.size() < 2) {
+    strings.emplace_back();
+  }
+  assert(strings.size() >= 2);
+
+  simdjson::dom::parser parser;
+
+  // parse without exceptions, for speed
+  auto res = parser.parse(strings[0]);
+  if (res.error())
+    return 0;
+
+  simdjson::dom::element root;
+  if (res.get(root))
+    return 0;
+
+  auto maybe_leaf = root.at_pointer(strings[1]);
+  if (maybe_leaf.error())
+    return 0;
+
+  simdjson::dom::element leaf;
+  if (maybe_leaf.get(leaf))
+    return 0;
+
+  std::string_view sv;
+  if (leaf.get_string().get(sv))
+    return 0;
+  return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_dump.cpp`
+
+~~~~cpp
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <string_view>
+
+#include "NullBuffer.h"
+
+// example from doc/basics.md#tree-walking-and-json-element-types
+/***
+ * Important: This function should compile without support for exceptions.
+ */
+static void print_json(std::ostream& os, simdjson::dom::element element) noexcept {
+  const char endl='\n';
+  switch (element.type()) {
+  case simdjson::dom::element_type::ARRAY:
+    os << "[";
+    {
+      simdjson::dom::array array = element.get_array().value_unsafe();
+      for (simdjson::dom::element child : array) {
+        print_json(os, child);
+        os << ",";
+      }
+    }
+    os << "]";
+    break;
+  case simdjson::dom::element_type::OBJECT:
+    os << "{";
+    {
+      simdjson::dom::object object = element.get_object().value_unsafe();
+      for (simdjson::dom::key_value_pair field : object) {
+        os << "\"" << field.key << "\": ";
+        print_json(os, field.value);
+      }
+    }
+    os << "}";
+    break;
+  case simdjson::dom::element_type::INT64:
+    os << element.get_int64().value_unsafe() << endl;
+    break;
+  case simdjson::dom::element_type::UINT64:
+    os << element.get_uint64().value_unsafe() << endl;
+    break;
+  case simdjson::dom::element_type::DOUBLE:
+    os << element.get_double().value_unsafe() << endl;
+    break;
+  case simdjson::dom::element_type::STRING:
+    os << element.get_string().value_unsafe() << endl;
+    break;
+  case simdjson::dom::element_type::BOOL:
+    os << element.get_bool().value_unsafe() << endl;
+    break;
+  case simdjson::dom::element_type::NULL_VALUE:
+    os << "null" << endl;
+    break;
+  case simdjson::dom::element_type::BIGINT:
+    os << element.get_bigint().value_unsafe() << endl;
+    break;
+  }
+}
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+  simdjson::dom::parser parser;
+  simdjson::dom::element elem;
+  auto error = parser.parse(Data, Size).get(elem);
+
+  if (error) { return 0; }
+  NulOStream os;
+  //std::ostream& os(std::cout);
+  print_json(os,elem);
+  return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_dump_raw_tape.cpp`
+
+~~~~cpp
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <string>
+
+#include "NullBuffer.h"
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+    simdjson::dom::parser parser;
+    simdjson::dom::element elem;
+    auto error = parser.parse(Data, Size).get(elem);
+    if (error) { return 0; }
+
+    NulOStream os;
+    simdjson_unused auto dumpstatus = elem.dump_raw_tape(os);
+    return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_element.cpp`
+
+~~~~cpp
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+#include "FuzzUtils.h"
+#include "NullBuffer.h"
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+  FuzzData fd(Data, Size);
+  const int action = fd.getInt<0, 31>();
+
+  // there will be some templatized functions like is() which need to be tested
+  // on a type. select one dynamically and create a function that will invoke
+  // with that type
+  const int selecttype=fd.getInt<0,7>();
+  auto invoke_with_type=[selecttype](auto cb) {
+    using constcharstar=const char*;
+    switch(selecttype) {
+    case 0: cb(bool{});break;
+    case 1: cb(double{});break;
+    case 2: cb(uint64_t{});break;
+    case 3: cb(int64_t{});break;
+    case 4: cb(std::string_view{});break;
+    case 5: cb(constcharstar{});break;
+    case 6: cb(simdjson::dom::array{});break;
+    case 7: cb(simdjson::dom::object{});break;
+    }
+  };
+
+  const auto index = fd.get<size_t>();
+
+  // split the remainder of the document into strings
+  auto strings = fd.splitIntoStrings();
+  while (strings.size() < 2) {
+    strings.emplace_back();
+  }
+  const auto str = strings[0];
+
+  // exit if there was too little data
+  if (!fd)
+    return 0;
+
+  simdjson::dom::parser parser;
+  simdjson_unused simdjson::dom::element elem;
+  simdjson_unused auto error = parser.parse(strings[1]).get(elem);
+
+  if (error)
+    return 0;
+
+#define CASE(num, fun)                                                         \
+  case num: {                                                                  \
+    simdjson_unused auto v = elem.fun();                                                       \
+    break;                                                                     \
+  }
+#define CASE2(num, fun)                                                        \
+  case num: {                                                                  \
+    simdjson_unused auto v = elem fun;                                                         \
+    break;                                                                     \
+  }
+#if SIMDJSON_EXCEPTIONS
+  try {
+#endif
+
+    switch (action) {
+      CASE(0, type);
+      CASE(1, get_array);
+      CASE(2, get_object);
+      CASE(3, get_c_str);
+      CASE(4, get_string_length);
+      CASE(5, get_string);
+      CASE(6, get_int64);
+      CASE(7, get_uint64);
+      CASE(8, get_double);
+      CASE(9, get_bool);
+      CASE(10, is_array);
+      CASE(11, is_object);
+      CASE(12, is_string);
+      CASE(13, is_int64);
+      CASE(14, is_uint64);
+      CASE(15, is_double);
+      CASE(16, is_number);
+      CASE(17, is_bool);
+      CASE(18, is_null);
+      // element.is<>() :
+    case 19: {
+        invoke_with_type([&elem](auto t){ simdjson_unused auto v = elem.is<decltype (t)>();  });
+      } break;
+
+      // CASE(xx,get);
+      case 20: {
+          invoke_with_type([&elem](auto t){ simdjson_unused auto v = elem.get<decltype (t)>();  });
+        } break;
+
+      // CASE(xx,tie);
+      case 21: {
+          invoke_with_type([&elem](auto t){
+            simdjson::error_code ec;
+            simdjson::dom::element{elem}.tie(t,ec);  });
+        } break;
+
+#if SIMDJSON_EXCEPTIONS
+      // cast to type
+      case 22: {
+          invoke_with_type([&elem](auto t){
+            using T=decltype(t);
+            simdjson_unused auto v = static_cast<T>(elem);  });
+        } break;
+
+      CASE(23, begin);
+      CASE(24, end);
+#endif
+      CASE2(25, [str]);
+      CASE2(26, .at_pointer(str));
+      // CASE2(xx,at(str)); deprecated
+      CASE2(28, .at(index));
+      CASE2(29, .at_key(str));
+      CASE2(30, .at_key_case_insensitive(str));
+      case 31: { NulOStream os;
+        simdjson_unused auto dumpstatus = elem.dump_raw_tape(os);} ;break;
+    default:
+      return 0;
+    }
+#undef CASE
+#undef CASE2
+
+#if SIMDJSON_EXCEPTIONS
+  } catch (std::exception &) {
+    // do nothing
+  }
+#endif
+
+  return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_implementations.cpp`
+
+~~~~cpp
+/*
+ * For fuzzing all of the implementations (haswell/fallback/westmere),
+ * finding any difference between the output of each which would
+ * indicate inconsistency. Also, it gets the non-default backend
+ * some fuzzing love.
+ *
+ * Copyright Paul Dreik 20200909 for the simdjson project.
+ */
+
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+#include <array>
+#include "supported_implementations.h"
+
+
+// store each implementation along with it's intermediate results,
+// which would make things easier to debug in case this fuzzer ever
+// catches anything
+struct Impl {
+    explicit Impl(const simdjson::implementation* im=nullptr) : impl(im),parser(),element(),error(),output(){}
+    //silence -Weffc++
+    Impl(const Impl&)=delete;
+    Impl& operator=(const Impl&)=delete;
+
+    const simdjson::implementation* impl;
+    simdjson::dom::parser parser;
+    simdjson::dom::element element;
+    simdjson::error_code error;
+    std::string output;
+};
+
+template<class Iterator>
+void showErrorAndAbort(Iterator first, Iterator last) {
+    auto it=first;
+    while(it!=last) {
+        std::cerr<<"Implementation: "<<it->impl->name()<<"\tError:"<<it->error<<'\n';
+        it++;
+    }
+    std::cerr.flush();
+    std::abort();
+}
+
+template<class Iterator>
+void showOutputAndAbort(Iterator first, Iterator last) {
+
+    for(auto it=first;it!=last;++it) {
+        std::cerr<<"Implementation: "<<it->impl->name()<<"\tOutput: "<<it->output<<'\n';
+    }
+
+    // show the pairwise results
+    for(auto it1=first; it1!=last; ++it1) {
+        for(auto it2=it1; it2!=last; ++it2) {
+            if(it1!=it2) {
+                const bool matches=(it1->output==it2->output);
+                std::cerr<<"Implementation "<<it1->impl->name()<<" and "<<it2->impl->name()<<(matches?" match.":" do NOT match.")<<'\n';
+            }
+        }
+    }
+    std::cerr.flush();
+    std::abort();
+}
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+
+  // since this check is expensive, only do it once
+  static const auto supported_implementations=get_runtime_supported_implementations();
+
+
+    // make this dynamic, so it works regardless of how it was compiled
+    // or what hardware it runs on
+    constexpr std::size_t Nimplementations_max=4;
+    const std::size_t Nimplementations = supported_implementations.size();
+
+    if(Nimplementations>Nimplementations_max) {
+        //there is another backend added, please bump Nimplementations_max!
+        std::abort();
+    }
+
+    // get pointers to the backend implementation
+    std::array<Impl,Nimplementations_max> implementations;
+    {
+        std::size_t i=0;
+        for(auto& e: supported_implementations) {
+              implementations[i++].impl=e;
+        }
+    }
+
+    // let each implementation parse and store the result
+    std::size_t nerrors=0;
+    for(std::size_t i=0; i<Nimplementations; ++i) {
+        auto& e=implementations[i];
+        simdjson::get_active_implementation()=e.impl;
+        e.error=e.parser.parse(Data,Size).get(e.element);
+        if(e.error) {
+            ++nerrors;
+        } else {
+            std::ostringstream oss;
+            oss<<e.element;
+            e.output=oss.str();
+        }
+    }
+
+    //we should either have no errors, or all should error
+    if(nerrors!=0) {
+        if(nerrors!=Nimplementations) {
+            showErrorAndAbort(implementations.begin(),
+                              implementations.begin()+Nimplementations);
+        }
+        return 0;
+    }
+
+    //parsing went well for all. compare the output against the first.
+    const std::string& reference=implementations[0].output;
+    for(std::size_t i=1; i<Nimplementations; ++i) {
+        if(implementations[i].output!=reference) {
+            showOutputAndAbort(implementations.begin(),
+                              implementations.begin()+Nimplementations);
+        }
+    }
+
+    //all is well
+    return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_minify.cpp`
+
+~~~~cpp
+#include "simdjson.h"
+#include "FuzzUtils.h"
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+/*
+ * Minifies by first parsing, then minifying.
+ */
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+    simdjson::padded_string str(reinterpret_cast<const char *>(Data), Size);
+    simdjson::dom::parser parser;
+    simdjson::dom::element elem;
+    auto error = parser.parse(str).get(elem);
+    if (error) { return 0; }
+    std::string minified = simdjson::minify(elem);
+    (void)minified;
+    return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_minifyimpl.cpp`
+
+~~~~cpp
+/*
+ * Minifies using the minify() function directly, without parsing.
+ *
+ * For fuzzing all of the implementations (haswell/fallback/westmere),
+ * finding any difference between the output of each which would
+ * indicate inconsistency. Also, it gets the non-default backend
+ * some fuzzing love.
+ *
+ * Copyright Paul Dreik 20200912 for the simdjson project.
+ */
+
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdlib>
+#include <iostream>
+#include <vector>
+#include "supported_implementations.h"
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+
+  // since this check is expensive, only do it once
+  static const auto implementations=get_runtime_supported_implementations();
+
+    using Buffer=std::vector<uint8_t>;
+    auto minify=[Data,Size](const simdjson::implementation* impl) -> Buffer {
+        Buffer ret(Size);
+        std::size_t retsize=0;
+        auto err=impl->minify(Data,Size,ret.data(),retsize);
+        if(err) {
+            std::string tmp = error_message(err);
+            ret.assign(tmp.begin(),tmp.end());
+        } else {
+            assert(retsize<=Size && "size should not grow by minimize()!");
+            ret.resize(retsize);
+        }
+        return ret;
+    };
+
+    auto const first = implementations.begin();
+    auto const last = implementations.end();
+
+    const auto reference=minify(*first);
+
+    bool failed=false;
+    for(auto it=first+1;it != last; ++it) {
+        const auto current=minify(*it);
+        if(current!=reference) {
+            failed=true;
+        }
+    }
+
+    if(failed) {
+        std::cerr<<std::boolalpha<<"Mismatch between implementations of minify() found:\n";
+        for(const auto& e:implementations) {
+            const auto current=minify(e);
+            std::string tmp(current.begin(),current.end());
+            std::cerr<<e->name()<<" returns "<<tmp<<std::endl;
+        }
+        std::abort();
+    }
+
+    //all is well
+    return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_ndjson.cpp`
+
+~~~~cpp
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+#include "FuzzUtils.h"
+#include "NullBuffer.h"
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+  FuzzData fd(Data, Size);
+  const auto batch_size = static_cast<size_t>(fd.getInt<0,1000>());
+  const auto json = simdjson::padded_string{fd.remainder_as_stringview()};
+  simdjson::dom::parser parser;
+  simdjson::dom::document_stream docs;
+  if(parser.parse_many(json,batch_size).get(docs)) { return 0; }
+  size_t bool_count1 = 0;
+  size_t total_count1 = 0;
+  for (auto doc : docs) {
+    total_count1++;
+    bool_count1 += doc.is_bool();
+  }
+  // Restart, if we made it this far, the document *must* be accessible.
+  if(parser.parse_many(json,batch_size).get(docs)) { return EXIT_FAILURE; }
+  size_t bool_count2 = 0;
+  size_t total_count2 = 0;
+  for (auto doc : docs) {
+    total_count2++;
+    bool_count2 += doc.is_bool();
+  }
+  // They should agree!!!
+  if((total_count2 != total_count1) || (bool_count2 != bool_count1)) { return EXIT_FAILURE; }
+  return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_ondemand.cpp`
+
+~~~~cpp
+#include "FuzzUtils.h"
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+  FuzzData fd(Data, Size);
+  const int action = fd.getInt<0, 12>();
+
+  // split the remainder of the document into strings
+  auto strings = fd.splitIntoStrings();
+  while (strings.size() < 1) {
+    strings.emplace_back();
+  }
+#if SIMDJSON_EXCEPTIONS
+  try {
+#endif
+    simdjson::ondemand::parser parser;
+    simdjson::padded_string padded(strings[0]);
+    auto doc = parser.iterate(padded);
+    if (doc.error()) {
+      return 0;
+    }
+    for (auto item : doc) {
+      switch (action) {
+      case 0: {
+        simdjson_unused auto x = item.get_string();
+      } break;
+      case 1: {
+        simdjson_unused auto x = item.get_bool();
+      } break;
+      case 2: {
+        simdjson_unused auto x = item.get_array();
+      } break;
+      case 3: {
+        simdjson_unused auto x = item.get_int64();
+      } break;
+      case 4: {
+        simdjson_unused auto x = item.get_double();
+      } break;
+      case 5: {
+        simdjson_unused auto x = item.get_object();
+      } break;
+      case 6: {
+        simdjson_unused auto x = item.get_uint64();
+      } break;
+      case 7: {
+        simdjson_unused auto x = item.get_raw_json_string();
+      } break;
+      case 8: {
+        simdjson_unused auto x = item.is_null();
+      } break;
+      case 9: {
+        simdjson_unused auto x = item.begin();
+      } break;
+      case 10: {
+        simdjson_unused auto x = item.end();
+      } break;
+      case 11: {
+        for (auto e : item) {
+          simdjson_unused auto x = e.is_null();
+        }
+      } break;
+      default:;
+      }
+    }
+#if SIMDJSON_EXCEPTIONS
+  } catch (...) {
+  }
+#endif
+
+  return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_padded.cpp`
+
+~~~~cpp
+#include "FuzzUtils.h"
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdint>
+#include <fstream>
+#include <string>
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+  FuzzData fd(Data, Size);
+
+  const int action = fd.getInt<0, 10>();
+
+  const auto s1 = fd.get<size_t>();
+  const auto s2 = fd.get<size_t>();
+  switch (action) {
+  case 0: {
+    simdjson_unused simdjson::padded_string p(s1);
+  } break;
+  case 1: {
+    // operator== with temp value
+    simdjson_unused simdjson::padded_string p1(s1);
+    simdjson_unused simdjson::padded_string p2(s2);
+    p1 = std::move(p2);
+  } break;
+  case 2: {
+    // swap
+    simdjson_unused simdjson::padded_string p1(s1);
+    simdjson_unused simdjson::padded_string p2(s2);
+    p1.swap(p2);
+  } break;
+  case 3: {
+    simdjson_unused simdjson::padded_string p(s1);
+    p.data();
+  } break;
+  case 4: {
+    simdjson::padded_string p(s1);
+    simdjson_unused auto sv = static_cast<std::string_view>(p);
+  } break;
+  case 5: {
+    // load from file.
+    const std::string filename = "/dev/shm/fuzz_padded.tmp";
+    {
+      std::ofstream file(filename);
+      assert(file);
+      const long ssize = static_cast<long>(fd.Size);
+      file.write(fd.chardata(), ssize);
+      assert(file.tellp() == ssize);
+    }
+    simdjson_unused auto data = simdjson::padded_string::load(filename);
+  } break;
+  default:;
+  }
+  return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_parser.cpp`
+
+~~~~cpp
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdint>
+#include <string>
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+  simdjson::dom::parser parser;
+  simdjson_unused simdjson::dom::element elem;
+  simdjson_unused auto error = parser.parse(Data, Size).get(elem);
+  return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_print_json.cpp`
+
+~~~~cpp
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+#include "NullBuffer.h"
+
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+  simdjson::dom::parser parser;
+  simdjson::dom::element elem;
+  auto error = parser.parse(Data, Size).get(elem);
+  if (!error) {
+    NulOStream os;
+    os<<elem;
+  }
+  return 0;
+}
+~~~~
+
+### H0 path: `fuzz/fuzz_utf8.cpp`
+
+~~~~cpp
+/*
+ * For fuzzing all of the implementations (haswell/fallback/westmere),
+ * finding any difference between the output of each which would
+ * indicate inconsistency. Also, it gets the non-default backend
+ * some fuzzing love.
+ *
+ * Copyright Paul Dreik 20200912 for the simdjson project.
+ */
+
+#include "simdjson.h"
+#include <cstddef>
+#include <cstdlib>
+#include <iostream>
+#include "supported_implementations.h"
+
+extern "C" int VerboseTestOneInput(const uint8_t *Data, size_t Size) {
+    static const auto supported_implementations=get_runtime_supported_implementations();
+    for(size_t i = 0; i <= Size; i++) {
+        std::cout<<"size: "<<std::dec<<std::setw(8)<<i<<std::endl;
+        std::cout<<"Input: \"";
+        for(size_t j = 0; j < i; j++) {
+            std::cout<<"\\x"<<std::hex<<std::setw(2)<<std::setfill('0')<<uint32_t(Data[j]);
+        }
+        std::cout<<"\""<<std::endl;
+        for(const auto& e: supported_implementations) {
+            if(!e->supported_by_runtime_system()) { continue; }
+            const bool current=e->validate_utf8((const char*)Data,i);
+            std::cout<<e->name()<<" returns "<<current<<std::endl;
+        }
+        std::cout<<std::endl;
+    }
+    return 0;
+}
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+
+    // since this check is expensive, only do it once
+    static const auto supported_implementations=get_runtime_supported_implementations();
+
+
+    auto utf8verify=[Data,Size](const simdjson::implementation* impl) -> bool {
+        return impl->validate_utf8((const char*)Data,Size);
+    };
+
+
+    auto first = supported_implementations.begin();
+    auto last = supported_implementations.end();
+
+
+    const bool reference=utf8verify(*first);
+
+    bool failed=false;
+    for(auto it=first+1; it != last; ++it) {
+        const bool current=utf8verify(*it);
+        if(current!=reference) {
+            failed=true;
+        }
+    }
+
+    if(failed) {
+        std::cerr<<std::boolalpha<<"Mismatch between implementations of validate_utf8() found:\n";
+        for(const auto& e: supported_implementations) {
+            if(!e->supported_by_runtime_system()) { continue; }
+            const bool current=utf8verify(e);
+            std::cerr<<e->name()<<" returns "<<current<<std::endl;
+        }
+        std::cerr << "Offending input: \"";
+        for(size_t i = 0; i < Size; i++) {
+            std::cerr << "\\x" << std::hex << std::setw(2) << std::setfill('0')  << uint32_t(Data[i]);
+        }
+        std::cerr << "\"" <<std::endl;
+
+        VerboseTestOneInput(Data, Size);
+
+        std::abort();
+    }
+
+    //all is well
+    return 0;
+}
+~~~~
+
+### H0 path: `fuzz/main.cpp`
+
+~~~~cpp
+#include <cassert>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include "FuzzUtils.h"
+
+
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* Data, std::size_t Size);
+int main(int argc, char* argv[]) {
+  for (int i = 1; i < argc; ++i) {
+    std::ifstream in(argv[i]);
+    assert(in);
+    in.seekg(0, std::ios_base::end);
+    const auto pos = in.tellg();
+    assert(pos >= 0);
+    in.seekg(0, std::ios_base::beg);
+    std::vector<char> buf(static_cast<std::size_t>(pos));
+    in.read(buf.data(), static_cast<long>(buf.size()));
+    assert(in.gcount() == pos);
+    LLVMFuzzerTestOneInput(as_bytes(buf.data()), buf.size());
+  }
+}
+~~~~
+
+### H0 path: `fuzz/supported_implementations.h`
+
+~~~~cpp
+#pragma once
+
+#include "simdjson.h"
+#include <vector>
+#include <cstdlib>
+
+/**
+ * @brief get_runtime_supported_implementations
+ * Returns a vector of implementations, which both
+ * have been compiled *and* are dynamically checked to
+ * be supported at runtime.
+ *
+ * Aborts if no implementations are available (should not happen, fallback
+ * should always be there for us!)
+ * @return
+ */
+std::vector<const simdjson::implementation*>
+get_runtime_supported_implementations() {
+    std::vector<const simdjson::implementation*> ret;
+    for(auto& e: simdjson::get_available_implementations()) {
+        if(e->supported_by_runtime_system()) {
+            ret.emplace_back(e);
+        }
+    }
+    if(ret.empty()) {
+        // No implementations available, not even fallback, weird.
+        std::abort();
+    }
+    return ret;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/include/simdjson/base.h b/include/simdjson/base.h
+index 5c946892..464d84ac 100644
+--- a/include/simdjson/base.h
++++ b/include/simdjson/base.h
+@@ -53,10 +53,16 @@ enum class stage1_mode;
+ /**
+  * Stream format for parse_many/iterate_many.
+  */
+ enum class stream_format {
+   whitespace_delimited, ///< Whitespace-delimited JSON documents (default, includes NDJSON/JSONL)
+   json_sequence,        ///< RFC 7464 JSON text sequences (RS-delimited)
+-  comma_delimited       ///< Comma-separated JSON documents (e.g., `{...},{...},{...}`)
++  comma_delimited,      ///< Comma-separated JSON documents (e.g., `{...},{...},{...}`)
++  comma_delimited_array ///< A single JSON array whose elements are iterated as
++                        ///< comma-separated documents (e.g., `[{...},{...},{...}]`).
++                        ///< The parser strips the outer `[` / `]` plus any
++                        ///< surrounding JSON whitespace (space, tab, LF, CR)
++                        ///< and then behaves like `comma_delimited` over the
++                        ///< remaining bytes.
+ };
+ 
+ namespace internal {
+diff --git a/include/simdjson/dom/document_stream-inl.h b/include/simdjson/dom/document_stream-inl.h
+index 1c222873..3e849dd5 100644
+--- a/include/simdjson/dom/document_stream-inl.h
++++ b/include/simdjson/dom/document_stream-inl.h
+@@ -221,15 +221,22 @@ simdjson_inline size_t document_stream::iterator::current_index() const noexcept
+ simdjson_inline std::string_view document_stream::iterator::source() const noexcept {
+   const char* start = reinterpret_cast<const char*>(stream->buf) + current_index();
+   bool object_or_array = ((*start == '[') || (*start == '{'));
+   if(object_or_array) {
+     size_t next_doc_index = stream->batch_start + stream->parser->implementation->structural_indexes[stream->parser->implementation->next_structural_index - 1];
+     return std::string_view(start, next_doc_index - current_index() + 1);
+   } else {
+     size_t next_doc_index = stream->batch_start + stream->parser->implementation->structural_indexes[stream->parser->implementation->next_structural_index];
+     size_t svlen = next_doc_index - current_index();
+-    while(svlen > 1 && (std::isspace(start[svlen-1]) || start[svlen-1] == '\0')) {
++    // Trim trailing whitespace, NUL, and RS (0x1E). In RFC 7464 json_sequence
++    // mode the scanner classifies RS as a scalar character, so an RS-prefixed
++    // scalar document (number/true/false/null/string) has no closing structural
++    // index and the slice runs all the way up to the next document's RS. RS
++    // cannot legally appear in a JSON value at the source level (control
++    // characters in strings must be escaped as \u001E), so stripping it is
++    // safe in every stream_format.
++    while(svlen > 1 && (std::isspace(start[svlen-1]) || start[svlen-1] == '\0' || static_cast<uint8_t>(start[svlen-1]) == 0x1E)) {
+       svlen--;
+     }
+     return std::string_view(start, svlen);
+   }
+ }
+diff --git a/include/simdjson/dom/parser-inl.h b/include/simdjson/dom/parser-inl.h
+index 0d1d33be..141c3db8 100644
+--- a/include/simdjson/dom/parser-inl.h
++++ b/include/simdjson/dom/parser-inl.h
+@@ -185,9 +185,27 @@ inline simdjson_result<document_stream> parser::parse_many(const padded_string &
+ inline simdjson_result<document_stream> parser::parse_many(const uint8_t *buf, size_t len, size_t batch_size, stream_format format) noexcept {
+   if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
+   if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
+     buf += 3;
+     len -= 3;
+   }
++  if (format == stream_format::comma_delimited_array) {
++    // Strip leading JSON whitespace.
++    while (len > 0 && (buf[0] == ' ' || buf[0] == '\t' || buf[0] == '\n' || buf[0] == '\r')) {
++      buf++; len--;
++    }
++    // Expect the opening '['.
++    if (len == 0 || buf[0] != '[') { return TAPE_ERROR; }
++    buf++; len--;
++    // Strip trailing JSON whitespace.
++    while (len > 0 && (buf[len-1] == ' ' || buf[len-1] == '\t' || buf[len-1] == '\n' || buf[len-1] == '\r')) {
++      len--;
++    }
++    // Expect the closing ']'.
++    if (len == 0 || buf[len-1] != ']') { return TAPE_ERROR; }
++    len--;
++    // Fall through to comma_delimited over the array contents.
++    format = stream_format::comma_delimited;
++  }
+   return document_stream(*this, buf, len, batch_size, format);
+ }
+ inline simdjson_result<document_stream> parser::parse_many(const char *buf, size_t len, size_t batch_size, stream_format format) noexcept {
+diff --git a/include/simdjson/generic/ondemand/document_stream-inl.h b/include/simdjson/generic/ondemand/document_stream-inl.h
+index f88063a5..38176c79 100644
+--- a/include/simdjson/generic/ondemand/document_stream-inl.h
++++ b/include/simdjson/generic/ondemand/document_stream-inl.h
+@@ -374,44 +374,51 @@ simdjson_inline size_t document_stream::iterator::current_index() const noexcept
+ simdjson_inline std::string_view document_stream::iterator::source() const noexcept {
+   auto depth = stream->doc.iter.depth();
+   auto cur_struct_index = stream->doc.iter._root - stream->parser->implementation->structural_indexes.get();
+ 
+   // If at root, process the first token to determine if scalar value
+   if (stream->doc.iter.at_root()) {
+     switch (stream->buf[stream->batch_start + stream->parser->implementation->structural_indexes[cur_struct_index]]) {
+       case '{': case '[':   // Depth=1 already at start of document
+         break;
+       case '}': case ']':
+         depth--;
+         break;
+       default:    // Scalar value document
+-        // TODO: We could remove trailing whitespaces
+         // This returns a string spanning from start of value to the beginning of the next document (excluded)
+         {
+           auto next_index = stream->parser->implementation->structural_indexes[++cur_struct_index];
+           // normally the length would be next_index - current_index() - 1, except for the last document
+           size_t svlen = next_index - current_index();
+           const char *start = reinterpret_cast<const char*>(stream->buf) + current_index();
+-          while(svlen > 1 && (std::isspace(start[svlen-1]) || start[svlen-1] == '\0')) {
++          // Trim trailing whitespace, NUL, and RS (0x1E). In RFC 7464
++          // json_sequence mode the scanner classifies RS as a scalar
++          // character, so an RS-prefixed scalar document (number / true /
++          // false / null / string) has no closing structural index and the
++          // slice runs all the way up to the next document's RS. RS cannot
++          // legally appear in a JSON value at the source level (control
++          // characters in strings must be escaped as \u001E), so stripping
++          // it is safe in every stream_format.
++          while(svlen > 1 && (std::isspace(start[svlen-1]) || start[svlen-1] == '\0' || static_cast<uint8_t>(start[svlen-1]) == 0x1E)) {
+             svlen--;
+           }
+           return std::string_view(start, svlen);
+         }
+     }
+     cur_struct_index++;
+   }
+ 
+   while (cur_struct_index <= static_cast<int64_t>(stream->parser->implementation->n_structural_indexes)) {
+     switch (stream->buf[stream->batch_start + stream->parser->implementation->structural_indexes[cur_struct_index]]) {
+       case '{': case '[':
+         depth++;
+         break;
+       case '}': case ']':
+         depth--;
+         break;
+     }
+     if (depth == 0) { break; }
+     cur_struct_index++;
+   }
+ 
+   return std::string_view(reinterpret_cast<const char*>(stream->buf) + current_index(), stream->parser->implementation->structural_indexes[cur_struct_index] - current_index() + stream->batch_start + 1);;
+ }
+diff --git a/include/simdjson/generic/ondemand/parser-inl.h b/include/simdjson/generic/ondemand/parser-inl.h
+index 30aef65a..d606ba38 100644
+--- a/include/simdjson/generic/ondemand/parser-inl.h
++++ b/include/simdjson/generic/ondemand/parser-inl.h
+@@ -198,9 +198,27 @@ SIMDJSON_POP_DISABLE_WARNINGS
+ inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf, size_t len, size_t batch_size, stream_format format) noexcept {
+   if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
+   if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
+     buf += 3;
+     len -= 3;
+   }
++  if (format == stream_format::comma_delimited_array) {
++    // Strip leading JSON whitespace.
++    while (len > 0 && (buf[0] == ' ' || buf[0] == '\t' || buf[0] == '\n' || buf[0] == '\r')) {
++      buf++; len--;
++    }
++    // Expect the opening '['.
++    if (len == 0 || buf[0] != '[') { return TAPE_ERROR; }
++    buf++; len--;
++    // Strip trailing JSON whitespace.
++    while (len > 0 && (buf[len-1] == ' ' || buf[len-1] == '\t' || buf[len-1] == '\n' || buf[len-1] == '\r')) {
++      len--;
++    }
++    // Expect the closing ']'.
++    if (len == 0 || buf[len-1] != ']') { return TAPE_ERROR; }
++    len--;
++    // Fall through to comma_delimited over the array contents.
++    format = stream_format::comma_delimited;
++  }
+   return document_stream(*this, buf, len, batch_size, false, format);
+ }
+ inline simdjson_result<document_stream> parser::iterate_many(const char *buf, size_t len, size_t batch_size, stream_format format) noexcept {
+diff --git a/src/fallback.cpp b/src/fallback.cpp
+index 824be07c..c3ba641a 100644
+--- a/src/fallback.cpp
++++ b/src/fallback.cpp
+@@ -209,130 +209,136 @@ simdjson_inline bool validate_string() {
+ //
+ // Parse the entire input in STEP_SIZE-byte chunks.
+ //
+ simdjson_warn_unused simdjson_inline error_code scan() {
+   bool unclosed_string = false;
+   for (;idx<len;idx++) {
+     do {
+       if (!char_is_space(buf[idx])) { break; }
+       idx++;
+     } while (idx < len);
+     if (idx >= len) { break; }
+     // String
+     if (buf[idx] == '"') {
+       add_structural();
+       unclosed_string |= validate_string();
+     // Operator
+     } else if (char_is_operator(buf[idx])) {
+       add_structural();
+     // Primitive or invalid character (invalid characters will be checked in stage 2)
+     } else {
+-      // Anything else, add the structural and go until we find the next one
++      // Anything else, add the structural and go until we find the next one.
++      // We also stop on RS (0x1E) so that RFC 7464 json_sequence inputs
++      // like `\x1e"a"\x1e"b"` produce a separate structural for each RS
++      // rather than being absorbed into a single primitive run. RS is a
++      // control character that is invalid in normal JSON, so breaking
++      // the run here has no effect on well-formed non-json_sequence
++      // inputs.
+       add_structural();
+-      while (idx+1<len && !char_is_space_or_operator(buf[idx+1])) {
++      while (idx+1<len && !char_is_space_or_operator(buf[idx+1]) && buf[idx+1] != 0x1e) {
+         idx++;
+       };
+     }
+   }
+   // We pad beyond.
+   // https://github.com/simdjson/simdjson/issues/906
+   // See json_structural_indexer.h for an explanation.
+   *next_structural_index = len; // assumed later in partial == stage1_mode::streaming_final
+   next_structural_index[1] = len;
+   next_structural_index[2] = 0;
+   parser.n_structural_indexes = uint32_t(next_structural_index - parser.structural_indexes.get());
+   if (simdjson_unlikely(parser.n_structural_indexes == 0)) { return EMPTY; }
+   parser.next_structural_index = 0;
+   if (partial == stage1_mode::streaming_partial) {
+     if(unclosed_string) {
+       parser.n_structural_indexes--;
+       if (simdjson_unlikely(parser.n_structural_indexes == 0)) { return CAPACITY; }
+     }
+     // We truncate the input to the end of the last complete document (or zero).
+     auto new_structural_indexes = find_next_document_index(parser);
+     if (new_structural_indexes == 0 && parser.n_structural_indexes > 0) {
+       if(parser.structural_indexes[0] == 0) {
+         // If the buffer is partial and we started at index 0 but the document is
+         // incomplete, it's too big to parse.
+         return CAPACITY;
+       } else {
+         // It is possible that the document could be parsed, we just had a lot
+         // of white space.
+         parser.n_structural_indexes = 0;
+         return EMPTY;
+       }
+     }
+     parser.n_structural_indexes = new_structural_indexes;
+   } else if(partial == stage1_mode::streaming_final) {
+     if(unclosed_string) { parser.n_structural_indexes--; }
+     // We truncate the input to the end of the last complete document (or zero).
+     // Because partial == stage1_mode::streaming_final, it means that we may
+     // silently ignore trailing garbage. Though it sounds bad, we do it
+     // deliberately because many people who have streams of JSON documents
+     // will truncate them for processing. E.g., imagine that you are uncompressing
+     // the data from a size file or receiving it in chunks from the network. You
+     // may not know where exactly the last document will be. Meanwhile the
+     // document_stream instances allow people to know the JSON documents they are
+     // parsing (see the iterator.source() method).
+     parser.n_structural_indexes = find_next_document_index(parser);
+     // We store the initial n_structural_indexes so that the client can see
+     // whether we used truncation. If initial_n_structural_indexes == parser.n_structural_indexes,
+     // then this will query parser.structural_indexes[parser.n_structural_indexes] which is len,
+     // otherwise, it will copy some prior index.
+     parser.structural_indexes[parser.n_structural_indexes + 1] = parser.structural_indexes[parser.n_structural_indexes];
+     // This next line is critical, do not change it unless you understand what you are
+     // doing.
+     parser.structural_indexes[parser.n_structural_indexes] = uint32_t(len);
+     if (parser.n_structural_indexes == 0) { return EMPTY; }
+   } else if (partial == stage1_mode::json_sequence_partial) {
+     // RFC 7464: use RS positions for batch boundaries
+     if(unclosed_string) {
+       parser.n_structural_indexes--;
+       if (simdjson_unlikely(parser.n_structural_indexes == 0)) { return CAPACITY; }
+     }
+     uint32_t next_batch_start = uint32_t(len);
+     auto new_structural_indexes = find_next_document_index_json_sequence(parser, len, false, next_batch_start);
+     if (new_structural_indexes == DOCUMENT_TOO_LARGE) {
+       return CAPACITY;
+     }
+     if (new_structural_indexes == 0) {
+       parser.n_structural_indexes = 0;
+       return EMPTY;
+     }
+     parser.n_structural_indexes = new_structural_indexes;
+     parser.structural_indexes[parser.n_structural_indexes] = next_batch_start;
+   } else if (partial == stage1_mode::json_sequence_final) {
+     // RFC 7464: final batch, last document extends to EOF
+     if(unclosed_string) { parser.n_structural_indexes--; }
+     uint32_t next_batch_start = uint32_t(len);
+     parser.n_structural_indexes = find_next_document_index_json_sequence(parser, len, true, next_batch_start);
+     parser.structural_indexes[parser.n_structural_indexes + 1] = parser.structural_indexes[parser.n_structural_indexes];
+     parser.structural_indexes[parser.n_structural_indexes] = uint32_t(len);
+     if (simdjson_unlikely(parser.n_structural_indexes == 0)) { return EMPTY; }
+   } else if (partial == stage1_mode::comma_delimited_partial) {
+     // Comma-delimited: filter root-level commas, use comma positions for batch boundaries
+     if(unclosed_string) {
+       parser.n_structural_indexes--;
+       if (simdjson_unlikely(parser.n_structural_indexes == 0)) { return CAPACITY; }
+     }
+     uint32_t next_batch_start = uint32_t(len);
+     auto new_structural_indexes = filter_comma_delimited(parser, len, false, next_batch_start);
+     if (new_structural_indexes == DOCUMENT_TOO_LARGE) {
+       return CAPACITY;
+     }
+     if (new_structural_indexes == 0) {
+       parser.n_structural_indexes = 0;
+       return EMPTY;
+     }
+     parser.n_structural_indexes = new_structural_indexes;
+     parser.structural_indexes[parser.n_structural_indexes] = next_batch_start;
+   } else if (partial == stage1_mode::comma_delimited_final) {
+     // Comma-delimited: final batch, last document extends to EOF
+     if(unclosed_string) { parser.n_structural_indexes--; }
+     uint32_t next_batch_start = uint32_t(len);
+     parser.n_structural_indexes = filter_comma_delimited(parser, len, true, next_batch_start);
+     parser.structural_indexes[parser.n_structural_indexes + 1] = parser.structural_indexes[parser.n_structural_indexes];
+     parser.structural_indexes[parser.n_structural_indexes] = uint32_t(len);
+     if (simdjson_unlikely(parser.n_structural_indexes == 0)) { return EMPTY; }
+   } else if(unclosed_string) { error = UNCLOSED_STRING; }
+   return error;
+ }
+diff --git a/src/generic/stage1/find_next_document_index.h b/src/generic/stage1/find_next_document_index.h
+index faa1b8a5..bcca5c0d 100644
+--- a/src/generic/stage1/find_next_document_index.h
++++ b/src/generic/stage1/find_next_document_index.h
+@@ -107,143 +107,181 @@ constexpr uint32_t DOCUMENT_TOO_LARGE = UINT32_MAX;
+ /**
+  * For RFC 7464 JSON text sequences, filter RS from structural indexes and
+  * find batch boundaries.
+  *
+  * In JSON sequence mode, RS (0x1E) marks the start of each JSON text.
+  * RS bytes appear in structural_indexes as they are classified as scalars.
+  * This function:
+  * 1. Scans structural_indexes to find and count RS positions
+  * 2. Filters RS out of structural_indexes in-place
+  * 3. Determines batch boundaries based on RS positions
+  *
+  * @param parser The parser with structural_indexes and buf.
+  * @param len The length of the current batch buffer.
+  * @param is_final True if this is the final batch (no more data coming).
+  * @param next_batch_start Output: offset where the next batch should start.
+  * @return The number of structural indexes to keep (after RS filtering),
+  *         0 if no document content found (EMPTY),
+  *         or DOCUMENT_TOO_LARGE if a document started but didn't fit (CAPACITY).
+  */
+ simdjson_inline uint32_t find_next_document_index_json_sequence(
+     dom_parser_implementation &parser,
+     size_t len,
+     bool is_final,
+     uint32_t &next_batch_start) {
+   // Default: next batch starts at end of buffer
+   next_batch_start = uint32_t(len);
+ 
+   if (parser.n_structural_indexes == 0) { return 0; }
+ 
+   // Phase 1: Scan structural_indexes to find RS positions and handle them.
+   // RS marks the start of a JSON text. For objects/arrays, the '{' or '[' after RS
+   // is already in structural_indexes (it's an operator). For scalars like numbers,
+   // the digit following RS is NOT in structural_indexes because the scanner sees
+   // RS as a scalar, making the digit a scalar continuation, not a start.
+   // We must: (1) remove RS from structural_indexes, and (2) for scalars, add the
+   // actual value start position.
+   uint32_t write_idx = 0;
+   uint32_t last_rs_pos = 0;
+   uint32_t rs_count = 0;
+ 
+   for (uint32_t read_idx = 0; read_idx < parser.n_structural_indexes; read_idx++) {
+     const uint32_t pos = parser.structural_indexes[read_idx];
+     if (parser.buf[pos] == 0x1E) {
+-      // This is an RS character - find the actual JSON value start
++      // This is an RS character - find the actual JSON value start.
+       last_rs_pos = pos;
+       rs_count++;
+-      // Skip RS and any whitespace to find the actual value start
++      // Skip past this RS and any whitespace *and any additional RSes*
++      // to locate the real value. Consecutive RSes are degenerate
++      // "empty records" per RFC 7464; we collapse them here. They do
++      // not always appear as separate entries in structural_indexes
++      // because the scanner groups runs of adjacent non-whitespace
++      // scalar bytes (including RS) into a single scalar start.
+       uint32_t value_start = pos + 1;
+       while (value_start < len) {
+         const uint8_t c = parser.buf[value_start];
+-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { value_start++; }
+-        else { break; }
++        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
++          value_start++;
++        } else if (c == 0x1E) {
++          // Collapsed empty record. Still count it so rs_count reflects
++          // the true number of record markers and last_rs_pos tracks
++          // the final one.
++          last_rs_pos = value_start;
++          rs_count++;
++          value_start++;
++        } else {
++          break;
++        }
++      }
++      // If the scanner emitted additional structurals inside the
++      // whitespace+RS run we just walked over (i.e., isolated RSes
++      // separated by whitespace), skip past them so we do not
++      // double-count or double-emit.
++      while (read_idx + 1 < parser.n_structural_indexes &&
++             parser.structural_indexes[read_idx + 1] < value_start) {
++        read_idx++;
+       }
+-      // Check if the value start is an operator (already in structural_indexes),
+-      // another RS (empty record), or a scalar (needs to be added).
++      // Check if the value start is an operator (always present in
++      // scanner structural_indexes) or a scalar-like start (which may
++      // be missing from structural_indexes and must be added here).
++      // Note: '"' is NOT always in structural_indexes. The scanner
++      // classifies '"' as a scalar character and emits it as a
++      // structural only when it is a *scalar start* (preceded by
++      // whitespace or an operator). When '"' immediately follows an
++      // RS (which the scanner also classifies as scalar), it is
++      // treated as a scalar continuation and not emitted - so we
++      // must add it here just like any other scalar value.
+       if (value_start < len) {
+         const uint8_t c = parser.buf[value_start];
+-        const bool is_operator = (c == '{' || c == '}' || c == '[' || c == ']' || c == ':' || c == ',');
+-        const bool is_rs = (c == 0x1E);
+-        if (!is_operator && !is_rs) {
+-          // Scalar value - add its position since scanner missed it
++        const bool is_operator =
++            (c == '{' || c == '}' || c == '[' || c == ']' ||
++             c == ':' || c == ',');
++        // If the next scanner structural is exactly at value_start,
++        // the scanner already emitted it (it followed whitespace) and
++        // we must not add a duplicate - a subsequent iteration will
++        // copy it into write_idx.
++        const bool already_emitted =
++            (read_idx + 1 < parser.n_structural_indexes &&
++             parser.structural_indexes[read_idx + 1] == value_start);
++        if (!is_operator && !already_emitted) {
++          // Scalar value (number/true/false/null/string) - add its
++          // position since scanner missed it.
+           parser.structural_indexes[write_idx++] = value_start;
+         }
+-        // For operators, they will appear later in structural_indexes
+-        // For RS, it will be processed in a subsequent iteration
+       }
+     } else {
+       // Not RS, copy to output
+       parser.structural_indexes[write_idx++] = pos;
+     }
+   }
+ 
+   // Update structural index count
+   parser.n_structural_indexes = write_idx;
+ 
+   if (parser.n_structural_indexes == 0) { return 0; }
+   if (rs_count == 0) {
+     // No RS found; for final batch, try generic boundary detection
+     return is_final ? find_next_document_index(parser) : 0;
+   }
+ 
+   // Phase 2: Determine batch boundaries based on RS positions
+ 
+   if (is_final) {
+     // Final batch: all documents are complete (last one ends at EOF).
+     // In json_sequence mode, RS markers define document boundaries, so all
+     // remaining structurals form complete documents. Return them all directly.
+     // (Calling find_next_document_index() would fail for scalar documents.)
+     return parser.n_structural_indexes;
+   }
+ 
+   // Partial batch: need to find complete documents only.
+   // A document starting at an RS is complete if there is another RS after it.
+   next_batch_start = last_rs_pos;
+ 
+   if (rs_count < 2) {
+     // Only one RS, so we have at most one document that may be incomplete.
+     // We cannot confirm it is complete without another RS.
+     // Return DOCUMENT_TOO_LARGE if content was found (write_idx > 0), 0 if only separators.
+     return (parser.n_structural_indexes > 0) ? DOCUMENT_TOO_LARGE : 0;
+   }
+ 
+   // We have at least 2 RS markers. The last complete document ends before last_rs_pos.
+ 
+   // Find the structural index cutoff: keep only structurals < last_rs_pos.
+   // Since we already filtered RS, all remaining structurals are valid.
+   // We iterate backward to find the last structural before last_rs_pos.
+   uint32_t keep_count = 0;
+   for (uint32_t i = parser.n_structural_indexes; i > 0; i--) {
+     if (parser.structural_indexes[i - 1] < last_rs_pos) {
+       keep_count = i;
+       break;
+     }
+   }
+ 
+   // No structurals before the last RS - no complete documents
+   if (keep_count == 0) { return 0; }
+ 
+   // All documents before the last RS are complete by definition (the next RS
+   // confirms their end). No need to call find_next_document_index() which
+   // would fail for scalar documents like `1` or `"hello"`.
+   return keep_count;
+ }
+ 
+ /**
+  * Filter comma-delimited documents by removing root-level commas from
+  * structural indexes.
+  *
+  * For comma-delimited format like `{...},{...},{...}`, we need to remove
+  * the commas that separate documents (depth 0) while preserving commas
+  * inside arrays and objects (depth > 0).
+  *
+  * After filtering, the structural indexes look like whitespace-delimited
+  * documents, so find_next_document_index() works unchanged.
+  *
+  * @param parser The parser with structural_indexes and buf.
+  * @param len The length of the current batch buffer.
+  * @param is_final True if this is the final batch (no more data coming).
+  * @param next_batch_start Output: offset where the next batch should start.
+  * @return The number of structural indexes to keep,
+  *         0 if no document content found (EMPTY),
+  *         or DOCUMENT_TOO_LARGE if a document started but didn't fit (CAPACITY).
+  */
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8030","gap_exists":true,"gap_type":["entry_point","configuration","input_semantics","state"],"confidence":99,"affected_functions":["simdjson::dom::parser::parse_many","simdjson::ondemand::parser::iterate_many","simdjson::dom::document_stream::iterator::source","simdjson::ondemand::document_stream::iterator::source","find_next_document_index_json_sequence","fallback::scan"],"reason":"H0 does not exercise the changed stream-format protocols. fuzz_ndjson calls parser.parse_many(json,batch_size) only with the default format, while fuzz_ondemand calls parser.iterate(padded) rather than iterate_many. Consequently, neither simdjson::stream_format::comma_delimited_array nor explicit json_sequence processing is selected, and iterator source slicing is not inspected. This misses fuzz-worthy wrapper validation and trimming, stream batching, delimiter handling, consecutive RS records, scalar/string record boundaries, and source-view behavior.","evidence":["S1 adds simdjson::stream_format::comma_delimited_array and new leading/trailing JSON-whitespace plus '[' and ']' handling in both dom::parser::parse_many and ondemand::parser::iterate_many.","H0 fuzz_ndjson invokes parser.parse_many(json,batch_size) without a stream_format argument, so it cannot select comma_delimited_array or json_sequence.","H0 fuzz_ondemand invokes parser.iterate(padded), not parser.iterate_many(..., stream_format), so it does not reach the changed on-demand streaming entry point.","S1 changes both document_stream::iterator::source implementations to trim byte 0x1E for scalar documents, but H0 never calls iterator.source().","S1 changes fallback::scan and find_next_document_index_json_sequence for RS-delimited scalar and string values, consecutive RS bytes, partial/final batches, and structural-index insertion; no H0 input controls stream_format::json_sequence.","The existing fuzz_ndjson state check only repeats default parse_many iteration and compares document and boolean counts; it does not vary stream format or validate source slices and delimiter-specific boundaries."],"recommended_action":"Add streaming harness coverage that derives stream_format and batch_size from fuzz bytes, invokes both dom::parser::parse_many and ondemand::parser::iterate_many, explicitly includes comma_delimited_array and json_sequence, iterates all documents, calls iterator.source(), and stresses empty/malformed array wrappers, JSON whitespace, nested commas, scalar/string records, consecutive 0x1E bytes, and batch-boundary truncation."}
+tokens used
+18,496

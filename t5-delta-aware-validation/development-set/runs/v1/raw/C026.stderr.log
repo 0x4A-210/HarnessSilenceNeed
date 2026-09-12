@@ -1,0 +1,455 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/delta-dev-C026-jvcvmpda
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08ab6-4120-7352-8c19-cace8505e338
+--------
+user
+You are evaluating whether one production-source commit creates a fuzz-harness
+maintenance need. Use only the anonymous case below. Do not use tools, files,
+the network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+Follow this order exactly and keep one stable comparison scope throughout:
+
+1. Identify the commit's fuzz-relevant impact scope from the S0-to-S1 source
+   diff. Anchor it in concrete files, functions, states, configurations, input
+   semantics, or entry points. Do not search the rest of the project for an
+   unrelated harness omission.
+2. For that same scope, decide whether S0 + H0 has a material harness gap.
+3. For that identical scope, decide whether S1 + H0 has a material harness gap.
+4. Identify whether the commit creates a concrete new harness obligation: a
+   new entry/call, caller-supplied argument or buffer, call-order transition,
+   configuration action, compile-time enablement, or input construction that
+   H0 did not need in S0.
+5. Derive exactly one delta: NEW, AGGRAVATED, UNCHANGED, REMOVED, or NONE.
+6. Apply the fixed final rule.
+
+A harness gap concerns exposure or controllability, not the mere existence of
+changed lines. More internal code, a replacement algorithm, validation, error
+handling, a CPU fast path, or implementation state is not by itself an
+aggravation. If an existing public entry/API is omitted by the unchanged H0 on
+both sides and its caller-facing exposure requirement is unchanged, then the
+gap existed before and after: classify UNCHANGED even when the commit changes
+behavior inside that entry. Conversely, a genuinely new public entry, format,
+configuration, state protocol, or caller obligation that H0 cannot exercise is
+NEW (or AGGRAVATED when a demonstrably weaker same-scope gap already existed).
+
+AGGRAVATED requires concrete comparative evidence that S1 adds a harness action
+or reachability/control requirement absent in S0. Do not infer AGGRAVATED only
+from added LOC, a changed file, additional internal branches, or the fact that
+H0 omits the whole subsystem on both sides.
+
+Use this truth table unless concrete aggravation/removal evidence is present:
+
+- before=false, after=true  -> NEW
+- before=true,  after=true  -> UNCHANGED
+- before=true,  after=false -> REMOVED
+- before=false, after=false -> NONE
+
+Set maintenance_needed=true only if explicit_failure=true or delta_attribution
+is NEW or AGGRAVATED. Otherwise set it false. Return exactly one JSON object
+matching the schema. Give separate S0 and S1 evidence and do not collapse the
+two judgments into one narrative.
+
+--- BEGIN DEVELOPMENT CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+C026
+
+## Existing harness H0
+
+The complete project-owned harness translation unit is shown below. Framework
+main/CLI scaffolding is not expanded; directly included semantic helper files
+are shown separately under the fixed context rule.
+
+Path: `fuzz/c/std/jpeg_fuzzer.c`
+
+```c
+// Copyright 2023 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN jpeg_fuzzer.c
+./a.out ../../../test/data/*.jpeg
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__JPEG
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+#include "../fuzzlib/fuzzlib_image_decoder.c"
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_jpeg__decoder dec;
+  wuffs_base__status status = wuffs_jpeg__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  hash = wuffs_base__u64__rotate_right(hash, 1);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  return fuzz_image_decoder(
+      src, hash,
+      wuffs_jpeg__decoder__upcast_as__wuffs_base__image_decoder(&dec));
+}
+```
+
+### Direct H0 helper: `fuzz/c/fuzzlib/fuzzlib_image_decoder.c`
+
+```c
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+#ifndef WUFFS_INCLUDE_GUARD
+#error "Wuffs' .h files need to be included before this file"
+#endif
+
+static const char*  //
+fuzz_image_decoder(wuffs_base__io_buffer* src,
+                   uint64_t hash,
+                   wuffs_base__image_decoder* dec) {
+  const char* ret = NULL;
+  wuffs_base__slice_u8 pixbuf = ((wuffs_base__slice_u8){});
+  wuffs_base__slice_u8 workbuf = ((wuffs_base__slice_u8){});
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    wuffs_base__status status =
+        wuffs_base__image_decoder__decode_image_config(dec, &ic, src);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    // 50% of the time, choose BGRA_PREMUL instead of the native pixel config.
+    if (hash & 1) {
+      wuffs_base__pixel_config__set(
+          &ic.pixcfg, WUFFS_BASE__PIXEL_FORMAT__BGRA_PREMUL,
+          WUFFS_BASE__PIXEL_SUBSAMPLING__NONE,
+          wuffs_base__pixel_config__width(&ic.pixcfg),
+          wuffs_base__pixel_config__height(&ic.pixcfg));
+    }
+    hash >>= 1;
+
+    // Wuffs allows either statically or dynamically allocated work buffers.
+    // This program exercises dynamic allocation.
+    uint64_t n = wuffs_base__image_decoder__workbuf_len(dec).max_incl;
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      workbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!workbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    n = wuffs_base__pixel_config__pixbuf_len(&ic.pixcfg);
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      pixbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!pixbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    status = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, pixbuf);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      wuffs_base__frame_config fc = ((wuffs_base__frame_config){});
+      status = wuffs_base__image_decoder__decode_frame_config(dec, &fc, src);
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+
+      status = wuffs_base__image_decoder__decode_frame(
+          dec, &pb, src, WUFFS_BASE__PIXEL_BLEND__SRC, workbuf, NULL);
+
+      wuffs_base__rect_ie_u32 frame_rect =
+          wuffs_base__frame_config__bounds(&fc);
+      wuffs_base__rect_ie_u32 dirty_rect =
+          wuffs_base__image_decoder__frame_dirty_rect(dec);
+      if (!wuffs_base__rect_ie_u32__contains_rect(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not contain dirty_rect";
+        goto exit;
+      }
+
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+      seen_ok = true;
+
+      if (!wuffs_base__rect_ie_u32__equals(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not equal dirty_rect";
+        goto exit;
+      }
+    }
+  }
+
+exit:
+  free(workbuf.ptr);
+  free(pixbuf.ptr);
+  return ret;
+}
+```
+
+## Complete S0 -> S1 hand-written production-source diff
+
+The fixed rule includes every changed `std/**/*.wuffs` production file. It
+excludes generated release snapshots, tests, docs, examples, and commit text.
+
+```diff
+diff --git a/std/jpeg/decode_jpeg.wuffs b/std/jpeg/decode_jpeg.wuffs
+index 57541954..4240ffca 100644
+--- a/std/jpeg/decode_jpeg.wuffs
++++ b/std/jpeg/decode_jpeg.wuffs
+@@ -984,28 +984,28 @@ pri func decoder.do_decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reade
+             src_pixfmt: this.util.make_pixel_format(repr: pixfmt),
+             src_palette: this.util.empty_slice_u8(),
+             blend: args.blend)
+     if not status.is_ok() {
+         return status
+     }
+ 
+     // For progressive JPEGs, zero-initialize the saved pre-IDCT blocks. For
+     // sequential JPEGs, this is a no-op, other than checking that args.workbuf
+     // is long enough and setting this.swizzle_immediately.
+     this.swizzle_immediately = false
+     if this.components_workbuf_offsets[8] > args.workbuf.length() {
+-        if this.sof_marker >= 0xC2 {
++        if (this.sof_marker >= 0xC2) or not this.use_lower_quality {
+             return base."#bad workbuf length"
+         }
+-        this.swizzle_immediately = this.use_lower_quality
++        this.swizzle_immediately = true
+         this.swizzle_immediately_status = ok
+     } else if this.components_workbuf_offsets[4] < this.components_workbuf_offsets[8] {
+         args.workbuf[this.components_workbuf_offsets[4] .. this.components_workbuf_offsets[8]].bulk_memset!(byte_value: 0)
+     }
+     // For both sequential and progressive JPEGs, biased-zero-initialize the
+     // samples, in case the scans are incomplete (in terms of covering all
+     // components) or the input is truncated. 0x80 is the same post-IDCT bias
+     // as per BIAS_AND_CLAMP. For YCbCr, (0x80, 0x80, 0x80) is a medium gray
+     // but (0x00, 0x00, 0x00) is a dark green.
+     if this.components_workbuf_offsets[4] <= args.workbuf.length() {
+         args.workbuf[.. this.components_workbuf_offsets[4]].bulk_memset!(byte_value: 0x80)
+     }
+```
+
+## Uniform selected declaration context
+
+This same mechanically selected S0/S1 context is supplied for every case.
+
+### S0
+
+```text
+lines 2176-2224
+002176:     return this.util.make_rect_ie_u32(
+002177:             min_incl_x: 0,
+002178:             min_incl_y: 0,
+002179:             max_excl_x: this.width,
+002180:             max_excl_y: this.height)
+002181: }
+002182: 
+002183: pub func decoder.num_animation_loops() base.u32 {
+002184:     return 0
+002185: }
+002186: 
+002187: pub func decoder.num_decoded_frame_configs() base.u64 {
+002188:     if this.call_sequence > 0x20 {
+002189:         return 1
+002190:     }
+002191:     return 0
+002192: }
+002193: 
+002194: pub func decoder.num_decoded_frames() base.u64 {
+002195:     if this.call_sequence > 0x40 {
+002196:         return 1
+002197:     }
+002198:     return 0
+002199: }
+002200: 
+002201: pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+002202:     var i : base.u32
+002203:     var j : base.u32
+002204: 
+002205:     if this.call_sequence < 0x20 {
+002206:         return base."#bad call sequence"
+002207:     }
+002208:     if args.index <> 0 {
+002209:         return base."#bad argument"
+002210:     }
+002211: 
+002212:     this.call_sequence = 0x28
+002213:     this.bitstream_is_closed = false
+002214:     this.expect_multiple_scans = false
+002215:     this.frame_config_io_position = args.io_position
+002216:     this.scan_count = 0
+002217:     this.restart_interval = this.saved_restart_interval
+002218: 
+002219:     i = 0
+002220:     while i < 4 {
+002221:         this.seen_dqt[i] = this.saved_seen_dqt[i]
+002222:         j = 0
+002223:         while j < 64,
+002224:                 inv i < 4,
+```
+
+### S1
+
+```text
+lines 2176-2224
+002176:     return this.util.make_rect_ie_u32(
+002177:             min_incl_x: 0,
+002178:             min_incl_y: 0,
+002179:             max_excl_x: this.width,
+002180:             max_excl_y: this.height)
+002181: }
+002182: 
+002183: pub func decoder.num_animation_loops() base.u32 {
+002184:     return 0
+002185: }
+002186: 
+002187: pub func decoder.num_decoded_frame_configs() base.u64 {
+002188:     if this.call_sequence > 0x20 {
+002189:         return 1
+002190:     }
+002191:     return 0
+002192: }
+002193: 
+002194: pub func decoder.num_decoded_frames() base.u64 {
+002195:     if this.call_sequence > 0x40 {
+002196:         return 1
+002197:     }
+002198:     return 0
+002199: }
+002200: 
+002201: pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+002202:     var i : base.u32
+002203:     var j : base.u32
+002204: 
+002205:     if this.call_sequence < 0x20 {
+002206:         return base."#bad call sequence"
+002207:     }
+002208:     if args.index <> 0 {
+002209:         return base."#bad argument"
+002210:     }
+002211: 
+002212:     this.call_sequence = 0x28
+002213:     this.bitstream_is_closed = false
+002214:     this.expect_multiple_scans = false
+002215:     this.frame_config_io_position = args.io_position
+002216:     this.scan_count = 0
+002217:     this.restart_interval = this.saved_restart_interval
+002218: 
+002219:     i = 0
+002220:     while i < 4 {
+002221:         this.seen_dqt[i] = this.saved_seen_dqt[i]
+002222:         j = 0
+002223:         while j < 64,
+002224:                 inv i < 4,
+```
+
+--- END DEVELOPMENT CASE ---
+
+codex
+{"case_id":"C026","impact_scope":[{"type":"input_semantic_change","files":["std/jpeg/decode_jpeg.wuffs"],"functions":["decoder.do_decode_frame"],"description":"Changes handling of an existing caller-supplied work buffer when it is shorter than components_workbuf_offsets[8]: S0 rejects progressive JPEGs but permits sequential JPEGs, while S1 permits only sequential lower-quality decoding and rejects other cases. No entry point, argument, configuration action, or call protocol is added."}],"gap_before":{"exists":true,"type":"work-buffer-length controllability gap","evidence":["In S0, decoder.do_decode_frame has distinct behavior for a work buffer shorter than components_workbuf_offsets[8].","H0 always allocates workbuf_len(dec).max_incl and passes that full allocation to decode_frame; it does not vary or truncate the supplied work buffer.","Therefore H0 does not exercise S0's existing short-work-buffer behavior."]},"gap_after":{"exists":true,"type":"work-buffer-length controllability gap","evidence":["In S1, decoder.do_decode_frame still has behavior conditional on the existing work buffer being shorter than components_workbuf_offsets[8], now also conditional on use_lower_quality.","H0 remains unchanged and always supplies workbuf_len(dec).max_incl, so it does not control the short-buffer condition in S1.","The same caller-facing decode_frame entry and workbuf argument are used on both sides."]},"new_harness_obligation":{"exists":false,"description":"S1 changes validation and behavior inside the existing decode_frame path but introduces no new entry, argument, buffer, call-order transition, configuration action, compile-time enablement, or input construction. Exercising the affected path still requires varying the already-existing workbuf length, which H0 already omitted in S0.","evidence":["args.workbuf and the components_workbuf_offsets[8] threshold exist in both S0 and S1.","The changed conditions only redistribute outcomes among existing short-buffer and use_lower_quality states.","H0's decode_frame invocation and full-sized work-buffer construction are equally unchanged and insufficient on both sides."]},"explicit_failure":false,"delta_attribution":"UNCHANGED","maintenance_needed":false,"confidence":96,"reason":"The commit alters internal semantics for an existing caller-supplied work buffer, but H0 lacked short-buffer controllability before and after. S1 adds no distinct harness action or reachability requirement absent in S0, so the same-scope material gap is UNCHANGED and the fixed rule yields maintenance_needed=false."}
+tokens used
+19,354

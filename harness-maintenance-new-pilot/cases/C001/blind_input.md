@@ -1,0 +1,545 @@
+# Case ID
+
+C001
+
+## Existing Fuzz Harness H0
+
+### `test/ares-fuzz.c`
+
+~~~~c
+/* MIT License
+ *
+ * Copyright (c) The c-ares project and its contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+/*
+ * General driver to allow command-line fuzzer (i.e. afl) to
+ * exercise the libFuzzer entrypoint.
+ */
+#include <stdio.h>
+
+#include <sys/types.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef WIN32
+#  include <io.h>
+#else
+#  include <unistd.h>
+#endif
+
+#include "ares.h"
+
+#define kMaxAflInputSize (1 << 20)
+static unsigned char afl_buffer[kMaxAflInputSize];
+
+#ifdef __AFL_LOOP
+/* If we are built with afl-clang-fast, use persistent mode */
+#  define KEEP_FUZZING(count) __AFL_LOOP(1000)
+#else
+/* If we are built with afl-clang, execute each input once */
+#  define KEEP_FUZZING(count) ((count) < 1)
+#endif
+
+/* In ares-test-fuzz.c and ares-test-fuzz-name.c: */
+int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size);
+
+static void ProcessFile(int fd)
+{
+  ares_ssize_t count = read(fd, afl_buffer, kMaxAflInputSize);
+  /*
+   * Make a copy of the data so that it's not part of a larger
+   * buffer (where buffer overflows would go unnoticed).
+   */
+  if (count > 0) {
+    unsigned char *copied_data = (unsigned char *)malloc((size_t)count);
+    memcpy(copied_data, afl_buffer, (size_t)count);
+    LLVMFuzzerTestOneInput(copied_data, (size_t)count);
+    free(copied_data);
+  }
+}
+
+int main(int argc, char *argv[])
+{
+  if (argc == 1) {
+    int count = 0;
+    while (KEEP_FUZZING(count)) {
+#ifndef STDIN_FILENO
+      ProcessFile(fileno(stdin));
+#else
+      ProcessFile(STDIN_FILENO);
+#endif
+      count++;
+    }
+  } else {
+    int ii;
+    for (ii = 1; ii < argc; ++ii) {
+      int fd = open(argv[ii], O_RDONLY);
+      if (fd < 0) {
+        fprintf(stderr, "Failed to open '%s'\n", argv[ii]);
+        continue;
+      }
+      ProcessFile(fd);
+      close(fd);
+    }
+  }
+  return 0;
+}
+~~~~
+
+## Production Source Change (S0 -> S1)
+
+Harness changes, commit messages, tests, outcomes, and future evidence are excluded. The source diff is complete.
+
+~~~~diff
+diff --git a/src/lib/ares_ipv6.h b/src/lib/ares_ipv6.h
+index 5da341b..d2007cc 100644
+--- a/src/lib/ares_ipv6.h
++++ b/src/lib/ares_ipv6.h
+@@ -90,6 +90,16 @@ struct addrinfo {
+ #  define NS_INT16SZ 2
+ #endif
+ 
++/* Windows XP Compatibility with later MSVC/Mingw versions */
++#if defined(_WIN32)
++#  if !defined(IF_MAX_STRING_SIZE)
++#    define IF_MAX_STRING_SIZE 256 /* =256 in <ifdef.h> */
++#  endif
++#  if !defined(NDIS_IF_MAX_STRING_SIZE)
++#    define NDIS_IF_MAX_STRING_SIZE IF_MAX_STRING_SIZE   /* =256 in <ifdef.h> */
++#  endif
++#endif
++
+ #ifndef IF_NAMESIZE
+ #  ifdef IFNAMSIZ
+ #    define IF_NAMESIZE IFNAMSIZ
+diff --git a/src/lib/ares_sysconfig_win.c b/src/lib/ares_sysconfig_win.c
+index f6e07f9..01109a8 100644
+--- a/src/lib/ares_sysconfig_win.c
++++ b/src/lib/ares_sysconfig_win.c
+@@ -176,6 +176,7 @@ static int compareAddresses(const void *arg1, const void *arg2)
+   return 0;
+ }
+ 
++#if defined(HAVE_GETBESTROUTE2) && !defined(__WATCOMC__)
+ /* There can be multiple routes to "the Internet".  And there can be different
+  * DNS servers associated with each of the interfaces that offer those routes.
+  * We have to assume that any DNS server can serve any request.  But, some DNS
+@@ -213,18 +214,6 @@ static ULONG getBestRouteMetric(IF_LUID * const luid, /* Can't be const :( */
+                                 const SOCKADDR_INET * const dest,
+                                 const ULONG                 interfaceMetric)
+ {
+-  /* On this interface, get the best route to that destination. */
+-#  if defined(__WATCOMC__)
+-  /* OpenWatcom's builtin Windows SDK does not have a definition for
+-   * MIB_IPFORWARD_ROW2, and also does not allow the usage of SOCKADDR_INET
+-   * as a variable. Let's work around this by returning the worst possible
+-   * metric, but only when using the OpenWatcom compiler.
+-   * It may be worth investigating using a different version of the Windows
+-   * SDK with OpenWatcom in the future, though this may be fixed in OpenWatcom
+-   * 2.0.
+-   */
+-  return (ULONG)-1;
+-#  else
+   MIB_IPFORWARD_ROW2 row;
+   SOCKADDR_INET      ignored;
+   if (GetBestRoute2(/* The interface to use.  The index is ignored since we are
+@@ -257,8 +246,8 @@ static ULONG getBestRouteMetric(IF_LUID * const luid, /* Can't be const :( */
+    * which describes the combination as a "sum".
+    */
+   return row.Metric + interfaceMetric;
+-#  endif /* __WATCOMC__ */
+ }
++#endif
+ 
+ /*
+  * get_DNS_Windows()
+@@ -379,9 +368,21 @@ static ares_bool_t get_DNS_Windows(char **outptr)
+           addressesSize = newSize;
+         }
+ 
++#  if defined(HAVE_GETBESTROUTE2) && !defined(__WATCOMC__)
++        /* OpenWatcom's builtin Windows SDK does not have a definition for
++         * MIB_IPFORWARD_ROW2, and also does not allow the usage of SOCKADDR_INET
++         * as a variable. Let's work around this by returning the worst possible
++         * metric, but only when using the OpenWatcom compiler.
++         * It may be worth investigating using a different version of the Windows
++         * SDK with OpenWatcom in the future, though this may be fixed in OpenWatcom
++         * 2.0.
++         */
+         addresses[addressesIndex].metric = getBestRouteMetric(
+           &ipaaEntry->Luid, (SOCKADDR_INET *)((void *)(namesrvr.sa)),
+           ipaaEntry->Ipv4Metric);
++#  else
++        addresses[addressesIndex].metric = (ULONG)-1;
++#  endif
+ 
+         /* Record insertion index to make qsort stable */
+         addresses[addressesIndex].orig_idx = addressesIndex;
+@@ -423,9 +424,13 @@ static ares_bool_t get_DNS_Windows(char **outptr)
+           ll_scope = ipaaEntry->Ipv6IfIndex;
+         }
+ 
++#  if defined(HAVE_GETBESTROUTE2) && !defined(__WATCOMC__)
+         addresses[addressesIndex].metric = getBestRouteMetric(
+           &ipaaEntry->Luid, (SOCKADDR_INET *)((void *)(namesrvr.sa)),
+           ipaaEntry->Ipv6Metric);
++#  else
++        addresses[addressesIndex].metric = (ULONG)-1;
++#  endif
+ 
+         /* Record insertion index to make qsort stable */
+         addresses[addressesIndex].orig_idx = addressesIndex;
+diff --git a/src/lib/config-win32.h b/src/lib/config-win32.h
+index be233a2..fc533c7 100644
+--- a/src/lib/config-win32.h
++++ b/src/lib/config-win32.h
+@@ -237,8 +237,10 @@
+ #  undef HAVE_NETIOAPI_H
+ #endif
+ 
+-/* Threading support enabled */
+-#define CARES_THREADS 1
++/* Threading support enabled for Vista+ */
++#if !defined(_WIN32_WINNT) || _WIN32_WINNT >= 0x0600
++#  define CARES_THREADS 1
++#endif
+ 
+ /* ---------------------------------------------------------------- */
+ /*                       TYPEDEF REPLACEMENTS                       */
+@@ -370,6 +372,8 @@
+ #  define HAVE_CONVERTINTERFACELUIDTONAMEA 1
+ /* Define to 1 if you have the `NotifyIpInterfaceChange' function. */
+ #  define HAVE_NOTIFYIPINTERFACECHANGE 1
++/* Define to 1 if you have the `GetBestRoute2` function */
++#  define HAVE_GETBESTROUTE2 1
+ #endif
+ 
+ /* ---------------------------------------------------------------- */
+diff --git a/src/lib/event/ares_event.h b/src/lib/event/ares_event.h
+index 36cd10d..bf298df 100644
+--- a/src/lib/event/ares_event.h
++++ b/src/lib/event/ares_event.h
+@@ -159,30 +159,33 @@ ares_status_t ares_event_update(ares_event_t **event, ares_event_thread_t *e,
+                                 ares_event_signal_cb_t signal_cb);
+ 
+ 
+-#ifdef HAVE_PIPE
++#ifdef CARES_THREADS
++#  ifdef HAVE_PIPE
+ ares_event_t *ares_pipeevent_create(ares_event_thread_t *e);
+-#endif
++#  endif
+ 
+-#ifdef HAVE_POLL
++#  ifdef HAVE_POLL
+ extern const ares_event_sys_t ares_evsys_poll;
+-#endif
++#  endif
+ 
+-#ifdef HAVE_KQUEUE
++#  ifdef HAVE_KQUEUE
+ extern const ares_event_sys_t ares_evsys_kqueue;
+-#endif
++#  endif
+ 
+-#ifdef HAVE_EPOLL
++#  ifdef HAVE_EPOLL
+ extern const ares_event_sys_t ares_evsys_epoll;
+-#endif
++#  endif
+ 
+-#ifdef _WIN32
++#  ifdef _WIN32
+ extern const ares_event_sys_t ares_evsys_win32;
+-#endif
++#  endif
+ 
+ /* All systems have select(), but not all have a way to wake, so we require
+  * pipe() to wake the select() */
+-#ifdef HAVE_PIPE
++#  ifdef HAVE_PIPE
+ extern const ares_event_sys_t ares_evsys_select;
++#  endif
++
+ #endif
+ 
+ #endif
+diff --git a/src/lib/event/ares_event_configchg.c b/src/lib/event/ares_event_configchg.c
+index 5ecc688..4dd6df8 100644
+--- a/src/lib/event/ares_event_configchg.c
++++ b/src/lib/event/ares_event_configchg.c
+@@ -26,7 +26,7 @@
+ #include "ares_private.h"
+ #include "ares_event.h"
+ 
+-#ifdef __ANDROID__
++#if defined(__ANDROID__) && defined(CARES_THREADS)
+ 
+ ares_status_t ares_event_configchg_init(ares_event_configchg_t **configchg,
+                                         ares_event_thread_t     *e)
+@@ -43,7 +43,7 @@ void ares_event_configchg_destroy(ares_event_configchg_t *configchg)
+   (void)configchg;
+ }
+ 
+-#elif defined(__linux__)
++#elif defined(__linux__) && defined(CARES_THREADS)
+ 
+ #  include <sys/inotify.h>
+ 
+@@ -174,7 +174,7 @@ done:
+   return status;
+ }
+ 
+-#elif defined(USE_WINSOCK)
++#elif defined(USE_WINSOCK) && defined(CARES_THREADS)
+ 
+ #  include <winsock2.h>
+ #  include <iphlpapi.h>
+@@ -379,7 +379,7 @@ done:
+   return status;
+ }
+ 
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) && defined(CARES_THREADS)
+ 
+ #  include <sys/types.h>
+ #  include <unistd.h>
+@@ -531,7 +531,7 @@ done:
+   return status;
+ }
+ 
+-#elif defined(HAVE_STAT) && !defined(_WIN32)
++#elif defined(HAVE_STAT) && !defined(_WIN32) && defined(CARES_THREADS)
+ #  ifdef HAVE_SYS_TYPES_H
+ #    include <sys/types.h>
+ #  endif
+@@ -722,6 +722,8 @@ void ares_event_configchg_destroy(ares_event_configchg_t *configchg)
+ ares_status_t ares_event_configchg_init(ares_event_configchg_t **configchg,
+                                         ares_event_thread_t     *e)
+ {
++  (void)configchg;
++  (void)e;
+   /* No ability */
+   return ARES_ENOTIMP;
+ }
+@@ -729,6 +731,7 @@ ares_status_t ares_event_configchg_init(ares_event_configchg_t **configchg,
+ void ares_event_configchg_destroy(ares_event_configchg_t *configchg)
+ {
+   /* No-op */
++  (void)configchg;
+ }
+ 
+ #endif
+diff --git a/src/lib/event/ares_event_epoll.c b/src/lib/event/ares_event_epoll.c
+index 538c38b..d451c86 100644
+--- a/src/lib/event/ares_event_epoll.c
++++ b/src/lib/event/ares_event_epoll.c
+@@ -26,6 +26,8 @@
+ #include "ares_private.h"
+ #include "ares_event.h"
+ 
++#if defined(HAVE_EPOLL) && defined(CARES_THREADS)
++
+ #ifdef HAVE_SYS_EPOLL_H
+ #  include <sys/epoll.h>
+ #endif
+@@ -33,8 +35,6 @@
+ #  include <fcntl.h>
+ #endif
+ 
+-#ifdef HAVE_EPOLL
+-
+ typedef struct {
+   int epoll_fd;
+ } ares_evsys_epoll_t;
+diff --git a/src/lib/event/ares_event_kqueue.c b/src/lib/event/ares_event_kqueue.c
+index dbbd0db..00cdcbe 100644
+--- a/src/lib/event/ares_event_kqueue.c
++++ b/src/lib/event/ares_event_kqueue.c
+@@ -26,6 +26,8 @@
+ #include "ares_private.h"
+ #include "ares_event.h"
+ 
++#if defined(HAVE_KQUEUE) && defined(CARES_THREADS)
++
+ #ifdef HAVE_SYS_TYPES_H
+ #  include <sys/types.h>
+ #endif
+@@ -39,8 +41,6 @@
+ #  include <fcntl.h>
+ #endif
+ 
+-#ifdef HAVE_KQUEUE
+-
+ typedef struct {
+   int            kqueue_fd;
+   struct kevent *changelist;
+diff --git a/src/lib/event/ares_event_poll.c b/src/lib/event/ares_event_poll.c
+index c6ab4b6..28e3c09 100644
+--- a/src/lib/event/ares_event_poll.c
++++ b/src/lib/event/ares_event_poll.c
+@@ -25,12 +25,13 @@
+  */
+ #include "ares_private.h"
+ #include "ares_event.h"
++
++#if defined(HAVE_POLL) && defined(CARES_THREADS)
++
+ #ifdef HAVE_POLL_H
+ #  include <poll.h>
+ #endif
+ 
+-#if defined(HAVE_POLL)
+-
+ static ares_bool_t ares_evsys_poll_init(ares_event_thread_t *e)
+ {
+   e->ev_signal = ares_pipeevent_create(e);
+diff --git a/src/lib/event/ares_event_select.c b/src/lib/event/ares_event_select.c
+index 4d7c085..df758b5 100644
+--- a/src/lib/event/ares_event_select.c
++++ b/src/lib/event/ares_event_select.c
+@@ -31,13 +31,14 @@
+ 
+ #include "ares_private.h"
+ #include "ares_event.h"
+-#ifdef HAVE_SYS_SELECT_H
+-#  include <sys/select.h>
+-#endif
+ 
+ /* All systems have select(), but not all have a way to wake, so we require
+  * pipe() to wake the select() */
+-#if defined(HAVE_PIPE)
++#if defined(HAVE_PIPE) && defined(CARES_THREADS)
++
++#ifdef HAVE_SYS_SELECT_H
++#  include <sys/select.h>
++#endif
+ 
+ static ares_bool_t ares_evsys_select_init(ares_event_thread_t *e)
+ {
+diff --git a/src/lib/event/ares_event_thread.c b/src/lib/event/ares_event_thread.c
+index d59b788..c77514e 100644
+--- a/src/lib/event/ares_event_thread.c
++++ b/src/lib/event/ares_event_thread.c
+@@ -26,6 +26,7 @@
+ #include "ares_private.h"
+ #include "ares_event.h"
+ 
++#ifdef CARES_THREADS
+ static void ares_event_destroy_cb(void *arg)
+ {
+   ares_event_t *event = arg;
+@@ -549,3 +550,18 @@ ares_status_t ares_event_thread_init(ares_channel_t *channel)
+ 
+   return ARES_SUCCESS;
+ }
++
++#else
++
++ares_status_t ares_event_thread_init(ares_channel_t *channel)
++{
++  (void)channel;
++  return ARES_ENOTIMP;
++}
++
++void ares_event_thread_destroy(ares_channel_t *channel)
++{
++  (void)channel;
++}
++
++#endif
+diff --git a/src/lib/event/ares_event_wake_pipe.c b/src/lib/event/ares_event_wake_pipe.c
+index d3b166a..cd1534b 100644
+--- a/src/lib/event/ares_event_wake_pipe.c
++++ b/src/lib/event/ares_event_wake_pipe.c
+@@ -25,14 +25,16 @@
+  */
+ #include "ares_private.h"
+ #include "ares_event.h"
+-#ifdef HAVE_UNISTD_H
+-#  include <unistd.h>
+-#endif
+-#ifdef HAVE_FCNTL_H
+-#  include <fcntl.h>
+-#endif
+ 
+-#ifdef HAVE_PIPE
++#if defined(HAVE_PIPE) && defined(CARES_THREADS)
++
++#  ifdef HAVE_UNISTD_H
++#    include <unistd.h>
++#  endif
++#  ifdef HAVE_FCNTL_H
++#    include <fcntl.h>
++#  endif
++
+ typedef struct {
+   int filedes[2];
+ } ares_pipeevent_t;
+diff --git a/src/lib/event/ares_event_win32.c b/src/lib/event/ares_event_win32.c
+index 7a25f12..d7d1d65 100644
+--- a/src/lib/event/ares_event_win32.c
++++ b/src/lib/event/ares_event_win32.c
+@@ -37,12 +37,14 @@
+ #include "ares_private.h"
+ #include "ares_event.h"
+ #include "ares_event_win32.h"
++
++
++#if defined(USE_WINSOCK) && defined(CARES_THREADS)
++
+ #ifdef HAVE_LIMITS_H
+ #  include <limits.h>
+ #endif
+ 
+-#if defined(USE_WINSOCK)
+-
+ /* IMPLEMENTATION NOTES
+  * ====================
+  *
+diff --git a/src/lib/util/ares_iface_ips.c b/src/lib/util/ares_iface_ips.c
+index 46cb291..c5f507f 100644
+--- a/src/lib/util/ares_iface_ips.c
++++ b/src/lib/util/ares_iface_ips.c
+@@ -431,8 +431,14 @@ static ares_status_t ares_iface_ips_enumerate(ares_iface_ips_t *ips,
+       }
+ 
+       status = ares_iface_ips_add(ips, addrflag, ifname, &addr,
++#if _WIN32_WINNT >= 0x0600
+                                   ipaddr->OnLinkPrefixLength /* netmask */,
+-                                  address->Ipv6IfIndex /* ll_scope */);
++#else
++                                  ipaddr->Address.lpSockaddr->sa_family
++                                    == AF_INET?32:128,
++#endif
++                                  address->Ipv6IfIndex /* ll_scope */
++                                  );
+ 
+       if (status != ARES_SUCCESS) {
+         goto done;
+~~~~
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.

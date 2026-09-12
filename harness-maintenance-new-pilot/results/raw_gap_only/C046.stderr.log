@@ -1,0 +1,166 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/maintenance-gap_only-C046-95cq2dzw
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0863d-97e8-75e3-bc5e-a075d463def5
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C046
+
+## Existing Fuzz Harness H0
+
+### `test/ares-test-fuzz-name.c`
+
+~~~~c
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "ares_setup.h"
+#include "ares.h"
+// Include ares internal file for DNS protocol constants
+#include "ares_nameser.h"
+
+// Entrypoint for Clang's libfuzzer, exercising query creation.
+int LLVMFuzzerTestOneInput(const unsigned char *data,
+                           unsigned long size) {
+  // Null terminate the data.
+  char *name = malloc(size + 1);
+  name[size] = '\0';
+  memcpy(name, data, size);
+
+  unsigned char *buf = NULL;
+  int buflen = 0;
+  ares_create_query(name, ns_c_in, T_AAAA, 1234, 0, &buf, &buflen, 1024);
+  free(buf);
+  free(name);
+  return 0;
+}
+~~~~
+
+## Production Source Change (S0 -> S1)
+
+Harness changes, commit messages, tests, outcomes, and future evidence are excluded. The source diff is complete.
+
+~~~~diff
+diff --git a/src/lib/ares_create_query.c b/src/lib/ares_create_query.c
+index 71f5555..e3d874b 100644
+--- a/src/lib/ares_create_query.c
++++ b/src/lib/ares_create_query.c
+@@ -48,7 +48,7 @@
+  * of the remaining fields:
+  *      ID      Identifier to match responses with queries
+  *      QR      Query (0) or response (1)
+- *      Opcode  For our purposes, always QUERY
++ *      Opcode  For our purposes, always O_QUERY
+  *      RD      Recursion desired
+  *      Z       Reserved (zero)
+  *      QDCOUNT Number of queries
+@@ -107,7 +107,7 @@ int ares_create_query(const char *name, int dnsclass, int type,
+   q = buf;
+   memset(q, 0, HFIXEDSZ);
+   DNS_HEADER_SET_QID(q, id);
+-  DNS_HEADER_SET_OPCODE(q, QUERY);
++  DNS_HEADER_SET_OPCODE(q, O_QUERY);
+   if (rd) {
+     DNS_HEADER_SET_RD(q, 1);
+   }
+diff --git a/src/lib/ares_nameser.h b/src/lib/ares_nameser.h
+index fb4f0fe..5270e5a 100644
+--- a/src/lib/ares_nameser.h
++++ b/src/lib/ares_nameser.h
+@@ -219,11 +219,26 @@ typedef enum __ns_rcode {
+ #  define NAMESERVER_PORT  NS_DEFAULTPORT
+ #endif
+ 
+-#ifndef QUERY
+-#  define QUERY           ns_o_query
++
++/* opcodes */
++#ifndef O_QUERY
++#  define O_QUERY 0  /* ns_o_query */
++#endif
++#ifndef O_IQUERY
++#  define O_IQUERY 1 /* ns_o_iquery */
++#endif
++#ifndef O_STATUS
++#  define O_STATUS 2 /* ns_o_status */
++#endif
++#ifndef O_NOTIFY
++#  define O_NOTIFY 4 /* ns_o_notify */
++#endif
++#ifndef O_UPDATE
++#  define O_UPDATE 5 /* ns_o_update */
+ #endif
+ 
+ 
++/* response codes */
+ #ifndef SERVFAIL
+ #  define SERVFAIL        ns_r_servfail
+ #endif
+@@ -271,22 +286,26 @@ typedef enum __ns_rcode {
+ #  define TSIG_BADTIME    18 /* ns_r_badtime */
+ #endif
+ 
++
++/* classes */
+ #ifndef C_IN
+-#  define C_IN            ns_c_in
++#  define C_IN            1 /* ns_c_in */
+ #endif
+ #ifndef C_CHAOS
+-#  define C_CHAOS         ns_c_chaos
++#  define C_CHAOS         3 /* ns_c_chaos */
+ #endif
+ #ifndef C_HS
+-#  define C_HS            ns_c_hs
++#  define C_HS            4 /* ns_c_hs */
+ #endif
+ #ifndef C_NONE
+-#  define C_NONE          ns_c_none
++#  define C_NONE          254 /* ns_c_none */
+ #endif
+ #ifndef C_ANY
+-#  define C_ANY           ns_c_any
++#  define C_ANY           255 /*  ns_c_any */
+ #endif
+ 
++
++/* types */
+ #ifndef T_A
+ #  define T_A             1   /* ns_t_a */
+ #endif
+~~~~
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C046","gap_exists":false,"gap_type":[],"confidence":98,"affected_functions":["ares_create_query"],"reason":"H0 directly exercises the only changed production function, ares_create_query. The change preserves its fixed DNS query opcode semantics by replacing QUERY with O_QUERY, whose visible definition is 0; it adds no input-dependent branch, protocol state, configuration, or entry point. Although H0 fixes dnsclass to ns_c_in and type to T_AAAA, the shown C_IN and opcode edits are compile-time constant definitions and do not expose a materially distinct fuzz surface in S1.","evidence":["H0 invokes ares_create_query(name, ns_c_in, T_AAAA, 1234, 0, &buf, &buflen, 1024) with fuzzed name bytes.","ares_create_query changes only DNS_HEADER_SET_OPCODE(q, QUERY) to DNS_HEADER_SET_OPCODE(q, O_QUERY).","ares_nameser.h defines O_QUERY as 0 with the comment ns_o_query, matching the prior QUERY definition as ns_o_query.","The added O_IQUERY, O_STATUS, O_NOTIFY, and O_UPDATE identifiers are not accepted as parameters or selected by any changed runtime logic in ares_create_query.","The C_IN, C_CHAOS, C_HS, C_NONE, and C_ANY edits replace enum aliases with their documented numeric constants without adding an API or behavioral branch."],"recommended_action":"Retain H0 for this change; no additional fuzz target or input dimension is materially justified by the supplied S1 source."}
+tokens used
+15,656

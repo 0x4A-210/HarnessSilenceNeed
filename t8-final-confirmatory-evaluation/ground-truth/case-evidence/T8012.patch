@@ -1,0 +1,436 @@
+PROJECT libarchive
+COMMIT 9890b31ffd24646469461978c2ea2cbce07f9d51
+PARENT ed4245cb9927b24413b1b96016e6e7635b31ac13
+SUBJECT Rename archive_read_finish to archive_read_free and archive_write_finish to archive_write_free.  Update all clients, tests, and documentation to use the new names exclusively.  (Though I've not yet run a global search-and-replace against the Wiki.  I'll do that shortly.)
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/contrib/shar/shar.c b/contrib/shar/shar.c
+index 12c84255..6d5c206e 100644
+--- a/contrib/shar/shar.c
++++ b/contrib/shar/shar.c
+@@ -269,7 +269,7 @@ shar_write(char **fn, size_t nfn)
+ 		}
+ 	}
+ 
+-	if (archive_write_finish(a) != ARCHIVE_OK)
++	if (archive_write_free(a) != ARCHIVE_OK)
+ 		errx(EXIT_FAILURE, "%s", archive_error_string(a));
+ 
+ 	if (error != 0)
+diff --git a/cpio/cpio.c b/cpio/cpio.c
+index cab7f01d..616b2ea1 100644
+--- a/cpio/cpio.c
++++ b/cpio/cpio.c
+@@ -545,7 +545,7 @@ mode_out(struct cpio *cpio)
+ 		fprintf(stderr, "%lu %s\n", (unsigned long)blocks,
+ 		    blocks == 1 ? "block" : "blocks");
+ 	}
+-	archive_write_finish(cpio->archive);
++	archive_write_free(cpio->archive);
+ }
+ 
+ /*
+@@ -881,8 +881,8 @@ mode_in(struct cpio *cpio)
+ 		fprintf(stderr, "%lu %s\n", (unsigned long)blocks,
+ 		    blocks == 1 ? "block" : "blocks");
+ 	}
+-	archive_read_finish(a);
+-	archive_write_finish(ext);
++	archive_read_free(a);
++	archive_write_free(ext);
+ 	exit(cpio->return_value);
+ }
+ 
+@@ -956,7 +956,7 @@ mode_list(struct cpio *cpio)
+ 		fprintf(stderr, "%lu %s\n", (unsigned long)blocks,
+ 		    blocks == 1 ? "block" : "blocks");
+ 	}
+-	archive_read_finish(a);
++	archive_read_free(a);
+ 	exit(0);
+ }
+ 
+@@ -1092,7 +1092,7 @@ mode_pass(struct cpio *cpio, const char *destdir)
+ 		    blocks == 1 ? "block" : "blocks");
+ 	}
+ 
+-	archive_write_finish(cpio->archive);
++	archive_write_free(cpio->archive);
+ }
+ 
+ /*
+diff --git a/libarchive/archive.h b/libarchive/archive.h
+index 8ff934a2..e2c8b8c1 100644
+--- a/libarchive/archive.h
++++ b/libarchive/archive.h
+@@ -482,8 +482,12 @@ __LA_DECL void		archive_read_extract_set_skip_file(struct archive *,
+ /* Close the file and release most resources. */
+ __LA_DECL int		 archive_read_close(struct archive *);
+ /* Release all resources and destroy the object. */
+-/* Note that archive_read_finish will call archive_read_close for you. */
++/* Note that archive_read_free will call archive_read_close for you. */
++__LA_DECL int		 archive_read_free(struct archive *);
++#if ARCHIVE_VERSION_NUMBER < 4000000
++/* Synonym for archive_read_free() for backwards compatibility. */
+ __LA_DECL int		 archive_read_finish(struct archive *);
++#endif
+ 
+ /*-
+  * To create an archive:
+@@ -498,7 +502,7 @@ __LA_DECL int		 archive_read_finish(struct archive *);
+  *      - archive_write_header to write the header
+  *      - archive_write_data to write the entry data
+  *   5) archive_write_close to close the output
+- *   6) archive_write_finish to cleanup the writer and release resources
++ *   6) archive_write_free to cleanup the writer and release resources
+  */
+ __LA_DECL struct archive	*archive_write_new(void);
+ __LA_DECL int		 archive_write_set_bytes_per_block(struct archive *,
+@@ -573,10 +577,13 @@ __LA_DECL __LA_SSIZE_T	 archive_write_data_block(struct archive *,
+ #endif
+ __LA_DECL int		 archive_write_finish_entry(struct archive *);
+ __LA_DECL int		 archive_write_close(struct archive *);
+-/* Libarchive 2.x and later returns an error if this fails. */
+-/* It can fail if the archive wasn't already closed, in which case
+- * archive_write_finish() will implicitly call archive_write_close(). */
++/* This can fail if the archive wasn't already closed, in which case
++ * archive_write_free() will implicitly call archive_write_close(). */
++__LA_DECL int		 archive_write_free(struct archive *);
++#if ARCHIVE_VERSION_NUMBER < 4000000
++/* Synonym for archive_write_free() for backwards compatibility. */
+ __LA_DECL int		 archive_write_finish(struct archive *);
++#endif
+ 
+ /*
+  * Set write options.
+@@ -603,7 +610,7 @@ __LA_DECL int		archive_write_set_options(struct archive *_a,
+  *      - construct an appropriate struct archive_entry structure
+  *      - archive_write_header to create the file/dir/etc on disk
+  *      - archive_write_data to write the entry data
+- *   4) archive_write_finish to cleanup the writer and release resources
++ *   4) archive_write_free to cleanup the writer and release resources
+  *
+  * In particular, you can use this in conjunction with archive_read()
+  * to pull entries out of an archive and create them on disk.
+diff --git a/libarchive/archive_private.h b/libarchive/archive_private.h
+index 63384b82..fba3d62a 100644
+--- a/libarchive/archive_private.h
++++ b/libarchive/archive_private.h
+@@ -58,7 +58,7 @@
+ 
+ struct archive_vtable {
+ 	int	(*archive_close)(struct archive *);
+-	int	(*archive_finish)(struct archive *);
++	int	(*archive_free)(struct archive *);
+ 	int	(*archive_write_header)(struct archive *,
+ 	    struct archive_entry *);
+ 	int	(*archive_write_finish_entry)(struct archive *);
+diff --git a/libarchive/archive_read.c b/libarchive/archive_read.c
+index abb419ee..9ed61efb 100644
+--- a/libarchive/archive_read.c
++++ b/libarchive/archive_read.c
+@@ -60,7 +60,7 @@ static int	choose_format(struct archive_read *);
+ static int	cleanup_filters(struct archive_read *);
+ static struct archive_vtable *archive_read_vtable(void);
+ static int	_archive_read_close(struct archive *);
+-static int	_archive_read_finish(struct archive *);
++static int	_archive_read_free(struct archive *);
+ 
+ static struct archive_vtable *
+ archive_read_vtable(void)
+@@ -69,7 +69,7 @@ archive_read_vtable(void)
+ 	static int inited = 0;
+ 
+ 	if (!inited) {
+-		av.archive_finish = _archive_read_finish;
++		av.archive_free = _archive_read_free;
+ 		av.archive_close = _archive_read_close;
+ 	}
+ 	return (&av);
+@@ -779,7 +779,7 @@ cleanup_filters(struct archive_read *a)
+  * Release memory and other resources.
+  */
+ static int
+-_archive_read_finish(struct archive *_a)
++_archive_read_free(struct archive *_a)
+ {
+ 	struct archive_read *a = (struct archive_read *)_a;
+ 	int i;
+@@ -787,7 +787,7 @@ _archive_read_finish(struct archive *_a)
+ 	int r = ARCHIVE_OK;
+ 
+ 	__archive_check_magic(_a, ARCHIVE_READ_MAGIC, ARCHIVE_STATE_ANY,
+-	    "archive_read_finish");
++	    "archive_read_free");
+ 	if (a->archive.state != ARCHIVE_STATE_CLOSED)
+ 		r = archive_read_close(&a->archive);
+ 
+diff --git a/libarchive/archive_read_disk.c b/libarchive/archive_read_disk.c
+index 8fad7f13..dc43e179 100644
+--- a/libarchive/archive_read_disk.c
++++ b/libarchive/archive_read_disk.c
+@@ -33,7 +33,7 @@ __FBSDID("$FreeBSD: head/lib/libarchive/archive_read_disk.c 189429 2009-03-06 04
+ #include "archive_private.h"
+ #include "archive_read_disk_private.h"
+ 
+-static int	_archive_read_finish(struct archive *);
++static int	_archive_read_free(struct archive *);
+ static int	_archive_read_close(struct archive *);
+ static const char *trivial_lookup_gname(void *, gid_t gid);
+ static const char *trivial_lookup_uname(void *, uid_t uid);
+@@ -45,7 +45,7 @@ archive_read_disk_vtable(void)
+ 	static int inited = 0;
+ 
+ 	if (!inited) {
+-		av.archive_finish = _archive_read_finish;
++		av.archive_free = _archive_read_free;
+ 		av.archive_close = _archive_read_close;
+ 	}
+ 	return (&av);
+@@ -129,7 +129,7 @@ archive_read_disk_new(void)
+ }
+ 
+ static int
+-_archive_read_finish(struct archive *_a)
++_archive_read_free(struct archive *_a)
+ {
+ 	struct archive_read_disk *a = (struct archive_read_disk *)_a;
+ 
+diff --git a/libarchive/archive_read_extract.c b/libarchive/archive_read_extract.c
+index c2f40c54..b698916f 100644
+--- a/libarchive/archive_read_extract.c
++++ b/libarchive/archive_read_extract.c
+@@ -172,7 +172,7 @@ archive_read_extract_cleanup(struct archive_read *a)
+ {
+ 	int ret = ARCHIVE_OK;
+ 
+-	ret = archive_write_finish(a->extract->ad);
++	ret = archive_write_free(a->extract->ad);
+ 	free(a->extract);
+ 	a->extract = NULL;
+ 	return (ret);
+diff --git a/libarchive/archive_virtual.c b/libarchive/archive_virtual.c
+index 0bd2d5bc..83688627 100644
+--- a/libarchive/archive_virtual.c
++++ b/libarchive/archive_virtual.c
+@@ -42,17 +42,35 @@ archive_read_close(struct archive *a)
+ 	return ((a->vtable->archive_close)(a));
+ }
+ 
++int
++archive_write_free(struct archive *a)
++{
++	return ((a->vtable->archive_free)(a));
++}
++
++#if ARCHIVE_VERSION_NUMBER < 4000000
++/* For backwards compatibility; will be removed with libarchive 4.0. */
+ int
+ archive_write_finish(struct archive *a)
+ {
+-	return ((a->vtable->archive_finish)(a));
++	return ((a->vtable->archive_free)(a));
++}
++#endif
++
++int
++archive_read_free(struct archive *a)
++{
++	return ((a->vtable->archive_free)(a));
+ }
+ 
++#if ARCHIVE_VERSION_NUMBER < 4000000
++/* For backwards compatibility; will be removed with libarchive 4.0. */
+ int
+ archive_read_finish(struct archive *a)
+ {
+-	return ((a->vtable->archive_finish)(a));
++	return ((a->vtable->archive_free)(a));
+ }
++#endif
+ 
+ int
+ archive_write_header(struct archive *a, struct archive_entry *entry)
+diff --git a/libarchive/archive_write.c b/libarchive/archive_write.c
+index e0d942b0..eba72272 100644
+--- a/libarchive/archive_write.c
++++ b/libarchive/archive_write.c
+@@ -60,7 +60,7 @@ __FBSDID("$FreeBSD: head/lib/libarchive/archive_write.c 201099 2009-12-28 03:03:
+ static struct archive_vtable *archive_write_vtable(void);
+ 
+ static int	_archive_write_close(struct archive *);
+-static int	_archive_write_finish(struct archive *);
++static int	_archive_write_free(struct archive *);
+ static int	_archive_write_header(struct archive *, struct archive_entry *);
+ static int	_archive_write_finish_entry(struct archive *);
+ static ssize_t	_archive_write_data(struct archive *, const void *, size_t);
+@@ -73,7 +73,7 @@ archive_write_vtable(void)
+ 
+ 	if (!inited) {
+ 		av.archive_close = _archive_write_close;
+-		av.archive_finish = _archive_write_finish;
++		av.archive_free = _archive_write_free;
+ 		av.archive_write_header = _archive_write_header;
+ 		av.archive_write_finish_entry = _archive_write_finish_entry;
+ 		av.archive_write_data = _archive_write_data;
+@@ -383,13 +383,13 @@ _archive_write_close(struct archive *_a)
+  * Destroy the archive structure.
+  */
+ static int
+-_archive_write_finish(struct archive *_a)
++_archive_write_free(struct archive *_a)
+ {
+ 	struct archive_write *a = (struct archive_write *)_a;
+ 	int r = ARCHIVE_OK;
+ 
+ 	__archive_check_magic(&a->archive, ARCHIVE_WRITE_MAGIC,
+-	    ARCHIVE_STATE_ANY, "archive_write_finish");
++	    ARCHIVE_STATE_ANY, "archive_write_free");
+ 	if (a->archive.state != ARCHIVE_STATE_CLOSED)
+ 		r = archive_write_close(&a->archive);
+ 
+diff --git a/libarchive/archive_write_disk.c b/libarchive/archive_write_disk.c
+index 88575510..f734037c 100644
+--- a/libarchive/archive_write_disk.c
++++ b/libarchive/archive_write_disk.c
+@@ -255,7 +255,7 @@ static ssize_t	write_data_block(struct archive_write_disk *,
+ static struct archive_vtable *archive_write_disk_vtable(void);
+ 
+ static int	_archive_write_close(struct archive *);
+-static int	_archive_write_finish(struct archive *);
++static int	_archive_write_free(struct archive *);
+ static int	_archive_write_header(struct archive *, struct archive_entry *);
+ static int	_archive_write_finish_entry(struct archive *);
+ static ssize_t	_archive_write_data(struct archive *, const void *, size_t);
+@@ -294,7 +294,7 @@ archive_write_disk_vtable(void)
+ 
+ 	if (!inited) {
+ 		av.archive_close = _archive_write_close;
+-		av.archive_finish = _archive_write_finish;
++		av.archive_free = _archive_write_free;
+ 		av.archive_write_header = _archive_write_header;
+ 		av.archive_write_finish_entry = _archive_write_finish_entry;
+ 		av.archive_write_data = _archive_write_data;
+@@ -1325,7 +1325,7 @@ _archive_write_close(struct archive *_a)
+ }
+ 
+ static int
+-_archive_write_finish(struct archive *_a)
++_archive_write_free(struct archive *_a)
+ {
+ 	struct archive_write_disk *a = (struct archive_write_disk *)_a;
+ 	int ret;
+diff --git a/tar/read.c b/tar/read.c
+index aaaacac0..3d8b347d 100644
+--- a/tar/read.c
++++ b/tar/read.c
+@@ -332,7 +332,7 @@ read_archive(struct bsdtar *bsdtar, char mode)
+ 		fprintf(stdout, "Archive Format: %s,  Compression: %s\n",
+ 		    archive_format_name(a), archive_compression_name(a));
+ 
+-	archive_read_finish(a);
++	archive_read_free(a);
+ }
+ 
+ 
+diff --git a/tar/write.c b/tar/write.c
+index 0d5c65c9..35bb3983 100644
+--- a/tar/write.c
++++ b/tar/write.c
+@@ -286,7 +286,7 @@ tar_mode_r(struct bsdtar *bsdtar)
+ 		    archive_error_string(a));
+ 	while (0 == archive_read_next_header(a, &entry)) {
+ 		if (archive_compression(a) != ARCHIVE_COMPRESSION_NONE) {
+-			archive_read_finish(a);
++			archive_read_free(a);
+ 			close(bsdtar->fd);
+ 			lafe_errc(1, 0,
+ 			    "Cannot append to compressed archive.");
+@@ -296,7 +296,7 @@ tar_mode_r(struct bsdtar *bsdtar)
+ 	}
+ 
+ 	end_offset = archive_read_header_position(a);
+-	archive_read_finish(a);
++	archive_read_free(a);
+ 
+ 	/* Re-open archive for writing */
+ 	a = archive_write_new();
+@@ -384,7 +384,7 @@ tar_mode_u(struct bsdtar *bsdtar)
+ 	/* Build a list of all entries and their recorded mod times. */
+ 	while (0 == archive_read_next_header(a, &entry)) {
+ 		if (archive_compression(a) != ARCHIVE_COMPRESSION_NONE) {
+-			archive_read_finish(a);
++			archive_read_free(a);
+ 			close(bsdtar->fd);
+ 			lafe_errc(1, 0,
+ 			    "Cannot append to compressed archive.");
+@@ -398,7 +398,7 @@ tar_mode_u(struct bsdtar *bsdtar)
+ 	}
+ 
+ 	end_offset = archive_read_header_position(a);
+-	archive_read_finish(a);
++	archive_read_free(a);
+ 
+ 	/* Re-open archive for writing. */
+ 	a = archive_write_new();
+@@ -509,7 +509,7 @@ cleanup:
+ 	free(bsdtar->buff);
+ 	archive_entry_linkresolver_free(bsdtar->resolver);
+ 	bsdtar->resolver = NULL;
+-	archive_read_finish(bsdtar->diskreader);
++	archive_read_free(bsdtar->diskreader);
+ 	bsdtar->diskreader = NULL;
+ 
+ 	if (bsdtar->option_totals) {
+@@ -517,7 +517,7 @@ cleanup:
+ 		    tar_i64toa(archive_position_compressed(a)));
+ 	}
+ 
+-	archive_write_finish(a);
++	archive_write_free(a);
+ }
+ 
+ /*
+@@ -588,7 +588,7 @@ append_archive_filename(struct bsdtar *bsdtar, struct archive *a,
+ 		    filename, archive_error_string(ina));
+ 		bsdtar->return_value = 1;
+ 	}
+-	archive_read_finish(ina);
++	archive_read_free(ina);
+ 
+ 	return (rc);
+ }
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/libarchive/test/test_fuzz.c b/libarchive/test/test_fuzz.c
+index e5dede93..86b4d0ce 100644
+--- a/libarchive/test/test_fuzz.c
++++ b/libarchive/test/test_fuzz.c
+@@ -97,7 +97,7 @@ DEFINE_TEST(test_fuzz)
+ 			    archive_read_support_format_raw(a));
+ 			r = archive_read_open_filename(a, filename, 16384);
+ 			if (r != ARCHIVE_OK) {
+-				archive_read_finish(a);
++				archive_read_free(a);
+ 				skipping("Cannot uncompress %s", filename);
+ 				continue;
+ 			}
+@@ -108,7 +108,7 @@ DEFINE_TEST(test_fuzz)
+ 			assertEqualIntA(a, ARCHIVE_EOF,
+ 			    archive_read_next_header(a, &ae));
+ 			assertEqualInt(ARCHIVE_OK,
+-			    archive_read_finish(a));
++			    archive_read_free(a));
+ 			assert(size > 0);
+ 			failure("Internal buffer is not big enough for "
+ 			    "uncompressed test file: %s", filename);
+@@ -156,7 +156,7 @@ DEFINE_TEST(test_fuzz)
+ 				}
+ 				archive_read_close(a);
+ 			}
+-			archive_read_finish(a);
++			archive_read_free(a);
+ 		}
+ 		free(image);
+ 		free(rawimage);

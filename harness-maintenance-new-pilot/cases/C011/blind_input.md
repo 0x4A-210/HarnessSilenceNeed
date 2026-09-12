@@ -1,0 +1,492 @@
+# Case ID
+
+C011
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `fuzz/c/std/gif_fuzzer.c`
+
+~~~~c
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a sanity check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN gif_fuzzer.c
+./a.out ../../../test/data/*.gif
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+
+const char* fuzz(wuffs_base__io_buffer* src, uint32_t hash) {
+  const char* ret = NULL;
+  wuffs_base__slice_u8 pixbuf = ((wuffs_base__slice_u8){});
+  wuffs_base__slice_u8 workbuf = ((wuffs_base__slice_u8){});
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_gif__decoder dec;
+    wuffs_base__status status = wuffs_gif__decoder__initialize(
+        &dec, sizeof dec, WUFFS_VERSION,
+        (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED
+                   : 0);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    status = wuffs_gif__decoder__decode_image_config(&dec, &ic, src);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    // Wuffs allows either statically or dynamically allocated work buffers.
+    // This program exercises dynamic allocation.
+    uint64_t n = wuffs_gif__decoder__workbuf_len(&dec).max_incl;
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      workbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!workbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    n = wuffs_base__pixel_config__pixbuf_len(&ic.pixcfg);
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      pixbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!pixbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    status = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, pixbuf);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      wuffs_base__frame_config fc = ((wuffs_base__frame_config){});
+      status = wuffs_gif__decoder__decode_frame_config(&dec, &fc, src);
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+
+      status = wuffs_gif__decoder__decode_frame(
+          &dec, &pb, src, WUFFS_BASE__PIXEL_BLEND__SRC, workbuf, NULL);
+
+      wuffs_base__rect_ie_u32 frame_rect =
+          wuffs_base__frame_config__bounds(&fc);
+      wuffs_base__rect_ie_u32 dirty_rect =
+          wuffs_gif__decoder__frame_dirty_rect(&dec);
+      if (!wuffs_base__rect_ie_u32__contains_rect(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not contain dirty_rect";
+        goto exit;
+      }
+
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+      seen_ok = true;
+
+      if (!wuffs_base__rect_ie_u32__equals(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not equal dirty_rect";
+        goto exit;
+      }
+    }
+  }
+
+exit:
+  free(workbuf.ptr);
+  free(pixbuf.ptr);
+  return ret;
+}
+~~~~
+
+### `fuzz/c/std/zlib_fuzzer.c`
+
+~~~~c
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a sanity check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN zlib_fuzzer.c
+./a.out ../../../test/data/*.zlib
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+
+#define DST_BUFFER_SIZE 65536
+
+// Wuffs allows either statically or dynamically allocated work buffers. This
+// program exercises static allocation.
+#define WORK_BUFFER_SIZE WUFFS_ZLIB__DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE
+#if WORK_BUFFER_SIZE > 0
+uint8_t work_buffer[WORK_BUFFER_SIZE];
+#else
+// Not all C/C++ compilers support 0-length arrays.
+uint8_t work_buffer[1];
+#endif
+
+const char* fuzz(wuffs_base__io_buffer* src, uint32_t hash) {
+  wuffs_zlib__decoder dec;
+  wuffs_base__status status = wuffs_zlib__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+
+  // Ignore the checksum for 99.99%-ish of all input. When fuzzers generate
+  // random input, the checkum is very unlikely to match. Still, it's useful to
+  // verify that checksumming does not lead to e.g. buffer overflows.
+  wuffs_zlib__decoder__set_ignore_checksum(&dec, hash & 0xFFFE);
+
+  uint8_t dst_buffer[DST_BUFFER_SIZE];
+  wuffs_base__io_buffer dst = ((wuffs_base__io_buffer){
+      .data = ((wuffs_base__slice_u8){
+          .ptr = dst_buffer,
+          .len = DST_BUFFER_SIZE,
+      }),
+  });
+
+  while (true) {
+    dst.meta.wi = 0;
+    status = wuffs_zlib__decoder__transform_io(&dec, &dst, src,
+                                               ((wuffs_base__slice_u8){
+                                                   .ptr = work_buffer,
+                                                   .len = WORK_BUFFER_SIZE,
+                                               }));
+    if (status.repr != wuffs_base__suspension__short_write) {
+      break;
+    }
+    if (dst.meta.wi == 0) {
+      fprintf(stderr, "wuffs_zlib__decoder__transform_io made no progress\n");
+      intentional_segfault();
+    }
+  }
+  return wuffs_base__status__message(&status);
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/wuffs/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2018 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+# "Build the project" is a no-op. There is no "./configure.sh && make" dance.
+# Wuffs' generated C files are "drop-in libraries" a la
+# http://gpfault.net/posts/drop-in-libraries.txt.html
+
+for f in fuzz/c/std/*_fuzzer.c; do
+  # Extract the format name, such as "gzip", from the C file name,
+  # "fuzz/c/std/gzip_fuzzer.c".
+  b=$(basename $f _fuzzer.c)
+
+  # Make the "gzip_fuzzer" binary. First compile the (C) Wuffs code, then link
+  # the (C++) fuzzing library.
+  $CC $CFLAGS -c -std=c99 $f -o $WORK/${b}_fuzzer.o
+  $CXX $CXXFLAGS $WORK/${b}_fuzzer.o -o $OUT/${b}_fuzzer $LIB_FUZZING_ENGINE
+
+  # Make the optional "gzip_fuzzer_seed_corpus.zip" archive. This means
+  # extracting the "foo/bar/*.gz" out of the matching "gzip: foo/bar/*.gz"
+  # lines in fuzz/c/std/seed_corpora.txt.
+  seeds=$(sed -n -e "/^$b:/s/^$b: *//p" fuzz/c/std/seed_corpora.txt)
+  if [ -n "$seeds" ]; then
+    zip --junk-paths $OUT/${b}_fuzzer_seed_corpus.zip $seeds
+  fi
+done
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `std/gif/common_consts.wuffs`
+- `std/gif/decode_gif.wuffs`
+
+~~~~diff
+diff --git a/std/gif/common_consts.wuffs b/std/gif/common_consts.wuffs
+new file mode 100644
+--- /dev/null
++++ b/std/gif/common_consts.wuffs
+@@ -0,0 +1,67 @@
++// Copyright 2017 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use "std/lzw"
++
++pub status "#bad block"
++pub status "#bad extension label"
++pub status "#bad frame size"
++pub status "#bad graphic control"
++pub status "#bad header"
++pub status "#bad literal width"
++pub status "#bad palette"
++
++pri status "#internal error: inconsistent ri/wi"
++
++// TODO: replace the placeholder 1 value with either 0 or 0xFFFF (plus
++// lzw.decoder_workbuf_len_max_incl_worst_case), depending on whether we'll
++// need a per-pixel-row workbuf.
++pub const decoder_workbuf_len_max_incl_worst_case base.u64 = 1
++
++// See the spec appendix E "Interlaced Images" on page 29. The first element
++// represents either that the frame was non-interlaced, or that all interlace
++// stages are complete. Otherwise, the four interlace stages are elements 4, 3,
++// 2 and 1 in descending order. For example, the start and delta for the first
++// interlace stage is 0 and 8, for the second interlace stage is 4 and 8, etc.
++// For interlaced frames, the decoder.interlace field starts at 4 and is
++// decremented towards 0.
++//
++// interlace_start[0] is a special case. For non-interlaced frames, that
++// element is never accessed. For interlaced frames, that element is only
++// accessed after all interlace stages are complete. Being the maximum base.u32
++// value means that, after all interlace stages are complete, dst_y will be set
++// to that maximum value (and therefore outside the frame rect).
++pri const interlace_start array[5] base.u32 = [0xFFFFFFFF, 1, 2, 4, 0]
++pri const interlace_delta array[5] base.u8 = [1, 2, 4, 8, 8]
++pri const interlace_count array[5] base.u8 = [0, 1, 2, 4, 8]
++
++// animexts1dot0 is "ANIMEXTS1.0" as bytes.
++pri const animexts1dot0 array[11] base.u8 = [
++	0x41, 0x4E, 0x49, 0x4D, 0x45, 0x58, 0x54, 0x53, 0x31, 0x2E, 0x30,
++]
++
++// netscape2dot0 is "NETSCAPE2.0" as bytes.
++pri const netscape2dot0 array[11] base.u8 = [
++	0x4E, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x2E, 0x30,
++]
++
++// iccrgbg1012 is "ICCRGBG1012" as bytes.
++pri const iccrgbg1012 array[11] base.u8 = [
++	0x49, 0x43, 0x43, 0x52, 0x47, 0x42, 0x47, 0x31, 0x30, 0x31, 0x32,
++]
++
++// xmpdataxmp is "XMP DataXMP" as bytes.
++pri const xmpdataxmp array[11] base.u8 = [
++	0x58, 0x4D, 0x50, 0x20, 0x44, 0x61, 0x74, 0x61, 0x58, 0x4D, 0x50,
++]
+diff --git a/std/gif/decode_gif.wuffs b/std/gif/decode_gif.wuffs
+--- a/std/gif/decode_gif.wuffs
++++ b/std/gif/decode_gif.wuffs
+@@ -9,46 +9,12 @@
+ // Unless required by applicable law or agreed to in writing, software
+ // distributed under the License is distributed on an "AS IS" BASIS,
+ // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-use "std/lzw"
+-
+-pub status "#bad block"
+-pub status "#bad extension label"
+-pub status "#bad frame size"
+-pub status "#bad graphic control"
+-pub status "#bad header"
+-pub status "#bad literal width"
+-pub status "#bad palette"
+-
+-pri status "#internal error: inconsistent ri/wi"
+-
+-// TODO: replace the placeholder 1 value with either 0 or 0xFFFF (plus
+-// lzw.decoder_workbuf_len_max_incl_worst_case), depending on whether we'll
+-// need a per-pixel-row workbuf.
+-pub const decoder_workbuf_len_max_incl_worst_case base.u64 = 1
+-
+-// See the spec appendix E "Interlaced Images" on page 29. The first element
+-// represents either that the frame was non-interlaced, or that all interlace
+-// stages are complete. Otherwise, the four interlace stages are elements 4, 3,
+-// 2 and 1 in descending order. For example, the start and delta for the first
+-// interlace stage is 0 and 8, for the second interlace stage is 4 and 8, etc.
+-// For interlaced frames, the decoder.interlace field starts at 4 and is
+-// decremented towards 0.
+-//
+-// interlace_start[0] is a special case. For non-interlaced frames, that
+-// element is never accessed. For interlaced frames, that element is only
+-// accessed after all interlace stages are complete. Being the maximum base.u32
+-// value means that, after all interlace stages are complete, dst_y will be set
+-// to that maximum value (and therefore outside the frame rect).
+-pri const interlace_start array[5] base.u32 = [0xFFFFFFFF, 1, 2, 4, 0]
+-pri const interlace_delta array[5] base.u8 = [1, 2, 4, 8, 8]
+-pri const interlace_count array[5] base.u8 = [0, 1, 2, 4, 8]
+-
+ pub struct decoder? implements base.image_decoder(
+ 	width  : base.u32,
+ 	height : base.u32,
+ 
+ 	// Call sequence states:
+ 	//  - 0: initial state.
+@@ -596,32 +562,12 @@ pri func decoder.skip_blocks?(src: base.io_reader) {
+ 			return ok
+ 		}
+ 		args.src.skip32?(n: block_size as base.u32)
+ 	}
+ }
+ 
+-// animexts1dot0 is "ANIMEXTS1.0" as bytes.
+-pri const animexts1dot0 array[11] base.u8 = [
+-	0x41, 0x4E, 0x49, 0x4D, 0x45, 0x58, 0x54, 0x53, 0x31, 0x2E, 0x30,
+-]
+-
+-// netscape2dot0 is "NETSCAPE2.0" as bytes.
+-pri const netscape2dot0 array[11] base.u8 = [
+-	0x4E, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x2E, 0x30,
+-]
+-
+-// iccrgbg1012 is "ICCRGBG1012" as bytes.
+-pri const iccrgbg1012 array[11] base.u8 = [
+-	0x49, 0x43, 0x43, 0x52, 0x47, 0x42, 0x47, 0x31, 0x30, 0x31, 0x32,
+-]
+-
+-// xmpdataxmp is "XMP DataXMP" as bytes.
+-pri const xmpdataxmp array[11] base.u8 = [
+-	0x58, 0x4D, 0x50, 0x20, 0x44, 0x61, 0x74, 0x61, 0x58, 0x4D, 0x50,
+-]
+-
+ // decode_ae reads an Application Extension.
+ pri func decoder.decode_ae?(src: base.io_reader) {
+ 	var c           : base.u8
+ 	var block_size  : base.u8
+ 	var is_animexts : base.bool
+ 	var is_netscape : base.bool
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.

@@ -1,0 +1,810 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8005-dg2ufo78
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093f6-3da2-7753-92f3-0d2d6eb48632
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8005
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `libarchive/test/test_fuzz.c`
+
+~~~~cpp
+/*-
+ * Copyright (c) 2003-2007 Tim Kientzle
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR(S) ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR(S) BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+#include "test.h"
+__FBSDID("$FreeBSD: head/lib/libarchive/test/test_fuzz.c 201247 2009-12-30 05:59:21Z kientzle $");
+
+/*
+ * This was inspired by an ISO fuzz tester written by Michal Zalewski
+ * and posted to the "vulnwatch" mailing list on March 17, 2005:
+ *    http://seclists.org/vulnwatch/2005/q1/0088.html
+ *
+ * This test simply reads each archive image into memory, pokes
+ * random values into it and runs it through libarchive.  It tries
+ * to damage about 1% of each file and repeats the exercise 100 times
+ * with each file.
+ *
+ * Unlike most other tests, this test does not verify libarchive's
+ * responses other than to ensure that libarchive doesn't crash.
+ *
+ * Due to the deliberately random nature of this test, it may be hard
+ * to reproduce failures.  Because this test deliberately attempts to
+ * induce crashes, there's little that can be done in the way of
+ * post-failure diagnostics.
+ */
+
+/* Because this works for any archive, we can just re-use the archives
+ * developed for other tests. */
+static struct {
+	int uncompress; /* If 1, decompress the file before fuzzing. */
+	const char *name;
+} files[] = {
+	{0, "test_fuzz_1.iso.Z"}, /* Exercise compress decompressor. */
+	{1, "test_fuzz_1.iso.Z"},
+	{0, "test_fuzz.cab"},
+	{0, "test_fuzz.lzh"},
+	{0, "test_compat_bzip2_1.tbz"}, /* Exercise bzip2 decompressor. */
+	{1, "test_compat_bzip2_1.tbz"},
+	{0, "test_compat_gtar_1.tar"},
+	{0, "test_compat_gzip_1.tgz"}, /* Exercise gzip decompressor. */
+	{0, "test_compat_gzip_2.tgz"}, /* Exercise gzip decompressor. */
+	{0, "test_compat_tar_hardlink_1.tar"},
+	{0, "test_compat_xz_1.txz"}, /* Exercise xz decompressor. */
+	{0, "test_compat_zip_1.zip"},
+	{0, "test_read_format_ar.ar"},
+	{0, "test_read_format_cpio_bin_be.cpio"},
+	{0, "test_read_format_cpio_svr4_gzip_rpm.rpm"}, /* Test RPM unwrapper */
+	{0, "test_read_format_rar.rar"}, /* Uncompressed RAR test */
+	{0, "test_read_format_rar_compress_best.rar"}, /* Best Compressed RAR test */
+	{0, "test_read_format_rar_compress_normal.rar"}, /* Normal Compressed RAR
+	                                                  * test */
+	{0, "test_read_format_rar_multi_lzss_blocks.rar"}, /* Normal Compressed Multi
+	                                                    * LZSS blocks RAR test */
+	{0, "test_read_format_rar_noeof.rar"}, /* RAR with no EOF header */
+	{0, "test_read_format_rar_subblock.rar"}, /* RAR with subblocks */
+	{0, "test_read_format_rar_unicode.rar"}, /* RAR with Unicode filenames */
+	{0, "test_read_format_gtar_sparse_1_17_posix10_modified.tar"},
+	{0, "test_read_format_mtree.mtree"},
+	{0, "test_read_format_tar_empty_filename.tar"},
+	{0, "test_read_format_zip.zip"},
+	{1, NULL}
+};
+
+DEFINE_TEST(test_fuzz)
+{
+	const void *blk;
+	size_t blk_size;
+	int64_t blk_offset;
+	int n;
+
+	for (n = 0; files[n].name != NULL; ++n) {
+		const size_t buffsize = 30000000;
+		const char *filename = files[n].name;
+		struct archive_entry *ae;
+		struct archive *a;
+		char *rawimage, *image;
+		size_t size;
+		int i, q;
+
+		extract_reference_file(filename);
+		if (files[n].uncompress) {
+			int r;
+			/* Use format_raw to decompress the data. */
+			assert((a = archive_read_new()) != NULL);
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_support_filter_all(a));
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_support_format_raw(a));
+			r = archive_read_open_filename(a, filename, 16384);
+			if (r != ARCHIVE_OK) {
+				archive_read_free(a);
+				skipping("Cannot uncompress %s", filename);
+				continue;
+			}
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_next_header(a, &ae));
+			rawimage = malloc(buffsize);
+			size = archive_read_data(a, rawimage, buffsize);
+			assertEqualIntA(a, ARCHIVE_EOF,
+			    archive_read_next_header(a, &ae));
+			assertEqualInt(ARCHIVE_OK,
+			    archive_read_free(a));
+			assert(size > 0);
+			failure("Internal buffer is not big enough for "
+			    "uncompressed test file: %s", filename);
+			if (!assert(size < buffsize)) {
+				free(rawimage);
+				continue;
+			}
+		} else {
+			rawimage = slurpfile(&size, filename);
+			if (!assert(rawimage != NULL))
+				continue;
+		}
+		image = malloc(size);
+		assert(image != NULL);
+		srand((unsigned)time(NULL));
+
+		for (i = 0; i < 100; ++i) {
+			FILE *f;
+			int j, numbytes, trycnt;
+
+			/* Fuzz < 1% of the bytes in the archive. */
+			memcpy(image, rawimage, size);
+			q = size / 100;
+			if (!q) q = 1;
+			numbytes = (int)(rand() % q);
+			for (j = 0; j < numbytes; ++j)
+				image[rand() % size] = (char)rand();
+
+			/* Save the messed-up image to a file.
+			 * If we crash, that file will be useful. */
+			for (trycnt = 0; trycnt < 3; trycnt++) {
+				f = fopen("after.test.failure.send.this.file."
+				    "to.libarchive.maintainers.with.system.details", "wb");
+				if (f != NULL)
+					break;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+				/*
+				 * Sometimes previous close operation does not completely
+				 * end at this time. So we should take a wait while
+				 * the operation running.
+				 */
+				Sleep(100);
+#endif
+			}
+			assertEqualInt((size_t)size, fwrite(image, 1, (size_t)size, f));
+			fclose(f);
+
+			assert((a = archive_read_new()) != NULL);
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_support_filter_all(a));
+			assertEqualIntA(a, ARCHIVE_OK,
+			    archive_read_support_format_all(a));
+
+			if (0 == archive_read_open_memory(a, image, size)) {
+				while(0 == archive_read_next_header(a, &ae)) {
+					while (0 == archive_read_data_block(a,
+						&blk, &blk_size, &blk_offset))
+						continue;
+				}
+				archive_read_close(a);
+			}
+			archive_read_free(a);
+		}
+		free(image);
+		free(rawimage);
+	}
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/libarchive/archive_read_support_format_rar.c b/libarchive/archive_read_support_format_rar.c
+index df81310c..15f87cf6 100644
+--- a/libarchive/archive_read_support_format_rar.c
++++ b/libarchive/archive_read_support_format_rar.c
+@@ -188,72 +188,73 @@ struct lzss
+ struct rar
+ {
+   /* Entries from main RAR header */
+   unsigned main_flags;
+   char reserved1[2];
+   char reserved2[4];
+   char encryptver;
+ 
+   /* File header entries */
+   char compression_method;
+   unsigned file_flags;
+   int64_t packed_size;
+   int64_t unp_size;
+   time_t mtime;
+   long mnsec;
+   mode_t mode;
+ 
+   /* File header optional entries */
+   char salt[8];
+   time_t atime;
+   long ansec;
+   time_t ctime;
+   long cnsec;
+   time_t arctime;
+   long arcnsec;
+ 
+   /* Fields to help with tracking decompression of files. */
+   int64_t bytes_unconsumed;
+   int64_t bytes_remaining;
+   int64_t bytes_uncopied;
+   int64_t offset;
+   char valid;
+   unsigned char *unp_buffer;
+   unsigned int dictionary_size;
+   char start_new_block;
+ 
+   /* LZSS members */
+   struct huffman_code maincode;
+   struct huffman_code offsetcode;
+   struct huffman_code lowoffsetcode;
+   struct huffman_code lengthcode;
+   unsigned char lengthtable[HUFFMAN_TABLE_SIZE];
+   struct lzss lzss;
+   char output_last_match;
+   unsigned int lastlength;
+   unsigned int lastoffset;
+   unsigned int oldoffset[4];
+   unsigned int lastlowoffset;
+   unsigned int numlowoffsetrepeats;
+   int64_t filterstart;
+   char start_new_table;
+ 
+   /* PPMd Variant H members */
+   char is_ppmd_block;
++  int ppmd_escape;
+   CPpmd7 ppmd7_context;
+   CPpmd7z_RangeDec range_dec;
+   IByteIn bytein;
+ 
+   /*
+    * Bit stream reader.
+    */
+   struct rar_br {
+ #define CACHE_TYPE	uint64_t
+ #define CACHE_BITS	(8 * sizeof(CACHE_TYPE))
+     /* Cache buffer. */
+     CACHE_TYPE		 cache_buffer;
+     /* Indicates how many bits avail in cache_buffer. */
+     int			 cache_avail;
+     ssize_t		 avail_in;
+     const unsigned char *next_in;
+   } br;
+ };
+@@ -1267,92 +1268,151 @@ static int
+ read_data_compressed(struct archive_read *a, const void **buff, size_t *size,
+                int64_t *offset)
+ {
+   struct rar *rar;
+   int64_t start, end, actualend;
+-  int ret = (ARCHIVE_OK), sym;
++  int ret = (ARCHIVE_OK), sym, code, lzss_offset, length, i;
+ 
+   rar = (struct rar *)(a->format->data);
+   if (!rar->valid)
+     return (ARCHIVE_FAILED);
+ 
+   if (rar->dictionary_size && rar->offset >= rar->unp_size)
+   {
+     *buff = NULL;
+     *size = 0;
+     *offset = rar->offset;
+     Ppmd7_Free(&rar->ppmd7_context, &g_szalloc);
+     return (ARCHIVE_EOF);
+   }
+ 
+   if (!rar->is_ppmd_block && rar->dictionary_size && rar->bytes_uncopied > 0)
+   {
+     *offset = rar->offset;
+     if (rar->offset + rar->bytes_uncopied > rar->unp_size)
+       *size = rar->unp_size - rar->offset;
+     else
+       *size = rar->bytes_uncopied;
+     ret = copy_from_lzss_window(a, buff, *offset, *size);
+     rar->offset += *size;
+     rar->bytes_uncopied -= *size;
+     return ret;
+   }
+ 
+   if ((ret = rar_br_preparation(a, &(rar->br))) < ARCHIVE_WARN)
+     return (ret);
+   if (rar->start_new_table && ((ret = parse_codes(a)) < (ARCHIVE_WARN)))
+     return (ret);
+ 
+   if (rar->is_ppmd_block)
+   {
+-    if (!rar->unp_buffer)
+-    {
+-      if ((rar->unp_buffer = malloc(1)) == NULL)
+-      {
+-        archive_set_error(&a->archive, ENOMEM,
+-                          "Unable to allocate memory for uncompressed data.");
+-        return (ARCHIVE_FATAL);
+-      }
+-    }
+     if ((sym = Ppmd7_DecodeSymbol(&rar->ppmd7_context, &rar->range_dec.p)) < 0)
+     {
+       archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+                         "Invalid symbol");
+       return (ARCHIVE_FATAL);
+     }
+-    *offset = rar->offset++;
+-    *size = 1;
+-    *rar->unp_buffer = sym;
+-    *buff = rar->unp_buffer;
+-    return (ret);
++    if(sym != rar->ppmd_escape)
++    {
++      lzss_emit_literal(rar, sym);
++      rar->bytes_uncopied++;
++    }
++    else
++    {
++      if ((code = Ppmd7_DecodeSymbol(&rar->ppmd7_context, &rar->range_dec.p)) < 0)
++      {
++        archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
++                          "Invalid symbol");
++        return (ARCHIVE_FATAL);
++      }
++
++      switch(code)
++      {
++        case 0:
++          rar->start_new_table = 1;
++          return read_data_compressed(a, buff, size, offset);
++
++        case 2:
++          *buff = NULL;
++          *size = 0;
++          *offset = rar->offset;
++          Ppmd7_Free(&rar->ppmd7_context, &g_szalloc);
++          return (ARCHIVE_EOF);
++
++        case 3:
++          archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
++                            "Parsing filters is unsupported.");
++          return (ARCHIVE_FAILED);
++
++        case 4:
++          lzss_offset = 0;
++          for (i = 2; i >= 0; i--)
++          {
++            if ((code = Ppmd7_DecodeSymbol(&rar->ppmd7_context,
++              &rar->range_dec.p)) < 0)
++            {
++              archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
++                                "Invalid symbol");
++              return (ARCHIVE_FATAL);
++            }
++            lzss_offset |= code << (i * 8);
++          }
++          if ((length = Ppmd7_DecodeSymbol(&rar->ppmd7_context,
++            &rar->range_dec.p)) < 0)
++          {
++            archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
++                              "Invalid symbol");
++            return (ARCHIVE_FATAL);
++          }
++          lzss_emit_match(rar, lzss_offset + 2, length + 32);
++          rar->bytes_uncopied += length + 32;
++          break;
++
++        case 5:
++          if ((length = Ppmd7_DecodeSymbol(&rar->ppmd7_context,
++            &rar->range_dec.p)) < 0)
++          {
++            archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
++                              "Invalid symbol");
++            return (ARCHIVE_FATAL);
++          }
++          lzss_emit_match(rar, 1, length + 4);
++          rar->bytes_uncopied += length + 4;
++          break;
++
++       default:
++         lzss_emit_literal(rar, sym);
++         rar->bytes_uncopied++;
++      }
++    }
+   }
+   else
+   {
+     start = rar->offset;
+     end = start + rar->dictionary_size;
+     rar->filterstart = INT64_MAX;
+ 
+     if ((actualend = expand(a, end)) < 0)
+       return ((int)actualend);
+ 
+     rar->bytes_uncopied = actualend - start;
+     if (rar->bytes_uncopied == 0) {
+         /* Broken RAR files cause this case.
+         * NOTE: If this case were possible on a normal RAR file
+         * we would find out where it was actually bad and
+         * what we would do to solve it. */
+         archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+                           "Internal error extracting RAR file.");
+         return (ARCHIVE_FAILED);
+     }
+-    *offset = rar->offset;
+-    if (rar->offset + rar->bytes_uncopied > rar->unp_size)
+-      *size = rar->unp_size - rar->offset;
+-    else
+-      *size = rar->bytes_uncopied;
+-    ret = copy_from_lzss_window(a, buff, *offset, *size);
+-    rar->offset += *size;
+-    rar->bytes_uncopied -= *size;
+   }
++  *offset = rar->offset;
++  if (rar->offset + rar->bytes_uncopied > rar->unp_size)
++    *size = rar->unp_size - rar->offset;
++  else
++    *size = rar->bytes_uncopied;
++  ret = copy_from_lzss_window(a, buff, *offset, *size);
++  rar->offset += *size;
++  rar->bytes_uncopied -= *size;
+   return ret;
+ }
+ 
+@@ -1360,214 +1420,217 @@ static int
+ parse_codes(struct archive_read *a)
+ {
+   int i, j, val, n, r;
+   unsigned char bitlengths[MAX_SYMBOLS], zerocount, ppmd_flags;
+   unsigned int maxorder;
+   struct huffman_code precode;
+   struct rar *rar = (struct rar *)(a->format->data);
+   struct rar_br *br = &(rar->br);
+ 
+   free_codes(a);
+ 
+   /* Skip to the next byte */
+   rar_br_consume_unalined_bits(br);
+ 
+   /* PPMd block flag */
+   if (!rar_br_read_ahead(a, br, 1))
+     goto truncated_data;
+   if ((rar->is_ppmd_block = rar_br_bits(br, 1)) != 0)
+   {
+     rar_br_consume(br, 1);
+     if (!rar_br_read_ahead(a, br, 7))
+       goto truncated_data;
+     ppmd_flags = rar_br_bits(br, 7);
+     rar_br_consume(br, 7);
+ 
+     /* Memory is allocated in MB */
+     if (ppmd_flags & 0x20)
+     {
+       if (!rar_br_read_ahead(a, br, 8))
+         goto truncated_data;
+       rar->dictionary_size = (rar_br_bits(br, 8) + 1) << 20;
+       rar_br_consume(br, 8);
+     }
+ 
+     if (ppmd_flags & 0x40)
+     {
+       if (!rar_br_read_ahead(a, br, 8))
+         goto truncated_data;
+-      rar->ppmd7_context.InitEsc = rar_br_bits(br, 8);
++      rar->ppmd_escape = rar->ppmd7_context.InitEsc = rar_br_bits(br, 8);
+       rar_br_consume(br, 8);
+     }
++    else
++      rar->ppmd_escape = 2;
+ 
+     if (ppmd_flags & 0x20)
+     {
+       maxorder = (ppmd_flags & 0x1F) + 1;
+       if(maxorder > 16)
+         maxorder = 16 + (maxorder - 16) * 3;
+ 
+       if (maxorder == 1)
+       {
+         archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+                           "Truncated RAR file data");
+         return (ARCHIVE_FATAL);
+       }
+ 
+       rar->bytein.a = a;
+       rar->bytein.Read = &ppmd_read;
+       PpmdRAR_RangeDec_CreateVTable(&rar->range_dec);
+       rar->range_dec.Stream = &rar->bytein;
+       Ppmd7_Construct(&rar->ppmd7_context);
+ 
+       if (!Ppmd7_Alloc(&rar->ppmd7_context, rar->dictionary_size, &g_szalloc))
+       {
+         archive_set_error(&a->archive, ENOMEM,
+                           "Out of memory");
+         return (ARCHIVE_FATAL);
+       }
+       if (!PpmdRAR_RangeDec_Init(&rar->range_dec))
+       {
+         archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+                           "Unable to initialize PPMd range decoder");
+         return (ARCHIVE_FATAL);
+       }
+       Ppmd7_Init(&rar->ppmd7_context, maxorder);
+     }
+     else
+     {
+       if (!PpmdRAR_RangeDec_Init(&rar->range_dec))
+       {
+         archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+                           "Unable to initialize PPMd range decoder");
+         return (ARCHIVE_FATAL);
+       }
+     }
+-    rar->start_new_table = 0;
+-    return (ARCHIVE_OK);
+   }
+-  rar_br_consume(br, 1);
+-
+-  /* Keep existing table flag */
+-  if (!rar_br_read_ahead(a, br, 1))
+-    goto truncated_data;
+-  if (!rar_br_bits(br, 1))
+-    memset(rar->lengthtable, 0, sizeof(rar->lengthtable));
+-  rar_br_consume(br, 1);
+-
+-  memset(&bitlengths, 0, sizeof(bitlengths));
+-  for (i = 0; i < MAX_SYMBOLS;)
++  else
+   {
+-    if (!rar_br_read_ahead(a, br, 4))
++    rar_br_consume(br, 1);
++
++    /* Keep existing table flag */
++    if (!rar_br_read_ahead(a, br, 1))
+       goto truncated_data;
+-    bitlengths[i++] = rar_br_bits(br, 4);
+-    rar_br_consume(br, 4);
+-    if (bitlengths[i-1] == 0xF)
++    if (!rar_br_bits(br, 1))
++      memset(rar->lengthtable, 0, sizeof(rar->lengthtable));
++    rar_br_consume(br, 1);
++
++    memset(&bitlengths, 0, sizeof(bitlengths));
++    for (i = 0; i < MAX_SYMBOLS;)
+     {
+       if (!rar_br_read_ahead(a, br, 4))
+         goto truncated_data;
+-      zerocount = rar_br_bits(br, 4);
++      bitlengths[i++] = rar_br_bits(br, 4);
+       rar_br_consume(br, 4);
+-      if (zerocount)
++      if (bitlengths[i-1] == 0xF)
+       {
+-        i--;
+-        for (j = 0; j < zerocount + 2 && i < MAX_SYMBOLS; j++)
+-          bitlengths[i++] = 0;
++        if (!rar_br_read_ahead(a, br, 4))
++          goto truncated_data;
++        zerocount = rar_br_bits(br, 4);
++        rar_br_consume(br, 4);
++        if (zerocount)
++        {
++          i--;
++          for (j = 0; j < zerocount + 2 && i < MAX_SYMBOLS; j++)
++            bitlengths[i++] = 0;
++        }
+       }
+     }
+-  }
+ 
+-  memset(&precode, 0, sizeof(precode));
+-  r = create_code(a, &precode, bitlengths, MAX_SYMBOLS, MAX_SYMBOL_LENGTH);
+-  if (r != ARCHIVE_OK)
+-    return (r);
++    memset(&precode, 0, sizeof(precode));
++    r = create_code(a, &precode, bitlengths, MAX_SYMBOLS, MAX_SYMBOL_LENGTH);
++    if (r != ARCHIVE_OK)
++      return (r);
+ 
+-  for (i = 0; i < HUFFMAN_TABLE_SIZE;)
+-  {
+-    if ((val = read_next_symbol(a, &precode)) < 0)
+-      return (ARCHIVE_FAILED);
+-    if (val < 16)
+-    {
+-      rar->lengthtable[i] = (rar->lengthtable[i] + val) & 0xF;
+-      i++;
+-    }
+-    else if (val < 18)
++    for (i = 0; i < HUFFMAN_TABLE_SIZE;)
+     {
+-      if (i == 0)
+-      {
+-        archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
+-                          "Internal error extracting RAR file.");
++      if ((val = read_next_symbol(a, &precode)) < 0)
+         return (ARCHIVE_FAILED);
++      if (val < 16)
++      {
++        rar->lengthtable[i] = (rar->lengthtable[i] + val) & 0xF;
++        i++;
+       }
++      else if (val < 18)
++      {
++        if (i == 0)
++        {
++          archive_set_error(&a->archive, ARCHIVE_ERRNO_FILE_FORMAT,
++                            "Internal error extracting RAR file.");
++          return (ARCHIVE_FAILED);
++        }
+ 
+-      if(val == 16) {
+-        if (!rar_br_read_ahead(a, br, 3))
+-          goto truncated_data;
+-        n = rar_br_bits(br, 3) + 3;
+-        rar_br_consume(br, 3);
+-      } else {
+-        if (!rar_br_read_ahead(a, br, 7))
+-          goto truncated_data;
+-        n = rar_br_bits(br, 7) + 11;
+-        rar_br_consume(br, 7);
+-      }
++        if(val == 16) {
++          if (!rar_br_read_ahead(a, br, 3))
++            goto truncated_data;
++          n = rar_br_bits(br, 3) + 3;
++          rar_br_consume(br, 3);
++        } else {
++          if (!rar_br_read_ahead(a, br, 7))
++            goto truncated_data;
++          n = rar_br_bits(br, 7) + 11;
++          rar_br_consume(br, 7);
++        }
+ 
+-      for (j = 0; j < n && i < HUFFMAN_TABLE_SIZE; j++)
++        for (j = 0; j < n && i < HUFFMAN_TABLE_SIZE; j++)
++        {
++          rar->lengthtable[i] = rar->lengthtable[i-1];
++          i++;
++        }
++      }
++      else
+       {
+-        rar->lengthtable[i] = rar->lengthtable[i-1];
+-        i++;
++        if(val == 18) {
++          if (!rar_br_read_ahead(a, br, 3))
++            goto truncated_data;
++          n = rar_br_bits(br, 3) + 3;
++          rar_br_consume(br, 3);
++        } else {
++          if (!rar_br_read_ahead(a, br, 7))
++            goto truncated_data;
++          n = rar_br_bits(br, 7) + 11;
++          rar_br_consume(br, 7);
++        }
++
++        for(j = 0; j < n && i < HUFFMAN_TABLE_SIZE; j++)
++          rar->lengthtable[i++] = 0;
+       }
+     }
+-    else
+-    {
+-      if(val == 18) {
+-        if (!rar_br_read_ahead(a, br, 3))
+-          goto truncated_data;
+-        n = rar_br_bits(br, 3) + 3;
+-        rar_br_consume(br, 3);
+-      } else {
+-        if (!rar_br_read_ahead(a, br, 7))
+-          goto truncated_data;
+-        n = rar_br_bits(br, 7) + 11;
+-        rar_br_consume(br, 7);
+-      }
+ 
+-      for(j = 0; j < n && i < HUFFMAN_TABLE_SIZE; j++)
+-        rar->lengthtable[i++] = 0;
+-    }
++    r = create_code(a, &rar->maincode, &rar->lengthtable[0], MAINCODE_SIZE,
++                MAX_SYMBOL_LENGTH);
++    if (r != ARCHIVE_OK)
++      return (r);
++    r = create_code(a, &rar->offsetcode, &rar->lengthtable[MAINCODE_SIZE],
++                OFFSETCODE_SIZE, MAX_SYMBOL_LENGTH);
++    if (r != ARCHIVE_OK)
++      return (r);
++    r = create_code(a, &rar->lowoffsetcode,
++                &rar->lengthtable[MAINCODE_SIZE + OFFSETCODE_SIZE],
++                LOWOFFSETCODE_SIZE, MAX_SYMBOL_LENGTH);
++    if (r != ARCHIVE_OK)
++      return (r);
++    r = create_code(a, &rar->lengthcode,
++                &rar->lengthtable[MAINCODE_SIZE + OFFSETCODE_SIZE +
++                LOWOFFSETCODE_SIZE], LENGTHCODE_SIZE, MAX_SYMBOL_LENGTH);
++    if (r != ARCHIVE_OK)
++      return (r);
+   }
+ 
+-  r = create_code(a, &rar->maincode, &rar->lengthtable[0], MAINCODE_SIZE,
+-              MAX_SYMBOL_LENGTH);
+-  if (r != ARCHIVE_OK)
+-    return (r);
+-  r = create_code(a, &rar->offsetcode, &rar->lengthtable[MAINCODE_SIZE],
+-              OFFSETCODE_SIZE, MAX_SYMBOL_LENGTH);
+-  if (r != ARCHIVE_OK)
+-    return (r);
+-  r = create_code(a, &rar->lowoffsetcode,
+-              &rar->lengthtable[MAINCODE_SIZE + OFFSETCODE_SIZE],
+-              LOWOFFSETCODE_SIZE, MAX_SYMBOL_LENGTH);
+-  if (r != ARCHIVE_OK)
+-    return (r);
+-  r = create_code(a, &rar->lengthcode,
+-              &rar->lengthtable[MAINCODE_SIZE + OFFSETCODE_SIZE +
+-              LOWOFFSETCODE_SIZE], LENGTHCODE_SIZE, MAX_SYMBOL_LENGTH);
+-  if (r != ARCHIVE_OK)
+-    return (r);
+-
+   if (!rar->dictionary_size || !rar->lzss.window)
+   {
+     /* Seems as though dictionary sizes are not used. Even so, minimize
+      * memory usage as much as possible.
+      */
+     if (rar->unp_size >= DICTIONARY_MAX_SIZE)
+       rar->dictionary_size = DICTIONARY_MAX_SIZE;
+     else
+       rar->dictionary_size = rar_fls(rar->unp_size) << 1;
+     rar->lzss.window = (unsigned char *)realloc(rar->lzss.window,
+                                                 rar->dictionary_size);
+     memset(rar->lzss.window, 0, rar->dictionary_size);
+     rar->lzss.mask = rar->dictionary_size - 1;
+   }
+ 
+   rar->start_new_table = 0;
+   return (ARCHIVE_OK);
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8005","gap_exists":true,"gap_type":["input semantics","parser state","archive-format attack surface"],"confidence":94,"affected_functions":["read_data_compressed","parse_codes"],"reason":"H0 exercises generic RAR files through archive_read_data_block, but it has no seed or structured input generation explicitly covering RAR PPMd blocks and their newly implemented escape protocol. Sparse random byte mutation is unlikely to preserve enough valid PPMd state to drive the escape-dependent branches, especially table transitions and variable-length match decoding.","evidence":["parse_codes now sets rar->is_ppmd_block, derives rar->ppmd_escape from ppmd_flags or defaults it to 2, and initializes or resumes the PPMd range decoder.","read_data_compressed now distinguishes ordinary PPMd symbols from rar->ppmd_escape and implements escape codes 0, 2, 3, 4, 5, plus a default path.","Escape code 0 recursively enters read_data_compressed after setting rar->start_new_table; code 2 terminates; code 3 reports unsupported filters; codes 4 and 5 decode additional symbols and call lzss_emit_match with input-derived offsets and lengths.","H0 lists several RAR inputs, but none is identified as a PPMd or PPMd-escape corpus case; its strategy only changes fewer than 1% of bytes in existing images for 100 iterations."],"recommended_action":"Add a structured RAR PPMd fuzz target or dedicated valid PPMd RAR seeds that reach custom and default rar->ppmd_escape handling, exercising escape codes 0, 2, 3, 4, 5, truncated follow-up symbols, repeated table transitions, and boundary values for the offsets and lengths passed to lzss_emit_match."}
+tokens used
+21,817

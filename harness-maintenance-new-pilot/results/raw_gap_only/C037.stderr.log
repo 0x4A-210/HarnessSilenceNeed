@@ -1,0 +1,1984 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/maintenance-gap_only-C037-kz1gxhr0
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0863c-7db3-7630-920e-f13f783e675a
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C037
+
+## Existing Fuzz Harness H0
+
+### `fuzz/c/std/gif_fuzzer.c`
+
+~~~~c
+// Copyright 2018 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a sanity check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN gif_fuzzer.c
+./a.out ../../../test/data/*.gif
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+// If building this program in an environment that doesn't easily accomodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/unsupported-snapshot.h"
+#include "../fuzzlib/fuzzlib.c"
+
+const char* fuzz(wuffs_base__io_reader src_reader, uint32_t hash) {
+  const char* ret = NULL;
+  void* pixbuf = NULL;
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_base__status s = 0;
+    wuffs_gif__decoder dec = ((wuffs_gif__decoder){});
+    wuffs_gif__decoder__check_wuffs_version(&dec, sizeof dec, WUFFS_VERSION);
+
+    wuffs_base__image_buffer ib = ((wuffs_base__image_buffer){});
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    s = wuffs_gif__decoder__decode_image_config(&dec, &ic, src_reader);
+    if (s) {
+      ret = wuffs_gif__status__string(s);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    size_t pixbuf_size = wuffs_base__image_config__pixbuf_size(&ic);
+    // Don't try to allocate more than 64 MiB.
+    if (pixbuf_size > 64 * 1024 * 1024) {
+      ret = "image too large";
+      goto exit;
+    }
+    pixbuf = malloc(pixbuf_size);
+    if (!pixbuf) {
+      ret = "out of memory";
+      goto exit;
+    }
+    s = wuffs_base__image_buffer__set_from_slice(
+        &ib, ic, ((wuffs_base__slice_u8){.ptr = pixbuf, .len = pixbuf_size}));
+    if (s) {
+      ret = wuffs_gif__status__string(s);
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      s = wuffs_gif__decoder__decode_frame(&dec, &ib, src_reader,
+                                           ((wuffs_base__slice_u8){}));
+      if (s) {
+        if ((s == WUFFS_BASE__SUSPENSION_END_OF_DATA) && seen_ok) {
+          s = WUFFS_BASE__STATUS_OK;
+        }
+        ret = wuffs_gif__status__string(s);
+        goto exit;
+      }
+      seen_ok = true;
+    }
+  }
+
+exit:
+  if (pixbuf) {
+    free(pixbuf);
+  }
+  return ret;
+}
+~~~~
+
+## Production Source Change (S0 -> S1)
+
+Harness changes, commit messages, tests, outcomes, and future evidence are excluded. The source diff is a deterministic H0-identifier-anchored excerpt capped at 70,000 characters.
+
+~~~~diff
+... [unselected diff lines omitted by frozen H0-anchored rule] ...
+diff --git a/cmd/wuffs-c/internal/cgen/base/image-public.h b/cmd/wuffs-c/internal/cgen/base/image-public.h
+index dfc90674..0178a5cf 100644
+--- a/cmd/wuffs-c/internal/cgen/base/image-public.h
++++ b/cmd/wuffs-c/internal/cgen/base/image-public.h
+@@ -195,10 +195,6 @@ wuffs_base__pixel_format__num_planes(wuffs_base__pixel_format f) {
+   return f ? (((f >> 20) & 0x03) + 1) : 0;
+ }
+ 
+-typedef struct {
+-  wuffs_base__table_u8 planes[WUFFS_BASE__PIXEL_FORMAT__NUM_PLANES_MAX];
+-} wuffs_base__pixel_buffer;
+-
+ // --------
+ 
+ // wuffs_base__pixel_subsampling encodes the mapping of pixel space coordinates
+@@ -289,17 +285,13 @@ typedef struct {
+     wuffs_base__pixel_subsampling pixsub;
+     uint32_t width;
+     uint32_t height;
+-    uint32_t num_loops;
+-    bool first_frame_is_opaque;
+   } private_impl;
+ 
+ #ifdef __cplusplus
+   inline void initialize(wuffs_base__pixel_format pixfmt,
+                          wuffs_base__pixel_subsampling pixsub,
+                          uint32_t width,
+-                         uint32_t height,
+-                         uint32_t num_loops,
+-                         bool first_frame_is_opaque);
++                         uint32_t height);
+   inline void invalidate();
+   inline bool is_valid();
+   inline wuffs_base__pixel_format pixel_format();
+@@ -307,22 +299,18 @@ typedef struct {
+   inline wuffs_base__rect_ie_u32 bounds();
+   inline uint32_t width();
+   inline uint32_t height();
+-  inline uint32_t num_loops();
+-  inline uint32_t first_frame_is_opaque();
+   inline size_t pixbuf_size();
+ #endif  // __cplusplus
+ 
+-} wuffs_base__image_config;
++} wuffs_base__pixel_config;
+ 
+ // TODO: Should this function return bool? An error type?
+ static inline void  //
+-wuffs_base__image_config__initialize(wuffs_base__image_config* c,
++wuffs_base__pixel_config__initialize(wuffs_base__pixel_config* c,
+                                      wuffs_base__pixel_format pixfmt,
+                                      wuffs_base__pixel_subsampling pixsub,
+                                      uint32_t width,
+-                                     uint32_t height,
+-                                     uint32_t num_loops,
+-                                     bool first_frame_is_opaque) {
++                                     uint32_t height) {
+   if (!c) {
+     return;
+   }
+@@ -334,38 +322,36 @@ wuffs_base__image_config__initialize(wuffs_base__image_config* c,
+       c->private_impl.pixsub = pixsub;
+       c->private_impl.width = width;
+       c->private_impl.height = height;
+-      c->private_impl.num_loops = num_loops;
+-      c->private_impl.first_frame_is_opaque = first_frame_is_opaque;
+       return;
+     }
+   }
+-  *c = ((wuffs_base__image_config){});
++  *c = ((wuffs_base__pixel_config){});
+ }
+ 
+ static inline void  //
+-wuffs_base__image_config__invalidate(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__invalidate(wuffs_base__pixel_config* c) {
+   if (c) {
+-    *c = ((wuffs_base__image_config){});
++    *c = ((wuffs_base__pixel_config){});
+   }
+ }
+ 
+ static inline bool  //
+-wuffs_base__image_config__is_valid(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__is_valid(wuffs_base__pixel_config* c) {
+   return c && c->private_impl.pixfmt;
+ }
+ 
+ static inline wuffs_base__pixel_format  //
+-wuffs_base__image_config__pixel_format(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__pixel_format(wuffs_base__pixel_config* c) {
+   return c ? c->private_impl.pixfmt : 0;
+ }
+ 
+ static inline wuffs_base__pixel_subsampling  //
+-wuffs_base__image_config__pixel_subsampling(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__pixel_subsampling(wuffs_base__pixel_config* c) {
+   return c ? c->private_impl.pixsub : 0;
+ }
+ 
+ static inline wuffs_base__rect_ie_u32  //
+-wuffs_base__image_config__bounds(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__bounds(wuffs_base__pixel_config* c) {
+   return c ? ((wuffs_base__rect_ie_u32){
+                  .min_incl_x = 0,
+                  .min_incl_y = 0,
+@@ -376,30 +362,20 @@ wuffs_base__image_config__bounds(wuffs_base__image_config* c) {
+ }
+ 
+ static inline uint32_t  //
+-wuffs_base__image_config__width(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__width(wuffs_base__pixel_config* c) {
+   return c ? c->private_impl.width : 0;
+ }
+ 
+ static inline uint32_t  //
+-wuffs_base__image_config__height(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__height(wuffs_base__pixel_config* c) {
+   return c ? c->private_impl.height : 0;
+ }
+ 
+-static inline uint32_t  //
+-wuffs_base__image_config__num_loops(wuffs_base__image_config* c) {
+-  return c ? c->private_impl.num_loops : 0;
+-}
+-
+-static inline uint32_t  //
+-wuffs_base__image_config__first_frame_is_opaque(wuffs_base__image_config* c) {
+-  return c ? c->private_impl.first_frame_is_opaque : false;
+-}
+-
+ // TODO: this is the right API for planar (not packed) pixbufs? Should it allow
+ // decoding into a color model different from the format's intrinsic one? For
+ // example, decoding a JPEG image straight to RGBA instead of to YCbCr?
+ static inline size_t  //
+-wuffs_base__image_config__pixbuf_size(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__pixbuf_size(wuffs_base__pixel_config* c) {
+   if (c) {
+     uint64_t wh =
+         ((uint64_t)c->private_impl.width) * ((uint64_t)c->private_impl.height);
+@@ -411,6 +387,172 @@ wuffs_base__image_config__pixbuf_size(wuffs_base__image_config* c) {
+ 
+ #ifdef __cplusplus
+ 
++inline void  //
++wuffs_base__pixel_config::initialize(wuffs_base__pixel_format pixfmt,
++                                     wuffs_base__pixel_subsampling pixsub,
++                                     uint32_t width,
++                                     uint32_t height) {
++  wuffs_base__pixel_config__initialize(this, pixfmt, pixsub, width, height);
++}
++
++inline void  //
++wuffs_base__pixel_config::invalidate() {
++  wuffs_base__pixel_config__invalidate(this);
++}
++
++inline bool  //
++wuffs_base__pixel_config::is_valid() {
++  return wuffs_base__pixel_config__is_valid(this);
++}
++
++inline wuffs_base__pixel_format  //
++wuffs_base__pixel_config::pixel_format() {
++  return wuffs_base__pixel_config__pixel_format(this);
++}
++
++inline wuffs_base__pixel_subsampling  //
++wuffs_base__pixel_config::pixel_subsampling() {
++  return wuffs_base__pixel_config__pixel_subsampling(this);
++}
++
++inline wuffs_base__rect_ie_u32  //
++wuffs_base__pixel_config::bounds() {
++  return wuffs_base__pixel_config__bounds(this);
++}
++
++inline uint32_t  //
++wuffs_base__pixel_config::width() {
++  return wuffs_base__pixel_config__width(this);
++}
++
++inline uint32_t  //
++wuffs_base__pixel_config::height() {
++  return wuffs_base__pixel_config__height(this);
++}
++
++inline size_t  //
++wuffs_base__pixel_config::pixbuf_size() {
++  return wuffs_base__pixel_config__pixbuf_size(this);
++}
++
++#endif  // __cplusplus
++
++// --------
++
++typedef struct {
++  // Do not access the private_impl's fields directly. There is no API/ABI
++  // compatibility or safety guarantee if you do so.
++  struct {
++    wuffs_base__pixel_config pixcfg;
++    uint32_t num_loops;
++    bool first_frame_is_opaque;
++  } private_impl;
++
++#ifdef __cplusplus
++  inline void initialize(wuffs_base__pixel_format pixfmt,
++                         wuffs_base__pixel_subsampling pixsub,
++                         uint32_t width,
++                         uint32_t height,
++                         uint32_t num_loops,
++                         bool first_frame_is_opaque);
++  inline void invalidate();
++  inline bool is_valid();
++  inline wuffs_base__pixel_config* pixel_config();
++  inline wuffs_base__pixel_format pixel_format();
++  inline wuffs_base__pixel_subsampling pixel_subsampling();
++  inline wuffs_base__rect_ie_u32 bounds();
++  inline uint32_t width();
++  inline uint32_t height();
++  inline uint32_t num_loops();
++  inline uint32_t first_frame_is_opaque();
++#endif  // __cplusplus
++
++} wuffs_base__image_config;
++
++// TODO: Should this function return bool? An error type?
++static inline void  //
++wuffs_base__image_config__initialize(wuffs_base__image_config* c,
++                                     wuffs_base__pixel_format pixfmt,
++                                     wuffs_base__pixel_subsampling pixsub,
++                                     uint32_t width,
++                                     uint32_t height,
++                                     uint32_t num_loops,
++                                     bool first_frame_is_opaque) {
++  if (!c) {
++    return;
++  }
++  if (wuffs_base__pixel_format__is_valid(pixfmt)) {
++    c->private_impl.pixcfg.private_impl.pixfmt = pixfmt;
++    c->private_impl.pixcfg.private_impl.pixsub = pixsub;
++    c->private_impl.pixcfg.private_impl.width = width;
++    c->private_impl.pixcfg.private_impl.height = height;
++    c->private_impl.num_loops = num_loops;
++    c->private_impl.first_frame_is_opaque = first_frame_is_opaque;
++    return;
++  }
++  *c = ((wuffs_base__image_config){});
++}
++
++static inline void  //
++wuffs_base__image_config__invalidate(wuffs_base__image_config* c) {
++  if (c) {
++    *c = ((wuffs_base__image_config){});
++  }
++}
++
++static inline bool  //
++wuffs_base__image_config__is_valid(wuffs_base__image_config* c) {
++  return c && wuffs_base__pixel_config__is_valid(&(c->private_impl.pixcfg));
++}
++
++static inline wuffs_base__pixel_config*  //
++wuffs_base__image_config__pixel_config(wuffs_base__image_config* c) {
++  return c ? &c->private_impl.pixcfg : NULL;
++}
++
++static inline wuffs_base__pixel_format  //
++wuffs_base__image_config__pixel_format(wuffs_base__image_config* c) {
++  return c ? c->private_impl.pixcfg.private_impl.pixfmt : 0;
++}
++
++static inline wuffs_base__pixel_subsampling  //
++wuffs_base__image_config__pixel_subsampling(wuffs_base__image_config* c) {
++  return c ? c->private_impl.pixcfg.private_impl.pixsub : 0;
++}
++
++static inline wuffs_base__rect_ie_u32  //
++wuffs_base__image_config__bounds(wuffs_base__image_config* c) {
++  return c ? ((wuffs_base__rect_ie_u32){
++                 .min_incl_x = 0,
++                 .min_incl_y = 0,
++                 .max_excl_x = c->private_impl.pixcfg.private_impl.width,
++                 .max_excl_y = c->private_impl.pixcfg.private_impl.height,
++             })
++           : ((wuffs_base__rect_ie_u32){});
++}
++
++static inline uint32_t  //
++wuffs_base__image_config__width(wuffs_base__image_config* c) {
++  return c ? c->private_impl.pixcfg.private_impl.width : 0;
++}
++
++static inline uint32_t  //
++wuffs_base__image_config__height(wuffs_base__image_config* c) {
++  return c ? c->private_impl.pixcfg.private_impl.height : 0;
++}
++
++static inline uint32_t  //
++wuffs_base__image_config__num_loops(wuffs_base__image_config* c) {
++  return c ? c->private_impl.num_loops : 0;
++}
++
++static inline uint32_t  //
++wuffs_base__image_config__first_frame_is_opaque(wuffs_base__image_config* c) {
++  return c ? c->private_impl.first_frame_is_opaque : false;
++}
++
++#ifdef __cplusplus
++
+ inline void  //
+ wuffs_base__image_config::initialize(wuffs_base__pixel_format pixfmt,
+                                      wuffs_base__pixel_subsampling pixsub,
+@@ -432,6 +574,11 @@ wuffs_base__image_config::is_valid() {
+   return wuffs_base__image_config__is_valid(this);
+ }
+ 
++inline wuffs_base__pixel_config*  //
++wuffs_base__image_config::pixel_config() {
++  return wuffs_base__image_config__pixel_config(this);
++}
++
+ inline wuffs_base__pixel_format  //
+ wuffs_base__image_config::pixel_format() {
+   return wuffs_base__image_config__pixel_format(this);
+@@ -467,11 +614,6 @@ wuffs_base__image_config::first_frame_is_opaque() {
+   return wuffs_base__image_config__first_frame_is_opaque(this);
+ }
+ 
+-inline size_t  //
+-wuffs_base__image_config::pixbuf_size() {
+-  return wuffs_base__image_config__pixbuf_size(this);
+-}
+-
+ #endif  // __cplusplus
+ 
+ // --------
+@@ -498,260 +640,284 @@ typedef struct {
+   // Do not access the private_impl's fields directly. There is no API/ABI
+   // compatibility or safety guarantee if you do so.
+   struct {
+-    wuffs_base__image_config config;
+-    wuffs_base__pixel_buffer pixbuf;
+-    // TODO: color spaces.
+-    wuffs_base__rect_ie_u32 dirty_rect;
++    wuffs_base__rect_ie_u32 bounds;
+     wuffs_base__flicks duration;
+     bool blend;
+     wuffs_base__animation_disposal disposal;
+     bool palette_changed;
+-    uint8_t palette[1024];
+   } private_impl;
+ 
+ #ifdef __cplusplus
+-  inline wuffs_base__status set_from_pixbuf(wuffs_base__image_config config,
+-                                            wuffs_base__pixel_buffer pixbuf);
+-  inline wuffs_base__status set_from_slice(wuffs_base__image_config config,
+-                                           wuffs_base__slice_u8 pixbuf_memory);
+-  inline void update(wuffs_base__rect_ie_u32 dirty_rect,
++  inline void update(wuffs_base__rect_ie_u32 bounds,
+                      wuffs_base__flicks duration,
+                      bool blend,
+                      wuffs_base__animation_disposal disposal,
+-                     wuffs_base__slice_u8 palette);
+-  inline wuffs_base__image_config* image_config();
++                     bool palette_changed);
+   inline wuffs_base__rect_ie_u32 bounds();
+   inline uint32_t width();
+   inline uint32_t height();
+-  inline wuffs_base__rect_ie_u32 dirty_rect();
+   inline wuffs_base__flicks duration();
+   inline bool blend();
+   inline wuffs_base__animation_disposal disposal();
+   inline bool palette_changed();
+-  inline wuffs_base__slice_u8 palette();
+-  inline wuffs_base__table_u8 plane(uint32_t p);
+ #endif  // __cplusplus
+ 
+-} wuffs_base__image_buffer;
+-
+-static inline wuffs_base__status  //
+-wuffs_base__image_buffer__set_from_pixbuf(wuffs_base__image_buffer* b,
+-                                          wuffs_base__image_config config,
+-                                          wuffs_base__pixel_buffer pixbuf) {
+-  if (!b) {
+-    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+-  }
+-  *b = ((wuffs_base__image_buffer){});
+-  b->private_impl.config = config;
+-  b->private_impl.pixbuf = pixbuf;
+-  return WUFFS_BASE__STATUS_OK;
+-}
+-
+-static inline wuffs_base__status  //
+-wuffs_base__image_buffer__set_from_slice(wuffs_base__image_buffer* b,
+-                                         wuffs_base__image_config config,
+-                                         wuffs_base__slice_u8 pixbuf_memory) {
+-  if (!b) {
+-    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+-  }
+-  *b = ((wuffs_base__image_buffer){});
+-  // TODO: don't assume 1 byte per pixel. Don't assume packed.
+-  uint64_t wh = ((uint64_t)config.private_impl.width) *
+-                ((uint64_t)config.private_impl.height);
+-  if (wh > pixbuf_memory.len) {
+-    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+-  }
+-  b->private_impl.config = config;
+-  wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+-  tab->ptr = pixbuf_memory.ptr;
+-  tab->width = config.private_impl.width;
+-  tab->height = config.private_impl.height;
+-  tab->stride = config.private_impl.width;
+-  return WUFFS_BASE__STATUS_OK;
+-}
++} wuffs_base__frame_config;
+ 
+-// The palette argument is ignored unless its length is exactly 1024.
+ static inline void  //
+-wuffs_base__image_buffer__update(wuffs_base__image_buffer* b,
+-                                 wuffs_base__rect_ie_u32 dirty_rect,
++wuffs_base__frame_config__update(wuffs_base__frame_config* c,
++                                 wuffs_base__rect_ie_u32 bounds,
+                                  wuffs_base__flicks duration,
+                                  bool blend,
+                                  wuffs_base__animation_disposal disposal,
+-                                 wuffs_base__slice_u8 palette) {
+-  if (!b) {
++                                 bool palette_changed) {
++  if (!c) {
+     return;
+   }
+ 
+-  // Clip the dirty_rect to the image bounds.
+-  dirty_rect.max_excl_x = wuffs_base__u32__min(
+-      dirty_rect.max_excl_x, b->private_impl.config.private_impl.width);
+-  dirty_rect.max_excl_y = wuffs_base__u32__min(
+-      dirty_rect.max_excl_y, b->private_impl.config.private_impl.height);
+-  b->private_impl.dirty_rect = dirty_rect;
+-
+-  b->private_impl.duration = duration;
+-  b->private_impl.blend = blend;
+-  b->private_impl.disposal = disposal;
+-  b->private_impl.palette_changed = palette.ptr && (palette.len == 1024);
+-  if (b->private_impl.palette_changed) {
+-    memmove(b->private_impl.palette, palette.ptr, 1024);
+-  }
+-}
+-
+-// wuffs_base__image_config returns the overall configuration for this frame.
+-static inline wuffs_base__image_config*  //
+-wuffs_base__image_buffer__image_config(wuffs_base__image_buffer* b) {
+-  return b ? &b->private_impl.config : NULL;
++  c->private_impl.bounds = bounds;
++  c->private_impl.duration = duration;
++  c->private_impl.blend = blend;
++  c->private_impl.disposal = disposal;
++  c->private_impl.palette_changed = palette_changed;
+ }
+ 
+ static inline wuffs_base__rect_ie_u32  //
+-wuffs_base__image_buffer__bounds(wuffs_base__image_buffer* b) {
+-  return b ? wuffs_base__image_config__bounds(&b->private_impl.config)
+-           : ((wuffs_base__rect_ie_u32){});
++wuffs_base__frame_config__bounds(wuffs_base__frame_config* c) {
++  return c ? c->private_impl.bounds : ((wuffs_base__rect_ie_u32){});
+ }
+ 
+ static inline uint32_t  //
+-wuffs_base__image_buffer__width(wuffs_base__image_buffer* b) {
+-  return b ? wuffs_base__image_config__width(&b->private_impl.config) : 0;
++wuffs_base__frame_config__width(wuffs_base__frame_config* c) {
++  return c ? wuffs_base__rect_ie_u32__width(&c->private_impl.bounds) : 0;
+ }
+ 
+ static inline uint32_t  //
+-wuffs_base__image_buffer__height(wuffs_base__image_buffer* b) {
+-  return b ? wuffs_base__image_config__height(&b->private_impl.config) : 0;
+-}
+-
+-// wuffs_base__image_buffer__dirty_rect returns an upper bound for what part of
+-// this frame's pixels differs from the previous frame.
+-static inline wuffs_base__rect_ie_u32  //
+-wuffs_base__image_buffer__dirty_rect(wuffs_base__image_buffer* b) {
+-  return b ? b->private_impl.dirty_rect : ((wuffs_base__rect_ie_u32){});
++wuffs_base__frame_config__height(wuffs_base__frame_config* c) {
++  return c ? wuffs_base__rect_ie_u32__height(&c->private_impl.bounds) : 0;
+ }
+ 
+-// wuffs_base__image_buffer__duration returns the amount of time to display
++// wuffs_base__frame_config__duration returns the amount of time to display
+ // this frame. Zero means to display forever - a still (non-animated) image.
+ static inline wuffs_base__flicks  //
+-wuffs_base__image_buffer__duration(wuffs_base__image_buffer* b) {
+-  return b ? b->private_impl.duration : 0;
++wuffs_base__frame_config__duration(wuffs_base__frame_config* c) {
++  return c ? c->private_impl.duration : 0;
+ }
+ 
+-// wuffs_base__image_buffer__blend returns, for a transparent image, whether to
++// wuffs_base__frame_config__blend returns, for a transparent image, whether to
+ // blend this frame with the existing canvas.
+ //
+ // In Porter-Duff compositing operator terminology, false means "src" and true
+ // means "src over dst".
+ static inline bool  //
+-wuffs_base__image_buffer__blend(wuffs_base__image_buffer* b) {
+-  return b && b->private_impl.blend;
++wuffs_base__frame_config__blend(wuffs_base__frame_config* c) {
++  return c && c->private_impl.blend;
+ }
+ 
+-// wuffs_base__image_buffer__disposal returns, for an animated image, how to
++// wuffs_base__frame_config__disposal returns, for an animated image, how to
+ // dispose of this frame after displaying it.
+ static inline wuffs_base__animation_disposal  //
+-wuffs_base__image_buffer__disposal(wuffs_base__image_buffer* b) {
+-  return b ? b->private_impl.disposal : 0;
++wuffs_base__frame_config__disposal(wuffs_base__frame_config* c) {
++  return c ? c->private_impl.disposal : 0;
+ }
+ 
+-// wuffs_base__image_buffer__palette_changed returns whether this frame's
++// wuffs_base__frame_config__palette_changed returns whether this frame's
+ // palette differs from the previous frame. It is conservative and may return
+ // false positives (but never false negatives).
+ static inline bool  //
+-wuffs_base__image_buffer__palette_changed(wuffs_base__image_buffer* b) {
+-  return b && b->private_impl.palette_changed;
++wuffs_base__frame_config__palette_changed(wuffs_base__frame_config* c) {
++  return c && c->private_impl.palette_changed;
+ }
+ 
+-// wuffs_base__image_buffer__palette returns the palette that the pixel data
+-// can index. The backing array is inside b and has length 1024.
+-static inline wuffs_base__slice_u8  //
+-wuffs_base__image_buffer__palette(wuffs_base__image_buffer* b) {
+-  return b ? ((wuffs_base__slice_u8){.ptr = b->private_impl.palette,
+-                                     .len = 1024})
+-           : ((wuffs_base__slice_u8){});
++#ifdef __cplusplus
++
++inline void  //
++wuffs_base__frame_config::update(wuffs_base__rect_ie_u32 bounds,
++                                 wuffs_base__flicks duration,
++                                 bool blend,
++                                 wuffs_base__animation_disposal disposal,
++                                 bool palette_changed) {
++  wuffs_base__frame_config__update(this, bounds, duration, blend, disposal,
++                                   palette_changed);
+ }
+ 
+-static inline wuffs_base__table_u8  //
+-wuffs_base__image_buffer__plane(wuffs_base__image_buffer* b, uint32_t p) {
+-  return (b && (p < WUFFS_BASE__PIXEL_FORMAT__NUM_PLANES_MAX))
+-             ? b->private_impl.pixbuf.planes[p]
+-             : ((wuffs_base__table_u8){});
++inline wuffs_base__rect_ie_u32  //
++wuffs_base__frame_config::bounds() {
++  return wuffs_base__frame_config__bounds(this);
+ }
+ 
+-#ifdef __cplusplus
++inline uint32_t  //
++wuffs_base__frame_config::width() {
++  return wuffs_base__frame_config__width(this);
++}
+ 
+-inline wuffs_base__status  //
+-wuffs_base__image_buffer::set_from_pixbuf(wuffs_base__image_config config,
+-                                          wuffs_base__pixel_buffer pixbuf) {
+-  return wuffs_base__image_buffer__set_from_pixbuf(this, config, pixbuf);
++inline uint32_t  //
++wuffs_base__frame_config::height() {
++  return wuffs_base__frame_config__height(this);
+ }
+ 
+-inline wuffs_base__status  //
+-wuffs_base__image_buffer::set_from_slice(wuffs_base__image_config config,
++inline wuffs_base__flicks  //
++wuffs_base__frame_config::duration() {
++  return wuffs_base__frame_config__duration(this);
++}
++
++inline bool  //
++wuffs_base__frame_config::blend() {
++  return wuffs_base__frame_config__blend(this);
++}
++
++inline wuffs_base__animation_disposal  //
++wuffs_base__frame_config::disposal() {
++  return wuffs_base__frame_config__disposal(this);
++}
++
++inline bool  //
++wuffs_base__frame_config::palette_changed() {
++  return wuffs_base__frame_config__palette_changed(this);
++}
++
++#endif  // __cplusplus
++
++// --------
++
++typedef struct {
++  // Do not access the private_impl's fields directly. There is no API/ABI
++  // compatibility or safety guarantee if you do so.
++  struct {
++    wuffs_base__pixel_config pixcfg;
++    wuffs_base__table_u8 planes[WUFFS_BASE__PIXEL_FORMAT__NUM_PLANES_MAX];
++    uint8_t palette[1024];
++    // TODO: color spaces.
++  } private_impl;
++
++#ifdef __cplusplus
++  inline wuffs_base__status set_from_slice(wuffs_base__pixel_config* pixcfg,
++                                           wuffs_base__slice_u8 pixbuf_memory);
++  inline void set_palette(wuffs_base__slice_u8 palette);
++  inline wuffs_base__pixel_config* pixel_config();
++  inline wuffs_base__rect_ie_u32 bounds();
++  inline uint32_t width();
++  inline uint32_t height();
++  inline wuffs_base__table_u8 plane(uint32_t p);
++  inline wuffs_base__slice_u8 palette();
++#endif  // __cplusplus
++
++} wuffs_base__pixel_buffer;
++
++static inline wuffs_base__status  //
++wuffs_base__pixel_buffer__set_from_slice(wuffs_base__pixel_buffer* b,
++                                         wuffs_base__pixel_config* pixcfg,
+                                          wuffs_base__slice_u8 pixbuf_memory) {
+-  return wuffs_base__image_buffer__set_from_slice(this, config, pixbuf_memory);
++  if (!b) {
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
++  }
++  *b = ((wuffs_base__pixel_buffer){});
++  if (!pixcfg) {
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT;
++  }
++  // TODO: don't assume 1 byte per pixel. Don't assume packed.
++  uint64_t wh = ((uint64_t)pixcfg->private_impl.width) *
++                ((uint64_t)pixcfg->private_impl.height);
++  if (wh > pixbuf_memory.len) {
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
++  }
++  b->private_impl.pixcfg = *pixcfg;
++  wuffs_base__table_u8* tab = &b->private_impl.planes[0];
++  tab->ptr = pixbuf_memory.ptr;
++  tab->width = pixcfg->private_impl.width;
++  tab->height = pixcfg->private_impl.height;
++  tab->stride = pixcfg->private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-inline void  //
+-wuffs_base__image_buffer::update(wuffs_base__rect_ie_u32 dirty_rect,
+-                                 wuffs_base__flicks duration,
+-                                 bool blend,
+-                                 wuffs_base__animation_disposal disposal,
+-                                 wuffs_base__slice_u8 palette) {
+-  wuffs_base__image_buffer__update(this, dirty_rect, duration, blend, disposal,
+-                                   palette);
++// The palette argument is ignored unless its length is exactly 1024.
++static inline void  //
++wuffs_base__pixel_buffer__set_palette(wuffs_base__pixel_buffer* b,
++                                      wuffs_base__slice_u8 palette) {
++  if (b && palette.ptr && (palette.len == 1024)) {
++    memmove(b->private_impl.palette, palette.ptr, 1024);
++  }
+ }
+ 
+-inline wuffs_base__image_config*  //
+-wuffs_base__image_buffer::image_config() {
+-  return wuffs_base__image_buffer__image_config(this);
++// wuffs_base__pixel_config returns the overall configuration for this frame.
++static inline wuffs_base__pixel_config*  //
++wuffs_base__pixel_buffer__pixel_config(wuffs_base__pixel_buffer* b) {
++  return b ? &b->private_impl.pixcfg : NULL;
+ }
+ 
+-inline wuffs_base__rect_ie_u32  //
+-wuffs_base__image_buffer::bounds() {
+-  return wuffs_base__image_buffer__bounds(this);
++static inline wuffs_base__rect_ie_u32  //
++wuffs_base__pixel_buffer__bounds(wuffs_base__pixel_buffer* b) {
++  return b ? wuffs_base__pixel_config__bounds(&b->private_impl.pixcfg)
++           : ((wuffs_base__rect_ie_u32){});
+ }
+ 
+-inline uint32_t  //
+-wuffs_base__image_buffer::width() {
+-  return wuffs_base__image_buffer__width(this);
++static inline uint32_t  //
++wuffs_base__pixel_buffer__width(wuffs_base__pixel_buffer* b) {
++  return b ? wuffs_base__pixel_config__width(&b->private_impl.pixcfg) : 0;
+ }
+ 
+-inline uint32_t  //
+-wuffs_base__image_buffer::height() {
+-  return wuffs_base__image_buffer__height(this);
++static inline uint32_t  //
++wuffs_base__pixel_buffer__height(wuffs_base__pixel_buffer* b) {
++  return b ? wuffs_base__pixel_config__height(&b->private_impl.pixcfg) : 0;
+ }
+ 
+-inline wuffs_base__rect_ie_u32  //
+-wuffs_base__image_buffer::dirty_rect() {
+-  return wuffs_base__image_buffer__dirty_rect(this);
++static inline wuffs_base__table_u8  //
++wuffs_base__pixel_buffer__plane(wuffs_base__pixel_buffer* b, uint32_t p) {
++  return (b && (p < WUFFS_BASE__PIXEL_FORMAT__NUM_PLANES_MAX))
++             ? b->private_impl.planes[p]
++             : ((wuffs_base__table_u8){});
+ }
+ 
+-inline wuffs_base__flicks  //
+-wuffs_base__image_buffer::duration() {
+-  return wuffs_base__image_buffer__duration(this);
++// wuffs_base__pixel_buffer__palette returns the palette that the pixel data
++// can index. The backing array is inside b and has length 1024.
++static inline wuffs_base__slice_u8  //
++wuffs_base__pixel_buffer__palette(wuffs_base__pixel_buffer* b) {
++  return b ? ((wuffs_base__slice_u8){.ptr = b->private_impl.palette,
++                                     .len = 1024})
++           : ((wuffs_base__slice_u8){});
+ }
+ 
+-inline bool  //
+-wuffs_base__image_buffer::blend() {
+-  return wuffs_base__image_buffer__blend(this);
++#ifdef __cplusplus
++
++inline wuffs_base__status  //
++wuffs_base__pixel_buffer::set_from_slice(wuffs_base__pixel_config* pixcfg,
++                                         wuffs_base__slice_u8 pixbuf_memory) {
++  return wuffs_base__pixel_buffer__set_from_slice(this, pixcfg, pixbuf_memory);
+ }
+ 
+-inline wuffs_base__animation_disposal  //
+-wuffs_base__image_buffer::disposal() {
+-  return wuffs_base__image_buffer__disposal(this);
++inline void  //
++wuffs_base__pixel_buffer::set_palette(wuffs_base__slice_u8 palette) {
++  wuffs_base__pixel_buffer__set_palette(this, palette);
+ }
+ 
+-inline bool  //
+-wuffs_base__image_buffer::palette_changed() {
+-  return wuffs_base__image_buffer__palette_changed(this);
++inline wuffs_base__pixel_config*  //
++wuffs_base__pixel_buffer::pixel_config() {
++  return wuffs_base__pixel_buffer__pixel_config(this);
+ }
+ 
+-inline wuffs_base__slice_u8  //
+-wuffs_base__image_buffer::palette() {
+-  return wuffs_base__image_buffer__palette(this);
++inline wuffs_base__rect_ie_u32  //
++wuffs_base__pixel_buffer::bounds() {
++  return wuffs_base__pixel_buffer__bounds(this);
++}
++
++inline uint32_t  //
++wuffs_base__pixel_buffer::width() {
++  return wuffs_base__pixel_buffer__width(this);
++}
++
++inline uint32_t  //
++wuffs_base__pixel_buffer::height() {
++  return wuffs_base__pixel_buffer__height(this);
+ }
+ 
+ inline wuffs_base__table_u8  //
+-wuffs_base__image_buffer::plane(uint32_t p) {
+-  return wuffs_base__image_buffer__plane(this, p);
++wuffs_base__pixel_buffer::plane(uint32_t p) {
++  return wuffs_base__pixel_buffer__plane(this, p);
++}
++
++inline wuffs_base__slice_u8  //
++wuffs_base__pixel_buffer::palette() {
++  return wuffs_base__pixel_buffer__palette(this);
+ }
+ 
+ #endif  // __cplusplus
+diff --git a/release/c/unsupported-snapshot.h b/release/c/unsupported-snapshot.h
+index cf8b3a42..d4fd9527 100644
+--- a/release/c/unsupported-snapshot.h
++++ b/release/c/unsupported-snapshot.h
+@@ -1291,10 +1291,6 @@ wuffs_base__pixel_format__num_planes(wuffs_base__pixel_format f) {
+   return f ? (((f >> 20) & 0x03) + 1) : 0;
+ }
+ 
+-typedef struct {
+-  wuffs_base__table_u8 planes[WUFFS_BASE__PIXEL_FORMAT__NUM_PLANES_MAX];
+-} wuffs_base__pixel_buffer;
+-
+ // --------
+ 
+ // wuffs_base__pixel_subsampling encodes the mapping of pixel space coordinates
+@@ -1385,17 +1381,13 @@ typedef struct {
+     wuffs_base__pixel_subsampling pixsub;
+     uint32_t width;
+     uint32_t height;
+-    uint32_t num_loops;
+-    bool first_frame_is_opaque;
+   } private_impl;
+ 
+ #ifdef __cplusplus
+   inline void initialize(wuffs_base__pixel_format pixfmt,
+                          wuffs_base__pixel_subsampling pixsub,
+                          uint32_t width,
+-                         uint32_t height,
+-                         uint32_t num_loops,
+-                         bool first_frame_is_opaque);
++                         uint32_t height);
+   inline void invalidate();
+   inline bool is_valid();
+   inline wuffs_base__pixel_format pixel_format();
+@@ -1403,22 +1395,18 @@ typedef struct {
+   inline wuffs_base__rect_ie_u32 bounds();
+   inline uint32_t width();
+   inline uint32_t height();
+-  inline uint32_t num_loops();
+-  inline uint32_t first_frame_is_opaque();
+   inline size_t pixbuf_size();
+ #endif  // __cplusplus
+ 
+-} wuffs_base__image_config;
++} wuffs_base__pixel_config;
+ 
+ // TODO: Should this function return bool? An error type?
+ static inline void  //
+-wuffs_base__image_config__initialize(wuffs_base__image_config* c,
++wuffs_base__pixel_config__initialize(wuffs_base__pixel_config* c,
+                                      wuffs_base__pixel_format pixfmt,
+                                      wuffs_base__pixel_subsampling pixsub,
+                                      uint32_t width,
+-                                     uint32_t height,
+-                                     uint32_t num_loops,
+-                                     bool first_frame_is_opaque) {
++                                     uint32_t height) {
+   if (!c) {
+     return;
+   }
+@@ -1430,38 +1418,36 @@ wuffs_base__image_config__initialize(wuffs_base__image_config* c,
+       c->private_impl.pixsub = pixsub;
+       c->private_impl.width = width;
+       c->private_impl.height = height;
+-      c->private_impl.num_loops = num_loops;
+-      c->private_impl.first_frame_is_opaque = first_frame_is_opaque;
+       return;
+     }
+   }
+-  *c = ((wuffs_base__image_config){});
++  *c = ((wuffs_base__pixel_config){});
+ }
+ 
+ static inline void  //
+-wuffs_base__image_config__invalidate(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__invalidate(wuffs_base__pixel_config* c) {
+   if (c) {
+-    *c = ((wuffs_base__image_config){});
++    *c = ((wuffs_base__pixel_config){});
+   }
+ }
+ 
+ static inline bool  //
+-wuffs_base__image_config__is_valid(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__is_valid(wuffs_base__pixel_config* c) {
+   return c && c->private_impl.pixfmt;
+ }
+ 
+ static inline wuffs_base__pixel_format  //
+-wuffs_base__image_config__pixel_format(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__pixel_format(wuffs_base__pixel_config* c) {
+   return c ? c->private_impl.pixfmt : 0;
+ }
+ 
+ static inline wuffs_base__pixel_subsampling  //
+-wuffs_base__image_config__pixel_subsampling(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__pixel_subsampling(wuffs_base__pixel_config* c) {
+   return c ? c->private_impl.pixsub : 0;
+ }
+ 
+ static inline wuffs_base__rect_ie_u32  //
+-wuffs_base__image_config__bounds(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__bounds(wuffs_base__pixel_config* c) {
+   return c ? ((wuffs_base__rect_ie_u32){
+                  .min_incl_x = 0,
+                  .min_incl_y = 0,
+@@ -1472,30 +1458,20 @@ wuffs_base__image_config__bounds(wuffs_base__image_config* c) {
+ }
+ 
+ static inline uint32_t  //
+-wuffs_base__image_config__width(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__width(wuffs_base__pixel_config* c) {
+   return c ? c->private_impl.width : 0;
+ }
+ 
+ static inline uint32_t  //
+-wuffs_base__image_config__height(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__height(wuffs_base__pixel_config* c) {
+   return c ? c->private_impl.height : 0;
+ }
+ 
+-static inline uint32_t  //
+-wuffs_base__image_config__num_loops(wuffs_base__image_config* c) {
+-  return c ? c->private_impl.num_loops : 0;
+-}
+-
+-static inline uint32_t  //
+-wuffs_base__image_config__first_frame_is_opaque(wuffs_base__image_config* c) {
+-  return c ? c->private_impl.first_frame_is_opaque : false;
+-}
+-
+ // TODO: this is the right API for planar (not packed) pixbufs? Should it allow
+ // decoding into a color model different from the format's intrinsic one? For
+ // example, decoding a JPEG image straight to RGBA instead of to YCbCr?
+ static inline size_t  //
+-wuffs_base__image_config__pixbuf_size(wuffs_base__image_config* c) {
++wuffs_base__pixel_config__pixbuf_size(wuffs_base__pixel_config* c) {
+   if (c) {
+     uint64_t wh =
+         ((uint64_t)c->private_impl.width) * ((uint64_t)c->private_impl.height);
+@@ -1507,6 +1483,172 @@ wuffs_base__image_config__pixbuf_size(wuffs_base__image_config* c) {
+ 
+ #ifdef __cplusplus
+ 
++inline void  //
++wuffs_base__pixel_config::initialize(wuffs_base__pixel_format pixfmt,
++                                     wuffs_base__pixel_subsampling pixsub,
++                                     uint32_t width,
++                                     uint32_t height) {
++  wuffs_base__pixel_config__initialize(this, pixfmt, pixsub, width, height);
++}
++
++inline void  //
++wuffs_base__pixel_config::invalidate() {
++  wuffs_base__pixel_config__invalidate(this);
++}
++
++inline bool  //
++wuffs_base__pixel_config::is_valid() {
++  return wuffs_base__pixel_config__is_valid(this);
++}
++
++inline wuffs_base__pixel_format  //
++wuffs_base__pixel_config::pixel_format() {
++  return wuffs_base__pixel_config__pixel_format(this);
++}
++
++inline wuffs_base__pixel_subsampling  //
++wuffs_base__pixel_config::pixel_subsampling() {
++  return wuffs_base__pixel_config__pixel_subsampling(this);
++}
++
++inline wuffs_base__rect_ie_u32  //
++wuffs_base__pixel_config::bounds() {
++  return wuffs_base__pixel_config__bounds(this);
++}
++
++inline uint32_t  //
++wuffs_base__pixel_config::width() {
++  return wuffs_base__pixel_config__width(this);
++}
++
++inline uint32_t  //
++wuffs_base__pixel_config::height() {
++  return wuffs_base__pixel_config__height(this);
++}
++
++inline size_t  //
++wuffs_base__pixel_config::pixbuf_size() {
++  return wuffs_base__pixel_config__pixbuf_size(this);
++}
++
++#endif  // __cplusplus
++
++// --------
++
++typedef struct {
++  // Do not access the private_impl's fields directly. There is no API/ABI
++  // compatibility or safety guarantee if you do so.
++  struct {
++    wuffs_base__pixel_config pixcfg;
++    uint32_t num_loops;
++    bool first_frame_is_opaque;
++  } private_impl;
++
++#ifdef __cplusplus
++  inline void initialize(wuffs_base__pixel_format pixfmt,
++                         wuffs_base__pixel_subsampling pixsub,
++                         uint32_t width,
++                         uint32_t height,
++                         uint32_t num_loops,
++                         bool first_frame_is_opaque);
++  inline void invalidate();
++  inline bool is_valid();
++  inline wuffs_base__pixel_config* pixel_config();
++  inline wuffs_base__pixel_format pixel_format();
++  inline wuffs_base__pixel_subsampling pixel_subsampling();
++  inline wuffs_base__rect_ie_u32 bounds();
++  inline uint32_t width();
++  inline uint32_t height();
++  inline uint32_t num_loops();
++  inline uint32_t first_frame_is_opaque();
++#endif  // __cplusplus
++
++} wuffs_base__image_config;
++
++// TODO: Should this function return bool? An error type?
++static inline void  //
++wuffs_base__image_config__initialize(wuffs_base__image_config* c,
++                                     wuffs_base__pixel_format pixfmt,
++                                     wuffs_base__pixel_subsampling pixsub,
++                                     uint32_t width,
++                                     uint32_t height,
++                                     uint32_t num_loops,
++                                     bool first_frame_is_opaque) {
++  if (!c) {
++    return;
++  }
++  if (wuffs_base__pixel_format__is_valid(pixfmt)) {
++    c->private_impl.pixcfg.private_impl.pixfmt = pixfmt;
++    c->private_impl.pixcfg.private_impl.pixsub = pixsub;
++    c->private_impl.pixcfg.private_impl.width = width;
++    c->private_impl.pixcfg.private_impl.height = height;
++    c->private_impl.num_loops = num_loops;
++    c->private_impl.first_frame_is_opaque = first_frame_is_opaque;
++    return;
++  }
++  *c = ((wuffs_base__image_config){});
++}
++
++static inline void  //
++wuffs_base__image_config__invalidate(wuffs_base__image_config* c) {
++  if (c) {
++    *c = ((wuffs_base__image_config){});
++  }
++}
++
++static inline bool  //
++wuffs_base__image_config__is_valid(wuffs_base__image_config* c) {
++  return c && wuffs_base__pixel_config__is_valid(&(c->private_impl.pixcfg));
++}
++
++static inline wuffs_base__pixel_config*  //
++wuffs_base__image_config__pixel_config(wuffs_base__image_config* c) {
++  return c ? &c->private_impl.pixcfg : NULL;
++}
++
++static inline wuffs_base__pixel_format  //
++wuffs_base__image_config__pixel_format(wuffs_base__image_config* c) {
++  return c ? c->private_impl.pixcfg.private_impl.pixfmt : 0;
++}
++
++static inline wuffs_base__pixel_subsampling  //
++wuffs_base__image_config__pixel_subsampling(wuffs_base__image_config* c) {
++  return c ? c->private_impl.pixcfg.private_impl.pixsub : 0;
++}
++
++static inline wuffs_base__rect_ie_u32  //
++wuffs_base__image_config__bounds(wuffs_base__image_config* c) {
++  return c ? ((wuffs_base__rect_ie_u32){
++                 .min_incl_x = 0,
++                 .min_incl_y = 0,
++                 .max_excl_x = c->private_impl.pixcfg.private_impl.width,
++                 .max_excl_y = c->private_impl.pixcfg.private_impl.height,
++             })
++           : ((wuffs_base__rect_ie_u32){});
++}
++
++static inline uint32_t  //
++wuffs_base__image_config__width(wuffs_base__image_config* c) {
++  return c ? c->private_impl.pixcfg.private_impl.width : 0;
++}
++
++static inline uint32_t  //
++wuffs_base__image_config__height(wuffs_base__image_config* c) {
++  return c ? c->private_impl.pixcfg.private_impl.height : 0;
++}
++
++static inline uint32_t  //
++wuffs_base__image_config__num_loops(wuffs_base__image_config* c) {
++  return c ? c->private_impl.num_loops : 0;
++}
++
++static inline uint32_t  //
++wuffs_base__image_config__first_frame_is_opaque(wuffs_base__image_config* c) {
++  return c ? c->private_impl.first_frame_is_opaque : false;
++}
++
++#ifdef __cplusplus
++
+ inline void  //
+ wuffs_base__image_config::initialize(wuffs_base__pixel_format pixfmt,
+                                      wuffs_base__pixel_subsampling pixsub,
+@@ -1528,6 +1670,11 @@ wuffs_base__image_config::is_valid() {
+   return wuffs_base__image_config__is_valid(this);
+ }
+ 
++inline wuffs_base__pixel_config*  //
++wuffs_base__image_config::pixel_config() {
++  return wuffs_base__image_config__pixel_config(this);
++}
++
+ inline wuffs_base__pixel_format  //
+ wuffs_base__image_config::pixel_format() {
+   return wuffs_base__image_config__pixel_format(this);
+@@ -1563,11 +1710,6 @@ wuffs_base__image_config::first_frame_is_opaque() {
+   return wuffs_base__image_config__first_frame_is_opaque(this);
+ }
+ 
+-inline size_t  //
+-wuffs_base__image_config::pixbuf_size() {
+-  return wuffs_base__image_config__pixbuf_size(this);
+-}
+-
+ #endif  // __cplusplus
+ 
+ // --------
+@@ -1594,260 +1736,284 @@ typedef struct {
+   // Do not access the private_impl's fields directly. There is no API/ABI
+   // compatibility or safety guarantee if you do so.
+   struct {
+-    wuffs_base__image_config config;
+-    wuffs_base__pixel_buffer pixbuf;
+-    // TODO: color spaces.
+-    wuffs_base__rect_ie_u32 dirty_rect;
++    wuffs_base__rect_ie_u32 bounds;
+     wuffs_base__flicks duration;
+     bool blend;
+     wuffs_base__animation_disposal disposal;
+     bool palette_changed;
+-    uint8_t palette[1024];
+   } private_impl;
+ 
+ #ifdef __cplusplus
+-  inline wuffs_base__status set_from_pixbuf(wuffs_base__image_config config,
+-                                            wuffs_base__pixel_buffer pixbuf);
+-  inline wuffs_base__status set_from_slice(wuffs_base__image_config config,
+-                                           wuffs_base__slice_u8 pixbuf_memory);
+-  inline void update(wuffs_base__rect_ie_u32 dirty_rect,
++  inline void update(wuffs_base__rect_ie_u32 bounds,
+                      wuffs_base__flicks duration,
+                      bool blend,
+                      wuffs_base__animation_disposal disposal,
+-                     wuffs_base__slice_u8 palette);
+-  inline wuffs_base__image_config* image_config();
++                     bool palette_changed);
+   inline wuffs_base__rect_ie_u32 bounds();
+   inline uint32_t width();
+   inline uint32_t height();
+-  inline wuffs_base__rect_ie_u32 dirty_rect();
+   inline wuffs_base__flicks duration();
+   inline bool blend();
+   inline wuffs_base__animation_disposal disposal();
+   inline bool palette_changed();
+-  inline wuffs_base__slice_u8 palette();
+-  inline wuffs_base__table_u8 plane(uint32_t p);
+ #endif  // __cplusplus
+ 
+-} wuffs_base__image_buffer;
+-
+-static inline wuffs_base__status  //
+-wuffs_base__image_buffer__set_from_pixbuf(wuffs_base__image_buffer* b,
+-                                          wuffs_base__image_config config,
+-                                          wuffs_base__pixel_buffer pixbuf) {
+-  if (!b) {
+-    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+-  }
+-  *b = ((wuffs_base__image_buffer){});
+-  b->private_impl.config = config;
+-  b->private_impl.pixbuf = pixbuf;
+-  return WUFFS_BASE__STATUS_OK;
+-}
+-
+-static inline wuffs_base__status  //
+-wuffs_base__image_buffer__set_from_slice(wuffs_base__image_buffer* b,
+-                                         wuffs_base__image_config config,
+-                                         wuffs_base__slice_u8 pixbuf_memory) {
+-  if (!b) {
+-    return WUFFS_BASE__ERROR_BAD_RECEIVER;
+-  }
+-  *b = ((wuffs_base__image_buffer){});
+-  // TODO: don't assume 1 byte per pixel. Don't assume packed.
+-  uint64_t wh = ((uint64_t)config.private_impl.width) *
+-                ((uint64_t)config.private_impl.height);
+-  if (wh > pixbuf_memory.len) {
+-    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
+-  }
+-  b->private_impl.config = config;
+-  wuffs_base__table_u8* tab = &b->private_impl.pixbuf.planes[0];
+-  tab->ptr = pixbuf_memory.ptr;
+-  tab->width = config.private_impl.width;
+-  tab->height = config.private_impl.height;
+-  tab->stride = config.private_impl.width;
+-  return WUFFS_BASE__STATUS_OK;
+-}
++} wuffs_base__frame_config;
+ 
+-// The palette argument is ignored unless its length is exactly 1024.
+ static inline void  //
+-wuffs_base__image_buffer__update(wuffs_base__image_buffer* b,
+-                                 wuffs_base__rect_ie_u32 dirty_rect,
++wuffs_base__frame_config__update(wuffs_base__frame_config* c,
++                                 wuffs_base__rect_ie_u32 bounds,
+                                  wuffs_base__flicks duration,
+                                  bool blend,
+                                  wuffs_base__animation_disposal disposal,
+-                                 wuffs_base__slice_u8 palette) {
+-  if (!b) {
++                                 bool palette_changed) {
++  if (!c) {
+     return;
+   }
+ 
+-  // Clip the dirty_rect to the image bounds.
+-  dirty_rect.max_excl_x = wuffs_base__u32__min(
+-      dirty_rect.max_excl_x, b->private_impl.config.private_impl.width);
+-  dirty_rect.max_excl_y = wuffs_base__u32__min(
+-      dirty_rect.max_excl_y, b->private_impl.config.private_impl.height);
+-  b->private_impl.dirty_rect = dirty_rect;
+-
+-  b->private_impl.duration = duration;
+-  b->private_impl.blend = blend;
+-  b->private_impl.disposal = disposal;
+-  b->private_impl.palette_changed = palette.ptr && (palette.len == 1024);
+-  if (b->private_impl.palette_changed) {
+-    memmove(b->private_impl.palette, palette.ptr, 1024);
+-  }
+-}
+-
+-// wuffs_base__image_config returns the overall configuration for this frame.
+-static inline wuffs_base__image_config*  //
+-wuffs_base__image_buffer__image_config(wuffs_base__image_buffer* b) {
+-  return b ? &b->private_impl.config : NULL;
++  c->private_impl.bounds = bounds;
++  c->private_impl.duration = duration;
++  c->private_impl.blend = blend;
++  c->private_impl.disposal = disposal;
++  c->private_impl.palette_changed = palette_changed;
+ }
+ 
+ static inline wuffs_base__rect_ie_u32  //
+-wuffs_base__image_buffer__bounds(wuffs_base__image_buffer* b) {
+-  return b ? wuffs_base__image_config__bounds(&b->private_impl.config)
+-           : ((wuffs_base__rect_ie_u32){});
++wuffs_base__frame_config__bounds(wuffs_base__frame_config* c) {
++  return c ? c->private_impl.bounds : ((wuffs_base__rect_ie_u32){});
+ }
+ 
+ static inline uint32_t  //
+-wuffs_base__image_buffer__width(wuffs_base__image_buffer* b) {
+-  return b ? wuffs_base__image_config__width(&b->private_impl.config) : 0;
++wuffs_base__frame_config__width(wuffs_base__frame_config* c) {
++  return c ? wuffs_base__rect_ie_u32__width(&c->private_impl.bounds) : 0;
+ }
+ 
+ static inline uint32_t  //
+-wuffs_base__image_buffer__height(wuffs_base__image_buffer* b) {
+-  return b ? wuffs_base__image_config__height(&b->private_impl.config) : 0;
+-}
+-
+-// wuffs_base__image_buffer__dirty_rect returns an upper bound for what part of
+-// this frame's pixels differs from the previous frame.
+-static inline wuffs_base__rect_ie_u32  //
+-wuffs_base__image_buffer__dirty_rect(wuffs_base__image_buffer* b) {
+-  return b ? b->private_impl.dirty_rect : ((wuffs_base__rect_ie_u32){});
++wuffs_base__frame_config__height(wuffs_base__frame_config* c) {
++  return c ? wuffs_base__rect_ie_u32__height(&c->private_impl.bounds) : 0;
+ }
+ 
+-// wuffs_base__image_buffer__duration returns the amount of time to display
++// wuffs_base__frame_config__duration returns the amount of time to display
+ // this frame. Zero means to display forever - a still (non-animated) image.
+ static inline wuffs_base__flicks  //
+-wuffs_base__image_buffer__duration(wuffs_base__image_buffer* b) {
+-  return b ? b->private_impl.duration : 0;
++wuffs_base__frame_config__duration(wuffs_base__frame_config* c) {
++  return c ? c->private_impl.duration : 0;
+ }
+ 
+-// wuffs_base__image_buffer__blend returns, for a transparent image, whether to
++// wuffs_base__frame_config__blend returns, for a transparent image, whether to
+ // blend this frame with the existing canvas.
+ //
+ // In Porter-Duff compositing operator terminology, false means "src" and true
+ // means "src over dst".
+ static inline bool  //
+-wuffs_base__image_buffer__blend(wuffs_base__image_buffer* b) {
+-  return b && b->private_impl.blend;
++wuffs_base__frame_config__blend(wuffs_base__frame_config* c) {
++  return c && c->private_impl.blend;
+ }
+ 
+-// wuffs_base__image_buffer__disposal returns, for an animated image, how to
++// wuffs_base__frame_config__disposal returns, for an animated image, how to
+ // dispose of this frame after displaying it.
+ static inline wuffs_base__animation_disposal  //
+-wuffs_base__image_buffer__disposal(wuffs_base__image_buffer* b) {
+-  return b ? b->private_impl.disposal : 0;
++wuffs_base__frame_config__disposal(wuffs_base__frame_config* c) {
++  return c ? c->private_impl.disposal : 0;
+ }
+ 
+-// wuffs_base__image_buffer__palette_changed returns whether this frame's
++// wuffs_base__frame_config__palette_changed returns whether this frame's
+ // palette differs from the previous frame. It is conservative and may return
+ // false positives (but never false negatives).
+ static inline bool  //
+-wuffs_base__image_buffer__palette_changed(wuffs_base__image_buffer* b) {
+-  return b && b->private_impl.palette_changed;
++wuffs_base__frame_config__palette_changed(wuffs_base__frame_config* c) {
++  return c && c->private_impl.palette_changed;
+ }
+ 
+-// wuffs_base__image_buffer__palette returns the palette that the pixel data
+-// can index. The backing array is inside b and has length 1024.
+-static inline wuffs_base__slice_u8  //
+-wuffs_base__image_buffer__palette(wuffs_base__image_buffer* b) {
+-  return b ? ((wuffs_base__slice_u8){.ptr = b->private_impl.palette,
+-                                     .len = 1024})
+-           : ((wuffs_base__slice_u8){});
++#ifdef __cplusplus
++
++inline void  //
++wuffs_base__frame_config::update(wuffs_base__rect_ie_u32 bounds,
++                                 wuffs_base__flicks duration,
++                                 bool blend,
++                                 wuffs_base__animation_disposal disposal,
++                                 bool palette_changed) {
++  wuffs_base__frame_config__update(this, bounds, duration, blend, disposal,
++                                   palette_changed);
+ }
+ 
+-static inline wuffs_base__table_u8  //
+-wuffs_base__image_buffer__plane(wuffs_base__image_buffer* b, uint32_t p) {
+-  return (b && (p < WUFFS_BASE__PIXEL_FORMAT__NUM_PLANES_MAX))
+-             ? b->private_impl.pixbuf.planes[p]
+-             : ((wuffs_base__table_u8){});
++inline wuffs_base__rect_ie_u32  //
++wuffs_base__frame_config::bounds() {
++  return wuffs_base__frame_config__bounds(this);
+ }
+ 
+-#ifdef __cplusplus
++inline uint32_t  //
++wuffs_base__frame_config::width() {
++  return wuffs_base__frame_config__width(this);
++}
+ 
+-inline wuffs_base__status  //
+-wuffs_base__image_buffer::set_from_pixbuf(wuffs_base__image_config config,
+-                                          wuffs_base__pixel_buffer pixbuf) {
+-  return wuffs_base__image_buffer__set_from_pixbuf(this, config, pixbuf);
++inline uint32_t  //
++wuffs_base__frame_config::height() {
++  return wuffs_base__frame_config__height(this);
+ }
+ 
+-inline wuffs_base__status  //
+-wuffs_base__image_buffer::set_from_slice(wuffs_base__image_config config,
++inline wuffs_base__flicks  //
++wuffs_base__frame_config::duration() {
++  return wuffs_base__frame_config__duration(this);
++}
++
++inline bool  //
++wuffs_base__frame_config::blend() {
++  return wuffs_base__frame_config__blend(this);
++}
++
++inline wuffs_base__animation_disposal  //
++wuffs_base__frame_config::disposal() {
++  return wuffs_base__frame_config__disposal(this);
++}
++
++inline bool  //
++wuffs_base__frame_config::palette_changed() {
++  return wuffs_base__frame_config__palette_changed(this);
++}
++
++#endif  // __cplusplus
++
++// --------
++
++typedef struct {
++  // Do not access the private_impl's fields directly. There is no API/ABI
++  // compatibility or safety guarantee if you do so.
++  struct {
++    wuffs_base__pixel_config pixcfg;
++    wuffs_base__table_u8 planes[WUFFS_BASE__PIXEL_FORMAT__NUM_PLANES_MAX];
++    uint8_t palette[1024];
++    // TODO: color spaces.
++  } private_impl;
++
++#ifdef __cplusplus
++  inline wuffs_base__status set_from_slice(wuffs_base__pixel_config* pixcfg,
++                                           wuffs_base__slice_u8 pixbuf_memory);
++  inline void set_palette(wuffs_base__slice_u8 palette);
++  inline wuffs_base__pixel_config* pixel_config();
++  inline wuffs_base__rect_ie_u32 bounds();
++  inline uint32_t width();
++  inline uint32_t height();
++  inline wuffs_base__table_u8 plane(uint32_t p);
++  inline wuffs_base__slice_u8 palette();
++#endif  // __cplusplus
++
++} wuffs_base__pixel_buffer;
++
++static inline wuffs_base__status  //
++wuffs_base__pixel_buffer__set_from_slice(wuffs_base__pixel_buffer* b,
++                                         wuffs_base__pixel_config* pixcfg,
+                                          wuffs_base__slice_u8 pixbuf_memory) {
+-  return wuffs_base__image_buffer__set_from_slice(this, config, pixbuf_memory);
++  if (!b) {
++    return WUFFS_BASE__ERROR_BAD_RECEIVER;
++  }
++  *b = ((wuffs_base__pixel_buffer){});
++  if (!pixcfg) {
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT;
++  }
++  // TODO: don't assume 1 byte per pixel. Don't assume packed.
++  uint64_t wh = ((uint64_t)pixcfg->private_impl.width) *
++                ((uint64_t)pixcfg->private_impl.height);
++  if (wh > pixbuf_memory.len) {
++    return WUFFS_BASE__ERROR_BAD_ARGUMENT_LENGTH_TOO_SHORT;
++  }
++  b->private_impl.pixcfg = *pixcfg;
++  wuffs_base__table_u8* tab = &b->private_impl.planes[0];
++  tab->ptr = pixbuf_memory.ptr;
++  tab->width = pixcfg->private_impl.width;
++  tab->height = pixcfg->private_impl.height;
++  tab->stride = pixcfg->private_impl.width;
++  return WUFFS_BASE__STATUS_OK;
+ }
+ 
+-inline void  //
+-wuffs_base__image_buffer::update(wuffs_base__rect_ie_u32 dirty_rect,
+-                                 wuffs_base__flicks duration,
+-                                 bool blend,
+-                                 wuffs_base__animation_disposal disposal,
+-                                 wuffs_base__slice_u8 palette) {
+-  wuffs_base__image_buffer__update(this, dirty_rect, duration, blend, disposal,
+-                                   palette);
++// The palette argument is ignored unless its length is exactly 1024.
++static inline void  //
++wuffs_base__pixel_buffer__set_palette(wuffs_base__pixel_buffer* b,
++                                      wuffs_base__slice_u8 palette) {
++  if (b && palette.ptr && (palette.len == 1024)) {
++    memmove(b->private_impl.palette, palette.ptr, 1024);
++  }
+ }
+ 
+-inline wuffs_base__image_config*  //
+-wuffs_base__image_buffer::image_config() {
+-  return wuffs_base__image_buffer__image_config(this);
++// wuffs_base__pixel_config returns the overall configuration for this frame.
++static inline wuffs_base__pixel_config*  //
++wuffs_base__pixel_buffer__pixel_config(wuffs_base__pixel_buffer* b) {
++  return b ? &b->private_impl.pixcfg : NULL;
+ }
+ 
+-inline wuffs_base__rect_ie_u32  //
+-wuffs_base__image_buffer::bounds() {
+-  return wuffs_base__image_buffer__bounds(this);
++static inline wuffs_base__rect_ie_u32  //
++wuffs_base__pixel_buffer__bounds(wuffs_base__pixel_buffer* b) {
++  return b ? wuffs_base__pixel_config__bounds(&b->private_impl.pixcfg)
++           : ((wuffs_base__rect_ie_u32){});
+ }
+ 
+-inline uint32_t  //
+-wuffs_base__image_buffer::width() {
+-  return wuffs_base__image_buffer__width(this);
++static inline uint32_t  //
++wuffs_base__pixel_buffer__width(wuffs_base__pixel_buffer* b) {
++  return b ? wuffs_base__pixel_config__width(&b->private_impl.pixcfg) : 0;
+ }
+ 
+-inline uint32_t  //
+-wuffs_base__image_buffer::height() {
+-  return wuffs_base__image_buffer__height(this);
++static inline uint32_t  //
++wuffs_base__pixel_buffer__height(wuffs_base__pixel_buffer* b) {
++  return b ? wuffs_base__pixel_config__height(&b->private_impl.pixcfg) : 0;
+ }
+ 
+-inline wuffs_base__rect_ie_u32  //
+-wuffs_base__image_buffer::dirty_rect() {
+-  return wuffs_base__image_buffer__dirty_rect(this);
++static inline wuffs_base__table_u8  //
++wuffs_base__pixel_buffer__plane(wuffs_base__pixel_buffer* b, uint32_t p) {
++  return (b && (p < WUFFS_BASE__PIXEL_FORMAT__NUM_PLANES_MAX))
++             ? b->private_impl.planes[p]
++             : ((wuffs_base__table_u8){});
+ }
+ 
+-inline wuffs_base__flicks  //
+-wuffs_base__image_buffer::duration() {
+-  return wuffs_base__image_buffer__duration(this);
++// wuffs_base__pixel_buffer__palette returns the palette that the pixel data
++// can index. The backing array is inside b and has length 1024.
++static inline wuffs_base__slice_u8  //
++wuffs_base__pixel_buffer__palette(wuffs_base__pixel_buffer* b) {
++  return b ? ((wuffs_base__slice_u8){.ptr = b->private_impl.palette,
++                                     .len = 1024})
++           : ((wuffs_base__slice_u8){});
+ }
+ 
+-inline bool  //
+-wuffs_base__image_buffer::blend() {
+-  return wuffs_base__image_buffer__blend(this);
++#ifdef __cplusplus
++
++inline wuffs_base__status  //
++wuffs_base__pixel_buffer::set_from_slice(wuffs_base__pixel_config* pixcfg,
++                                         wuffs_base__slice_u8 pixbuf_memory) {
++  return wuffs_base__pixel_buffer__set_from_slice(this, pixcfg, pixbuf_memory);
+ }
+ 
+-inline wuffs_base__animation_disposal  //
+-wuffs_base__image_buffer::disposal() {
+-  return wuffs_base__image_buffer__disposal(this);
++inline void  //
++wuffs_base__pixel_buffer::set_palette(wuffs_base__slice_u8 palette) {
++  wuffs_base__pixel_buffer__set_palette(this, palette);
+ }
+ 
+-inline bool  //
+-wuffs_base__image_buffer::palette_changed() {
+-  return wuffs_base__image_buffer__palette_changed(this);
++inline wuffs_base__pixel_config*  //
++wuffs_base__pixel_buffer::pixel_config() {
++  return wuffs_base__pixel_buffer__pixel_config(this);
+ }
+ 
+-inline wuffs_base__slice_u8  //
+-wuffs_base__image_buffer::palette() {
+-  return wuffs_base__image_buffer__palette(this);
++inline wuffs_base__rect_ie_u32  //
++wuffs_base__pixel_buffer::bounds() {
++  return wuffs_base__pixel_buffer__bounds(this);
++}
++
++inline uint32_t  //
++wuffs_base__pixel_buffer::width() {
++  return wuffs_base__pixel_buffer__width(this);
++}
++
++inline uint32_t  //
++wuffs_base__pixel_buffer::height() {
++  return wuffs_base__pixel_buffer__height(this);
+ }
+ 
+ inline wuffs_base__table_u8  //
+-wuffs_base__image_buffer::plane(uint32_t p) {
+-  return wuffs_base__image_buffer__plane(this, p);
++wuffs_base__pixel_buffer::plane(uint32_t p) {
++  return wuffs_base__pixel_buffer__plane(this, p);
++}
++
++inline wuffs_base__slice_u8  //
++wuffs_base__pixel_buffer::palette() {
++  return wuffs_base__pixel_buffer__palette(this);
+ }
+ 
+ #endif  // __cplusplus
+@@ -2454,7 +2620,8 @@ typedef struct {
+                                                 wuffs_base__io_reader a_src);
+   inline uint64_t frame_count();
+   inline wuffs_base__range_ii_u64 work_buffer_size();
+-  inline wuffs_base__status decode_frame(wuffs_base__image_buffer* a_dst,
++  inline wuffs_base__status decode_frame(wuffs_base__frame_config* a_dst0,
++                                         wuffs_base__pixel_buffer* a_dst1,
+                                          wuffs_base__io_reader a_src,
+                                          wuffs_base__slice_u8 a_work_buffer);
+ #endif  // __cplusplus
+@@ -2487,7 +2654,8 @@ wuffs_gif__decoder__work_buffer_size(wuffs_gif__decoder* self);
+ 
+ WUFFS_BASE__MAYBE_STATIC wuffs_base__status  //
+ wuffs_gif__decoder__decode_frame(wuffs_gif__decoder* self,
+-                                 wuffs_base__image_buffer* a_dst,
++                                 wuffs_base__frame_config* a_dst0,
++                                 wuffs_base__pixel_buffer* a_dst1,
+                                  wuffs_base__io_reader a_src,
+                                  wuffs_base__slice_u8 a_work_buffer);
+ 
+@@ -2519,10 +2687,12 @@ wuffs_gif__decoder::work_buffer_size() {
+ }
+ 
+ inline wuffs_base__status  //
+-wuffs_gif__decoder::decode_frame(wuffs_base__image_buffer* a_dst,
++wuffs_gif__decoder::decode_frame(wuffs_base__frame_config* a_dst0,
++                                 wuffs_base__pixel_buffer* a_dst1,
+                                  wuffs_base__io_reader a_src,
+                                  wuffs_base__slice_u8 a_work_buffer) {
+-  return wuffs_gif__decoder__decode_frame(this, a_dst, a_src, a_work_buffer);
++  return wuffs_gif__decoder__decode_frame(this, a_dst0, a_dst1, a_src,
++                                          a_work_buffer);
+ }
+ 
+ #endif  // __cplusplus
+@@ -6492,12 +6662,13 @@ wuffs_gif__decoder__decode_id_part0(wuffs_gif__decoder* self,
+ 
+ static wuffs_base__status  //
+ wuffs_gif__decoder__decode_id_part1(wuffs_gif__decoder* self,
+-                                    wuffs_base__image_buffer* a_dst,
++                                    wuffs_base__frame_config* a_dst0,
++                                    wuffs_base__pixel_buffer* a_dst1,
+                                     wuffs_base__io_reader a_src);
+ 
+ static wuffs_base__status  //
+ wuffs_gif__decoder__copy_to_image_buffer(wuffs_gif__decoder* self,
+-                                         wuffs_base__image_buffer* a_ib);
++                                         wuffs_base__pixel_buffer* a_pb);
+ 
+ // ---------------- Initializer Implementations
+ 
+@@ -6657,7 +6828,8 @@ wuffs_gif__decoder__work_buffer_size(wuffs_gif__decoder* self) {
+ 
+ WUFFS_BASE__MAYBE_STATIC wuffs_base__status  //
+ wuffs_gif__decoder__decode_frame(wuffs_gif__decoder* self,
+-                                 wuffs_base__image_buffer* a_dst,
++                                 wuffs_base__frame_config* a_dst0,
++                                 wuffs_base__pixel_buffer* a_dst1,
+                                  wuffs_base__io_reader a_src,
+                                  wuffs_base__slice_u8 a_work_buffer) {
+   if (!self) {
+@@ -6670,7 +6842,7 @@ wuffs_gif__decoder__decode_frame(wuffs_gif__decoder* self,
+   if (self->private_impl.status < 0) {
+     return self->private_impl.status;
+   }
+-  if (!a_dst) {
++  if (!a_dst0 || !a_dst1) {
+     self->private_impl.status = WUFFS_BASE__ERROR_BAD_ARGUMENT;
+     return WUFFS_BASE__ERROR_BAD_ARGUMENT;
+   }
+@@ -6709,7 +6881,7 @@ wuffs_gif__decoder__decode_frame(wuffs_gif__decoder* self,
+       }
+     }
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT(4);
+-    status = wuffs_gif__decoder__decode_id_part1(self, a_dst, a_src);
++    status = wuffs_gif__decoder__decode_id_part1(self, a_dst0, a_dst1, a_src);
+     if (status) {
+       goto suspend;
+     }
+@@ -7948,7 +8120,8 @@ short_read_src:
+ 
+ static wuffs_base__status  //
+ wuffs_gif__decoder__decode_id_part1(wuffs_gif__decoder* self,
+-                                    wuffs_base__image_buffer* a_dst,
++                                    wuffs_base__frame_config* a_dst0,
++                                    wuffs_base__pixel_buffer* a_dst1,
+                                     wuffs_base__io_reader a_src) {
+   wuffs_base__status status = WUFFS_BASE__STATUS_OK;
+ 
+@@ -8100,7 +8273,7 @@ wuffs_gif__decoder__decode_id_part1(wuffs_gif__decoder* self,
+         }
+         if ((v_z == 0) || (v_z == WUFFS_BASE__SUSPENSION_SHORT_WRITE)) {
+           WUFFS_BASE__COROUTINE_SUSPENSION_POINT(3);
+-          status = wuffs_gif__decoder__copy_to_image_buffer(self, a_dst);
++          status = wuffs_gif__decoder__copy_to_image_buffer(self, a_dst1);
+           if (status) {
+             goto suspend;
+           }
+@@ -8122,7 +8295,7 @@ wuffs_gif__decoder__decode_id_part1(wuffs_gif__decoder* self,
+     if (self->private_impl.f_uncompressed_ri !=
+         self->private_impl.f_uncompressed_wi) {
+       WUFFS_BASE__COROUTINE_SUSPENSION_POINT(5);
+-      status = wuffs_gif__decoder__copy_to_image_buffer(self, a_dst);
++      status = wuffs_gif__decoder__copy_to_image_buffer(self, a_dst1);
+       if (status) {
+         goto suspend;
+       }
+@@ -8136,15 +8309,18 @@ wuffs_gif__decoder__decode_id_part1(wuffs_gif__decoder* self,
+       v_palette = ((wuffs_base__slice_u8){
+           .ptr = self->private_impl.f_palettes[0], .len = 1024});
+     }
+-    wuffs_base__image_buffer__update(
+-        a_dst,
++    wuffs_base__frame_config__update(
++        a_dst0,
+         wuffs_base__utility__make_rect_ie_u32(
+             &self->private_impl.f_util, self->private_impl.f_frame_rect_x0,
+             self->private_impl.f_frame_rect_y0,
+             self->private_impl.f_frame_rect_x1,
+             self->private_impl.f_frame_rect_y1),
+         self->private_impl.f_gc_duration, true,
+-        self->private_impl.f_gc_disposal, v_palette);
++        self->private_impl.f_gc_disposal, (((uint64_t)(v_palette.len)) != 0));
++    if (((uint64_t)(v_palette.len)) != 0) {
++      wuffs_base__pixel_buffer__set_palette(a_dst1, v_palette);
++    }
+     self->private_impl.f_previous_use_global_palette =
+         !(self->private_impl.f_use_local_palette ||
+           self->private_impl.f_gc_has_transparent_index);
+@@ -8188,7 +8364,7 @@ short_read_src:
+ 
+ static wuffs_base__status  //
+ wuffs_gif__decoder__copy_to_image_buffer(wuffs_gif__decoder* self,
+-                                         wuffs_base__image_buffer* a_ib) {
++                                         wuffs_base__pixel_buffer* a_pb) {
+   wuffs_base__status status = WUFFS_BASE__STATUS_OK;
+ 
+   wuffs_base__slice_u8 v_dst;
+@@ -8201,7 +8377,7 @@ wuffs_gif__decoder__copy_to_image_buffer(wuffs_gif__decoder* self,
+   v_src = ((wuffs_base__slice_u8){});
+   v_n = 0;
+   v_new_ri = 0;
+-  v_tab = wuffs_base__image_buffer__plane(a_ib, 0);
++  v_tab = wuffs_base__pixel_buffer__plane(a_pb, 0);
+ label_0_continue:;
+   while (self->private_impl.f_uncompressed_wi >
+          self->private_impl.f_uncompressed_ri) {
+diff --git a/std/gif/decode_gif.wuffs b/std/gif/decode_gif.wuffs
+index acd4ddc8..44c3f2df 100644
+--- a/std/gif/decode_gif.wuffs
++++ b/std/gif/decode_gif.wuffs
+@@ -145,7 +145,8 @@ pub func decoder.work_buffer_size()(ret base.range_ii_u64) {
+ 	return this.util.make_range_ii_u64(min_incl:0, max_incl:0)
+ }
+ 
+-pub func decoder.decode_frame?(dst ptr base.image_buffer, src base.io_reader, work_buffer slice base.u8)() {
++// TODO: take pixbuf_origin_x and pixbuf_origin_y args.
++pub func decoder.decode_frame?(dst0 ptr base.frame_config, dst1 ptr base.pixel_buffer, src base.io_reader, work_buffer slice base.u8)() {
+ 	if this.call_sequence == 0 {
+ 		this.decode_image_config?(dst:nullptr, src:in.src)
+ 	}
+@@ -167,7 +168,7 @@ pub func decoder.decode_frame?(dst ptr base.image_buffer, src base.io_reader, wo
+ 		}
+ 	}
+ 
+-	this.decode_id_part1?(dst:in.dst, src:in.src)
++	this.decode_id_part1?(dst0:in.dst0, dst1:in.dst1, src:in.src)
+ 	this.frame_count_value ~sat+= 1
+ }
+ 
+@@ -454,7 +455,7 @@ pri func decoder.decode_id_part0?(src base.io_reader)() {
+ 	}
+ }
+ 
+-pri func decoder.decode_id_part1?(dst ptr base.image_buffer, src base.io_reader)() {
++pri func decoder.decode_id_part1?(dst0 ptr base.frame_config, dst1 ptr base.pixel_buffer, src base.io_reader)() {
+ 	if this.gc_has_transparent_index {
+ 		if not this.use_local_palette {
+ 			this.palettes[1][:].copy_from_slice(s:this.palettes[0][:])
+@@ -518,7 +519,7 @@ pri func decoder.decode_id_part1?(dst ptr base.image_buffer, src base.io_reader)
+ 			}
+ 
+ 			if z.is_ok() or (z == suspension "short write") {
+-				this.copy_to_image_buffer?(ib:in.dst)
++				this.copy_to_image_buffer?(pb:in.dst1)
+ 
+ 				if z == suspension "short write" {
+ 					continue:inner
+@@ -535,7 +536,7 @@ pri func decoder.decode_id_part1?(dst ptr base.image_buffer, src base.io_reader)
+ 	}
+ 
+ 	if this.uncompressed_ri != this.uncompressed_wi {
+-		this.copy_to_image_buffer?(ib:in.dst)
++		this.copy_to_image_buffer?(pb:in.dst1)
+ 	}
+ 
+ 	// TODO: check for "not enough pixel data".
+@@ -550,12 +551,16 @@ pri func decoder.decode_id_part1?(dst ptr base.image_buffer, src base.io_reader)
+ 		// Both this frame and the previous one used the global palette. No
+ 		// palette update is necessary.
+ 	}
+-	in.dst.update!(dirty_rect:this.util.make_rect_ie_u32(
++	in.dst0.update!(bounds:this.util.make_rect_ie_u32(
+ 		min_incl_x:this.frame_rect_x0,
+ 		min_incl_y:this.frame_rect_y0,
+ 		max_excl_x:this.frame_rect_x1,
+ 		max_excl_y:this.frame_rect_y1),
+-		duration:this.gc_duration, blend:true, disposal:this.gc_disposal, palette:palette)
++		duration:this.gc_duration, blend:true, disposal:this.gc_disposal,
++		palette_changed:palette.length() != 0)
++	if palette.length() != 0 {
++		in.dst1.set_palette!(palette:palette)
++	}
+ 
+ 	this.previous_use_global_palette = not (this.use_local_palette or this.gc_has_transparent_index)
+ 
+@@ -568,7 +573,7 @@ pri func decoder.decode_id_part1?(dst ptr base.image_buffer, src base.io_reader)
+ 	this.gc_duration = 0
+ }
+ 
+-pri func decoder.copy_to_image_buffer?(ib ptr base.image_buffer)() {
++pri func decoder.copy_to_image_buffer?(pb ptr base.pixel_buffer)() {
+ 	// TODO: don't assume a packed pixel format.
+ 	var dst slice base.u8
+ 	var src slice base.u8
+@@ -576,7 +581,7 @@ pri func decoder.copy_to_image_buffer?(ib ptr base.image_buffer)() {
+ 	// TODO: we shouldn't need this temporary variable.
+ 	var new_ri base.u32
+ 
+-	var tab table base.u8 = in.ib.plane(p:0)
++	var tab table base.u8 = in.pb.plane(p:0)
+ 
+ 	while this.uncompressed_wi > this.uncompressed_ri {
+ 		assert this.uncompressed_ri < this.uncompressed_wi via "a < b: b > a"()
+@@ -587,7 +592,7 @@ pri func decoder.copy_to_image_buffer?(ib ptr base.image_buffer)() {
+ 		}
+ 
+ 		// First, copy from src to that part of the frame rect that is inside
+-		// in.ib's bounds.
++		// in.pb's bounds.
+ 
+ 		dst = tab.row(y:this.dst_y)
+ 		if (this.dst_x as base.u64) < dst.length() {
+@@ -622,7 +627,7 @@ pri func decoder.copy_to_image_buffer?(ib ptr base.image_buffer)() {
+ 		}
+ 
+ 		// Second, skip over src for that part of the frame rect that is
+-		// outside in.ib's bounds. This second step should be infrequent.
+~~~~
+
+## Available Context
+
+Only H0 and the S0-to-S1 production diff above are evidence. Analyze this case according to the fixed baseline prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C037","gap_exists":true,"gap_type":["API protocol","state/output separation","build incompatibility"],"confidence":99,"affected_functions":["wuffs_gif__decoder__decode_frame","wuffs_base__pixel_buffer__set_from_slice","wuffs_base__image_config__pixel_config","wuffs_base__pixel_config__pixbuf_size","wuffs_base__frame_config__update","wuffs_base__pixel_buffer__set_palette"],"reason":"H0 cannot exercise S1's GIF frame-decoding path because it uses removed types and signatures. S1 splits the former wuffs_base__image_buffer destination into distinct wuffs_base__frame_config and wuffs_base__pixel_buffer objects, while H0 still constructs wuffs_base__image_buffer and passes only that object to wuffs_gif__decoder__decode_frame. H0 also calls the removed wuffs_base__image_config__pixbuf_size and wuffs_base__image_buffer__set_from_slice APIs. Consequently, the post-commit frame protocol—including separate frame metadata, pixel storage, and palette updates—is not fuzzed.","evidence":["H0 declares `wuffs_base__image_buffer ib`, but S1 removes `wuffs_base__image_buffer` and introduces `wuffs_base__frame_config` plus `wuffs_base__pixel_buffer`.","H0 calls `wuffs_gif__decoder__decode_frame(&dec, &ib, src_reader, ...)`; S1 requires both `wuffs_base__frame_config* a_dst0` and `wuffs_base__pixel_buffer* a_dst1` and rejects either null destination.","H0 calls `wuffs_base__image_config__pixbuf_size(&ic)`, while S1 moves this operation to `wuffs_base__pixel_config__pixbuf_size`.","H0 initializes pixels with `wuffs_base__image_buffer__set_from_slice(&ib, ic, ...)`; S1 replaces this with `wuffs_base__pixel_buffer__set_from_slice(..., wuffs_base__pixel_config* pixcfg, ...)`.","S1 routes frame bounds, duration, blend, disposal, and `palette_changed` through `wuffs_base__frame_config__update`, while palette bytes are independently written by `wuffs_base__pixel_buffer__set_palette`; H0 represents neither side of this split protocol."],"recommended_action":"Update H0 to obtain the `wuffs_base__pixel_config*` through `wuffs_base__image_config__pixel_config(&ic)`, size and initialize a `wuffs_base__pixel_buffer` with the new pixel-config APIs, create a persistent `wuffs_base__frame_config`, and pass both destinations to every `wuffs_gif__decoder__decode_frame` call. Exercise and sanity-check frame bounds and palette-change state across multiple frames so the separated metadata/pixel-buffer protocol is covered."}
+tokens used
+34,790

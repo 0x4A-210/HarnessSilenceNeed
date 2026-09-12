@@ -1,0 +1,224 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8080-ejtjnam3
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fd-67ad-74b1-9458-a58e2fe25b8a
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8080
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `fuzz/xplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * xplist_fuzzer.cc
+ * XML plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_xml(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/src/xplist.c b/src/xplist.c
+index 9870104..55b01e9 100644
+--- a/src/xplist.c
++++ b/src/xplist.c
+@@ -842,96 +842,110 @@ static text_part_t* get_text_parts(parse_ctx ctx, const char* tag, size_t tag_le
+ static int unescape_entities(char *str, size_t *length)
+ {
+     size_t i = 0;
+     size_t len = *length;
+     while (len > 0 && i < len-1) {
+         if (str[i] == '&') {
+             char *entp = str + i + 1;
+             while (i < len && str[i] != ';') {
+                 i++;
+             }
+             if (i >= len) {
+                 PLIST_XML_ERR("Invalid entity sequence encountered (missing terminating ';')\n");
+                 return -1;
+             }
+-            if (str+i >= entp+1) {
+-                int entlen = str+i - entp;
+-                int bytelen = 1;
+-                if (!strncmp(entp, "amp", 3)) {
++            size_t entlen = (size_t)(str+i - entp);
++            if (entlen > 0) {
++                if (entlen > 256) {
++                    PLIST_XML_ERR("Rejecting absurdly large entity at &%.*s...\n", 8, entp);
++                    return -1;
++                }
++                size_t bytelen = 1;
++                if (entlen == 3 && memcmp(entp, "amp", 3) == 0) {
+                     /* the '&' is already there */
+-                } else if (!strncmp(entp, "apos", 4)) {
++                } else if (entlen == 4 && memcmp(entp, "apos", 4) == 0) {
+                     *(entp-1) = '\'';
+-                } else if (!strncmp(entp, "quot", 4)) {
++                } else if (entlen == 4 && memcmp(entp, "quot", 4) == 0) {
+                     *(entp-1) = '"';
+-                } else if (!strncmp(entp, "lt", 2)) {
++                } else if (entlen == 2 && memcmp(entp, "lt", 2) == 0) {
+                     *(entp-1) = '<';
+-                } else if (!strncmp(entp, "gt", 2)) {
++                } else if (entlen == 2 && memcmp(entp, "gt", 2) == 0) {
+                     *(entp-1) = '>';
+                 } else if (*entp == '#') {
+                     /* numerical  character reference */
+                     uint64_t val = 0;
+                     char* ep = NULL;
+                     if (entlen > 8) {
+-                        PLIST_XML_ERR("Invalid numerical character reference encountered, sequence too long: &%.*s;\n", entlen, entp);
++                        PLIST_XML_ERR("Invalid numerical character reference encountered, sequence too long: &%.*s;\n", (int)entlen, entp);
+                         return -1;
+                     }
+-                    if (*(entp+1) == 'x' || *(entp+1) == 'X') {
++                    if (entlen >= 2 && (entp[1] == 'x' || entp[1] == 'X')) {
+                         if (entlen < 3) {
+-                            PLIST_XML_ERR("Invalid numerical character reference encountered, sequence too short: &%.*s;\n", entlen, entp);
++                            PLIST_XML_ERR("Invalid numerical character reference encountered, sequence too short: &%.*s;\n", (int)entlen, entp);
+                             return -1;
+                         }
+                         val = strtoull(entp+2, &ep, 16);
+                     } else {
+                         if (entlen < 2) {
+-                            PLIST_XML_ERR("Invalid numerical character reference encountered, sequence too short: &%.*s;\n", entlen, entp);
++                            PLIST_XML_ERR("Invalid numerical character reference encountered, sequence too short: &%.*s;\n", (int)entlen, entp);
+                             return -1;
+                         }
+                         val = strtoull(entp+1, &ep, 10);
+                     }
+-                    if (val == 0 || val > 0x10FFFF || ep-entp != entlen) {
+-                        PLIST_XML_ERR("Invalid numerical character reference found: &%.*s;\n", entlen, entp);
++                    if (val == 0 || val > 0x10FFFF || (size_t)(ep-entp) != entlen) {
++                        PLIST_XML_ERR("Invalid numerical character reference found: &%.*s;\n", (int)entlen, entp);
++                        return -1;
++                    }
++                    if (val >= 0xD800 && val <= 0xDFFF) {
++                        PLIST_XML_ERR("Invalid numerical character reference found (surrogate): &%.*s;\n", (int)entlen, entp);
+                         return -1;
+                     }
+                     /* convert to UTF8 */
+                     if (val >= 0x10000) {
+                         /* four bytes */
+                         *(entp-1) = (char)(0xF0 + ((val >> 18) & 0x7));
+                         *(entp+0) = (char)(0x80 + ((val >> 12) & 0x3F));
+                         *(entp+1) = (char)(0x80 + ((val >> 6) & 0x3F));
+                         *(entp+2) = (char)(0x80 + (val & 0x3F));
+                         entp+=3;
+                         bytelen = 4;
+                     } else if (val >= 0x800) {
+                         /* three bytes */
+                         *(entp-1) = (char)(0xE0 + ((val >> 12) & 0xF));
+                         *(entp+0) = (char)(0x80 + ((val >> 6) & 0x3F));
+                         *(entp+1) = (char)(0x80 + (val & 0x3F));
+                         entp+=2;
+                         bytelen = 3;
+                     } else if (val >= 0x80) {
+                         /* two bytes */
+                         *(entp-1) = (char)(0xC0 + ((val >> 6) & 0x1F));
+                         *(entp+0) = (char)(0x80 + (val & 0x3F));
+                         entp++;
+                         bytelen = 2;
+                     } else {
+                         /* one byte */
+                         *(entp-1) = (char)(val & 0x7F);
+                     }
+                 } else {
+-                    PLIST_XML_ERR("Invalid entity encountered: &%.*s;\n", entlen, entp);
++                    PLIST_XML_ERR("Invalid entity encountered: &%.*s;\n", (int)entlen, entp);
++                    return -1;
++                }
++                memmove(entp, str+i+1, len - i); /* include '\0' */
++                size_t dec = entlen + 1 - bytelen;
++                size_t shrink = entlen + 2 - bytelen;
++                if (i < dec || len < shrink) {
++                    PLIST_XML_ERR("Internal error: length underflow?!\n");
+                     return -1;
+                 }
+-                memmove(entp, str+i+1, len - i);
+-                i -= entlen+1 - bytelen;
+-                len -= entlen+2 - bytelen;
++                i -= dec;
++                len -= shrink;
+                 continue;
+             } else {
+                 PLIST_XML_ERR("Invalid empty entity sequence &;\n");
+                 return -1;
+             }
+         }
+         i++;
+     }
+     *length = len;
+     return 0;
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8080","gap_exists":false,"gap_type":[],"confidence":98,"affected_functions":[],"reason":"H0 directly fuzzes the relevant XML-plist parsing entry point. Arbitrary input bytes and their explicit length are passed to plist_from_xml, so XML text containing named, numeric, empty, unterminated, oversized, malformed, or surrogate-valued entity sequences can exercise the changed unescape_entities logic. The change does not expose a distinct public API, protocol phase, state requirement, or configuration that H0 omits.","evidence":["H0 invokes plist_from_xml(reinterpret_cast<const char*>(data), size, &root_node) for every fuzz input.","The only changed production function is static unescape_entities in src/xplist.c, and its logic operates on entity sequences beginning with '&' in parsed XML text.","The changed branches cover malformed and boundary-sensitive entity input, including entlen > 256, numeric references, invalid Unicode surrogate values, and length-underflow guards; all are representable within H0's arbitrary data buffer.","H0 calls plist_free(root_node), covering cleanup whether parsing produces a root node or leaves it NULL."],"recommended_action":"Keep H0 as the relevant harness; enrich its corpus or dictionary with boundary entity forms if desired, but no new fuzz entry point is indicated."}
+tokens used
+5,870

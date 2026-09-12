@@ -1,0 +1,248 @@
+diff --git a/release/c/wuffs-unsupported-snapshot.c b/release/c/wuffs-unsupported-snapshot.c
+index 7ed4f1fdfd81de8e3572eecee1c820957b576af0..3f4ad79e35a61834b12c1d1dd5db8a80948bd8c0 100644
+--- a/release/c/wuffs-unsupported-snapshot.c
++++ b/release/c/wuffs-unsupported-snapshot.c
+@@ -7661,6 +7661,8 @@ extern const char wuffs_json__error__unsupported_recursion_depth[];
+ 
+ #define WUFFS_JSON__QUIRK_ALLOW_LEADING_UNICODE_BYTE_ORDER_MARK 1225364496
+ 
++#define WUFFS_JSON__QUIRK_ALLOW_TRAILING_COMMENT 1225364497
++
+ #define WUFFS_JSON__QUIRK_ALLOW_TRAILING_NEW_LINE 1225364498
+ 
+ #define WUFFS_JSON__QUIRK_JSON_POINTER_ALLOW_TILDE_R_TILDE_N 1225364499
+@@ -7758,7 +7760,9 @@ struct wuffs_json__decoder__struct {
+     bool f_quirks[21];
+     bool f_allow_leading_ars;
+     bool f_allow_leading_ubom;
++    bool f_allow_trailing_comment;
+     bool f_end_of_data;
++    uint8_t f_comment_type;
+ 
+     uint32_t p_decode_tokens[1];
+     uint32_t p_decode_leading[1];
+@@ -27227,6 +27231,7 @@ wuffs_json__decoder__decode_comment(
+   switch (coro_susp_point) {
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT_0;
+ 
++    self->private_impl.f_comment_type = 0;
+     label__0__continue:;
+     while ((((uint64_t)(io2_a_dst - iop_a_dst)) <= 0) || (((uint64_t)(io2_a_src - iop_a_src)) <= 1)) {
+       if (((uint64_t)(io2_a_dst - iop_a_dst)) <= 0) {
+@@ -27276,6 +27281,7 @@ wuffs_json__decoder__decode_comment(
+             *iop_a_dst++ = wuffs_base__make_token(
+                 (((uint64_t)(2)) << WUFFS_BASE__TOKEN__VALUE_MINOR__SHIFT) |
+                 (((uint64_t)((v_length + 2))) << WUFFS_BASE__TOKEN__LENGTH__SHIFT));
++            self->private_impl.f_comment_type = 1;
+             status = wuffs_base__make_status(NULL);
+             goto ok;
+           }
+@@ -27325,6 +27331,7 @@ wuffs_json__decoder__decode_comment(
+             *iop_a_dst++ = wuffs_base__make_token(
+                 (((uint64_t)(4)) << WUFFS_BASE__TOKEN__VALUE_MINOR__SHIFT) |
+                 (((uint64_t)((v_length + 1))) << WUFFS_BASE__TOKEN__LENGTH__SHIFT));
++            self->private_impl.f_comment_type = 2;
+             status = wuffs_base__make_status(NULL);
+             goto ok;
+           }
+@@ -27568,6 +27575,7 @@ wuffs_json__decoder__decode_trailing_new_line(
+   switch (coro_susp_point) {
+     WUFFS_BASE__COROUTINE_SUSPENSION_POINT_0;
+ 
++    self->private_impl.f_allow_trailing_comment = self->private_impl.f_quirks[17];
+     label__outer__continue:;
+     while (true) {
+       if (((uint64_t)(io2_a_dst - iop_a_dst)) <= 0) {
+@@ -27600,6 +27608,33 @@ wuffs_json__decoder__decode_trailing_new_line(
+                 (((uint64_t)(v_whitespace_length)) << WUFFS_BASE__TOKEN__LENGTH__SHIFT));
+             v_whitespace_length = 0;
+           }
++          if (self->private_impl.f_allow_trailing_comment) {
++            if (a_dst) {
++              a_dst->meta.wi = ((size_t)(iop_a_dst - a_dst->data.ptr));
++            }
++            if (a_src) {
++              a_src->meta.ri = ((size_t)(iop_a_src - a_src->data.ptr));
++            }
++            WUFFS_BASE__COROUTINE_SUSPENSION_POINT(3);
++            status = wuffs_json__decoder__decode_comment(self, a_dst, a_src);
++            if (a_dst) {
++              iop_a_dst = a_dst->data.ptr + a_dst->meta.wi;
++            }
++            if (a_src) {
++              iop_a_src = a_src->data.ptr + a_src->meta.ri;
++            }
++            if (status.repr) {
++              goto suspend;
++            }
++            v_c = 0;
++            v_whitespace_length = 0;
++            if (self->private_impl.f_comment_type == 1) {
++              self->private_impl.f_allow_trailing_comment = false;
++              goto label__outer__continue;
++            } else if (self->private_impl.f_comment_type == 2) {
++              goto label__outer__break;
++            }
++          }
+           status = wuffs_base__make_status(wuffs_json__error__bad_input);
+           goto exit;
+         }
+diff --git a/std/json/decode_json.wuffs b/std/json/decode_json.wuffs
+index 761ea00d99ebbdf671db239b309bdbe052554433..df48da1c669bcb85c986710e763f450e26b0ae55 100644
+--- a/std/json/decode_json.wuffs
++++ b/std/json/decode_json.wuffs
+@@ -15,11 +15,18 @@
+ pub struct decoder? implements base.token_decoder(
+ 	quirks : array[QUIRKS_COUNT] base.bool,
+ 
+-	allow_leading_ars  : base.bool,
+-	allow_leading_ubom : base.bool,
++	allow_leading_ars      : base.bool,
++	allow_leading_ubom     : base.bool,
++	allow_trailing_comment : base.bool,
+ 
+ 	end_of_data : base.bool,
+ 
++	// comment_type is set as a side-effect of decode_comment?.
++	//  - 0 means failure.
++	//  - 1 means a block comment.
++	//  - 2 means a line  comment.
++	comment_type : base.u8,
++
+ 	util : base.utility,
+ )(
+ 	// stack is conceptually an array of bits, implemented as an array of u32.
+@@ -1420,6 +1427,8 @@ pri func decoder.decode_comment?(dst: base.token_writer, src: base.io_reader) {
+ 	var c2     : base.u16
+ 	var length : base.u32[..= 0xFFFD]
+ 
++	this.comment_type = 0
++
+ 	while (args.dst.length() <= 0) or (args.src.length() <= 1),
+ 		post args.dst.length() > 0,
+ 		post args.src.length() > 1,
+@@ -1475,6 +1484,7 @@ pri func decoder.decode_comment?(dst: base.token_writer, src: base.io_reader) {
+ 						base.TOKEN__VBD__FILLER__COMMENT_BLOCK,
+ 						continued: 0,
+ 						length: length + 2)
++					this.comment_type = 1
+ 					return ok
+ 				}
+ 
+@@ -1533,6 +1543,7 @@ pri func decoder.decode_comment?(dst: base.token_writer, src: base.io_reader) {
+ 						base.TOKEN__VBD__FILLER__COMMENT_LINE,
+ 						continued: 0,
+ 						length: length + 1)
++					this.comment_type = 2
+ 					return ok
+ 				}
+ 
+@@ -1670,6 +1681,8 @@ pri func decoder.decode_trailing_new_line?(dst: base.token_writer, src: base.io_
+ 	var c                 : base.u8
+ 	var whitespace_length : base.u32[..= 0xFFFE]
+ 
++	this.allow_trailing_comment = this.quirks[QUIRK_ALLOW_TRAILING_COMMENT - QUIRKS_BASE]
++
+ 	while.outer true {
+ 		if args.dst.length() <= 0 {
+ 			yield? base."$short write"
+@@ -1701,6 +1714,17 @@ pri func decoder.decode_trailing_new_line?(dst: base.token_writer, src: base.io_
+ 						value_major: 0, value_minor: 0, continued: 0, length: whitespace_length)
+ 					whitespace_length = 0
+ 				}
++				if this.allow_trailing_comment {
++					this.decode_comment?(dst: args.dst, src: args.src)
++					c = 0
++					whitespace_length = 0
++					if this.comment_type == 1 {  // Block comment.
++						this.allow_trailing_comment = false
++						continue.outer
++					} else if this.comment_type == 2 {  // Line comment.
++						break.outer
++					}
++				}
+ 				return "#bad input"
+ 			}
+ 
+diff --git a/std/json/decode_quirks.wuffs b/std/json/decode_quirks.wuffs
+index 81eb35a4651b8f8bac9b3ca9a7ea32d4c7e2f424..5f31b5ba4cad8107ebda50f067c18bb14353e17d 100644
+--- a/std/json/decode_quirks.wuffs
++++ b/std/json/decode_quirks.wuffs
+@@ -97,7 +97,7 @@ pub const QUIRK_ALLOW_BACKSLASH_X_AS_CODE_POINTS : base.u32 = 0x4909_9400 | 0x09
+ pub const QUIRK_ALLOW_BACKSLASH_ZERO : base.u32 = 0x4909_9400 | 0x0A
+ 
+ // When this quirk is enabled, "/* C/C++ style block comments */" are accepted
+-// anywhere whitespace would be, although see the QUIRK_ALLOW_TRAILING_NEW_LINE
++// anywhere whitespace would be, although see the QUIRK_ALLOW_TRAILING_COMMENT
+ // comment for additional interaction when combining multiple quirks.
+ //
+ // They produce WUFFS_BASE__TOKEN__VBD__FILLER__COMMENT_BLOCK tokens. The token
+@@ -105,7 +105,7 @@ pub const QUIRK_ALLOW_BACKSLASH_ZERO : base.u32 = 0x4909_9400 | 0x0A
+ pub const QUIRK_ALLOW_COMMENT_BLOCK : base.u32 = 0x4909_9400 | 0x0B
+ 
+ // When this quirk is enabled, "// C/C++ style line comments\n" are accepted
+-// anywhere whitespace would be, although see the QUIRK_ALLOW_TRAILING_NEW_LINE
++// anywhere whitespace would be, although see the QUIRK_ALLOW_TRAILING_COMMENT
+ // comment for additional interaction when combining multiple quirks.
+ //
+ // A line comment may not omit the ending "\n", even if there is no input
+@@ -152,6 +152,23 @@ pub const QUIRK_ALLOW_LEADING_ASCII_RECORD_SEPARATOR : base.u32 = 0x4909_9400 |
+ // may come first in the byte stream.
+ pub const QUIRK_ALLOW_LEADING_UNICODE_BYTE_ORDER_MARK : base.u32 = 0x4909_9400 | 0x10
+ 
++// When this quirk is enabled and both:
++//  - QUIRK_ALLOW_TRAILING_NEW_LINE is enabled,
++//  - at least one of QUIRK_ALLOW_COMMENT_ETC is enabled,
++// the trailing whitespace may optionally contain a single comment. As per
++// QUIRK_ALLOW_TRAILING_NEW_LINE, processing will still stop at the first
++// trailing '\n' (outside of a block comment), even if more comments followed.
++//
++// For a trailing block comment, new lines within the comment are not counted
++// and after the comment concludes, the decoder will continue consuming
++// whitespace up to and including the next '\n' (or end-of-file).
++//
++// For a trailing line comment, the decoder stops immediately after the
++// comment. If not stopped by end-of-file, this stops after the '\n' that
++// concludes (and is part of) the comment. One implication is that if multiple
++// line comments trail a JSON value, only the first one will be processed.
++pub const QUIRK_ALLOW_TRAILING_COMMENT : base.u32 = 0x4909_9400 | 0x11
++
+ // When this quirk is enabled, following a successful decoding of a top-level
+ // JSON value, any trailing whitespace (ASCII characters 0x09, 0x0A, 0x0D or
+ // 0x20) is also consumed (and WUFFS_BASE__TOKEN__VBC__FILLER tokens emitted)
+@@ -159,14 +176,16 @@ pub const QUIRK_ALLOW_LEADING_UNICODE_BYTE_ORDER_MARK : base.u32 = 0x4909_9400 |
+ // also known as '\n'), whichever comes first. This trailing whitespace is not
+ // mandatory, but it is consumed if present.
+ //
+-// When enabled, trailing non-whitespace (before a '\n') is an error. For
++// When enabled, trailing non-whitespace (before a '\n') is an error (unless it
++// is a comment and QUIRK_ALLOW_TRAILING_COMMENT is enabled; see above). For
+ // example, with "007" input, decoding with this quirk disabled (the default
+ // case) will consume just 1 byte ("0") and leave the rest ("07") unread
+ // without error, as "0" is a perfectly valid JSON value (but "00" is not).
+ // Decoding "007" (or "007\n") with this quirk enabled will return an error.
+ //
+-// When enabled, the decoder will not consume more than one trailing '\n', nor
+-// will it consume any other whitespace immediately after a trailing '\n'.
++// When enabled, the decoder will not consume more than one trailing '\n'
++// (outside of a block comment), nor will it consume any other whitespace
++// immediately after a trailing '\n'.
+ //
+ // If a JSON encoder avoids emitting (optional) '\n' bytes, other than a single
+ // '\n' after each top-level value in a multi-JSON-value stream, this format is
+@@ -182,10 +201,11 @@ pub const QUIRK_ALLOW_LEADING_UNICODE_BYTE_ORDER_MARK : base.u32 = 0x4909_9400 |
+ // "application/json-seq".
+ //
+ // When combined with QUIRK_ALLOW_COMMENT_BLOCK or QUIRK_ALLOW_COMMENT_LINE, it
+-// is an error for a comment to occur in this trailing whitespace, before an
+-// end-of-file or '\n' is encountered. Treating this as an error avoids any
+-// ambiguity in accounting for new lines within a block comment or ending a
+-// line comment.
++// is an error for a comment to occur in this trailing whitespace, unless
++// QUIRK_ALLOW_TRAILING_COMMENT is also enabled. Be aware that block comments
++// can contain multiple new lines, so combining such quirks can break the
++// "exactly one JSON value per line" assumption for newline-delimited but
++// otherwise compact (minified) JSON.
+ pub const QUIRK_ALLOW_TRAILING_NEW_LINE : base.u32 = 0x4909_9400 | 0x12
+ 
+ // When this quirk is enabled, JSON Pointer strings containing "~r" or "~n",

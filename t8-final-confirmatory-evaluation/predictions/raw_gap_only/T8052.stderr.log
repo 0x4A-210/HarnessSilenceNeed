@@ -1,0 +1,189 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8052-0pnupyor
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fb-0710-7583-ba82-e68d191a028b
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8052
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `fuzz/bplist_fuzzer.cc`
+
+~~~~cpp
+/*
+ * bplist_fuzzer.cc
+ * binary plist fuzz target for libFuzzer
+ *
+ * Copyright (c) 2017 Nikias Bassen All Rights Reserved.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include <plist/plist.h>
+#include <stdio.h>
+
+extern "C" int LLVMFuzzerTestOneInput(const unsigned char* data, size_t size)
+{
+	plist_t root_node = NULL;
+	plist_from_bin(reinterpret_cast<const char*>(data), size, &root_node);
+	plist_free(root_node);
+
+	return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/src/plist.c b/src/plist.c
+index 19279ed..2f4990c 100644
+--- a/src/plist.c
++++ b/src/plist.c
+@@ -654,39 +654,48 @@ static void _plist_array_post_insert(plist_t node, plist_t item, long n)
+ 
+ void plist_array_set_item(plist_t node, plist_t item, uint32_t n)
+ {
++    if (!item) {
++        return;
++    }
+     if (node && PLIST_ARRAY == plist_get_node_type(node) && n < INT_MAX)
+     {
+         plist_t old_item = plist_array_get_item(node, n);
+         if (old_item)
+         {
+             int idx = plist_free_node((node_t)old_item);
+             assert(idx >= 0);
+             if (idx < 0) {
+                 return;
+             }
+             node_insert((node_t)node, idx, (node_t)item);
+             ptrarray_t* pa = (ptrarray_t*)((plist_data_t)((node_t)node)->data)->hashtable;
+             if (pa) {
+                 ptr_array_set(pa, item, idx);
+             }
+         }
+     }
+ }
+ 
+ void plist_array_append_item(plist_t node, plist_t item)
+ {
++    if (!item) {
++        return;
++    }
+     if (node && PLIST_ARRAY == plist_get_node_type(node))
+     {
+         node_attach((node_t)node, (node_t)item);
+         _plist_array_post_insert(node, item, -1);
+     }
+ }
+ 
+ void plist_array_insert_item(plist_t node, plist_t item, uint32_t n)
+ {
++    if (!item) {
++        return;
++    }
+     if (node && PLIST_ARRAY == plist_get_node_type(node) && n < INT_MAX)
+     {
+         node_insert((node_t)node, n, (node_t)item);
+         _plist_array_post_insert(node, item, (long)n);
+     }
+ }
+@@ -852,41 +861,44 @@ plist_t plist_dict_get_item(plist_t node, const char* key)
+ 
+ void plist_dict_set_item(plist_t node, const char* key, plist_t item)
+ {
++    if (!item) {
++        return;
++    }
+     if (node && PLIST_DICT == plist_get_node_type(node)) {
+         plist_t old_item = plist_dict_get_item(node, key);
+         plist_t key_node = NULL;
+         if (old_item) {
+             int idx = plist_free_node((node_t)old_item);
+             assert(idx >= 0);
+             if (idx < 0) {
+                 return;
+             }
+             node_insert((node_t)node, idx, (node_t)item);
+             key_node = node_prev_sibling((node_t)item);
+         } else {
+             key_node = plist_new_key(key);
+             node_attach((node_t)node, (node_t)key_node);
+             node_attach((node_t)node, (node_t)item);
+         }
+ 
+         hashtable_t *ht = (hashtable_t*)((plist_data_t)((node_t)node)->data)->hashtable;
+         if (ht) {
+             /* store pointer to item in hash table */
+             hash_table_insert(ht, (plist_data_t)((node_t)key_node)->data, item);
+         } else {
+             if (((node_t)node)->count > 500) {
+                 /* make new hash table */
+                 ht = hash_table_new(dict_key_hash, dict_key_compare, NULL);
+                 /* calculate the hashes for all entries we have so far */
+                 plist_t current = NULL;
+                 for (current = (plist_t)node_first_child((node_t)node);
+                      ht && current;
+                      current = (plist_t)node_next_sibling(node_next_sibling((node_t)current)))
+                 {
+                     hash_table_insert(ht, ((node_t)current)->data, node_next_sibling((node_t)current));
+                 }
+                 ((plist_data_t)((node_t)node)->data)->hashtable = ht;
+             }
+         }
+     }
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8052","gap_exists":true,"gap_type":["entry_point","API_protocol","state","input_semantics"],"confidence":98,"affected_functions":["plist_array_set_item","plist_array_append_item","plist_array_insert_item","plist_dict_set_item"],"reason":"H0 exercises only binary parsing through plist_from_bin and immediately frees the result. It does not directly exercise the changed container-mutation APIs, especially their NULL-item contract or mutation-dependent branches such as array replacement/insertion and dictionary replacement, creation, and large-dictionary hash-table initialization.","evidence":["H0 calls only plist_from_bin(reinterpret_cast<const char*>(data), size, &root_node) and plist_free(root_node).","All four changed public functions add an early `if (!item) { return; }` branch that H0 does not deliberately invoke.","plist_array_set_item has distinct existing-item replacement behavior through plist_array_get_item, plist_free_node, node_insert, and ptr_array_set.","plist_array_insert_item and plist_array_set_item also depend on caller-controlled index `n`, including the `n < INT_MAX` condition.","plist_dict_set_item has separate existing-key and new-key paths and creates a hash table only when `((node_t)node)->count > 500`, requiring constructed mutable state rather than merely parsing and freeing one input."],"recommended_action":"Add a structure-aware mutation harness that constructs array and dictionary nodes, derives operation sequences, keys, indices, and item values from fuzz input, explicitly calls each affected API with both NULL and non-NULL items, exercises replacement and insertion cases, crosses the dictionary count threshold above 500, and frees all resulting structures."}
+tokens used
+4,946

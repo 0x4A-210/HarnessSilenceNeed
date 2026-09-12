@@ -1,0 +1,556 @@
+diff --git a/std/lzma/decode_bitstream_slow.wuffs b/std/lzma/decode_bitstream_slow.wuffs
+index e9e8a6a7..c84f4774 100644
+--- a/std/lzma/decode_bitstream_slow.wuffs
++++ b/std/lzma/decode_bitstream_slow.wuffs
+@@ -9,25 +9,25 @@
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
+ // --------
+ 
+ // The AlgOveNN line numbers refer to the ./README.md file.
+ //
+ // Most LZMA C/C++ implementations use macros for the "decodeTheNextBym()" code
+ // fragment in that "Algorithm Overview" section, repeated multiple times in
+ // the decoding algorithm. Wuffs does not have macros (or inline functions), so
+ // its LZMA implementation looks relatively verbose and repetitive (even though
+ // it's equivalent to the C/C++ code, at the machine code level).
+ 
+-pri func decoder.decode_bitstream_slow?(dst: base.io_writer, src: base.io_reader) {
++pri func decoder.decode_bitstream_slow?(dst: base.io_writer, src: base.io_reader, workbuf: roslice base.u8) {
+     var c8 : base.u8
+ 
+     var bits  : base.u32
+     var range : base.u32
+ 
+     var state : base.u32[..= 11]
+ 
+     // repN is what the "Algorithm Overview" calls (mrud[N] - 1). The minimum
+     // distance is 1.
+     var rep0   : base.u32[..= 0xFFFF_FFFE]
+     var rep1   : base.u32[..= 0xFFFF_FFFE]
+     var rep2   : base.u32[..= 0xFFFF_FFFE]
+@@ -59,24 +59,35 @@ pri func decoder.decode_bitstream_slow?(dst: base.io_writer, src: base.io_reader
+ 
+     var index_ao00 : base.u32[..= (12 << 4) - 1]
+     var index_ao41 : base.u32[..= (12 << 4) - 1]
+     var index_lit  : base.u32[..= (1 << 4) - 1]
+     var index_len  : base.u32[..= (1 << 4) - 1]
+ 
+     var index_small_dist_base  : base.u32
+     var index_small_dist_extra : base.u32
+     var index_small_dist       : base.u32[..= 127]
+ 
+     var index_large_dist : base.u32[..= 15]
+ 
++    // dist is part of the Lempel-Ziv (length, distance) pair. When dist is at
++    // or below the args.dst history length then the LZ copy can be resolved
++    // just from args.dst (and adj_dist and wb_index are unused). Otherwise, if
++    // e.g. dist was 100 and args.dst.history_length() was 40 then adj_dist
++    // would be 60: the LZ copy starts 60 bytes before the end of the
++    // args.workbuf ringbuffer. wb_index is that start index, equal to
++    // ((this.dict_workbuf_index ~mod- adj_dist) modulo this.dict_size).
++    var dist     : base.u32
++    var adj_dist : base.u32
++    var wb_index : base.u64
++
+     // Initialize the bitstream.
+     c8 = args.src.read_u8?()
+     if c8 <> 0x00 {
+         return "#bad code"
+     }
+     bits = args.src.read_u32be?()
+     if bits == 0xFFFF_FFFF {
+         return "#bad code"
+     }
+     range = 0xFFFF_FFFF
+ 
+     lc = this.lc
+@@ -795,41 +806,106 @@ pri func decoder.decode_bitstream_slow?(dst: base.io_writer, src: base.io_reader
+         } endwhile
+         len = (tree_node & 0xFF) + 18
+         assert len >= 1
+         state = STATE_TRANSITION_LONGREP[state] as base.u32
+ 
+         break.goto_after_decode_len
+         }} endwhile.goto_after_decode_len
+         break.goto_do_the_lz_copy
+         }} endwhile.goto_do_the_lz_copy
+ 
+         // AlgOve90  labelDoTheLZCopy:
+         // AlgOve94  emitCopy(len, mrud[0])
++
+         assert len >= 1
+-        if (((rep0 + 1) as base.u64) > (pos ~mod+ this.lzma2_prior_decoded_length)) or
+-                (((rep0 + 1) as base.u64) > (this.dict_size as base.u64)) {
++        dist = rep0 + 1
++        assert dist >= 1
++        if ((dist as base.u64) > (pos ~mod+ this.lzma2_prior_decoded_length)) or
++                ((dist as base.u64) > (this.dict_size as base.u64)) {
+             return "#bad distance"
+         }
+         pos ~mod+= len as base.u64
+-        while (len as base.u64) > args.dst.length(),
++        // 274 is at least (len + 1). A limited_copy_u32_from_slice call below
++        // passes "up_to: len + 1". It's simpler if it's always a full copy.
++        while 274 > args.dst.length(),
+                 inv len >= 1,
+-                post (len as base.u64) <= args.dst.length(),
++                inv dist >= 1,
++                post 274 <= args.dst.length(),
+         {
+             yield? base."$short write"
+         } endwhile
+-        if ((rep0 + 1) as base.u64) > args.dst.history_length() {
+-            return base."#insufficient history"
++        assert (len as base.u64) <= args.dst.length() via "a <= b: a <= c; c <= b"(c: 274)
++
++        // Copy from the args.workbuf history, if necessary.
++        if (dist as base.u64) > args.dst.history_length() {
++            adj_dist = (((dist as base.u64) - args.dst.history_length()) & 0xFFFF_FFFF) as base.u32
++            if adj_dist > this.dict_seen {
++                return "#bad distance"
++            }
++            wb_index = (this.dict_workbuf_index as base.u64) ~mod- (adj_dist as base.u64)
++            while wb_index >= 0x8000_0000_0000_0000,
++                    inv dist >= 1,
++            {
++                wb_index ~mod+= this.dict_size as base.u64
++            } endwhile
++            if wb_index > args.workbuf.length() {
++                return "#internal error: inconsistent dictionary state"
++            }
++
++            if len < adj_dist {
++                // Copy len bytes of history and one more byte for the later
++                // half of the two-byte cusp, all from args.workbuf.
++                args.dst.limited_copy_u32_from_slice!(up_to: len + 1, s: args.workbuf[wb_index ..])
++                if not args.dst.can_undo_byte() {
++                    return "#internal error: inconsistent dictionary state"
++                }
++                match_byte = args.dst.peek_undo_byte()
++                args.dst.undo_byte!()
++                if not args.dst.can_undo_byte() {
++                    return "#internal error: inconsistent dictionary state"
++                }
++                prev_byte = args.dst.peek_undo_byte()
++                continue.outer
++            } else if len == adj_dist {
++                // Like above, copy len bytes of history and one more byte for
++                // the later half of the two-byte cusp, but the copy-source
++                // crosses over from args.workbuf to args.dst.
++                args.dst.limited_copy_u32_from_slice!(up_to: len, s: args.workbuf[wb_index ..])
++                args.dst.limited_copy_u32_from_history!(up_to: 1, distance: dist)
++                if not args.dst.can_undo_byte() {
++                    return "#internal error: inconsistent dictionary state"
++                }
++                match_byte = args.dst.peek_undo_byte()
++                args.dst.undo_byte!()
++                if not args.dst.can_undo_byte() {
++                    return "#internal error: inconsistent dictionary state"
++                }
++                prev_byte = args.dst.peek_undo_byte()
++                continue.outer
++            }
++            args.dst.limited_copy_u32_from_slice!(up_to: adj_dist, s: args.workbuf[wb_index ..])
++            len -= adj_dist
++            assert len >= 1
++            if ((len as base.u64) > args.dst.length()) or
++                    ((dist as base.u64) > args.dst.history_length()) {
++                return "#internal error: inconsistent dictionary state"
++            }
+         }
+-        assert (rep0 + 1) >= 1
++
++        // Copy from the args.dst history.
++        assert len >= 1
++        assert dist >= 1
++        assert (len as base.u64) <= args.dst.length()
++        assert (dist as base.u64) <= args.dst.history_length()
+         match_cusp = args.dst.limited_copy_u32_from_history_fast_return_cusp!(
+-                up_to: len, distance: (rep0 + 1))
++                up_to: len, distance: dist)
+         match_byte = (match_cusp >> 8) as base.u8
+         prev_byte = (match_cusp & 0xFF) as base.u8
+     } endwhile.outer
+ 
+     if bits <> 0 {
+         return "#bad bitstream trailer"
+     } else if (this.decoded_length <> 0xFFFF_FFFF_FFFF_FFFF) and
+             (this.decoded_length <> pos) {
+         return "#bad decoded length"
+     }
+ }
+diff --git a/std/lzma/decode_lzma.wuffs b/std/lzma/decode_lzma.wuffs
+index 71878e37..f429199f 100644
+--- a/std/lzma/decode_lzma.wuffs
++++ b/std/lzma/decode_lzma.wuffs
+@@ -9,44 +9,56 @@
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
+ pub status "#bad LZMA2 header"
+ pub status "#bad bitstream trailer"
+ pub status "#bad code"
+ pub status "#bad decoded length"
+ pub status "#bad distance"
+ pub status "#bad header"
+ pub status "#truncated input"
+ pub status "#unsupported decoded length"
+ pub status "#unsupported properties"
+ 
+-pub const DECODER_DST_HISTORY_RETAIN_LENGTH_MAX_INCL_WORST_CASE : base.u64 = 0xFFFF_FFFF
++pri status "#internal error: inconsistent dictionary state"
+ 
+-pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0
++pub const DECODER_DST_HISTORY_RETAIN_LENGTH_MAX_INCL_WORST_CASE : base.u64 = 0
++pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE               : base.u64 = 0xFFFF_FFFF + 273
+ 
+ pub struct decoder? implements base.io_transformer(
+         // In theory, lc ranges in [0 ..= 8]. In practice, to keep the
+         // worst-case size of the statically allocated probs_lit array
+         // managable, we only support configurations where ((lc + lp) <= 4) and
+         // otherwise return "#unsupported properties".
+         //
+         // This matches "LZMA2's limited property condition" described at:
+         // https://github.com/jljusten/LZMA-SDK/blob/781863cdf592da3e97420f50de5dac056ad352a5/DOC/lzma-specification.txt#L192
+         lc : base.u32[..= 4],  // The number of Literal Context bits.  Default: 3.
+         lp : base.u32[..= 4],  // The number of Literal Position bits. Default: 0.
+         pb : base.u32[..= 4],  // The number of Position Bits.         Default: 2.
+ 
+         format_extension : base.u32,
+ 
++        // dict_size is the nominal size of the args.workbuf ringbuffer that
++        // holds historical decoded bytes. The workbuf_len is a little larger:
++        // see "ML" below.
+         dict_size : base.u32,
+ 
++        // dict_workbuf_index indexes the args.workbuf ringbuffer, pointing to
++        // where add_history will next write to.
++        dict_workbuf_index : base.u32,
++
++        // dict_seen is the cumulative sum (saturating at 0xFFFF_FFFF) of the
++        // number of bytes passed to add_history.
++        dict_seen : base.u32,
++
+         decoded_length : base.u64,
+ 
+         lzma2_prior_decoded_length : base.u64,
+         lzma2_encoded_length_have  : base.u64,
+         lzma2_encoded_length_want  : base.u64,
+         lzma2_need_prob_reset      : base.bool,
+         lzma2_need_properties      : base.bool,
+ 
+         util : base.utility,
+ ) + (
+         // 12 is the number of states. 4 is the pb inclusive maximum.
+         //
+@@ -157,24 +169,97 @@ pub struct decoder? implements base.io_transformer(
+         // https://github.com/torvalds/linux/blob/052d534373b7ed33712a63d5e17b2b6cdbce84fd/lib/xz/xz_dec_lzma2.c#L211
+         //
+         // [Ref1]
+         // https://github.com/jljusten/LZMA-SDK/blob/781863cdf592da3e97420f50de5dac056ad352a5/C/LzmaDec.c#L151
+         //
+         // [Ref2]
+         // https://raw.githubusercontent.com/jljusten/LZMA-SDK/781863cdf592da3e97420f50de5dac056ad352a5/DOC/lzma-specification.txt
+         //
+         // [Ref3]
+         // https://github.com/jljusten/LZMA-SDK/blob/f287b63f6bb8b88e281f18a9295340c732245167/Source/LzmaDecode.h#L48
+ )
+ 
++pri func decoder.add_history!(hist: slice base.u8, workbuf: slice base.u8) base.status {
++    var dict_workbuf_index : base.u64[..= 0xFFFF_FFFF]
++    var dict_size          : base.u64[..= 0xFFFF_FFFF]
++    var hist_length        : base.u64
++    var s                  : slice base.u8
++    var n_copied           : base.u64
++    var n                  : base.u64
++
++    dict_workbuf_index = this.dict_workbuf_index as base.u64
++    dict_size = this.dict_size as base.u64
++    if args.hist.length() == 0 {
++        return ok
++    }
++
++    // 273 is ML, where ML is the Maximum Length of an LZMA Lempel-Ziv (length,
++    // distance) pair. After an add_history call, args.workbuf[dict_size ..
++    // (dict_size + ML)] duplicates args.workbuf[.. ML]. This simplifies
++    // copying up to (ML + 1) bytes from the ringbuffer, as there is no need to
++    // split the copy around the dict_size boundary.
++    //
++    // This technique is similar to the one used in the std/deflate package
++    // (although that package uses a different value of ML, 258). That package
++    // also extends the nominal dict_size by (ML - 1), not ML as is done here,
++    // because std/deflate copies up to ML bytes, but std/lzma copies up to (ML
++    // + 1) bytes. std/lzma also needs to know the later half of the two-byte
++    // cusp: the first byte after the copied history.
++    if args.workbuf.length() < (dict_size + 273) {
++        return base."#bad workbuf length"
++    }
++    assert args.workbuf.length() >= dict_size via "a >= b: a >= (b + c); 0 <= c"(c: 273)
++    assert dict_size <= args.workbuf.length() via "a <= b: b >= a"()
++
++    hist_length = args.hist.length()
++    if hist_length > 0xFFFF_FFFF {
++        this.dict_seen = 0xFFFF_FFFF
++    } else {
++        this.dict_seen ~sat+= hist_length as base.u32
++    }
++
++    s = args.hist
++    if s.length() >= dict_size {
++        s = s.suffix(up_to: dict_size)
++        args.workbuf.copy_from_slice!(s: s)
++        this.dict_workbuf_index = 0
++
++    } else if dict_workbuf_index > dict_size {
++        return "#internal error: inconsistent dictionary state"
++
++    } else {
++        n_copied = args.workbuf[dict_workbuf_index .. dict_size].copy_from_slice!(s: s)
++        if n_copied < s.length() {
++            n = args.workbuf.copy_from_slice!(s: s[n_copied ..])
++            this.dict_workbuf_index = (n & 0xFFFF_FFFF) as base.u32
++        } else {
++            n = dict_workbuf_index ~mod+ n_copied
++            if n < dict_size {
++                assert n < 0xFFFF_FFFF via "a < b: a < c; c <= b"(c: dict_size)
++                this.dict_workbuf_index = n as base.u32
++            } else {
++                this.dict_workbuf_index = 0
++            }
++        }
++    }
++
++    // Have the tail duplicate the head.
++    if (273 > dict_size) or (dict_size > args.workbuf.length()) {
++        return "#internal error: inconsistent dictionary state"
++    }
++    assert 273 <= args.workbuf.length() via "a <= b: a <= c; c <= b"(c: dict_size)
++    args.workbuf[dict_size ..].copy_from_slice!(s: args.workbuf[.. 273])
++    return ok
++}
++
+ pub func decoder.get_quirk(key: base.u32) base.u64 {
+     if args.key == QUIRK_FORMAT_EXTENSION {
+         return this.format_extension as base.u64
+     }
+     return 0
+ }
+ 
+ pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+     var v : base.u32
+ 
+     if args.key == QUIRK_FORMAT_EXTENSION {
+         if args.value == 0 {
+@@ -187,47 +272,59 @@ pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+         v = this.format_extension >> 8
+         if v < 40 {
+             this.dict_size = (2 | (v & 1)) << ((v >> 1) + 11)
+         } else {
+             this.dict_size = 0xFFFF_FFFF
+         }
+         return ok
+     }
+     return base."#unsupported option"
+ }
+ 
+ pub func decoder.dst_history_retain_length() base.optional_u63 {
+-    if this.dict_size == 0 {
+-        return this.util.make_optional_u63(has_value: false, value: 0)
+-    }
+-    return this.util.make_optional_u63(has_value: true, value: this.dict_size as base.u64)
++    return this.util.make_optional_u63(has_value: true, value: 0)
+ }
+ 
+ pub func decoder.workbuf_len() base.range_ii_u64 {
+-    return this.util.make_range_ii_u64(min_incl: 0, max_incl: 0)
++    var m : base.u64
++
++    if this.dict_size == 0 {
++        return this.util.make_range_ii_u64(min_incl: 0, max_incl: 0)
++    }
++    m = (this.dict_size as base.u64) + 273
++    return this.util.make_range_ii_u64(min_incl: m, max_incl: m)
+ }
+ 
+ pub func decoder.transform_io?(dst: base.io_writer, src: base.io_reader, workbuf: slice base.u8) {
+-    var status : base.status
++    var mark       : base.u64
++    var dti_status : base.status
++    var ah_status  : base.status
+ 
+     while true {
+-        status =? this.do_transform_io?(dst: args.dst, src: args.src)
+-        if (status == base."$short read") and args.src.is_closed() {
++        mark = args.dst.mark()
++        dti_status =? this.do_transform_io?(dst: args.dst, src: args.src, workbuf: args.workbuf)
++        if not dti_status.is_suspension() {
++            return dti_status
++        } else if (dti_status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+-        yield? status
++        ah_status = this.add_history!(hist: args.dst.since(mark: mark), workbuf: args.workbuf)
++        if ah_status.is_error() {
++            return ah_status
++        }
++        yield? dti_status
+     } endwhile
+ }
+ 
+-pri func decoder.do_transform_io?(dst: base.io_writer, src: base.io_reader) {
++pri func decoder.do_transform_io?(dst: base.io_writer, src: base.io_reader, workbuf: roslice base.u8) {
+     var header_byte : base.u8
+     var c32         : base.u32
+     var prop_byte   : base.u8
+ 
+     var lc : base.u32[..= 8]
+     var lp : base.u32[..= 4]
+     var pb : base.u32[..= 4]
+ 
+     var length   : base.u32
+     var n_copied : base.u32
+ 
+     var dmark  : base.u64
+@@ -339,47 +436,51 @@ pri func decoder.do_transform_io?(dst: base.io_writer, src: base.io_reader) {
+                 this.lzma2_need_properties = false
+             }
+ 
+             if header_byte >= 0xE0 {
+                 this.lzma2_prior_decoded_length = 0
+             }
+ 
+             if this.lzma2_need_prob_reset or this.lzma2_need_properties {
+                 return "#bad LZMA2 header"
+             }
+         }
+ 
++        while args.workbuf.length() < ((this.dict_size as base.u64) + 273) {
++            yield? base."$short workbuf"
++        } endwhile
++
+         this.lzma2_encoded_length_have = 0
+         while true {
+             dmark = args.dst.mark()
+             smark = args.src.mark()
+-            status =? this.decode_bitstream?(dst: args.dst, src: args.src)
++            status =? this.decode_bitstream?(dst: args.dst, src: args.src, workbuf: args.workbuf)
+             this.lzma2_encoded_length_have ~sat+= args.src.count_since(mark: smark)
+             this.lzma2_prior_decoded_length ~sat+= args.dst.count_since(mark: dmark)
+             if status.is_ok() {
+                 break
+             }
+             yield? status
+         } endwhile
+ 
+         if this.format_extension == 0 {
+             break
+         } else if this.lzma2_encoded_length_have <> this.lzma2_encoded_length_want {
+             return "#bad LZMA2 header"
+         }
+     } endwhile
+ }
+ 
+-pri func decoder.decode_bitstream?(dst: base.io_writer, src: base.io_reader) {
+-    this.decode_bitstream_slow?(dst: args.dst, src: args.src)
++pri func decoder.decode_bitstream?(dst: base.io_writer, src: base.io_reader, workbuf: roslice base.u8) {
++    this.decode_bitstream_slow?(dst: args.dst, src: args.src, workbuf: args.workbuf)
+ }
+ 
+ // initialize_probs sets all of the probs_foo[i][j] values to 1024.
+ pri func decoder.initialize_probs!() {
+     var i : base.u32
+     var j : base.u32
+ 
+     i = 0
+     while i < (12 << 4) {
+         this.probs_ao00[i] = 1024
+         i += 1
+     } endwhile
+diff --git a/std/xz/decode_xz.wuffs b/std/xz/decode_xz.wuffs
+index 86bb75c2..e4b643e2 100644
+--- a/std/xz/decode_xz.wuffs
++++ b/std/xz/decode_xz.wuffs
+@@ -17,27 +17,26 @@ use "std/crc64"
+ use "std/lzma"
+ use "std/sha256"
+ 
+ pub status "#bad block header"
+ pub status "#bad checksum"
+ pub status "#bad filter"
+ pub status "#bad header"
+ pub status "#bad padding"
+ pub status "#truncated input"
+ pub status "#unsupported checksum algorithm"
+ pub status "#unsupported filter"
+ 
+-pub const DECODER_DST_HISTORY_RETAIN_LENGTH_MAX_INCL_WORST_CASE : base.u64 = 0xFFFF_FFFF
+-
+-pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0
++pub const DECODER_DST_HISTORY_RETAIN_LENGTH_MAX_INCL_WORST_CASE : base.u64 = 0
++pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE               : base.u64 = 0xFFFF_FFFF + 273
+ 
+ pub struct decoder? implements base.io_transformer(
+         filters               : array[3] base.u32,
+         num_non_final_filters : base.u32[..= 3],
+ 
+         // 0: None.
+         // 1: CRC-32.
+         // 2: CRC-64.
+         // 3: SHA-256.
+         checksummer : base.u32[..= 3],
+ 
+         ignore_checksum : base.bool,
+@@ -70,25 +69,25 @@ pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+     if args.key == base.QUIRK_IGNORE_CHECKSUM {
+         this.ignore_checksum = args.value > 0
+         return ok
+     }
+     return base."#unsupported option"
+ }
+ 
+ pub func decoder.dst_history_retain_length() base.optional_u63 {
+     return this.lzma.dst_history_retain_length()
+ }
+ 
+ pub func decoder.workbuf_len() base.range_ii_u64 {
+-    return this.util.make_range_ii_u64(min_incl: 0, max_incl: 0)
++    return this.lzma.workbuf_len()
+ }
+ 
+ pub func decoder.transform_io?(dst: base.io_writer, src: base.io_reader, workbuf: slice base.u8) {
+     var status : base.status
+ 
+     while true {
+         status =? this.do_transform_io?(dst: args.dst, src: args.src, workbuf: args.workbuf)
+         if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+         yield? status
+     } endwhile
+@@ -168,25 +167,25 @@ pri func decoder.do_transform_io?(dst: base.io_writer, src: base.io_reader, work
+             return "#bad checksum"
+         } else {
+             this.crc32.reset!()
+             this.crc64.reset!()
+             this.sha256.reset!()
+         }
+ 
+         compressed_size = 0
+         uncompressed_size = 0
+         while true {
+             dmark = args.dst.mark()
+             smark = args.src.mark()
+-            status =? this.lzma.transform_io?(dst: args.dst, src: args.src, workbuf: this.util.empty_slice_u8())
++            status =? this.lzma.transform_io?(dst: args.dst, src: args.src, workbuf: args.workbuf)
+             compressed_size ~mod+= args.src.count_since(mark: smark)
+             uncompressed_size ~mod+= args.dst.count_since(mark: dmark)
+ 
+             if this.num_non_final_filters <> 0 {
+                 this.apply_non_final_filters!(dst_slice: args.dst.since(mark: dmark))
+             }
+ 
+             if this.ignore_checksum {
+                 // No-op.
+             } else if this.checksummer == 1 {
+                 this.crc32.update!(x: args.dst.since(mark: dmark))
+             } else if this.checksummer == 2 {

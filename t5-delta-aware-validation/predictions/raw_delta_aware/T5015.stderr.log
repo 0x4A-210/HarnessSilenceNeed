@@ -1,0 +1,955 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t5-delta_aware-T5015-33ftexr4
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08af3-fed8-7d62-81cc-bd0d90a87747
+--------
+user
+You are evaluating whether one production-source commit creates a fuzz-harness
+maintenance need. Use only the anonymous case below. Do not use tools, files,
+the network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+Follow this order exactly and preserve one principal comparison scope:
+
+1. Identify the smallest fuzz-relevant semantic unit introduced or changed by
+   the diff. Use the mechanically supplied S0/S1 declaration context as the
+   identity anchor when it belongs to the change. Do not combine it with an
+   older sibling API, another module, or a general project-wide omission.
+2. For that exact unit and exposure obligation, decide Gap(S0,H0).
+3. For the identical unit and exposure obligation, decide Gap(S1,H0).
+4. Compare the caller-visible harness obligations, not the amount of internal
+   implementation.
+5. Derive NEW, AGGRAVATED, UNCHANGED, REMOVED, or NONE and apply the fixed
+   maintenance rule.
+
+Identity rules:
+
+- If the anchored public declaration/configuration/module is absent in S0 and
+  introduced in S1, then its own GapBefore is false. Do not turn it into an
+  AGGRAVATED old gap merely because H0 also omitted a related module in S0.
+- If the same public declaration exists in S0 and S1 and unchanged H0 omits
+  that callable/configuration/lifecycle path on both sides, its exposure gap is
+  true before and after. A formerly constant/no-op getter or lifecycle method
+  is still the same callable surface; new behavior inside it does not create a
+  new call obligation. This comparison is UNCHANGED unless the commit changes
+  how H0 must reach or control the API.
+- If H0 already reaches the new behavior through an existing one-hop caller
+  that supplies a new internal argument/configuration automatically, that
+  internal caller-to-callee protocol is not a new H0 obligation. It cannot make
+  an already-omitted direct-API gap AGGRAVATED.
+
+A concrete new harness obligation means H0 itself must add an entry/call,
+caller-supplied value or buffer, call-order transition, runtime/compile-time
+configuration, or special input construction that was unnecessary in S0. More
+LOC, new internal state, a replacement algorithm, validation/error handling,
+CPU fast path, or state reset inside an existing omitted API is not sufficient.
+Do not infer aggravation because a whole subsystem is omitted on both sides.
+
+Use separate evidence and this default truth table:
+
+- before=false, after=true  -> NEW
+- before=true,  after=true  -> UNCHANGED
+- before=true,  after=false -> REMOVED
+- before=false, after=false -> NONE
+
+AGGRAVATED is allowed only with concrete S0-versus-S1 evidence of a new H0
+action or reduced same-scope reachability/control. Set maintenance_needed=true
+only if explicit_failure=true or the delta is NEW/AGGRAVATED. Return exactly
+one JSON object matching the schema, with separate S0 and S1 evidence.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T5015
+
+## Existing harness H0
+
+Every project-owned C/C++ path containing `fuzz` at the pre-change snapshot is shown below. Framework and build-script scaffolding are not expanded.
+
+### H0 path: `tests/fuzz_main.c`
+
+~~~~cpp
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+
+/* fuzz target entry point, works without libFuzzer */
+
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size);
+
+int main(int argc, char **argv)
+{
+    FILE *f;
+    char *buf = NULL;
+    long siz_buf;
+
+    if(argc < 2)
+    {
+        fprintf(stderr, "no input file\n");
+        goto err;
+    }
+
+    f = fopen(argv[1], "rb");
+    if(f == NULL)
+    {
+        fprintf(stderr, "error opening input file %s\n", argv[1]);
+        goto err;
+    }
+
+    fseek(f, 0, SEEK_END);
+
+    siz_buf = ftell(f);
+    rewind(f);
+
+    if(siz_buf < 1) goto err;
+
+    buf = (char*)malloc(siz_buf);
+    if(buf == NULL)
+    {
+        fprintf(stderr, "malloc() failed\n");
+        goto err;
+    }
+
+    if(fread(buf, siz_buf, 1, f) != 1)
+    {
+        fprintf(stderr, "fread() failed\n");
+        goto err;
+    }
+
+    (void)LLVMFuzzerTestOneInput((uint8_t*)buf, siz_buf);
+
+err:
+    free(buf);
+
+    return 0;
+}
+~~~~
+
+### H0 path: `tests/spng_read_fuzzer.c`
+
+~~~~cpp
+#define SPNG_UNTESTED
+#include "../spng/spng.h"
+
+#include <string.h>
+
+struct buf_state
+{
+    const uint8_t *data;
+    size_t bytes_left;
+};
+
+static int buffer_read_fn(spng_ctx *ctx, void *user, void *dest, size_t length)
+{
+    struct buf_state *state = (struct buf_state*)user;
+
+    if(length > state->bytes_left) return SPNG_IO_EOF;
+
+    memcpy(dest, state->data, length);
+
+    state->bytes_left -= length;
+    state->data += length;
+
+    return 0;
+}
+
+#ifdef __cplusplus
+extern "C"
+#endif
+int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+    if(size < 4) return 0;
+
+    int flags = data[size - 1];
+    int fmt = data[size - 3] | (data[size - 2] << 8);
+    int stream = data[size - 4] & 1;
+    int progressive = data[size - 4] & 2;
+    int file_stream = data[size - 4] & 4;
+    int discard = data[size - 4] & 8;
+
+    size -= 4;
+
+    int ret;
+    unsigned char *out = NULL;
+    FILE *file = NULL;
+
+    spng_ctx *ctx = spng_ctx_new(SPNG_CTX_IGNORE_ADLER32);
+    if(ctx == NULL) return 0;
+
+    struct spng_ihdr ihdr;
+    struct spng_plte plte;
+    struct spng_trns trns;
+    struct spng_chrm chrm;
+    struct spng_chrm_int chrm_int;
+    double gamma;
+    struct spng_iccp iccp;
+    struct spng_sbit sbit;
+    uint8_t srgb_rendering_intent;
+    struct spng_text text[4] = {0};
+    struct spng_bkgd bkgd;
+    struct spng_hist hist;
+    struct spng_phys phys;
+    struct spng_splt splt[4] = {0};
+    struct spng_time time;
+    struct spng_unknown_chunk chunks[4] = {0};
+    uint32_t n_text = 4, n_splt = 4, n_chunks = 4;
+
+    struct buf_state state;
+    state.data = data;
+    state.bytes_left = size;
+
+    if(stream)
+    {
+        if(file_stream)
+        {
+#if defined(SPNGT_HAVE_FMEMOPEN)
+            file = fmemopen((void*)data, size, "rb");
+
+            if(file == NULL) goto err;
+#endif
+            ret = spng_set_png_file(ctx, file);
+        }
+        else ret = spng_set_png_stream(ctx, buffer_read_fn, &state);
+    }
+    else ret = spng_set_png_buffer(ctx, (void*)data, size);
+
+    if(ret) goto err;
+
+    spng_set_image_limits(ctx, 200000, 200000);
+
+    spng_set_chunk_limits(ctx, 4 * 1000 * 1000, 8 * 1000 * 1000);
+
+    spng_set_crc_action(ctx, SPNG_CRC_USE, discard ? SPNG_CRC_DISCARD : SPNG_CRC_USE);
+
+    size_t out_size;
+    if(spng_decoded_image_size(ctx, fmt, &out_size)) goto err;
+
+    if(out_size > 80000000) goto err;
+
+    out = (unsigned char*)malloc(out_size);
+    if(out == NULL) goto err;
+
+    spng_get_ihdr(ctx, &ihdr);
+    spng_get_plte(ctx, &plte);
+    spng_get_trns(ctx, &trns);
+    spng_get_chrm(ctx, &chrm);
+    spng_get_chrm_int(ctx, &chrm_int);
+    spng_get_gama(ctx, &gamma);
+    spng_get_iccp(ctx, &iccp);
+    spng_get_sbit(ctx, &sbit);
+    spng_get_srgb(ctx, &srgb_rendering_intent);
+
+    if(!spng_get_text(ctx, text, &n_text))
+    {/* Up to 4 entries were read, get the actual count */
+        spng_get_text(ctx, NULL, &n_text);
+
+        uint32_t i;
+        for(i=0; i < n_text; i++)
+        {/* All strings should be non-NULL */
+            if(text[i].text == NULL ||
+               text[i].keyword[0] == '\0' ||
+               text[i].language_tag == NULL ||
+               text[i].translated_keyword == NULL ||
+               memchr(text[i].keyword, 0, 80) == NULL)
+            {
+                spng_ctx_free(ctx);
+                free(out);
+                return 1;
+            }
+            /* This shouldn't cause issues either */
+            text[i].length = strlen(text[i].text);
+        }
+    }
+
+    spng_get_bkgd(ctx, &bkgd);
+    spng_get_hist(ctx, &hist);
+    spng_get_phys(ctx, &phys);
+
+    if(!spng_get_splt(ctx, splt, &n_splt))
+    {/* Up to 4 entries were read, get the actual count */
+        spng_get_splt(ctx, NULL, &n_splt);
+
+        uint32_t i;
+        for(i=0; i < n_splt; i++)
+        {
+            if(splt[i].name[0] == '\0' ||
+               splt[i].entries == NULL ||
+               memchr(splt[i].name, 0, 80) == NULL)
+            {
+                spng_ctx_free(ctx);
+                free(out);
+                return 1;
+            }
+        }
+    }
+
+    if(!spng_get_unknown_chunks(ctx, chunks, &n_chunks))
+    {
+        spng_get_unknown_chunks(ctx, NULL, &n_chunks);
+
+        uint32_t i;
+        for(i=0; i < n_chunks; i++)
+        {
+            if( (chunks[i].length && !chunks[i].data) ||
+                (!chunks[i].length && chunks[i].data) )
+            {
+                spng_ctx_free(ctx);
+                free(out);
+                return 1;
+            }
+        }
+    }
+
+    if(progressive)
+    {
+        if(spng_decode_image(ctx, NULL, 0, fmt, flags | SPNG_DECODE_PROGRESSIVE)) goto err;
+
+        size_t ioffset, out_width = out_size / ihdr.height;
+        struct spng_row_info ri;
+
+        do
+        {
+            if(spng_get_row_info(ctx, &ri)) break;
+
+            ioffset = ri.row_num * out_width;
+
+        }while(!spng_decode_row(ctx, out + ioffset, out_size));
+    }
+    else if(spng_decode_image(ctx, out, out_size, fmt, flags)) goto err;
+
+    spng_get_time(ctx, &time);
+
+err:
+    spng_ctx_free(ctx);
+    free(out);
+    if(file != NULL) fclose(file);
+
+    return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed C/C++ production paths and all hunks are included. Function-context mode expands changed C/C++ function bodies; tests, examples, documentation, build files, and Harness files are excluded by the frozen rule.
+
+~~~~diff
+diff --git a/spng/spng.c b/spng/spng.c
+index fcc9590..9a401b8 100644
+--- a/spng/spng.c
++++ b/spng/spng.c
+@@ -3683,467 +3683,478 @@ int spng_get_row_info(spng_ctx *ctx, struct spng_row_info *row_info)
+ static int write_chunks_before_idat(spng_ctx *ctx)
+ {
+     if(ctx == NULL) return SPNG_EINTERNAL;
+     if(!ctx->encode_only) return SPNG_EINTERNAL;
+     if(!ctx->stored.ihdr) return SPNG_EINTERNAL;
+ 
+     int ret;
+     uint32_t i, length;
+     const struct spng_ihdr *ihdr = &ctx->ihdr;
+     unsigned char *data = ctx->decode_plte.raw;
+ 
+     ret = write_data(ctx, png_signature, 8);
+     if(ret) return ret;
+ 
+     write_u32(data,     ihdr->width);
+     write_u32(data + 4, ihdr->height);
+     data[8]  = ihdr->bit_depth;
+     data[9]  = ihdr->color_type;
+     data[10] = ihdr->compression_method;
+     data[11] = ihdr->filter_method;
+     data[12] = ihdr->interlace_method;
+ 
+     ret = write_chunk(ctx, type_ihdr, data, 13);
+     if(ret) return ret;
+ 
+     if(ctx->stored.chrm)
+     {
+         write_u32(data,      ctx->chrm_int.white_point_x);
+         write_u32(data + 4,  ctx->chrm_int.white_point_y);
+         write_u32(data + 8,  ctx->chrm_int.red_x);
+         write_u32(data + 12, ctx->chrm_int.red_y);
+         write_u32(data + 16, ctx->chrm_int.green_x);
+         write_u32(data + 20, ctx->chrm_int.green_y);
+         write_u32(data + 24, ctx->chrm_int.blue_x);
+         write_u32(data + 28, ctx->chrm_int.blue_y);
+ 
+         ret = write_chunk(ctx, type_chrm, data, 32);
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.gama)
+     {
+         write_u32(data, ctx->gama);
+ 
+         ret = write_chunk(ctx, type_gama, data, 4);
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.iccp)
+     {
+         uLongf dest_len = compressBound(ctx->iccp.profile_len);
+ 
+         Bytef *buf = spng__malloc(ctx, dest_len);
+         if(buf == NULL) return SPNG_EMEM;
+ 
+         ret = compress2(buf, &dest_len, (void*)ctx->iccp.profile, ctx->iccp.profile_len, Z_DEFAULT_COMPRESSION);
+ 
+         if(ret != Z_OK)
+         {
+             spng__free(ctx, buf);
+             return SPNG_EZLIB;
+         }
+ 
+         uint32_t name_len = strlen(ctx->iccp.profile_name);
+ 
+         length = name_len + 2;
+         length += dest_len;
+ 
+         if(dest_len > length) return SPNG_EOVERFLOW;
+ 
+         unsigned char *cdata = NULL;
+ 
+         ret = write_header(ctx, type_iccp, length, &cdata);
+ 
+         if(ret)
+         {
+             spng__free(ctx, buf);
+             return ret;
+         }
+ 
+         memcpy(cdata, ctx->iccp.profile_name, name_len + 1);
+         cdata[name_len + 1] = 0; /* compression method */
+         memcpy(cdata + name_len + 2, buf, dest_len);
+ 
+         spng__free(ctx, buf);
+ 
+         ret = finish_chunk(ctx);
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.sbit)
+     {
+         switch(ctx->ihdr.color_type)
+         {
+             case SPNG_COLOR_TYPE_GRAYSCALE:
+             {
+                 length = 1;
+ 
+                 data[0] = ctx->sbit.grayscale_bits;
+ 
+                 break;
+             }
+             case SPNG_COLOR_TYPE_TRUECOLOR:
+             case SPNG_COLOR_TYPE_INDEXED:
+             {
+                 length = 3;
+ 
+                 data[0] = ctx->sbit.red_bits;
+                 data[1] = ctx->sbit.green_bits;
+                 data[2] = ctx->sbit.blue_bits;
+ 
+                 break;
+             }
+             case SPNG_COLOR_TYPE_GRAYSCALE_ALPHA:
+             {
+                 length = 2;
+ 
+                 data[0] = ctx->sbit.grayscale_bits;
+                 data[1] = ctx->sbit.alpha_bits;
+ 
+                 break;
+             }
+             case SPNG_COLOR_TYPE_TRUECOLOR_ALPHA:
+             {
+                 length = 4;
+ 
+                 data[0] = ctx->sbit.red_bits;
+                 data[1] = ctx->sbit.green_bits;
+                 data[2] = ctx->sbit.blue_bits;
+                 data[3] = ctx->sbit.alpha_bits;
+ 
+                 break;
+             }
+             default: return SPNG_EINTERNAL;
+         }
+ 
+         ret = write_chunk(ctx, type_sbit, data, length);
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.srgb)
+     {
+         ret = write_chunk(ctx, type_srgb, &ctx->srgb_rendering_intent, 1);
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.unknown)
+     {
+         uint32_t i;
+         for(i=0; i < ctx->n_chunks; i++)
+         {
+             struct spng_unknown_chunk *chunk = &ctx->chunk_list[i];
+ 
+             if(chunk->location == SPNG_AFTER_IHDR)
+             {
+                 int ret = write_chunk(ctx, chunk->type, chunk->data, chunk->length);
+                 if(ret) return ret;
+             }
+         }
+     }
+ 
+     if(ctx->stored.plte)
+     {
+         for(i=0; i < ctx->plte.n_entries; i++)
+         {
+             data[i * 3 + 0] = ctx->plte.entries[i].red;
+             data[i * 3 + 1] = ctx->plte.entries[i].green;
+             data[i * 3 + 2] = ctx->plte.entries[i].blue;
+         }
+ 
+         ret = write_chunk(ctx, type_plte, data, ctx->plte.n_entries * 3);
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.bkgd)
+     {
+         switch(ctx->ihdr.color_type)
+         {
+             case SPNG_COLOR_TYPE_GRAYSCALE:
+             case SPNG_COLOR_TYPE_GRAYSCALE_ALPHA:
+             {
+                 length = 2;
+ 
+                 write_u16(data, ctx->bkgd.gray);
+ 
+                 break;
+             }
+             case SPNG_COLOR_TYPE_TRUECOLOR:
+             case SPNG_COLOR_TYPE_TRUECOLOR_ALPHA:
+             {
+                 length = 6;
+ 
+                 write_u16(data,     ctx->bkgd.red);
+                 write_u16(data + 2, ctx->bkgd.green);
+                 write_u16(data + 4, ctx->bkgd.blue);
+ 
+                 break;
+             }
+             case SPNG_COLOR_TYPE_INDEXED:
+             {
+                 length = 1;
+ 
+                 data[0] = ctx->bkgd.plte_index;
+ 
+                 break;
+             }
+             default: return SPNG_EINTERNAL;
+         }
+ 
+         ret = write_chunk(ctx, type_bkgd, data, length);
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.hist)
+     {
+         length = ctx->plte.n_entries * 2;
+ 
+         for(i=0; i < ctx->plte.n_entries; i++)
+         {
+             write_u16(data + i * 2, ctx->hist.frequency[i]);
+         }
+ 
+         ret = write_chunk(ctx, type_hist, data, length);
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.trns)
+     {
+         if(ctx->ihdr.color_type == SPNG_COLOR_TYPE_GRAYSCALE)
+         {
+             write_u16(data, ctx->trns.gray);
+ 
+             ret = write_chunk(ctx, type_trns, data, 2);
+         }
+         else if(ctx->ihdr.color_type == SPNG_COLOR_TYPE_TRUECOLOR)
+         {
+             write_u16(data,     ctx->trns.red);
+             write_u16(data + 2, ctx->trns.green);
+             write_u16(data + 4, ctx->trns.blue);
+ 
+             ret = write_chunk(ctx, type_trns, data, 6);
+         }
+         else if(ctx->ihdr.color_type == SPNG_COLOR_TYPE_INDEXED)
+         {
+             ret = write_chunk(ctx, type_trns, ctx->trns.type3_alpha, ctx->trns.n_type3_entries);
+         }
+ 
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.phys)
+     {
+         write_u32(data,     ctx->phys.ppu_x);
+         write_u32(data + 4, ctx->phys.ppu_y);
+         data[8] = ctx->phys.unit_specifier;
+ 
+         ret = write_chunk(ctx, type_phys, data, 9);
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.splt)
+     {
+         const struct spng_splt *splt;
+         unsigned char *cdata = NULL;
+ 
+         uint32_t k;
+         for(i=0; i < ctx->n_splt; i++)
+         {
+             splt = &ctx->splt_list[i];
+ 
+             size_t name_len = strlen(splt->name);
+             length = name_len + 1;
+ 
+             if(splt->sample_depth == 8) length += splt->n_entries * 6 + 1;
+             else if(splt->sample_depth == 16) length += splt->n_entries * 10 + 1;
+ 
+             ret = write_header(ctx, type_splt, length, &cdata);
+             if(ret) return ret;
+ 
+             memcpy(cdata, splt->name, name_len + 1);
+             cdata += name_len + 2;
+             cdata[-1] = splt->sample_depth;
+ 
+             if(splt->sample_depth == 8)
+             {
+                 for(k=0; k < splt->n_entries; k++)
+                 {
+                     cdata[k * 6 + 0] = splt->entries[k].red;
+                     cdata[k * 6 + 1] = splt->entries[k].green;
+                     cdata[k * 6 + 2] = splt->entries[k].blue;
+                     cdata[k * 6 + 3] = splt->entries[k].alpha;
+                     write_u16(cdata + k * 6 + 4, splt->entries[k].frequency);
+                 }
+             }
+             else if(splt->sample_depth == 16)
+             {
+                 for(k=0; k < splt->n_entries; k++)
+                 {
+                     write_u16(cdata + k * 10 + 0, splt->entries[k].red);
+                     write_u16(cdata + k * 10 + 2, splt->entries[k].green);
+                     write_u16(cdata + k * 10 + 4, splt->entries[k].blue);
+                     write_u16(cdata + k * 10 + 6, splt->entries[k].alpha);
+                     write_u16(cdata + k * 10 + 8, splt->entries[k].frequency);
+                 }
+             }
+ 
+             ret = finish_chunk(ctx);
+             if(ret) return ret;
+         }
+     }
+ 
+     if(ctx->stored.time)
+     {
+         write_u16(data, ctx->time.year);
+         data[2] = ctx->time.month;
+         data[3] = ctx->time.day;
+         data[4] = ctx->time.hour;
+         data[5] = ctx->time.minute;
+         data[6] = ctx->time.second;
+ 
+         ret = write_chunk(ctx, type_time, data, 7);
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.text)
+     {
+         unsigned char *cdata = NULL;
+         const struct spng_text2 *text;
+         const uint8_t *text_type_array[4] = { 0, type_text, type_ztxt, type_itxt };
+ 
+         for(i=0; i < ctx->n_text; i++)
+         {
+             text = &ctx->text_list[i];
+ 
+             const uint8_t *text_chunk_type = text_type_array[text->type];
+             Bytef *compressed_text = NULL;
+             size_t keyword_len = 0;
+             size_t language_tag_len = 0;
+             size_t translated_keyword_len = 0;
+             size_t compressed_length = 0;
+             size_t text_length = 0;
+ 
+             keyword_len = strlen(text->keyword);
+             text_length = strlen(text->text);
+ 
+             length = keyword_len + 1;
+ 
+             if(text->type == SPNG_ZTXT)
+             {
+                 length += 1; /* compression method */
+             }
+             else if(text->type == SPNG_ITXT)
+             {
+                 if(!text->language_tag || !text->translated_keyword) return SPNG_EINTERNAL;
+ 
+                 language_tag_len = strlen(text->language_tag);
+                 translated_keyword_len = strlen(text->translated_keyword);
+ 
+                 length += language_tag_len;
+                 if(length < language_tag_len) return SPNG_EOVERFLOW;
+ 
+                 length += translated_keyword_len;
+                 if(length < translated_keyword_len) return SPNG_EOVERFLOW;
+ 
+                 length += 4; /* compression flag + method + nul for the two strings */
+                 if(length < 4) return SPNG_EOVERFLOW;
+             }
+ 
+             if(text->compression_flag)
+             {
+-                uLongf dest_len = compressBound(text->text_length);
++                ret = spng__deflate_init(ctx, &ctx->text_options);
++                if(ret) return ret;
++
++                z_stream *zstream = &ctx->zstream;
++                uLongf dest_len = deflateBound(zstream, text_length);
++
+                 compressed_text = spng__malloc(ctx, dest_len);
+ 
+                 if(compressed_text == NULL) return SPNG_EMEM;
+ 
+-                ret = compress2(compressed_text, &dest_len, (void*)text->text, text_length, Z_DEFAULT_COMPRESSION);
++                zstream->next_in = (void*)text->text;
++                zstream->avail_in = text_length;
++
++                zstream->next_out = compressed_text;
++                zstream->avail_out = dest_len;
++
++                ret = deflate(zstream, Z_FINISH);
+ 
+-                if(ret != Z_OK)
++                if(ret != Z_STREAM_END)
+                 {
+                     spng__free(ctx, compressed_text);
+                     return SPNG_EZLIB;
+                 }
+ 
+-                compressed_length = dest_len;
++                compressed_length = zstream->total_out;
+ 
+                 length += compressed_length;
+                 if(length < compressed_length) return SPNG_EOVERFLOW;
+             }
+             else
+             {
+                 text_length = strlen(text->text);
+ 
+                 length += text_length;
+                 if(length < text_length) return SPNG_EOVERFLOW;
+             }
+ 
+             ret = write_header(ctx, text_chunk_type, length, &cdata);
+             if(ret)
+             {
+                 spng__free(ctx, compressed_text);
+                 return ret;
+             }
+ 
+             memcpy(cdata, text->keyword, keyword_len + 1);
+             cdata += keyword_len + 1;
+ 
+             if(text->type == SPNG_ITXT)
+             {
+                 cdata[0] = text->compression_flag;
+                 cdata[1] = 0; /* compression method */
+                 cdata += 2;
+ 
+                 memcpy(cdata, text->language_tag, language_tag_len + 1);
+                 cdata += language_tag_len + 1;
+ 
+                 memcpy(cdata, text->translated_keyword, translated_keyword_len + 1);
+                 cdata += translated_keyword_len + 1;
+             }
+             else if(text->type == SPNG_ZTXT)
+             {
+                 cdata[0] = 0; /* compression method */
+                 cdata++;
+             }
+ 
+             if(text->compression_flag) memcpy(cdata, compressed_text, compressed_length);
+             else memcpy(cdata, text->text, text_length);
+ 
+             spng__free(ctx, compressed_text);
+ 
+             ret = finish_chunk(ctx);
+             if(ret) return ret;
+         }
+     }
+ 
+     if(ctx->stored.offs)
+     {
+         write_s32(data,     ctx->offs.x);
+         write_s32(data + 4, ctx->offs.y);
+         data[8] = ctx->offs.unit_specifier;
+ 
+         ret = write_chunk(ctx, type_offs, data, 9);
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.exif)
+     {
+         ret = write_chunk(ctx, type_exif, ctx->exif.data, ctx->exif.length);
+         if(ret) return ret;
+     }
+ 
+     if(ctx->stored.unknown)
+     {
+         uint32_t i;
+         for(i=0; i < ctx->n_chunks; i++)
+         {
+             struct spng_unknown_chunk *chunk = &ctx->chunk_list[i];
+ 
+             if(chunk->location == SPNG_AFTER_PLTE)
+             {
+                 int ret = write_chunk(ctx, chunk->type, chunk->data, chunk->length);
+                 if(ret) return ret;
+             }
+         }
+     }
+ 
+     return 0;
+ }
+~~~~
+
+## Uniform selected declaration context
+
+The same mechanical rule is used for every case: in lexicographic changed-production-path order, show +/-24 lines around the first literal identity match in each snapshot.
+
+### S0
+
+Path: `spng/spng.c`; lines 5246-5294
+
+~~~~text
+005246:     if(!ctx->stored.ihdr) return 1;
+005247: 
+005248:     ctx->sbit = *sbit;
+005249: 
+005250:     ctx->stored.sbit = 1;
+005251:     ctx->user.sbit = 1;
+005252: 
+005253:     return 0;
+005254: }
+005255: 
+005256: int spng_set_srgb(spng_ctx *ctx, uint8_t rendering_intent)
+005257: {
+005258:     SPNG_SET_CHUNK_BOILERPLATE(ctx);
+005259: 
+005260:     if(rendering_intent > 3) return 1;
+005261: 
+005262:     ctx->srgb_rendering_intent = rendering_intent;
+005263: 
+005264:     ctx->stored.srgb = 1;
+005265:     ctx->user.srgb = 1;
+005266: 
+005267:     return 0;
+005268: }
+005269: 
+005270: int spng_set_text(spng_ctx *ctx, struct spng_text *text, uint32_t n_text)
+005271: {
+005272:     if(!n_text) return 1;
+005273:     SPNG_SET_CHUNK_BOILERPLATE(text);
+005274: 
+005275:     uint32_t i;
+005276:     for(i=0; i < n_text; i++)
+005277:     {
+005278:         if(check_png_keyword(text[i].keyword)) return SPNG_ETEXT_KEYWORD;
+005279:         if(!text[i].length) return 1;
+005280:         if(text[i].text == NULL) return 1;
+005281: 
+005282:         if(text[i].type == SPNG_TEXT)
+005283:         {
+005284:             if(check_png_text(text[i].text, text[i].length)) return 1;
+005285:         }
+005286:         else if(text[i].type == SPNG_ZTXT)
+005287:         {
+005288:             if(check_png_text(text[i].text, text[i].length)) return 1;
+005289: 
+005290:             if(text[i].compression_method != 0) return SPNG_EZTXT_COMPRESSION_METHOD;
+005291:         }
+005292:         else if(text[i].type == SPNG_ITXT)
+005293:         {
+005294:             if(text[i].compression_flag > 1) return SPNG_EITXT_COMPRESSION_FLAG;
+~~~~
+
+### S1
+
+Path: `spng/spng.c`; lines 5257-5305
+
+~~~~text
+005257:     if(!ctx->stored.ihdr) return 1;
+005258: 
+005259:     ctx->sbit = *sbit;
+005260: 
+005261:     ctx->stored.sbit = 1;
+005262:     ctx->user.sbit = 1;
+005263: 
+005264:     return 0;
+005265: }
+005266: 
+005267: int spng_set_srgb(spng_ctx *ctx, uint8_t rendering_intent)
+005268: {
+005269:     SPNG_SET_CHUNK_BOILERPLATE(ctx);
+005270: 
+005271:     if(rendering_intent > 3) return 1;
+005272: 
+005273:     ctx->srgb_rendering_intent = rendering_intent;
+005274: 
+005275:     ctx->stored.srgb = 1;
+005276:     ctx->user.srgb = 1;
+005277: 
+005278:     return 0;
+005279: }
+005280: 
+005281: int spng_set_text(spng_ctx *ctx, struct spng_text *text, uint32_t n_text)
+005282: {
+005283:     if(!n_text) return 1;
+005284:     SPNG_SET_CHUNK_BOILERPLATE(text);
+005285: 
+005286:     uint32_t i;
+005287:     for(i=0; i < n_text; i++)
+005288:     {
+005289:         if(check_png_keyword(text[i].keyword)) return SPNG_ETEXT_KEYWORD;
+005290:         if(!text[i].length) return 1;
+005291:         if(text[i].text == NULL) return 1;
+005292: 
+005293:         if(text[i].type == SPNG_TEXT)
+005294:         {
+005295:             if(check_png_text(text[i].text, text[i].length)) return 1;
+005296:         }
+005297:         else if(text[i].type == SPNG_ZTXT)
+005298:         {
+005299:             if(check_png_text(text[i].text, text[i].length)) return 1;
+005300: 
+005301:             if(text[i].compression_method != 0) return SPNG_EZTXT_COMPRESSION_METHOD;
+005302:         }
+005303:         else if(text[i].type == SPNG_ITXT)
+005304:         {
+005305:             if(text[i].compression_flag > 1) return SPNG_EITXT_COMPRESSION_FLAG;
+~~~~
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T5015","impact_scope":[{"type":"internal_only","files":["spng/spng.c"],"functions":["write_chunks_before_idat","spng_set_text"],"description":"The smallest fuzz-relevant unit is the existing spng_set_text compressed-text encoding path: write_chunks_before_idat replaces compress2 with internally initialized streaming deflate. The public setter and caller-supplied text structure are unchanged."}],"gap_before":{"exists":true,"type":"exposure_gap","evidence":["In S0, spng_set_text already exists and accepts the text array and count.","H0 only configures and exercises PNG decoding; it never calls spng_set_text or invokes an encoding path that writes compressed text chunks."]},"gap_after":{"exists":true,"type":"exposure_gap","evidence":["In S1, the same spng_set_text declaration and caller-facing inputs remain present and unchanged.","H0 remains decode-only and still does not call spng_set_text or exercise compressed-text encoding."]},"new_harness_obligation":{"exists":false,"description":"S1 introduces no new H0 entry point, caller-supplied value or buffer, call-order transition, configuration, or special input construction. The deflate stream and ctx->text_options are passed and managed internally within the already-omitted encoding path.","evidence":["The changed code is inside write_chunks_before_idat and does not alter the spng_set_text signature.","spng__deflate_init(ctx, &ctx->text_options) supplies the new internal compression setup automatically.","The same text content and compression_flag that selected compressed text in S0 select it in S1."]},"explicit_failure":false,"delta_attribution":"UNCHANGED","maintenance_needed":false,"confidence":98,"reason":"For the identical existing compressed-text encoding unit, H0 has an exposure gap in both snapshots. The implementation changes from compress2 to streaming deflate, but the caller-visible route and controls are unchanged, so the fixed truth table yields UNCHANGED and no maintenance need."}
+tokens used
+11,758

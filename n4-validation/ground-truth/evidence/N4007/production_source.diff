@@ -1,0 +1,90 @@
+diff --git a/std/jpeg/decode_jpeg.wuffs b/std/jpeg/decode_jpeg.wuffs
+index 7a4e695a..41d9a504 100644
+--- a/std/jpeg/decode_jpeg.wuffs
++++ b/std/jpeg/decode_jpeg.wuffs
+@@ -271,24 +271,26 @@ pub struct decoder? implements base.image_decoder(
+         payload_length : base.u32[..= 0xFFFF],
+ 
+         seen_dqt       : array[4] base.bool,
+         saved_seen_dqt : array[4] base.bool,
+         seen_dht       : array[8] base.bool,
+ 
+         // These fields yield bitstream bits in Most Significant Bits order.
+         bitstream_bits   : base.u64,
+         bitstream_n_bits : base.u32,
+         bitstream_ri     : base.u32[..= 0x800],
+         bitstream_wi     : base.u32[..= 0x800],
+ 
++        bitstream_is_closed : base.bool,
++
+         // bitstream_padding is the number (per restart) of implicit zeroes
+         // remaining at the end of the bitstream. Its initial 12345 value is
+         // arbitrary.
+         bitstream_padding : base.u32[..= 12345],
+ 
+         quant_tables       : array[4] array[64] base.u16[..= 0xFF],
+         saved_quant_tables : array[4] array[64] base.u16[..= 0xFF],
+ 
+         // huff_tables_symbols[(tc*4)|th][i] is the i'th Huffman code's symbol.
+         huff_tables_symbols : array[8] array[256] base.u8,
+ 
+         // huff_tables_slow[(tc*4)|th][n] is a u32 such that:
+@@ -1302,24 +1304,32 @@ pri func decoder.decode_sos?(src: base.io_reader, workbuf: slice base.u8) {
+                 }
+ 
+                 while.fill_bitstream true,
+                         inv my < 0x2000,
+                         inv mx < 0x2000,
+                 {
+                     bitstream_length = this.bitstream_wi ~mod- this.bitstream_ri
+                     this.fill_bitstream!(src: args.src)
+                     if bitstream_length < (this.bitstream_wi ~mod- this.bitstream_ri) {
+                         break.fill_bitstream
+                     } else if this.bitstream_padding == 0 {
+                         return "#bad SOS marker"
++                    } else if args.src.is_closed() and (not this.bitstream_is_closed) {
++                        if this.bitstream_wi < (0x800 / 2) {
++                            assert this.bitstream_wi <= (this.bitstream_wi + 264) via "a <= (a + b): 0 <= b"()
++                            this.bitstream_buffer[this.bitstream_wi .. (this.bitstream_wi + 264)].bulk_memset!(byte_value: 0)
++                            this.bitstream_wi += 264
++                            this.bitstream_is_closed = true
++                        }
++                        break.fill_bitstream
+                     }
+                     yield? base."$short read"
+                 } endwhile.fill_bitstream
+             } endwhile.decode_mcu
+ 
+             if this.sof_marker >= 0xC2 {
+                 this.save_mcu_blocks!(mx: mx, my: my, workbuf: args.workbuf)
+             }
+ 
+             // Check for a restart.
+             if this.restarts_remaining > 0 {
+                 this.restarts_remaining -= 1
+@@ -2042,24 +2052,25 @@ pub func decoder.num_decoded_frames() base.u64 {
+ pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.status {
+     var i : base.u32
+     var j : base.u32
+ 
+     if this.call_sequence < 0x20 {
+         return base."#bad call sequence"
+     }
+     if args.index <> 0 {
+         return base."#bad argument"
+     }
+ 
+     this.call_sequence = 0x28
++    this.bitstream_is_closed = false
+     this.frame_config_io_position = args.io_position
+     this.scan_count = 0
+     this.restart_interval = this.saved_restart_interval
+ 
+     i = 0
+     while i < 4 {
+         this.seen_dqt[i] = this.saved_seen_dqt[i]
+         j = 0
+         while j < 64,
+                 inv i < 4,
+         {
+             this.quant_tables[i][j] = this.saved_quant_tables[i][j]

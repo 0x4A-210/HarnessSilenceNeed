@@ -1,0 +1,141 @@
+diff --git a/cmd/wuffs-c/internal/cgen/base/base-public.h b/cmd/wuffs-c/internal/cgen/base/base-public.h
+index fd481d5ef2bbdcc905eb1c2f1b4150894d3ad5cb..3a70040cf42770aa2bb8168c6a39030415b85b53 100644
+--- a/cmd/wuffs-c/internal/cgen/base/base-public.h
++++ b/cmd/wuffs-c/internal/cgen/base/base-public.h
+@@ -99,10 +99,10 @@ typedef struct {
+ 
+ // --------
+ 
+-// A status is either NULL (meaning OK or no error) or string message. That
+-// message is human-readable, for programmers, but it is not for end users. It
+-// is not localized, and does not contain additional contextual information
+-// such as a source filename.
++// A status is either NULL (meaning OK) or a string message. That message is
++// human-readable, for programmers, but it is not for end users. It is not
++// localized, and does not contain additional contextual information such as a
++// source filename.
+ //
+ // Status strings are statically allocated and should never be free'd. They can
+ // be compared by the == operator and not just by strcmp.
+@@ -112,7 +112,7 @@ typedef const char* wuffs_base__status;
+ 
+ static inline bool  //
+ wuffs_base__status__is_error(wuffs_base__status z) {
+-  return z && (*z != '$');
++  return z && (*z == '?');
+ }
+ 
+ static inline bool  //
+@@ -125,6 +125,11 @@ wuffs_base__status__is_suspension(wuffs_base__status z) {
+   return z && (*z == '$');
+ }
+ 
++static inline bool  //
++wuffs_base__status__is_warning(wuffs_base__status z) {
++  return z && (*z != '$') && (*z != '?');
++}
++
+ // --------
+ 
+ // Flicks are a unit of time. One flick (frame-tick) is 1 / 705_600_000 of a
+diff --git a/release/c/wuffs-unsupported-snapshot.h b/release/c/wuffs-unsupported-snapshot.h
+index 167889ef1254a4b77fab6e37943fbd71e329b3ae..89e8eeb974fbe7bdef280882db773e7821b66df1 100644
+--- a/release/c/wuffs-unsupported-snapshot.h
++++ b/release/c/wuffs-unsupported-snapshot.h
+@@ -123,16 +123,16 @@ typedef struct {
+ 
+ // --------
+ 
+-// A status is either NULL (meaning OK or no error) or string message. That
+-// message is human-readable, for programmers, but it is not for end users. It
+-// is not localized, and does not contain additional contextual information
+-// such as a source filename.
++// A status is either NULL (meaning OK) or a string message. That message is
++// human-readable, for programmers, but it is not for end users. It is not
++// localized, and does not contain additional contextual information such as a
++// source filename.
+ //
+ // Status strings are statically allocated and should never be free'd. They can
+ // be compared by the == operator and not just by strcmp.
+ typedef const char* wuffs_base__status;
+ 
+-extern const char* wuffs_base__suspension__end_of_data;
++extern const char* wuffs_base__warning__end_of_data;
+ extern const char* wuffs_base__suspension__short_read;
+ extern const char* wuffs_base__suspension__short_write;
+ extern const char* wuffs_base__error__bad_argument_length_too_short;
+@@ -148,7 +148,7 @@ extern const char* wuffs_base__error__disabled_by_previous_error;
+ 
+ static inline bool  //
+ wuffs_base__status__is_error(wuffs_base__status z) {
+-  return z && (*z != '$');
++  return z && (*z == '?');
+ }
+ 
+ static inline bool  //
+@@ -161,6 +161,11 @@ wuffs_base__status__is_suspension(wuffs_base__status z) {
+   return z && (*z == '$');
+ }
+ 
++static inline bool  //
++wuffs_base__status__is_warning(wuffs_base__status z) {
++  return z && (*z != '$') && (*z != '?');
++}
++
+ // --------
+ 
+ // Flicks are a unit of time. One flick (frame-tick) is 1 / 705_600_000 of a
+@@ -3616,7 +3621,7 @@ wuffs_base__frame_config__rect_y1(wuffs_base__frame_config* c) {
+ 
+ #if !defined(WUFFS_CONFIG__MODULES) || defined(WUFFS_CONFIG__MODULE__BASE)
+ 
+-const char* wuffs_base__suspension__end_of_data = "$base: end of data";
++const char* wuffs_base__warning__end_of_data = "!base: end of data";
+ const char* wuffs_base__suspension__short_read = "$base: short read";
+ const char* wuffs_base__suspension__short_write = "$base: short write";
+ const char* wuffs_base__error__bad_argument_length_too_short =
+@@ -4514,12 +4519,13 @@ wuffs_deflate__decoder__decode(wuffs_deflate__decoder* self,
+       }
+       if (!wuffs_base__status__is_suspension(v_z)) {
+         status = v_z;
+-        if (!status) {
+-          goto ok;
++        if (wuffs_base__status__is_error(status)) {
++          goto exit;
+         } else if (wuffs_base__status__is_suspension(status)) {
+           status = wuffs_base__error__cannot_return_a_suspension;
++          goto exit;
+         }
+-        goto exit;
++        goto ok;
+       }
+       v_written = ((wuffs_base__slice_u8){
+           .ptr = a_dst.private_impl.mark,
+@@ -6603,10 +6609,8 @@ wuffs_gif__decoder__decode_frame_config(wuffs_gif__decoder* self,
+       }
+     }
+     if (self->private_impl.f_end_of_data) {
+-      while (true) {
+-        status = wuffs_base__suspension__end_of_data;
+-        WUFFS_BASE__COROUTINE_SUSPENSION_POINT_MAYBE_SUSPEND(4);
+-      }
++      status = wuffs_base__warning__end_of_data;
++      goto ok;
+     }
+     v_blend = 0;
+     if (!self->private_impl.f_gc_has_transparent_index) {
+diff --git a/std/gif/decode_gif.wuffs b/std/gif/decode_gif.wuffs
+index e7de4ef4269968b6245250877d24c717b3da33f0..1fcea164210532fe8b57df7bd5f994510d9619a4 100644
+--- a/std/gif/decode_gif.wuffs
++++ b/std/gif/decode_gif.wuffs
+@@ -205,9 +205,7 @@ pub func decoder.decode_frame_config!??(dst nptr base.frame_config, src base.io_
+ 	// This is a new "if", not an "else", because the calls above can modify
+ 	// this.end_of_data.
+ 	if this.end_of_data {
+-		while true {
+-			yield status "$end of data"
+-		}
++		return status "!end of data"
+ 	}
+ 
+ 	var blend base.u8 = 0

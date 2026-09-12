@@ -1,0 +1,206 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/harness-blind-run-40ko0e9q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a0854d-4f22-7963-860c-0fb2e1025e13
+--------
+user
+You are reviewing whether a software commit requires maintenance of an existing fuzz harness.
+
+You must reason only from:
+
+- the existing fuzz harness,
+- the source-code changes,
+- the provided code context.
+
+Do not assume future coverage results, developer changes, or fuzzing outcomes. Do not use tools, the filesystem, the network, or outside knowledge. Treat the supplied case text as the complete evidence.
+
+A harness maintenance need may arise from:
+
+- new entry points or features,
+- API protocol changes,
+- new initialization or state requirements,
+- configuration changes,
+- new input constraints,
+- attack-surface expansion.
+
+Do not recommend updating the harness merely because source code changed. A refactor, bug fix, validation check, or new helper is not by itself a maintenance need when the existing harness still invokes the relevant high-level path with adequate state and input control.
+
+Return exactly one JSON object conforming to the experiment schema. Ground the reason and evidence in concrete identifiers or statements visible in the supplied harness and diff.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Case ID
+
+C005
+
+## Existing Fuzz Harness H0
+
+The following target source and OSS-Fuzz build wiring are from before the source commit.
+
+### `tests/spng_read_fuzzer.cc`
+
+~~~~cpp
+#define SPNG_UNTESTED
+#include "../spng.h"
+
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
+{
+    unsigned char *out = NULL;
+    int flags;
+
+    spng_ctx *ctx = spng_ctx_new(0);
+    if(ctx == NULL) return 0;
+
+    if(spng_set_png_buffer(ctx, (void*)data, size)) goto err;
+
+    spng_set_image_limits(ctx, 200000, 200000);
+    
+    spng_set_chunk_limits(ctx, 4 * 1000 * 1000, 8 * 1000 * 1000);
+
+    spng_set_crc_action(ctx, SPNG_CRC_USE, SPNG_CRC_USE);
+
+    size_t out_size;
+    if(spng_decoded_image_size(ctx, SPNG_FMT_RGBA8, &out_size)) goto err;
+
+    if(out_size > 80000000) goto err;
+
+    out = (unsigned char*)malloc(out_size);
+    if(out == NULL) goto err;
+
+    flags = SPNG_DECODE_USE_TRNS | SPNG_DECODE_USE_GAMA | SPNG_DECODE_USE_SBIT;
+    if(spng_decode_image(ctx, out, out_size, SPNG_FMT_RGBA8, flags)) goto err;
+
+err:
+    spng_ctx_free(ctx);
+    if(out != NULL) free(out);
+
+    return 0;
+}
+~~~~
+
+### `historical OSS-Fuzz:projects/libspng/build.sh`
+
+~~~~text
+#!/bin/bash -eu
+# Copyright 2018 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+mkdir build
+meson --buildtype=plain --default-library static build
+ninja -C build
+
+$CXX $CXXFLAGS -std=c++11 -I. \
+    $SRC/libspng/tests/spng_read_fuzzer.cc \
+    -o $OUT/spng_read_fuzzer \
+    $LIB_FUZZING_ENGINE $SRC/libspng/build/libspng.a -lz
+
+$CXX $CXXFLAGS -std=c++11 -I. \
+    $SRC/libspng/tests/spng_read_fuzzer.cc \
+    -o $OUT/spng_read_fuzzer_structure_aware \
+    -include ../fuzzer-test-suite/libpng-1.2.56/png_mutator.h \
+    -D PNG_MUTATOR_DEFINE_LIBFUZZER_CUSTOM_MUTATOR \
+    $LIB_FUZZING_ENGINE $SRC/libspng/build/libspng.a -lz
+
+find $SRC/libspng/tests/images -name "*.png" | \
+     xargs zip $OUT/spng_read_fuzzer_seed_corpus.zip
+
+cp $SRC/libspng/tests/spng.dict \
+   $SRC/libspng/tests/spng_read_fuzzer.options $OUT/
+~~~~
+
+## Source Change (S0 -> S1)
+
+Tests, documentation, commit messages, generated snapshots, and any fuzz-harness changes are excluded. The complete diff for the production-source files listed below is included.
+
+- `spng.c`
+
+~~~~diff
+diff --git a/spng.c b/spng.c
+--- a/spng.c
++++ b/spng.c
+@@ -1037,12 +1037,14 @@ static int get_ancillary_data_first_idat(spng_ctx *ctx)
+         else if(!memcmp(chunk.type, type_exif, 4))
+         {
+             if(ctx->file_exif) return SPNG_EDUP_EXIF;
+ 
+             ctx->file_exif = 1;
+ 
++            if(!chunk.length) return SPNG_EEXIF;
++
+             struct spng_exif exif;
+ 
+             exif.data = spng__malloc(ctx, chunk.length);
+             if(exif.data == NULL) return SPNG_EMEM;
+ 
+             memcpy(exif.data, data, chunk.length);
+@@ -1083,12 +1085,14 @@ static int validate_past_idat(spng_ctx *ctx)
+         { 
+             ret = discard_chunk_bytes(ctx, chunk.length);
+             if(ret) return ret;
+             continue;
+         }
+ 
++        data = ctx->data;
++
+         ret = read_chunk_bytes(ctx, chunk.length);
+         if(ret) return ret;        
+ 
+         /* Reserved bit must be zero */
+         if( (chunk.type[2] & (1 << 5)) != 0) return SPNG_ECHUNK_TYPE;
+          /* Ignore private chunks */
+@@ -1141,12 +1145,14 @@ static int validate_past_idat(spng_ctx *ctx)
+         else if(!memcmp(chunk.type, type_exif, 4))
+         {
+             if(ctx->file_exif) return SPNG_EDUP_EXIF;
+ 
+             ctx->file_exif = 1;
+ 
++            if(!chunk.length) return SPNG_EEXIF;
++
+             struct spng_exif exif;
+ 
+             exif.data = spng__malloc(ctx, chunk.length);
+             if(exif.data == NULL) return SPNG_EMEM;
+ 
+             memcpy(exif.data, data, chunk.length);
+~~~~
+
+## Relevant Code Context
+
+No post-commit harness, future commit, coverage result, issue outcome, or vulnerability information is provided. The pre-change harness and source diff above are the available evidence.
+
+## Question
+
+Based only on the source-code evolution and the existing fuzz harness:
+
+Does this commit introduce a fuzz-harness maintenance need?
+
+A maintenance need exists when the source-code change introduces or modifies functionality, entry points, API usage requirements, state/configuration requirements, or input constraints such that the existing harness is no longer adequate for testing the changed functionality.
+
+Return one structured decision using the fixed experiment prompt.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C005","maintenance_needed":false,"confidence":98,"change_types":["validation change","bug fix"],"affected_functions":["get_ancillary_data_first_idat","validate_past_idat"],"reason":"The commit only tightens eXIf chunk validation and fixes internal data-pointer setup while parsing chunks after IDAT. The existing harness already supplies arbitrary PNG bytes through spng_set_png_buffer() and exercises the complete decode path through spng_decoded_image_size() and spng_decode_image(), so it can reach both changed parsing paths without new API calls, initialization, configuration, state, or input construction.","evidence":["get_ancillary_data_first_idat() and validate_past_idat() now reject a zero-length eXIf chunk with SPNG_EEXIF.","validate_past_idat() now assigns data = ctx->data before read_chunk_bytes() and subsequent ancillary-chunk processing.","The harness passes the entire fuzz input to spng_set_png_buffer(ctx, (void*)data, size).","The harness invokes spng_decoded_image_size() and spng_decode_image(), which are the existing high-level PNG parsing and decoding path.","No new entry point, feature flag, API protocol, initialization requirement, configuration option, or input constraint is introduced."],"recommended_action":"Keep the existing fuzz harness unchanged; no maintenance is required for this commit."}
+tokens used
+15,793

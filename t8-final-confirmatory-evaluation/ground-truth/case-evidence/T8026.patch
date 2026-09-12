@@ -1,0 +1,513 @@
+PROJECT simdjson
+COMMIT f1b4a54991b06715beeb3e994350cb165d147e53
+PARENT 58e7106df13a036a35efab2938fc2c6c297a47ed
+SUBJECT add fuzz element (#1204)
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/include/simdjson/dom/element-inl.h b/include/simdjson/dom/element-inl.h
+index 485b0e86..0ece4f69 100644
+--- a/include/simdjson/dom/element-inl.h
++++ b/include/simdjson/dom/element-inl.h
+@@ -93,6 +93,9 @@ simdjson_really_inline bool simdjson_result<dom::element>::is_uint64() const noe
+ simdjson_really_inline bool simdjson_result<dom::element>::is_double() const noexcept {
+   return !error() && first.is_double();
+ }
++simdjson_really_inline bool simdjson_result<dom::element>::is_number() const noexcept {
++  return !error() && first.is_number();
++}
+ simdjson_really_inline bool simdjson_result<dom::element>::is_bool() const noexcept {
+   return !error() && first.is_bool();
+ }
+@@ -294,6 +297,10 @@ simdjson_warn_unused simdjson_really_inline error_code element::get<element>(ele
+   value = element(tape);
+   return SUCCESS;
+ }
++template<typename T>
++inline void element::tie(T &value, error_code &error) && noexcept {
++  error = get<T>(value);
++}
+ 
+ template<typename T>
+ simdjson_really_inline bool element::is() const noexcept {
+@@ -317,6 +324,7 @@ inline bool element::is_int64() const noexcept { return is<int64_t>(); }
+ inline bool element::is_uint64() const noexcept { return is<uint64_t>(); }
+ inline bool element::is_double() const noexcept { return is<double>(); }
+ inline bool element::is_bool() const noexcept { return is<bool>(); }
++inline bool element::is_number() const noexcept { return is_int64() || is_uint64() || is_double(); }
+ 
+ inline bool element::is_null() const noexcept {
+   return tape.is_null_on_tape();
+diff --git a/include/simdjson/dom/element.h b/include/simdjson/dom/element.h
+index c7dd024a..3254d418 100644
+--- a/include/simdjson/dom/element.h
++++ b/include/simdjson/dom/element.h
+@@ -125,7 +125,7 @@ public:
+    */
+   inline simdjson_result<uint64_t> get_uint64() const noexcept;
+   /**
+-   * Cast this element to an double floating-point.
++   * Cast this element to a double floating-point.
+    *
+    * Equivalent to get<double>().
+    *
+@@ -179,12 +179,14 @@ public:
+    * Equivalent to is<double>().
+    */
+   inline bool is_double() const noexcept;
++
+   /**
+    * Whether this element is a json number.
+    *
+    * Both integers and floating points will return true.
+    */
+   inline bool is_number() const noexcept;
++
+   /**
+    * Whether this element is a json `true` or `false`.
+    *
+@@ -513,6 +515,7 @@ public:
+   simdjson_really_inline bool is_int64() const noexcept;
+   simdjson_really_inline bool is_uint64() const noexcept;
+   simdjson_really_inline bool is_double() const noexcept;
++  simdjson_really_inline bool is_number() const noexcept;
+   simdjson_really_inline bool is_bool() const noexcept;
+   simdjson_really_inline bool is_null() const noexcept;
+ 
+diff --git a/include/simdjson/padded_string-inl.h b/include/simdjson/padded_string-inl.h
+index 49326dd0..f11eb891 100644
+--- a/include/simdjson/padded_string-inl.h
++++ b/include/simdjson/padded_string-inl.h
+@@ -37,14 +37,11 @@ inline char *allocate_padded_buffer(size_t length) noexcept {
+ inline padded_string::padded_string() noexcept {}
+ inline padded_string::padded_string(size_t length) noexcept
+     : viable_size(length), data_ptr(internal::allocate_padded_buffer(length)) {
+-  if (data_ptr != nullptr)
+-    data_ptr[length] = '\0'; // easier when you need a c_str
+ }
+ inline padded_string::padded_string(const char *data, size_t length) noexcept
+     : viable_size(length), data_ptr(internal::allocate_padded_buffer(length)) {
+   if ((data != nullptr) and (data_ptr != nullptr)) {
+     std::memcpy(data_ptr, data, length);
+-    data_ptr[length] = '\0'; // easier when you need a c_str
+   }
+ }
+ // note: do not pass std::string arguments by value
+@@ -52,15 +49,13 @@ inline padded_string::padded_string(const std::string & str_ ) noexcept
+     : viable_size(str_.size()), data_ptr(internal::allocate_padded_buffer(str_.size())) {
+   if (data_ptr != nullptr) {
+     std::memcpy(data_ptr, str_.data(), str_.size());
+-    data_ptr[str_.size()] = '\0'; // easier when you need a c_str
+   }
+ }
+ // note: do pass std::string_view arguments by value
+ inline padded_string::padded_string(std::string_view sv_) noexcept
+     : viable_size(sv_.size()), data_ptr(internal::allocate_padded_buffer(sv_.size())) {
+-  if (data_ptr != nullptr) {
++  if (sv_.size()) {
+     std::memcpy(data_ptr, sv_.data(), sv_.size());
+-    data_ptr[sv_.size()] = '\0'; // easier when you need a c_str
+   }
+ }
+ inline padded_string::padded_string(padded_string &&o) noexcept
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/fuzz/FuzzUtils.h b/fuzz/FuzzUtils.h
+index c79e7638..22594337 100644
+--- a/fuzz/FuzzUtils.h
++++ b/fuzz/FuzzUtils.h
+@@ -2,6 +2,9 @@
+ #define SIMDJSON_FUZZUTILS_H
+ 
+ #include <cstdint>
++#include <vector>
++#include <string_view>
++#include <cstring> //memcpy
+ 
+ // view data as a byte pointer
+ template <typename T> inline const std::uint8_t* as_bytes(const T* data) {
+@@ -14,4 +17,142 @@ template <typename T> inline const char* as_chars(const T* data) {
+ }
+ 
+ 
++
++
++// Splits the input into strings, using a four byte separator which is human
++// readable. Makes for nicer debugging of fuzz data.
++// See https://github.com/google/fuzzing/blob/master/docs/split-inputs.md#magic-separator
++// for background. Note: don't use memmem, it is not standard C++.
++inline std::vector<std::string_view> split(const char* Data, size_t Size) {
++
++  std::vector<std::string_view> ret;
++
++    using namespace std::literals;
++    constexpr auto sep="\n~~\n"sv;
++
++    std::string_view all(Data,Size);
++    auto pos=all.find(sep);
++    while(pos!=std::string_view::npos) {
++      ret.push_back(all.substr(0,pos));
++      all=all.substr(pos+sep.size());
++      pos=all.find(sep);
++    }
++    ret.push_back(all);
++    return ret;
++}
++
++// Generic helper to split fuzz data into usable parts, like ints etc.
++// Note that it does not throw, instead it sets the data pointer to null
++// if the input is exhausted.
++struct FuzzData {
++  // data may not be null, even if size is zero.
++  FuzzData(const uint8_t* data,
++           size_t size) : Data(data),Size(size){}
++
++  ///range is inclusive
++  template<int Min, int Max>
++  int getInt() {
++    static_assert (Min<Max,"min must be <max");
++
++    // make this constexpr, can't overflow because that is UB and is forbidden
++    // in constexpr evaluation
++    constexpr int range=(Max-Min)+1;
++    constexpr unsigned int urange=range;
++
++    // don't use std::uniform_int_distribution, we don't want to pay for
++    // over consumption of random data. Accept the slightly non-uniform distribution.
++    if(range<256)
++      return Min+static_cast<int>(get<uint8_t>()%urange);
++    if(range<65536)
++      return Min+static_cast<int>(get<uint16_t>()%urange);
++
++    return Min+static_cast<int>(get<uint32_t>()%urange);
++  }
++
++  template<typename T>
++  T get() {
++    const auto Nbytes=sizeof(T);
++    T ret{};
++    if(Size<Nbytes) {
++      //don't throw, signal with null instead.
++      Data=nullptr;
++      Size=0;
++      return ret;
++    }
++    std::memcpy(&ret,Data,Nbytes);
++    Data+=Nbytes;
++    Size-=Nbytes;
++    return ret;
++  }
++
++  // gets a string view with length in [Min,Max]
++  template<int Min, int Max>
++  std::string_view get_stringview() {
++    static_assert (Min>=0,"Min must be positive");
++    const int len=getInt<Min,Max>();
++    const unsigned int ulen=static_cast<unsigned int>(len);
++    if(ulen<Size) {
++      std::string_view ret(chardata(),ulen);
++      Data+=len;
++      Size-=ulen;
++      return ret;
++    }
++
++    //mark that there is too little data to fulfill the request
++    Data=nullptr;
++    Size=0;
++
++    return {};
++  }
++
++  // split the remainder of the data into string views,
++  std::vector<std::string_view> splitIntoStrings() {
++    std::vector<std::string_view> ret;
++    if(Size>0) {
++      ret=split(chardata(),Size);
++      // all data consumed.
++      Data+=Size;
++      Size=0;
++    }
++    return ret;
++  }
++
++  //are we good?
++  explicit operator bool() const { return Data!=nullptr;}
++
++  //we are a URBG
++  // https://en.cppreference.com/w/cpp/named_req/UniformRandomBitGenerator
++  //The type G satisfies UniformRandomBitGenerator if    Given
++  //   T, the type named by G::result_type
++  //    g, a value of type G
++  //
++  //  The following expressions must be valid and have their specified effects
++  //  Expression 	Return type 	Requirements
++  //  G::result_type 	T 	T is an unsigned integer type
++  using result_type=uint8_t;
++  //  G::min() 	T 	Returns the smallest value that G's operator() may return. The value is strictly less than G::max(). The function must be constexpr.
++  static constexpr result_type min() {return 0;}
++  //  G::max() 	T 	Returns the largest value that G's operator() may return. The value is strictly greater than G::min(). The function must be constexpr.
++  static constexpr result_type max() {return 255;}
++  //  g() 	T 	Returns a value in the closed interval [G::min(), G::max()]. Has amortized constant complexity.
++  result_type operator()() {
++    if(Size==0) {
++      // return something varying, otherwise uniform_int_distribution may get
++      // stuck
++      return failcount++;
++    }
++    const result_type ret=Data[0];
++    Data++;
++    Size--;
++    return ret;
++  }
++  // returns a pointer to data as const char* to avoid those cstyle casts
++  const char* chardata() const {return static_cast<const char*>(static_cast<const void*>(Data));}
++  // members
++  const uint8_t* Data;
++  size_t Size;
++  uint8_t failcount=0;
++};
++
++
+ #endif // SIMDJSON_FUZZUTILS_H
+diff --git a/fuzz/fuzz_atpointer.cpp b/fuzz/fuzz_atpointer.cpp
+index 2e9fee61..f45aa5de 100644
+--- a/fuzz/fuzz_atpointer.cpp
++++ b/fuzz/fuzz_atpointer.cpp
+@@ -1,68 +1,47 @@
+-#include "simdjson.h"
+ #include "FuzzUtils.h"
++#include "simdjson.h"
+ #include <cstddef>
+ #include <cstdint>
+ #include <string>
+ #include <string_view>
+ 
+-struct FuzzData {
+-    std::string_view json_pointer;
+-    std::string_view json_doc;
+-};
+-
+-/**
+- * @brief split split fuzz data into a pointer and a document
+- * @param Data
+- * @param Size
+- * @return
+- */
+-FuzzData split(const char *Data, size_t Size) {
+-
+-    using namespace std::literals;
+-    constexpr auto sep="\n~~~\n"sv;
+-
+-    std::string_view all(Data,Size);
+-    auto pos=all.find(sep);
+-    if(pos==std::string_view::npos) {
+-        //not found.
+-        return FuzzData{std::string_view{},all};
+-    } else {
+-        return FuzzData{std::string_view{all.substr(0,pos)},all.substr(pos+sep.size())};
+-    }
+-}
+-
+ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+ 
+-    // Split data into two strings, json pointer and the document string.
+-    // Might end up with none, either or both being empty, important for
+-    // covering edge cases such as https://github.com/simdjson/simdjson/issues/1142
+-    // Inputs missing the separator line will get an empty json pointer
+-    // but the all the input put in the document string. This means
+-    // test data from other fuzzers that take json input works for this fuzzer
+-    // as well.
+-    const auto fd=split(as_chars(Data),Size);
+-
+-    simdjson::dom::parser parser;
+-
+-    // parse without exceptions, for speed
+-    auto res=parser.parse(fd.json_doc.data(),fd.json_doc.size());
+-    if(res.error())
+-        return 0;
++  // Split data into two strings, json pointer and the document string.
++  // Might end up with none, either or both being empty, important for
++  // covering edge cases such as
++  // https://github.com/simdjson/simdjson/issues/1142 Inputs missing the
++  // separator line will get an empty json pointer but the all the input put in
++  // the document string. This means test data from other fuzzers that take json
++  // input works for this fuzzer as well.
++  FuzzData fd(Data, Size);
++  auto strings = fd.splitIntoStrings();
++  while (strings.size() < 2) {
++    strings.emplace_back();
++  }
++  assert(strings.size() >= 2);
++
++  simdjson::dom::parser parser;
++
++  // parse without exceptions, for speed
++  auto res = parser.parse(strings[0]);
++  if (res.error())
++    return 0;
+ 
+-    simdjson::dom::element root;
+-    if(res.get(root))
+-        return 0;
++  simdjson::dom::element root;
++  if (res.get(root))
++    return 0;
+ 
+-    auto maybe_leaf=root.at_pointer(fd.json_pointer);
+-    if(maybe_leaf.error())
+-        return 0;
++  auto maybe_leaf = root.at_pointer(strings[1]);
++  if (maybe_leaf.error())
++    return 0;
+ 
+-    simdjson::dom::element leaf;
+-    if(maybe_leaf.get(leaf))
+-        return 0;
++  simdjson::dom::element leaf;
++  if (maybe_leaf.get(leaf))
++    return 0;
+ 
+-    std::string_view sv;
+-    if(leaf.get_string().get(sv))
+-        return 0;
++  std::string_view sv;
++  if (leaf.get_string().get(sv))
+     return 0;
++  return 0;
+ }
+diff --git a/fuzz/fuzz_element.cpp b/fuzz/fuzz_element.cpp
+new file mode 100644
+index 00000000..9257057e
+--- /dev/null
++++ b/fuzz/fuzz_element.cpp
+@@ -0,0 +1,130 @@
++#include "simdjson.h"
++#include <cstddef>
++#include <cstdint>
++#include <string>
++
++#include "FuzzUtils.h"
++#include "NullBuffer.h"
++
++extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
++  FuzzData fd(Data, Size);
++  const int action = fd.getInt<0, 31>();
++
++  // there will be some templatized functions like is() which need to be tested
++  // on a type. select one dynamically and create a function that will invoke
++  // with that type
++  const int selecttype=fd.getInt<0,7>();
++  auto invoke_with_type=[selecttype](auto cb) {
++    using constcharstar=const char*;
++    switch(selecttype) {
++    case 0: cb(bool{});break;
++    case 1: cb(double{});break;
++    case 2: cb(uint64_t{});break;
++    case 3: cb(int64_t{});break;
++    case 4: cb(std::string_view{});break;
++    case 5: cb(constcharstar{});break;
++    case 6: cb(simdjson::dom::array{});break;
++    case 7: cb(simdjson::dom::object{});break;
++    }
++  };
++
++  const auto index = fd.get<size_t>();
++
++  // split the remainder of the document into strings
++  auto strings = fd.splitIntoStrings();
++  while (strings.size() < 2) {
++    strings.emplace_back();
++  }
++  const auto str = strings[0];
++
++  // exit if there was too little data
++  if (!fd)
++    return 0;
++
++  simdjson::dom::parser parser;
++  simdjson_unused simdjson::dom::element elem;
++  simdjson_unused auto error = parser.parse(strings[1]).get(elem);
++
++  if (error)
++    return 0;
++
++#define CASE(num, fun)                                                         \
++  case num: {                                                                  \
++    simdjson_unused auto v = elem.fun();                                                       \
++    break;                                                                     \
++  }
++#define CASE2(num, fun)                                                        \
++  case num: {                                                                  \
++    simdjson_unused auto v = elem fun;                                                         \
++    break;                                                                     \
++  }
++  try {
++
++    switch (action) {
++      CASE(0, type);
++      CASE(1, get_array);
++      CASE(2, get_object);
++      CASE(3, get_c_str);
++      CASE(4, get_string_length);
++      CASE(5, get_string);
++      CASE(6, get_int64);
++      CASE(7, get_uint64);
++      CASE(8, get_double);
++      CASE(9, get_bool);
++      CASE(10, is_array);
++      CASE(11, is_object);
++      CASE(12, is_string);
++      CASE(13, is_int64);
++      CASE(14, is_uint64);
++      CASE(15, is_double);
++      CASE(16, is_number);
++      CASE(17, is_bool);
++      CASE(18, is_null);
++      // element.is<>() :
++    case 19: {
++        invoke_with_type([&elem](auto t){ simdjson_unused auto v = elem.is<decltype (t)>();  });
++      } break;
++
++      // CASE(xx,get);
++      case 20: {
++          invoke_with_type([&elem](auto t){ simdjson_unused auto v = elem.get<decltype (t)>();  });
++        } break;
++
++      // CASE(xx,tie);
++      case 21: {
++          invoke_with_type([&elem](auto t){
++            simdjson::error_code ec;
++            simdjson::dom::element{elem}.tie(t,ec);  });
++        } break;
++
++#if SIMDJSON_EXCEPTIONS
++      // cast to type
++      case 22: {
++          invoke_with_type([&elem](auto t){
++            using T=decltype(t);
++            simdjson_unused auto v = static_cast<T>(elem);  });
++        } break;
++
++      CASE(23, begin);
++      CASE(24, end);
++#endif
++      CASE2(25, [str]);
++      CASE2(26, .at_pointer(str));
++      // CASE2(xx,at(str)); deprecated
++      CASE2(28, .at(index));
++      CASE2(29, .at_key(str));
++      CASE2(30, .at_key_case_insensitive(str));
++      case 31: { NulOStream os;
++        simdjson_unused auto dumpstatus = elem.dump_raw_tape(os);} ;break;
++    default:
++      return 0;
++    }
++#undef CASE
++#undef CASE2
++
++  } catch (std::exception &) {
++    // do nothing
++  }
++
++  return 0;
++}

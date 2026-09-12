@@ -1,0 +1,272 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/silent-maintenance-evolution_aware-C075-ktgrk_t4
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a089a6-6c6a-7682-9353-733bc8d5193b
+--------
+user
+You are evaluating whether a source commit creates a fuzz-harness maintenance
+need. Use only the anonymous case supplied below. Do not use tools, files, the
+network, commit messages, developer harness changes, future behavior, or
+outside knowledge.
+
+First decide whether S1 + H0 has a material harness gap involving an entry
+point, API protocol, state, configuration, input semantics, or attack surface.
+Then compare S0 + H0 with S1 + H0 and decide whether this commit introduced or
+materially aggravated that gap. A historical gap alone is not maintenance for
+this commit. Refactoring, validation, error handling, and internal optimization
+do not require maintenance when H0 still reaches the changed behavior with
+adequate state and input control.
+
+Set maintenance_needed to true only when gap_exists is true AND commit_induced
+is YES. Return exactly one JSON object matching the required schema and ground
+every claim in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous Fuzz-Harness Maintenance Case
+
+Case ID
+
+C075
+
+## Evidence boundary
+
+The material below contains only the complete existing harness H0 and the complete production source diff from S0 to S1. No developer-updated harness, commit message, build result, coverage result, reachability result, or label is supplied.
+
+## Existing Harness H0
+
+### `programs/fuzz/common.c`
+
+```text
+#include "common.h"
+#include <limits.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include "mbedtls/ctr_drbg.h"
+
+#if defined(MBEDTLS_PLATFORM_TIME_ALT)
+mbedtls_time_t dummy_constant_time(mbedtls_time_t *time)
+{
+    (void) time;
+    return 0x5af2a056;
+}
+#endif
+
+void dummy_init()
+{
+#if defined(MBEDTLS_PLATFORM_TIME_ALT)
+    mbedtls_platform_set_time(dummy_constant_time);
+#else
+    fprintf(stderr, "Warning: fuzzing without constant time\n");
+#endif
+}
+
+int dummy_send(void *ctx, const unsigned char *buf, size_t len)
+{
+    //silence warning about unused parameter
+    (void) ctx;
+    (void) buf;
+
+    //pretends we wrote everything ok
+    if (len > INT_MAX) {
+        return -1;
+    }
+    return (int) len;
+}
+
+int fuzz_recv(void *ctx, unsigned char *buf, size_t len)
+{
+    //reads from the buffer from fuzzer
+    fuzzBufferOffset_t *biomemfuzz = (fuzzBufferOffset_t *) ctx;
+
+    if (biomemfuzz->Offset == biomemfuzz->Size) {
+        //EOF
+        return 0;
+    }
+    if (len > INT_MAX) {
+        return -1;
+    }
+    if (len + biomemfuzz->Offset > biomemfuzz->Size) {
+        //do not overflow
+        len = biomemfuzz->Size - biomemfuzz->Offset;
+    }
+    memcpy(buf, biomemfuzz->Data + biomemfuzz->Offset, len);
+    biomemfuzz->Offset += len;
+    return (int) len;
+}
+
+int dummy_random(void *p_rng, unsigned char *output, size_t output_len)
+{
+    int ret;
+    size_t i;
+
+#if defined(MBEDTLS_CTR_DRBG_C)
+    //mbedtls_ctr_drbg_random requires a valid mbedtls_ctr_drbg_context in p_rng
+    if (p_rng != NULL) {
+        //use mbedtls_ctr_drbg_random to find bugs in it
+        ret = mbedtls_ctr_drbg_random(p_rng, output, output_len);
+    } else {
+        //fall through to pseudo-random
+        ret = 0;
+    }
+#else
+    (void) p_rng;
+    ret = 0;
+#endif
+    for (i = 0; i < output_len; i++) {
+        //replace result with pseudo random
+        output[i] = (unsigned char) rand();
+    }
+    return ret;
+}
+
+int dummy_entropy(void *data, unsigned char *output, size_t len)
+{
+    size_t i;
+    (void) data;
+
+    //use mbedtls_entropy_func to find bugs in it
+    //test performance impact of entropy
+    //ret = mbedtls_entropy_func(data, output, len);
+    for (i = 0; i < len; i++) {
+        //replace result with pseudo random
+        output[i] = (unsigned char) rand();
+    }
+    return 0;
+}
+
+int fuzz_recv_timeout(void *ctx, unsigned char *buf, size_t len,
+                      uint32_t timeout)
+{
+    (void) timeout;
+
+    return fuzz_recv(ctx, buf, len);
+}
+
+```
+
+### `programs/fuzz/common.h`
+
+```text
+#include "mbedtls/build_info.h"
+
+#if defined(MBEDTLS_HAVE_TIME)
+#include "mbedtls/platform_time.h"
+#endif
+#include <stddef.h>
+#include <stdint.h>
+
+typedef struct fuzzBufferOffset {
+    const uint8_t *Data;
+    size_t Size;
+    size_t Offset;
+} fuzzBufferOffset_t;
+
+#if defined(MBEDTLS_HAVE_TIME)
+mbedtls_time_t dummy_constant_time(mbedtls_time_t *time);
+#endif
+void dummy_init();
+
+int dummy_send(void *ctx, const unsigned char *buf, size_t len);
+int fuzz_recv(void *ctx, unsigned char *buf, size_t len);
+int dummy_random(void *p_rng, unsigned char *output, size_t output_len);
+int dummy_entropy(void *data, unsigned char *output, size_t len);
+int fuzz_recv_timeout(void *ctx, unsigned char *buf, size_t len,
+                      uint32_t timeout);
+
+```
+
+## Complete production source diff S0 -> S1
+
+The fixed `--function-context` rule includes the complete diff and expanded changed-function bodies where Git recognizes them.
+
+```diff
+diff --git a/library/ecp.c b/library/ecp.c
+index 049a1e015176b1f105282632d44dbc377280963f..29f5bc77fa23f166f7e1af78d9b94cb5fada8e07 100644
+--- a/library/ecp.c
++++ b/library/ecp.c
+@@ -3639,15 +3639,15 @@ cleanup:
+ #if defined(MBEDTLS_TEST_HOOKS)
+ 
+ MBEDTLS_STATIC_TESTABLE
+-mbedtls_ecp_variant mbedtls_ecp_get_variant()
++mbedtls_ecp_variant mbedtls_ecp_get_variant(void)
+ {
+     return MBEDTLS_ECP_VARIANT_WITH_MPI_STRUCT;
+ }
+ 
+ #endif /* MBEDTLS_TEST_HOOKS */
+ 
+ #endif /* !MBEDTLS_ECP_ALT */
+ 
+ #endif /* MBEDTLS_ECP_LIGHT */
+ 
+ #endif /* !MBEDTLS_ECP_WITH_MPI_UINT */
+diff --git a/programs/ssl/ssl_context_info.c b/programs/ssl/ssl_context_info.c
+index a5f065032263fe4bc2bc2e11fe4285ae486944a5..855b0911fdc951d4f036aad780b400a0e9476afd 100644
+--- a/programs/ssl/ssl_context_info.c
++++ b/programs/ssl/ssl_context_info.c
+@@ -125,29 +125,29 @@ const char buf_ln_err[] = "Buffer does not have enough data to complete the pars
+ /*
+  * Basic printing functions
+  */
+-void print_version()
++void print_version(void)
+ {
+     printf("%s v%d.%d\n", PROG_NAME, VER_MAJOR, VER_MINOR);
+ }
+ 
+-void print_usage()
++void print_usage(void)
+ {
+     print_version();
+     printf("\nThis program is used to deserialize an Mbed TLS SSL session from the base64 code provided\n"
+            "in the text file. The program can deserialize many codes from one file, but they must be\n"
+            "separated, e.g. by a newline.\n\n");
+     printf(
+         "Usage:\n"
+         "\t-f path            - Path to the file with base64 code\n"
+         "\t-v                 - Show version\n"
+         "\t-h                 - Show this usage\n"
+         "\t-d                 - Print more information\n"
+         "\t--keep-peer-cert=0 - Use this option if you know that the Mbed TLS library\n"
+         "\t                     has been compiled with the MBEDTLS_SSL_KEEP_PEER_CERTIFICATE\n"
+         "\t                     flag. You can also use it if there are some problems with reading\n"
+         "\t                     the information about certificate\n"
+         "\t--dtls-protocol=0  - Use this option if you know that the Mbed TLS library\n"
+         "\t                     has been compiled without the MBEDTLS_SSL_PROTO_DTLS flag\n"
+         "\n"
+         );
+ }
+@@ -179,14 +179,14 @@ void printf_err(const char *str, ...)
+ /*
+  * Exit from the program in case of error
+  */
+-void error_exit()
++void error_exit(void)
+ {
+     if (NULL != b64_file) {
+         fclose(b64_file);
+     }
+     exit(-1);
+ }
+ 
+ /*
+  * This function takes the input arguments of this program
+  */
+
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C075","gap_exists":false,"gap_type":[],"commit_induced":"NO","maintenance_needed":false,"confidence":99,"affected_functions":["mbedtls_ecp_get_variant","print_version","print_usage","error_exit"],"reason":"The S0-to-S1 changes only replace unspecified empty parameter lists with explicit `(void)` parameter lists. They do not change any entry point, API protocol, state, configuration, input semantics, attack surface, or runtime behavior relevant to H0. H0 therefore has no material harness gap caused or aggravated by this commit.","evidence":["`mbedtls_ecp_get_variant()` becomes `mbedtls_ecp_get_variant(void)` while retaining the same body and return value `MBEDTLS_ECP_VARIANT_WITH_MPI_STRUCT`.","`print_version()`, `print_usage()`, and `error_exit()` become explicit no-argument functions using `(void)`; their bodies are unchanged.","No production input handling, state transition, configuration branch, or callable behavior is added or altered in the complete S0-to-S1 diff.","H0 contains no calls to the four changed functions, but the commit adds no behavior that would require new harness reachability or input control."],"recommended_action":"No fuzz-harness maintenance is needed for this commit."}
+tokens used
+5,271

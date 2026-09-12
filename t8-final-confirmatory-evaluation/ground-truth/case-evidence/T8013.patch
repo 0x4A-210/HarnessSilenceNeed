@@ -1,0 +1,121 @@
+PROJECT libxml2
+COMMIT 6c128fd58a0e4641c23a345d413672494622db1b
+PARENT 50f06b3efb638efb0abd95dc62dca05ae67882c2
+SUBJECT Fuzz XInclude engine
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/xinclude.c b/xinclude.c
+index 5ea87ade..41ff4e5f 100644
+--- a/xinclude.c
++++ b/xinclude.c
+@@ -86,6 +86,8 @@ struct _xmlXIncludeCtxt {
+     xmlChar *		 base; /* the current xml:base */
+ 
+     void            *_private; /* application data */
++
++    unsigned long    incTotal; /* total number of processed inclusions */
+ };
+ 
+ static int
+@@ -729,7 +731,9 @@ xmlXIncludeRecurseDoc(xmlXIncludeCtxtPtr ctxt, xmlDocPtr doc,
+ 	 * (bug 132597)
+ 	 */
+ 	newctxt->parseFlags = ctxt->parseFlags;
++        newctxt->incTotal = ctxt->incTotal;
+ 	xmlXIncludeDoProcess(newctxt, doc, xmlDocGetRootElement(doc));
++        ctxt->incTotal = newctxt->incTotal;
+ 	for (i = 0;i < ctxt->incNr;i++) {
+ 	    newctxt->incTab[i]->count--;
+ 	    newctxt->incTab[i] = NULL;
+@@ -1992,11 +1996,13 @@ xmlXIncludeLoadFallback(xmlXIncludeCtxtPtr ctxt, xmlNodePtr fallback, int nr) {
+ 	newctxt->_private = ctxt->_private;
+ 	newctxt->base = xmlStrdup(ctxt->base);	/* Inherit the base from the existing context */
+ 	xmlXIncludeSetFlags(newctxt, ctxt->parseFlags);
++        newctxt->incTotal = ctxt->incTotal;
+         for (child = fallback->children; child != NULL; child = next) {
+             next = child->next;
+ 	    if (xmlXIncludeDoProcess(newctxt, ctxt->doc, child) < 0)
+                 ret = -1;
+         }
++        ctxt->incTotal = newctxt->incTotal;
+ 	if (ctxt->nbErrors > oldNbErrors)
+ 	    ret = -1;
+ 	xmlXIncludeFreeContext(newctxt);
+@@ -2411,6 +2417,15 @@ xmlXIncludeDoProcess(xmlXIncludeCtxtPtr ctxt, xmlDocPtr doc, xmlNodePtr tree) {
+     do {
+ 	/* TODO: need to work on entities -> stack */
+         if (xmlXIncludeTestNode(ctxt, cur) == 1) {
++#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
++            /*
++             * Avoid superlinear expansion by limiting the total number
++             * of replacements.
++             */
++            if (ctxt->incTotal >= 20)
++                return(-1);
++#endif
++            ctxt->incTotal++;
+             xmlXIncludePreProcessNode(ctxt, cur);
+         } else if ((cur->children != NULL) &&
+                    (cur->children->type != XML_ENTITY_DECL) &&
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/fuzz/xml.c b/fuzz/xml.c
+index 50dd967d..f3e74ef8 100644
+--- a/fuzz/xml.c
++++ b/fuzz/xml.c
+@@ -7,6 +7,7 @@
+ #include <libxml/parser.h>
+ #include <libxml/tree.h>
+ #include <libxml/xmlerror.h>
++#include <libxml/xinclude.h>
+ #include <libxml/xmlreader.h>
+ #include "fuzz.h"
+ 
+@@ -46,6 +47,8 @@ LLVMFuzzerTestOneInput(const char *data, size_t size) {
+     /* Pull parser */
+ 
+     doc = xmlReadMemory(docBuffer, docSize, NULL, NULL, opts);
++    if (opts & XML_PARSE_XINCLUDE)
++        xmlXIncludeProcessFlags(doc, opts);
+     /* Also test the serializer. */
+     xmlDocDumpMemory(doc, &out, &outSize);
+     xmlFree(out);
+@@ -64,6 +67,8 @@ LLVMFuzzerTestOneInput(const char *data, size_t size) {
+     }
+ 
+     xmlParseChunk(ctxt, NULL, 0, 1);
++    if (opts & XML_PARSE_XINCLUDE)
++        xmlXIncludeProcessFlags(ctxt->myDoc, opts);
+     xmlFreeDoc(ctxt->myDoc);
+     xmlFreeParserCtxt(ctxt);
+ 
+diff --git a/fuzz/xmlSeed.c b/fuzz/xmlSeed.c
+index 5ce97d0b..8f164ddc 100644
+--- a/fuzz/xmlSeed.c
++++ b/fuzz/xmlSeed.c
+@@ -5,11 +5,13 @@
+  */
+ 
+ #include <stdio.h>
++#include <libxml/xinclude.h>
+ #include "fuzz.h"
+ 
+ int
+ main(int argc, char **argv) {
+     int opts = XML_PARSE_NOENT | XML_PARSE_DTDLOAD;
++    xmlDocPtr doc;
+ 
+     if (argc != 2) {
+         fprintf(stderr, "Usage: xmlSeed [FILE]\n");
+@@ -20,7 +22,9 @@ main(int argc, char **argv) {
+ 
+     xmlSetGenericErrorFunc(NULL, xmlFuzzErrorFunc);
+     xmlSetExternalEntityLoader(xmlFuzzEntityRecorder);
+-    xmlFreeDoc(xmlReadFile(argv[1], NULL, opts));
++    doc = xmlReadFile(argv[1], NULL, opts);
++    xmlXIncludeProcessFlags(doc, opts);
++    xmlFreeDoc(doc);
+     xmlFuzzDataCleanup();
+ 
+     return(0);

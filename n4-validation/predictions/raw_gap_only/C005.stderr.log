@@ -1,0 +1,1515 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/n4-gap_only-C005-8zqf933q
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a08a72-c8f0-7fb2-891c-47557145e120
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+C005
+
+## Existing harness H0
+
+The complete project-owned harness translation unit is shown below. Framework
+main/CLI scaffolding is not expanded; directly included semantic helper files
+are shown separately under the fixed context rule.
+
+Path: `fuzz/c/std/webp_fuzzer.c`
+
+```c
+// Copyright 2026 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// ----------------
+
+// Silence the nested slash-star warning for the next comment's command line.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcomment"
+
+/*
+This fuzzer (the fuzz function) is typically run indirectly, by a framework
+such as https://github.com/google/oss-fuzz calling LLVMFuzzerTestOneInput.
+
+When working on the fuzz implementation, or as a coherence check, defining
+WUFFS_CONFIG__FUZZLIB_MAIN will let you manually run fuzz over a set of files:
+
+gcc -DWUFFS_CONFIG__FUZZLIB_MAIN webp_fuzzer.c
+./a.out ../../../test/data/*.webp
+rm -f ./a.out
+
+It should print "PASS", amongst other information, and exit(0).
+*/
+
+#pragma clang diagnostic pop
+
+// Wuffs ships as a "single file C library" or "header file library" as per
+// https://github.com/nothings/stb/blob/master/docs/stb_howto.txt
+//
+// To use that single file as a "foo.c"-like implementation, instead of a
+// "foo.h"-like header, #define WUFFS_IMPLEMENTATION before #include'ing or
+// compiling it.
+#define WUFFS_IMPLEMENTATION
+
+#if defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+// Defining the WUFFS_CONFIG__STATIC_FUNCTIONS macro is optional, but when
+// combined with WUFFS_IMPLEMENTATION, it demonstrates making all of Wuffs'
+// functions have static storage.
+//
+// This can help the compiler ignore or discard unused code, which can produce
+// faster compiles and smaller binaries. Other motivations are discussed in the
+// "ALLOW STATIC IMPLEMENTATION" section of
+// https://raw.githubusercontent.com/nothings/stb/master/docs/stb_howto.txt
+#define WUFFS_CONFIG__STATIC_FUNCTIONS
+#endif  // defined(WUFFS_CONFIG__FUZZLIB_MAIN)
+
+// Defining the WUFFS_CONFIG__MODULE* macros are optional, but it lets users of
+// release/c/etc.c choose which parts of Wuffs to build. That file contains the
+// entire Wuffs standard library, implementing a variety of codecs and file
+// formats. Without this macro definition, an optimizing compiler or linker may
+// very well discard Wuffs code for unused codecs, but listing the Wuffs
+// modules we use makes that process explicit. Preprocessing means that such
+// code simply isn't compiled.
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__VP8
+#define WUFFS_CONFIG__MODULE__WEBP
+
+// If building this program in an environment that doesn't easily accommodate
+// relative includes, you can use the script/inline-c-relative-includes.go
+// program to generate a stand-alone C file.
+#include "../../../release/c/wuffs-unsupported-snapshot.c"
+#include "../fuzzlib/fuzzlib.c"
+#include "../fuzzlib/fuzzlib_image_decoder.c"
+
+const char*  //
+fuzz(wuffs_base__io_buffer* src, uint64_t hash) {
+  wuffs_webp__decoder dec;
+  wuffs_base__status status = wuffs_webp__decoder__initialize(
+      &dec, sizeof dec, WUFFS_VERSION,
+      (hash & 1) ? WUFFS_INITIALIZE__LEAVE_INTERNAL_BUFFERS_UNINITIALIZED : 0);
+  hash = wuffs_base__u64__rotate_right(hash, 1);
+  if (!wuffs_base__status__is_ok(&status)) {
+    return wuffs_base__status__message(&status);
+  }
+  return fuzz_image_decoder(
+      src, hash,
+      wuffs_webp__decoder__upcast_as__wuffs_base__image_decoder(&dec));
+}
+```
+
+### Direct H0 helper: `fuzz/c/fuzzlib/fuzzlib_image_decoder.c`
+
+```c
+// Copyright 2020 The Wuffs Authors.
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+#ifndef WUFFS_INCLUDE_GUARD
+#error "Wuffs' .h files need to be included before this file"
+#endif
+
+static const char*  //
+fuzz_image_decoder(wuffs_base__io_buffer* src,
+                   uint64_t hash,
+                   wuffs_base__image_decoder* dec) {
+  const char* ret = NULL;
+  wuffs_base__slice_u8 pixbuf = ((wuffs_base__slice_u8){});
+  wuffs_base__slice_u8 workbuf = ((wuffs_base__slice_u8){});
+
+  // Use a {} code block so that "goto exit" doesn't trigger "jump bypasses
+  // variable initialization" warnings.
+  {
+    wuffs_base__image_config ic = ((wuffs_base__image_config){});
+    wuffs_base__status status =
+        wuffs_base__image_decoder__decode_image_config(dec, &ic, src);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+    if (!wuffs_base__image_config__is_valid(&ic)) {
+      ret = "invalid image_config";
+      goto exit;
+    }
+
+    // 50% of the time, choose BGRA_PREMUL instead of the native pixel config.
+    if (hash & 1) {
+      wuffs_base__pixel_config__set(
+          &ic.pixcfg, WUFFS_BASE__PIXEL_FORMAT__BGRA_PREMUL,
+          WUFFS_BASE__PIXEL_SUBSAMPLING__NONE,
+          wuffs_base__pixel_config__width(&ic.pixcfg),
+          wuffs_base__pixel_config__height(&ic.pixcfg));
+    }
+    hash >>= 1;
+
+    // Wuffs allows either statically or dynamically allocated work buffers.
+    // This program exercises dynamic allocation.
+    uint64_t n = wuffs_base__image_decoder__workbuf_len(dec).max_incl;
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      workbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!workbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    n = wuffs_base__pixel_config__pixbuf_len(&ic.pixcfg);
+    if (n > 64 * 1024 * 1024) {  // Don't allocate more than 64 MiB.
+      ret = "image too large";
+      goto exit;
+    }
+    if (n > 0) {
+      pixbuf = wuffs_base__malloc_slice_u8(malloc, n);
+      if (!pixbuf.ptr) {
+        ret = "out of memory";
+        goto exit;
+      }
+    }
+
+    wuffs_base__pixel_buffer pb = ((wuffs_base__pixel_buffer){});
+    status = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, pixbuf);
+    if (!wuffs_base__status__is_ok(&status)) {
+      ret = wuffs_base__status__message(&status);
+      goto exit;
+    }
+
+    bool seen_ok = false;
+    while (true) {
+      wuffs_base__frame_config fc = ((wuffs_base__frame_config){});
+      status = wuffs_base__image_decoder__decode_frame_config(dec, &fc, src);
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+
+      status = wuffs_base__image_decoder__decode_frame(
+          dec, &pb, src, WUFFS_BASE__PIXEL_BLEND__SRC, workbuf, NULL);
+
+      wuffs_base__rect_ie_u32 frame_rect =
+          wuffs_base__frame_config__bounds(&fc);
+      wuffs_base__rect_ie_u32 dirty_rect =
+          wuffs_base__image_decoder__frame_dirty_rect(dec);
+      if (!wuffs_base__rect_ie_u32__contains_rect(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not contain dirty_rect";
+        goto exit;
+      }
+
+      if (!wuffs_base__status__is_ok(&status)) {
+        if ((status.repr != wuffs_base__note__end_of_data) || !seen_ok) {
+          ret = wuffs_base__status__message(&status);
+        }
+        goto exit;
+      }
+      seen_ok = true;
+
+      if (!wuffs_base__rect_ie_u32__equals(&frame_rect, dirty_rect)) {
+        ret = "internal error: frame_rect does not equal dirty_rect";
+        goto exit;
+      }
+    }
+  }
+
+exit:
+  free(workbuf.ptr);
+  free(pixbuf.ptr);
+  return ret;
+}
+```
+
+## Complete S0 -> S1 hand-written production-source diff
+
+The fixed rule includes every changed `std/**/*.wuffs` production file. It
+excludes generated release snapshots, tests, docs, examples, and commit text.
+
+```diff
+diff --git a/std/vp8/common_consts.wuffs b/std/vp8/common_consts.wuffs
+new file mode 100644
+index 00000000..008215d8
+--- /dev/null
++++ b/std/vp8/common_consts.wuffs
+@@ -0,0 +1,398 @@
++// Copyright 2026 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
++// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
++// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
++// option. This file may not be copied, modified, or distributed
++// except according to those terms.
++//
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++// --------
++
++// RENORM_SHIFT[range_m1] is the number of bits to shift the entropy coder
++// state by, when decoder.read_bit reads an entropy coded bit, so that range_m1
++// stays in the range [0x7F ..= 0xFE].
++//
++// It is a look-up table for:
++//
++// RENORM_SHIFT[range_m1] = 7 - log2(range_m1 + 1)
++//
++// Equivalently:
++//
++// RENORM_SHIFT[range_m1] = 24 ^ __builtin_clz((uint32_t)(range_m1 + 1))
++//
++// Note that the final (255th) element is unused.
++//
++// If range_m1 >= 0x7F then RENORM_SHIFT[range_m1] is zero, so that shifting or
++// subtracting RENORM_SHIFT[range_m1], as part of re-normalization, is a no-op.
++//
++// In terms of formatting, the line breaks are "off by one" (after 15, 31, 47,
++// etc instead of 16, 32, 48, etc elements) because the the array is indexed by
++// a "foobar_m1" expression and the "m1" means "minus 1".
++pri const RENORM_SHIFT : roarray[256] base.u8[..= 7] = [
++        7, 6, 6, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4,
++        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
++        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
++        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
++
++        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
++
++        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++
++        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++
++        // Unused. Set the placeholder equal to the second-last entry.
++        0,
++]
++
++// RENORM_RANGE_M1[range_m1] is the re-normalized value of range_m1, used when
++// decoder.read_bit reads an entropy coded bit.
++//
++//  - There are   1 entries, matching RENORM_SHIFT[range_m1] == 7, being 128-1.
++//  - There are   2 entries, matching RENORM_SHIFT[range_m1] == 6, being
++//    128-1,             192-1, incrementing by 64.
++//  - There are   4 entries, matching RENORM_SHIFT[range_m1] == 5, being
++//    128-1, 160-1, ..., 224-1, incrementing by 32.
++//  - There are   8 entries, matching RENORM_SHIFT[range_m1] == 4, being
++//    128-1, 144-1, ..., 240-1, incrementing by 16.
++//  - There are  16 entries, matching RENORM_SHIFT[range_m1] == 3, being
++//    128-1, 136-1, ..., 248-1, incrementing by  8.
++//  - ...
++//  - There are 128 entries, matching RENORM_SHIFT[range_m1] == 0, being
++//    128-1, 129-1, ..., 255-1, incrementing by  1.
++//
++// It is a look-up table for:
++//
++// RENORM_RANGE_M1[range_m1] = ((range_m1 + 1) << RENORM_SHIFT[range_m1]) - 1
++//
++// If range_m1 >= 0x7F then RENORM_RANGE_M1[range_m1] is range_m1, so that
++// assigning "range_m1 = RENORM_RANGE_M1[range_m1]", as part of
++// re-normalization, is a no-op.
++//
++// In terms of formatting, the line breaks are "off by one" (after 15, 31, 47,
++// etc instead of 16, 32, 48, etc elements) because the the array is indexed by
++// a "foobar_m1" expression and the "m1" means "minus 1".
++pri const RENORM_RANGE_M1 : roarray[256] base.u8[127 ..= 254] = [
++        127, 127, 191, 127, 159, 191, 223, 127, 143, 159, 175, 191, 207, 223, 239,
++        127, 135, 143, 151, 159, 167, 175, 183, 191, 199, 207, 215, 223, 231, 239, 247,
++        127, 131, 135, 139, 143, 147, 151, 155, 159, 163, 167, 171, 175, 179, 183, 187,
++        191, 195, 199, 203, 207, 211, 215, 219, 223, 227, 231, 235, 239, 243, 247, 251,
++
++        127, 129, 131, 133, 135, 137, 139, 141, 143, 145, 147, 149, 151, 153, 155, 157,
++        159, 161, 163, 165, 167, 169, 171, 173, 175, 177, 179, 181, 183, 185, 187, 189,
++        191, 193, 195, 197, 199, 201, 203, 205, 207, 209, 211, 213, 215, 217, 219, 221,
++        223, 225, 227, 229, 231, 233, 235, 237, 239, 241, 243, 245, 247, 249, 251, 253,
++
++        127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142,
++        143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158,
++        159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174,
++        175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190,
++
++        191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206,
++        207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222,
++        223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238,
++        239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254,
++
++        // Unused. Set the placeholder equal to the second-last entry.
++        254,
++]
++
++// RFC 6386 Section 13.4. Token Probability Updates.
++//
++// 1056 is (4 planes, 8 bands, 3 contexts, 11 tokens) flattened.
++pri const COEFF_UPDATE_PROBS : roarray[1056] base.u8[1 ..=] = [
++        // Plane 0: Y beginning at coefficient 1
++
++        // Band 0
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 1
++        176, 246, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        223, 241, 252, 255, 255, 255, 255, 255, 255, 255, 255,
++        249, 253, 253, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 2
++        255, 244, 252, 255, 255, 255, 255, 255, 255, 255, 255,
++        234, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        253, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 3
++        255, 246, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        239, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        254, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 4
++        255, 248, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        251, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 5
++        255, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        251, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        254, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 6
++        255, 254, 253, 255, 254, 255, 255, 255, 255, 255, 255,
++        250, 255, 254, 255, 254, 255, 255, 255, 255, 255, 255,
++        254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 7
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++
++        // Plane 1: Y2
++
++        // Band 0
++        217, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        225, 252, 241, 253, 255, 255, 254, 255, 255, 255, 255,
++        234, 250, 241, 250, 253, 255, 253, 254, 255, 255, 255,
++        // Band 1
++        255, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        223, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        238, 253, 254, 254, 255, 255, 255, 255, 255, 255, 255,
++        // Band 2
++        255, 248, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        249, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 3
++        255, 253, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        247, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 4
++        255, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        252, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 5
++        255, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        253, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 6
++        255, 254, 253, 255, 255, 255, 255, 255, 255, 255, 255,
++        250, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 7
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++
++        // Plane 2: U or V
++
++        // Band 0
++        186, 251, 250, 255, 255, 255, 255, 255, 255, 255, 255,
++        234, 251, 244, 254, 255, 255, 255, 255, 255, 255, 255,
++        251, 251, 243, 253, 254, 255, 254, 255, 255, 255, 255,
++        // Band 1
++        255, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        236, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        251, 253, 253, 254, 254, 255, 255, 255, 255, 255, 255,
++        // Band 2
++        255, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        254, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 3
++        255, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        254, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 4
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 5
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 6
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 7
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++
++        // Plane 3: Y beginning at coefficient 0
++
++        // Band 0
++        248, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        250, 254, 252, 254, 255, 255, 255, 255, 255, 255, 255,
++        248, 254, 249, 253, 255, 255, 255, 255, 255, 255, 255,
++        // Band 1
++        255, 253, 253, 255, 255, 255, 255, 255, 255, 255, 255,
++        246, 253, 253, 255, 255, 255, 255, 255, 255, 255, 255,
++        252, 254, 251, 254, 254, 255, 255, 255, 255, 255, 255,
++        // Band 2
++        255, 254, 252, 255, 255, 255, 255, 255, 255, 255, 255,
++        248, 254, 253, 255, 255, 255, 255, 255, 255, 255, 255,
++        253, 255, 254, 254, 255, 255, 255, 255, 255, 255, 255,
++        // Band 3
++        255, 251, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        245, 251, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        253, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 4
++        255, 251, 253, 255, 255, 255, 255, 255, 255, 255, 255,
++        252, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 5
++        255, 252, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        249, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 6
++        255, 255, 253, 255, 255, 255, 255, 255, 255, 255, 255,
++        250, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        // Band 7
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
++]
++
++// RFC 6386 Section 13.5. Default Token Probability Table.
++//
++// 1056 is (4 planes, 8 bands, 3 contexts, 11 tokens) flattened.
++pri const DEFAULT_COEFF_PROBS : roarray[1056] base.u8[1 ..=] = [
++        // Plane 0: Y beginning at coefficient 1
++
++        // Band 0
++        128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
++        128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
++        128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
++        // Band 1
++        253, 136, 254, 255, 228, 219, 128, 128, 128, 128, 128,
++        189, 129, 242, 255, 227, 213, 255, 219, 128, 128, 128,
++        106, 126, 227, 252, 214, 209, 255, 255, 128, 128, 128,
++        // Band 2
++        1, 98, 248, 255, 236, 226, 255, 255, 128, 128, 128,
++        181, 133, 238, 254, 221, 234, 255, 154, 128, 128, 128,
++        78, 134, 202, 247, 198, 180, 255, 219, 128, 128, 128,
++        // Band 3
++        1, 185, 249, 255, 243, 255, 128, 128, 128, 128, 128,
++        184, 150, 247, 255, 236, 224, 128, 128, 128, 128, 128,
++        77, 110, 216, 255, 236, 230, 128, 128, 128, 128, 128,
++        // Band 4
++        1, 101, 251, 255, 241, 255, 128, 128, 128, 128, 128,
++        170, 139, 241, 252, 236, 209, 255, 255, 128, 128, 128,
++        37, 116, 196, 243, 228, 255, 255, 255, 128, 128, 128,
++        // Band 5
++        1, 204, 254, 255, 245, 255, 128, 128, 128, 128, 128,
++        207, 160, 250, 255, 238, 128, 128, 128, 128, 128, 128,
++        102, 103, 231, 255, 211, 171, 128, 128, 128, 128, 128,
++        // Band 6
++        1, 152, 252, 255, 240, 255, 128, 128, 128, 128, 128,
++        177, 135, 243, 255, 234, 225, 128, 128, 128, 128, 128,
++        80, 129, 211, 255, 194, 224, 128, 128, 128, 128, 128,
++        // Band 7
++        1, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128,
++        246, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128,
++        255, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
++
++        // Plane 1: Y2
++
++        // Band 0
++        198, 35, 237, 223, 193, 187, 162, 160, 145, 155, 62,
++        131, 45, 198, 221, 172, 176, 220, 157, 252, 221, 1,
++        68, 47, 146, 208, 149, 167, 221, 162, 255, 223, 128,
++        // Band 1
++        1, 149, 241, 255, 221, 224, 255, 255, 128, 128, 128,
++        184, 141, 234, 253, 222, 220, 255, 199, 128, 128, 128,
++        81, 99, 181, 242, 176, 190, 249, 202, 255, 255, 128,
++        // Band 2
++        1, 129, 232, 253, 214, 197, 242, 196, 255, 255, 128,
++        99, 121, 210, 250, 201, 198, 255, 202, 128, 128, 128,
++        23, 91, 163, 242, 170, 187, 247, 210, 255, 255, 128,
++        // Band 3
++        1, 200, 246, 255, 234, 255, 128, 128, 128, 128, 128,
++        109, 178, 241, 255, 231, 245, 255, 255, 128, 128, 128,
++        44, 130, 201, 253, 205, 192, 255, 255, 128, 128, 128,
++        // Band 4
++        1, 132, 239, 251, 219, 209, 255, 165, 128, 128, 128,
++        94, 136, 225, 251, 218, 190, 255, 255, 128, 128, 128,
++        22, 100, 174, 245, 186, 161, 255, 199, 128, 128, 128,
++        // Band 5
++        1, 182, 249, 255, 232, 235, 128, 128, 128, 128, 128,
++        124, 143, 241, 255, 227, 234, 128, 128, 128, 128, 128,
++        35, 77, 181, 251, 193, 211, 255, 205, 128, 128, 128,
++        // Band 6
++        1, 157, 247, 255, 236, 231, 255, 255, 128, 128, 128,
++        121, 141, 235, 255, 225, 227, 255, 255, 128, 128, 128,
++        45, 99, 188, 251, 195, 217, 255, 224, 128, 128, 128,
++        // Band 7
++        1, 1, 251, 255, 213, 255, 128, 128, 128, 128, 128,
++        203, 1, 248, 255, 255, 128, 128, 128, 128, 128, 128,
++        137, 1, 177, 255, 224, 255, 128, 128, 128, 128, 128,
++
++        // Plane 2: U or V
++
++        // Band 0
++        253, 9, 248, 251, 207, 208, 255, 192, 128, 128, 128,
++        175, 13, 224, 243, 193, 185, 249, 198, 255, 255, 128,
++        73, 17, 171, 221, 161, 179, 236, 167, 255, 234, 128,
++        // Band 1
++        1, 95, 247, 253, 212, 183, 255, 255, 128, 128, 128,
++        239, 90, 244, 250, 211, 209, 255, 255, 128, 128, 128,
++        155, 77, 195, 248, 188, 195, 255, 255, 128, 128, 128,
++        // Band 2
++        1, 24, 239, 251, 218, 219, 255, 205, 128, 128, 128,
++        201, 51, 219, 255, 196, 186, 128, 128, 128, 128, 128,
++        69, 46, 190, 239, 201, 218, 255, 228, 128, 128, 128,
++        // Band 3
++        1, 191, 251, 255, 255, 128, 128, 128, 128, 128, 128,
++        223, 165, 249, 255, 213, 255, 128, 128, 128, 128, 128,
++        141, 124, 248, 255, 255, 128, 128, 128, 128, 128, 128,
++        // Band 4
++        1, 16, 248, 255, 255, 128, 128, 128, 128, 128, 128,
++        190, 36, 230, 255, 236, 255, 128, 128, 128, 128, 128,
++        149, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128,
++        // Band 5
++        1, 226, 255, 128, 128, 128, 128, 128, 128, 128, 128,
++        247, 192, 255, 128, 128, 128, 128, 128, 128, 128, 128,
++        240, 128, 255, 128, 128, 128, 128, 128, 128, 128, 128,
++        // Band 6
++        1, 134, 252, 255, 255, 128, 128, 128, 128, 128, 128,
++        213, 62, 250, 255, 255, 128, 128, 128, 128, 128, 128,
++        55, 93, 255, 128, 128, 128, 128, 128, 128, 128, 128,
++        // Band 7
++        128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
++        128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
++        128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
++
++        // Plane 3: Y beginning at coefficient 0
++
++        // Band 0
++        202, 24, 213, 235, 186, 191, 220, 160, 240, 175, 255,
++        126, 38, 182, 232, 169, 184, 228, 174, 255, 187, 128,
++        61, 46, 138, 219, 151, 178, 240, 170, 255, 216, 128,
++        // Band 1
++        1, 112, 230, 250, 199, 191, 247, 159, 255, 255, 128,
++        166, 109, 228, 252, 211, 215, 255, 174, 128, 128, 128,
++        39, 77, 162, 232, 172, 180, 245, 178, 255, 255, 128,
++        // Band 2
++        1, 52, 220, 246, 198, 199, 249, 220, 255, 255, 128,
++        124, 74, 191, 243, 183, 193, 250, 221, 255, 255, 128,
++        24, 71, 130, 219, 154, 170, 243, 182, 255, 255, 128,
++        // Band 3
++        1, 182, 225, 249, 219, 240, 255, 224, 128, 128, 128,
++        149, 150, 226, 252, 216, 205, 255, 171, 128, 128, 128,
++        28, 108, 170, 242, 183, 194, 254, 223, 255, 255, 128,
++        // Band 4
++        1, 81, 230, 252, 204, 203, 255, 192, 128, 128, 128,
++        123, 102, 209, 247, 188, 196, 255, 233, 128, 128, 128,
++        20, 95, 153, 243, 164, 173, 255, 203, 128, 128, 128,
++        // Band 5
++        1, 222, 248, 255, 216, 213, 128, 128, 128, 128, 128,
++        168, 175, 246, 252, 235, 205, 255, 255, 128, 128, 128,
++        47, 116, 215, 255, 211, 212, 255, 255, 128, 128, 128,
++        // Band 6
++        1, 121, 236, 253, 212, 214, 255, 255, 128, 128, 128,
++        141, 84, 213, 252, 201, 202, 255, 219, 128, 128, 128,
++        42, 80, 160, 240, 162, 185, 255, 205, 128, 128, 128,
++        // Band 7
++        1, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128,
++        244, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128,
++        238, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128,
++]
+diff --git a/std/vp8/decode_bitstream.wuffs b/std/vp8/decode_bitstream.wuffs
+new file mode 100644
+index 00000000..9b5da55c
+--- /dev/null
++++ b/std/vp8/decode_bitstream.wuffs
+@@ -0,0 +1,78 @@
++// Copyright 2026 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
++// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
++// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
++// option. This file may not be copied, modified, or distributed
++// except according to those terms.
++//
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++pri func decoder.read_bit!(workbuf: roslice base.u8, part: base.u32[..= 8], prob: base.u32[..= 0xFF]) base.u32[..= 1] {
++    var p        : base.u32[..= 8]
++    var c8       : base.u8
++    var shift    : base.u32[..= 31]
++    var split_m1 : base.u32[..= 0xFE]
++    var ret      : base.u32[..= 1]
++
++    p = args.part
++    if this.part_n_bits[p] < 8 {
++        c8 = 0
++        if this.part_workbuf_ris[p] < args.workbuf.length() {
++            assert this.part_workbuf_ris[p] < 0xFFFF_FFFF_FFFF_FFFF via "a < b: a < c; c <= b"(c: args.workbuf.length())
++            c8 = args.workbuf[this.part_workbuf_ris[p]]
++            this.part_workbuf_ris[p] += 1
++        }
++        this.part_bits[p] = (this.part_bits[p] ~mod<< 8) | (c8 as base.u32)
++        this.part_n_bits[p] ~mod+= 8
++    }
++
++    shift = (this.part_n_bits[p] ~mod- 8) & 31
++    split_m1 = ((this.part_range_m1s[p] * args.prob) >> 8)
++
++    if (this.part_bits[p] >> shift) > split_m1 {
++        ret = 1
++        this.part_range_m1s[p] = (this.part_range_m1s[p] ~mod- (split_m1 + 1)) & 0xFF
++        this.part_bits[p] ~mod-= (split_m1 + 1) ~mod<< shift
++
++    } else {
++        ret = 0
++        this.part_range_m1s[p] = split_m1
++    }
++
++    this.part_n_bits[p] ~mod-= RENORM_SHIFT[this.part_range_m1s[p]] as base.u32
++    this.part_range_m1s[p] = RENORM_RANGE_M1[this.part_range_m1s[p]] as base.u32
++
++    return ret
++}
++
++pri func decoder.read_unsigned!(workbuf: roslice base.u8, part: base.u32[..= 8], n: base.u32[..= 31]) base.u32 {
++    var n   : base.u32[..= 31]
++    var v1  : base.u32[..= 1]
++    var v32 : base.u32
++
++    n = args.n
++    while n > 0 {
++        n -= 1
++        v1 = this.read_bit!(workbuf: args.workbuf, part: args.part, prob: 128)
++        v32 |= v1 ~mod<< n
++    }
++    return v32
++}
++
++pri func decoder.read_signed!(workbuf: roslice base.u8, part: base.u32[..= 8], n: base.u32[..= 31]) base.u32 {
++    var v1  : base.u32[..= 1]
++    var v32 : base.u32
++
++    v1 = this.read_bit!(workbuf: args.workbuf, part: args.part, prob: 128)
++    if v1 == 0 {
++        return 0
++    }
++
++    v32 = this.read_unsigned!(workbuf: args.workbuf, part: args.part, n: args.n)
++    v1 = this.read_bit!(workbuf: args.workbuf, part: args.part, prob: 128)
++    if v1 == 0 {
++        return v32
++    }
++    return 0 ~mod- v32
++}
+diff --git a/std/vp8/decode_first_partition.wuffs b/std/vp8/decode_first_partition.wuffs
+new file mode 100644
+index 00000000..ac6e0e60
+--- /dev/null
++++ b/std/vp8/decode_first_partition.wuffs
+@@ -0,0 +1,272 @@
++// Copyright 2026 The Wuffs Authors.
++//
++// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
++// https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
++// <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
++// option. This file may not be copied, modified, or distributed
++// except according to those terms.
++//
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++
++pri func decoder.copy_partitions_to_workbuf?(src: base.io_reader, workbuf: slice base.u8) {
++    var i : base.u64
++    var j : base.u64
++    var n : base.u32
++
++    i = this.workbuf_yuv_v_end
++    j = this.workbuf_yuv_v_end + (this.partitioned_data_length as base.u64)
++
++    while i < j,
++            inv j <= 0x20FF_FFF7,
++    {
++        if j > args.workbuf.length() {
++            return base."#bad workbuf length"
++        }
++        assert j > i via "a > b: b < a"()
++        n = args.src.limited_copy_u32_to_slice!(
++                up_to: ((j - i) & 0xFFFF_FFFF) as base.u32,
++                s: args.workbuf[i .. j])
++        i ~mod+= n as base.u64
++        if i < j {
++            yield? base."$short read"
++        }
++    }
++
++    // Write eight 0x00 bytes to the end of the workbuf, past what we copy from
++    // args.src. Later on, we can then always peek_u64le from the workbuf.
++
++    j += 8
++    while i < j {
++        assert i < 0xFFFF_FFFF_FFFF_FFFF via "a < b: a < c; c <= b"(c: j)
++        if i >= args.workbuf.length() {
++            return base."#bad workbuf length"
++        }
++        args.workbuf[i] = 0x00
++        i += 1
++    }
++}
++
++pri func decoder.decode_first_partition!(workbuf: roslice base.u8) base.status {
++    var v1  : base.u32[..= 1]
++    var v32 : base.u32
++
++    // RFC 6386 Section 9.2. Color Space and Pixel Type (Key Frames Only).
++    if this.is_key_frame {
++        this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
++        this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
++    }
++
++    // RFC 6386 Section 9.3. Segment-Based Adjustments.
++    this.decode_segment_header!(workbuf: args.workbuf)
++
++    // RFC 6386 Section 9.4. Loop Filter Type and Levels.
++    this.decode_filter_header!(workbuf: args.workbuf)
++
++    // RFC 6386 Section 9.5. Token Partition and Partition Data Offsets.
++    v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 2)
++    this.num_other_partitions_m1 = ((1 as base.u32) << (v32 & 3)) - 1
++
++    // RFC 6386 Section 9.6. Dequantization Indices.
++    v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 7)
++    this.quant_yac_qi = v32 & 127
++    this.quant_ydc_delta = this.read_signed!(workbuf: args.workbuf, part: 0, n: 4)
++    this.quant_y2dc_delta = this.read_signed!(workbuf: args.workbuf, part: 0, n: 4)
++    this.quant_y2ac_delta = this.read_signed!(workbuf: args.workbuf, part: 0, n: 4)
++    this.quant_uvdc_delta = this.read_signed!(workbuf: args.workbuf, part: 0, n: 4)
++    this.quant_uvac_delta = this.read_signed!(workbuf: args.workbuf, part: 0, n: 4)
++
++    // RFC 6386 Section 9.7. Refresh Golden Frame and Altref Frame.
++    if not this.is_key_frame {
++        return "#unsupported VP8 file"
++    }
++
++    // RFC 6386 Section 9.8. Refresh Last Frame Buffer.
++    this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
++
++    // RFC 6386 Section 9.9. DCT Coefficient Probability Update.
++    this.decode_coeff_probs!(workbuf: args.workbuf)
++
++    if not this.is_key_frame {
++        // RFC 6386 Section 9.10. Remaining Frame Header Data (Non-Key Frame).
++        return "#unsupported VP8 file"
++
++    } else {
++        // RFC 6386 Section 9.11. Remaining Frame Header Data (Key Frame).
++        v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
++        if v1 <> 0 {
++            v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 8)
++            this.prob_skip = (v32 & 0xFF) | 0x100
++        }
++    }
++
++    return ok
++}
++
++pri func decoder.decode_segment_header!(workbuf: roslice base.u8) {
++    var v1  : base.u32[..= 1]
++    var v32 : base.u32
++    var i   : base.u32
++
++    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
++    this.seg_enabled = v1 <> 0
++    if not this.seg_enabled {
++        this.seg_update_map = false
++        return nothing
++    }
++
++    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
++    this.seg_update_map = v1 <> 0
++
++    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
++    if v1 <> 0 {
++        v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
++        this.seg_absolute = v1 <> 0
++
++        i = 0
++        while i < 4 {
++            v32 = this.read_signed!(workbuf: args.workbuf, part: 0, n: 7)
++            this.seg_quants[i] = (v32 & 0xFF) as base.u8
++            i += 1
++        }
++
++        i = 0
++        while i < 4 {
++            v32 = this.read_signed!(workbuf: args.workbuf, part: 0, n: 6)
++            this.seg_strengths[i] = (v32 & 0xFF) as base.u8
++            i += 1
++        }
++    }
++
++    if this.seg_update_map {
++        i = 0
++        while i < 3 {
++            v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
++            if v1 <> 0 {
++                v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 8)
++                this.seg_probs[i] = (v32 & 0xFF) as base.u8
++            } else {
++                this.seg_probs[i] = 0xFF
++            }
++            i += 1
++        }
++    }
++}
++
++pri func decoder.decode_filter_header!(workbuf: roslice base.u8) {
++    var v1  : base.u32[..= 1]
++    var v32 : base.u32
++    var i   : base.u32
++
++    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
++    this.filt_simple = v1 <> 0
++
++    v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 6)
++    this.filt_level = (v32 & 0x3F) as base.u8
++
++    v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 3)
++    this.filt_sharpness = (v32 & 0x07) as base.u8
++
++    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
++    this.filt_deltas_enabled = v1 <> 0
++    if not this.filt_deltas_enabled {
++        return nothing
++    }
++
++    v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: 128)
++    if v1 == 0 {
++        return nothing
++    }
++
++    i = 0
++    while i < 8 {
++        v32 = this.read_signed!(workbuf: args.workbuf, part: 0, n: 6)
++        this.filt_deltas[i >> 2][i & 3] = (v32 & 0xFF) as base.u8
++        i += 1
++    }
++}
++
++pri func decoder.decode_coeff_probs!(workbuf: roslice base.u8) {
++    var v1  : base.u32[..= 1]
++    var v32 : base.u32
++    var i   : base.u32
++
++    i = 0
++    while i < 1056 {
++        v1 = this.read_bit!(workbuf: args.workbuf, part: 0, prob: COEFF_UPDATE_PROBS[i] as base.u32)
++        if v1 <> 0 {
++            v32 = this.read_unsigned!(workbuf: args.workbuf, part: 0, n: 8)
++            this.coeff_probs[i] = (v32 & 0xFF) as base.u8
++        } else {
++            this.coeff_probs[i] = DEFAULT_COEFF_PROBS[i]
++        }
++        i += 1
++    }
++}
++
++pri func decoder.decode_other_partition_lengths!(workbuf: roslice base.u8) base.status {
++    var v32       : base.u32
++    var remainder : base.u32
++    var i         : base.u32
++    var o         : base.u64
++
++    remainder = this.partitioned_data_length ~sat- this.part_lens[0]
++    remainder ~sat-= 3 * this.num_other_partitions_m1
++
++    o = this.workbuf_yuv_v_end + (this.part_lens[0] as base.u64)
++    i = 0
++    while i < this.num_other_partitions_m1 {
++        assert i < 7 via "a < b: a < c; c <= b"(c: this.num_other_partitions_m1)
++
++        v32 = 0
++
++        if o >= args.workbuf.length() {
++            return "#bad header"
++        }
++        assert o < 0xFFFF_FFFF_FFFF_FFFF via "a < b: a < c; c <= b"(c: args.workbuf.length())
++        v32 |= (args.workbuf[o] as base.u32) << 0
++        o += 1
++
++        if o >= args.workbuf.length() {
++            return "#bad header"
++        }
++        assert o < 0xFFFF_FFFF_FFFF_FFFF via "a < b: a < c; c <= b"(c: args.workbuf.length())
++        v32 |= (args.workbuf[o] as base.u32) << 8
++        o += 1
++
++        if o >= args.workbuf.length() {
++            return "#bad header"
++        }
++        assert o < 0xFFFF_FFFF_FFFF_FFFF via "a < b: a < c; c <= b"(c: args.workbuf.length())
++        v32 |= (args.workbuf[o] as base.u32) << 16
++        o += 1
++
++        if remainder < v32 {
++            return "#bad header"
++        }
++        remainder -= v32
++
++        this.part_lens[1 + i] = v32
++
++        i += 1
++    }
++
++    if remainder > 0xFF_FFFF {
++        return "#unsupported VP8 file"
++    }
++    this.part_lens[1 + this.num_other_partitions_m1] = remainder
++
++    i = 0
++    while i < (1 + this.num_other_partitions_m1) {
++        assert i < 8 via "a < b: a < c; c <= b"(c: (1 + this.num_other_partitions_m1))
++
++        this.part_workbuf_ris[1 + i] = o
++        o ~mod+= this.part_lens[1 + i] as base.u64
++        if o > args.workbuf.length() {
++            return "#bad header"
++        }
++
++        i += 1
++    }
++
++    return ok
++}
+diff --git a/std/vp8/decode_vp8.wuffs b/std/vp8/decode_vp8.wuffs
+index e804dc05..7a727873 100644
+--- a/std/vp8/decode_vp8.wuffs
++++ b/std/vp8/decode_vp8.wuffs
+@@ -1,86 +1,192 @@
+ // Copyright 2024 The Wuffs Authors.
+ //
+ // Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+ // https://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+ // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
+ // option. This file may not be copied, modified, or distributed
+ // except according to those terms.
+ //
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ 
++pub status "#bad QUIRK_SOURCE_LENGTH"
+ pub status "#bad header"
++pub status "#missing QUIRK_SOURCE_LENGTH"
+ pub status "#truncated input"
++pub status "#unsupported QUIRK_SOURCE_LENGTH"
+ pub status "#unsupported VP8 file"
+ 
+-pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0
++pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0x20FF_FFFF
+ 
+ pub struct decoder? implements base.image_decoder(
+         width  : base.u32[..= 0x3FFF],
+         height : base.u32[..= 0x3FFF],
+ 
++        // Width and height again, but this time measured in 16×16 macroblocks.
++        mbw : base.u32[..= 0x400],
++        mbh : base.u32[..= 0x400],
++
+         // The call sequence state machine is discussed in
+         // (/doc/std/image-decoders-call-sequence.md).
+         call_sequence : base.u8,
+ 
++        is_key_frame : base.bool,
++
+         frame_config_io_position : base.u64,
+ 
++        quirk_source_length : base.u64,
++
++        // Just under 144 MiB, for 9 partitions each up to 0xFF_FFFF bytes.
++        partitioned_data_length : base.u32[..= 0x08FF_FFF7],
++
++        // args.workbuf strides and offsets.
++        //
++        // The workbuf holds the YUV buffers (after decoding from the source
++        // bytes but before converting YUV to RGBX) and then also a copy of
++        // most of the source bytes themselves - the "at least 2, up to 9"
++        // partitions after the frame header. Decoding successive rows of
++        // macroblocks alternates between the other (not-first) partitions.
++        // Source bytes are processed with random (not sequential) access.
++        workbuf_yuv_y_stride  : base.u32[..= 0x4000],
++        workbuf_yuv_uv_stride : base.u32[..= 0x2000],
++        workbuf_yuv_y_end     : base.u64[..= 0x1000_0000],
++        workbuf_yuv_u_end     : base.u64[..= 0x1400_0000],
++        workbuf_yuv_v_end     : base.u64[..= 0x1800_0000],
++
++        // Partition lengths and per-partition entropy decoder state.
++        //
++        // On naming: "foobar_m1" is "foobar minus 1" and "foobar_m1s" is the
++        // plural, "an array of (foobar - 1) values".
++        part_workbuf_ris : array[9] base.u64,
++        part_range_m1s   : array[9] base.u32[..= 0xFF],
++        part_bits        : array[9] base.u32,
++        part_n_bits      : array[9] base.u32,
++        part_lens        : array[9] base.u32[..= 0xFF_FFFF],
++
++        // The number of other partitions (other than the first one), minus 1.
++        num_other_partitions_m1 : base.u32[..= 7],
++
++        // Segmentation parameters.
++        seg_enabled    : base.bool,
++        seg_update_map : base.bool,
++        seg_absolute   : base.bool,
++        seg_quants     : array[4] base.u8,
++        seg_strengths  : array[4] base.u8,
++        seg_probs      : array[3] base.u8,
++
++        // Loop filter parameters.
++        filt_simple         : base.bool,
++        filt_level          : base.u8[..= 63],
++        filt_sharpness      : base.u8[..= 7],
++        filt_deltas_enabled : base.bool,
++        filt_deltas         : array[2] array[4] base.u8,
++
++        // Dequantization parameters.
++        quant_yac_qi     : base.u32[..= 127],
++        quant_ydc_delta  : base.u32,
++        quant_y2dc_delta : base.u32,
++        quant_y2ac_delta : base.u32,
++        quant_uvdc_delta : base.u32,
++        quant_uvac_delta : base.u32,
++
++        // These 9 bits combine what RFC 6386 calls mb_no_skip_coeff (which we
++        // hold in the 0x100 bit) and prob_skip_false (in the low 8 bits).
++        prob_skip : base.u32[..= 0x1FF],
++
+         dst_x : base.u32,
+         dst_y : base.u32,
+ 
+         swizzler : base.pixel_swizzler,
+         util     : base.utility,
++) + (
++        // 1056 is (4 planes, 8 bands, 3 contexts, 11 tokens) flattened.
++        coeff_probs : array[1056] base.u8,
+ )
+ 
+ pub func decoder.get_quirk(key: base.u32) base.u64 {
++    if args.key == base.QUIRK_SOURCE_LENGTH {
++        return this.quirk_source_length
++    }
+     return 0
+ }
+ 
+ pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
++    if args.key == base.QUIRK_SOURCE_LENGTH {
++        this.quirk_source_length = args.value
++        return ok
++    }
+     return base."#unsupported option"
+ }
+ 
+ pub func decoder.decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+     var status : base.status
+ 
+     while true {
+         status =? this.do_decode_image_config?(dst: args.dst, src: args.src)
+         if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+         yield? status
+     }
+ }
+ 
+ pri func decoder.do_decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+     var c32 : base.u32
+ 
+     if this.call_sequence <> 0x00 {
+         return base."#bad call sequence"
+     }
+ 
++    if (this.quirk_source_length & 1) == 0 {
++        return "#missing QUIRK_SOURCE_LENGTH"
++    } else if (this.quirk_source_length >> 1) < 10 {
++        return "#bad QUIRK_SOURCE_LENGTH"
++    } else if (this.quirk_source_length >> 1) > (0x08FF_FFF7 + 10) {
++        return "#unsupported QUIRK_SOURCE_LENGTH"
++    }
++    this.partitioned_data_length = ((this.quirk_source_length >> 1) as base.u32) - 10
++
++    // RFC 6386 Section 9. Frame Header, up to and including 9.1. Uncompressed
++    // Data Chunk. decode_first_partition handles the rest of section 9.
++
+     c32 = args.src.read_u24le_as_u32?()
+-    if (c32 & 0x01) <> 0 {
++    this.is_key_frame = ((c32 & 0x01) == 0)
++    if not this.is_key_frame {
+         // TODO: support non-key frames.
+         return "#unsupported VP8 file"
+     }
++    this.part_lens[0] = c32 >> 5
++    if this.part_lens[0] > this.partitioned_data_length {
++        return "#bad header"
++    }
+ 
+     c32 = args.src.read_u24le_as_u32?()
+     if c32 <> '\x9D\x01\x2A'le {
+         return "#bad header"
+     }
+ 
+     c32 = args.src.read_u32le?()
+     this.width = 0x3FFF & (c32 >> 0)
+     this.height = 0x3FFF & (c32 >> 16)
++    this.mbw = (this.width + 15) / 16
++    this.mbh = (this.height + 15) / 16
++
++    this.workbuf_yuv_y_stride = this.mbw * 16
++    this.workbuf_yuv_uv_stride = this.mbw * 8
++    this.workbuf_yuv_y_end =
++            ((this.workbuf_yuv_y_stride as base.u64) * ((this.mbh * 16) as base.u64))
++    this.workbuf_yuv_u_end = this.workbuf_yuv_y_end +
++            ((this.workbuf_yuv_uv_stride as base.u64) * ((this.mbh * 8) as base.u64))
++    this.workbuf_yuv_v_end = this.workbuf_yuv_u_end +
++            ((this.workbuf_yuv_uv_stride as base.u64) * ((this.mbh * 8) as base.u64))
+ 
+     this.frame_config_io_position = args.src.position()
+ 
+     if args.dst <> nullptr {
+         args.dst.set!(
+                 pixfmt: base.PIXEL_FORMAT__BGRX,
+                 pixsub: 0,
+                 width: this.width,
+                 height: this.height,
+                 first_frame_io_position: this.frame_config_io_position,
+                 first_frame_is_opaque: false)
+     }
+@@ -126,46 +232,77 @@ pri func decoder.do_decode_frame_config?(dst: nptr base.frame_config, src: base.
+                 index: 0,
+                 io_position: this.frame_config_io_position,
+                 disposal: 0,
+                 opaque_within_bounds: false,
+                 overwrite_instead_of_blend: false,
+                 background_color: 0xFF00_0000)
+     }
+ 
+     this.call_sequence = 0x40
+ }
+ 
+ pub func decoder.decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
++    var wb_len : base.u64[..= DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE]
+     var status : base.status
+ 
+     while true {
++        wb_len = this.workbuf_yuv_v_end + (this.partitioned_data_length as base.u64) + 8
++        if wb_len > args.workbuf.length() {
++            return base."#bad workbuf length"
++        } else {
++            args.workbuf = args.workbuf[.. wb_len]
++        }
++
+         status =? this.do_decode_frame?(dst: args.dst, src: args.src, blend: args.blend, workbuf: args.workbuf, opts: args.opts)
+         if (status == base."$short read") and args.src.is_closed() {
+             return "#truncated input"
+         }
+         yield? status
+     }
+ }
+ 
+ pri func decoder.do_decode_frame?(dst: ptr base.pixel_buffer, src: base.io_reader, blend: base.pixel_blend, workbuf: slice base.u8, opts: nptr base.decode_frame_options) {
++    var i      : base.u32
+     var status : base.status
+ 
+     if this.call_sequence == 0x40 {
+         // No-op.
+     } else if this.call_sequence < 0x40 {
+         this.do_decode_frame_config?(dst: nullptr, src: args.src)
+     } else {
+         return base."@end of data"
+     }
+ 
++    this.copy_partitions_to_workbuf?(src: args.src, workbuf: args.workbuf)
++
++    // Initialize per-partition bitstreams.
++    i = 0
++    while i < 9 {
++        this.part_workbuf_ris[i] = this.workbuf_yuv_v_end
++        this.part_range_m1s[i] = 0xFE
++        this.part_bits[i] = 0
++        this.part_n_bits[i] = 0
++        i += 1
++    }
++
++    status = this.decode_first_partition!(workbuf: args.workbuf)
++    if not status.is_ok() {
++        return status
++    }
++
++    status = this.decode_other_partition_lengths!(workbuf: args.workbuf)
++    if not status.is_ok() {
++        return status
++    }
++
+     this.dst_x = 0
+     this.dst_y = 0
+ 
+     status = this.swizzler.prepare!(
+             dst_pixfmt: args.dst.pixel_format(),
+             dst_palette: args.dst.palette(),
+             src_pixfmt: this.util.make_pixel_format(repr: base.PIXEL_FORMAT__BGRX),
+             src_palette: this.util.empty_slice_u8(),
+             blend: args.blend)
+     if not status.is_ok() {
+         return status
+     }
+@@ -270,14 +407,19 @@ pub func decoder.restart_frame!(index: base.u64, io_position: base.u64) base.sta
+     return ok
+ }
+ 
+ pub func decoder.set_report_metadata!(fourcc: base.u32, report: base.bool) {
+     // No-op. VP8 doesn't support metadata (but WEBP does).
+ }
+ 
+ pub func decoder.tell_me_more?(dst: base.io_writer, minfo: nptr base.more_information, src: base.io_reader) {
+     return base."#no more information"
+ }
+ 
+ pub func decoder.workbuf_len() base.range_ii_u64 {
+-    return this.util.make_range_ii_u64(min_incl: 0, max_incl: 0)
++    var wb_len : base.u64[..= DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE]
++
++    wb_len = this.workbuf_yuv_v_end + (this.partitioned_data_length as base.u64) + 8
++    return this.util.make_range_ii_u64(
++            min_incl: wb_len,
++            max_incl: wb_len)
+ }
+diff --git a/std/webp/decode_webp.wuffs b/std/webp/decode_webp.wuffs
+index 0589aabf..2de3302a 100644
+--- a/std/webp/decode_webp.wuffs
++++ b/std/webp/decode_webp.wuffs
+@@ -18,25 +18,27 @@ pub status "#bad color cache"
+ pub status "#bad header"
+ pub status "#bad transform"
+ pub status "#short chunk"
+ pub status "#truncated input"
+ pub status "#unsupported number of Huffman groups"
+ pub status "#unsupported transform after color indexing transform"
+ pub status "#unsupported WebP file"
+ 
+ pri status "#internal error: inconsistent Huffman code"
+ pri status "#internal error: inconsistent dst buffer"
+ pri status "#internal error: inconsistent n_bits"
+ 
+-pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0
++// TODO: reference vp8.DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE, although the
++// worst case for VP8L is bigger than for VP8.
++pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0x4C00_0000
+ 
+ pub struct decoder? implements base.image_decoder(
+         pixfmt : base.u32,
+         width  : base.u32[..= 0x4000],
+         height : base.u32[..= 0x4000],
+ 
+         // The call sequence state machine is discussed in
+         // (/doc/std/image-decoders-call-sequence.md).
+         call_sequence : base.u8,
+ 
+         code_length_code_lengths : array[19] base.u8[..= 7],
+ 
+@@ -230,24 +232,31 @@ pri func decoder.do_decode_image_config_limited?(dst: nptr base.image_config, sr
+     } else if c32 == 'VP8X'le {
+         return "#unsupported WebP file"
+     } else {
+         return "#bad header"
+     }
+ 
+     this.sub_chunk_length = args.src.read_u32le?()
+     if this.sub_chunk_length < 4 {
+         return "#bad header"
+     }
+     this.sub_chunk_has_padding = (this.sub_chunk_length & 1) <> 0
+ 
++    if this.is_vp8_lossy {
++        this.vp8.set_quirk!(
++                key: base.QUIRK_SOURCE_LENGTH,
++                value: ((this.sub_chunk_length as base.u64) << 1) | 1)
++
++    }
++
+     while true {
+         io_limit (io: args.src, limit: this.sub_chunk_length as base.u64) {
+             r_mark = args.src.mark()
+             if this.is_vp8_lossy {
+                 status =? this.vp8.decode_image_config?(dst: args.dst, src: args.src)
+             } else {
+                 status =? this.do_decode_image_config_limited_vp8l?(src: args.src)
+             }
+             this.sub_chunk_length ~sat-=
+                     (args.src.count_since(mark: r_mark) & 0xFFFF_FFFF) as base.u32
+         }
+```
+
+## Uniform selected declaration context
+
+This same mechanically selected S0/S1 context is supplied for every case.
+
+### S0
+
+```text
+lines 9-57
+000009: // SPDX-License-Identifier: Apache-2.0 OR MIT
+000010: 
+000011: pub status "#bad header"
+000012: pub status "#truncated input"
+000013: pub status "#unsupported VP8 file"
+000014: 
+000015: pub const DECODER_WORKBUF_LEN_MAX_INCL_WORST_CASE : base.u64 = 0
+000016: 
+000017: pub struct decoder? implements base.image_decoder(
+000018:         width  : base.u32[..= 0x3FFF],
+000019:         height : base.u32[..= 0x3FFF],
+000020: 
+000021:         // The call sequence state machine is discussed in
+000022:         // (/doc/std/image-decoders-call-sequence.md).
+000023:         call_sequence : base.u8,
+000024: 
+000025:         frame_config_io_position : base.u64,
+000026: 
+000027:         dst_x : base.u32,
+000028:         dst_y : base.u32,
+000029: 
+000030:         swizzler : base.pixel_swizzler,
+000031:         util     : base.utility,
+000032: )
+000033: 
+000034: pub func decoder.get_quirk(key: base.u32) base.u64 {
+000035:     return 0
+000036: }
+000037: 
+000038: pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+000039:     return base."#unsupported option"
+000040: }
+000041: 
+000042: pub func decoder.decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+000043:     var status : base.status
+000044: 
+000045:     while true {
+000046:         status =? this.do_decode_image_config?(dst: args.dst, src: args.src)
+000047:         if (status == base."$short read") and args.src.is_closed() {
+000048:             return "#truncated input"
+000049:         }
+000050:         yield? status
+000051:     }
+000052: }
+000053: 
+000054: pri func decoder.do_decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+000055:     var c32 : base.u32
+000056: 
+000057:     if this.call_sequence <> 0x00 {
+```
+
+### S1
+
+```text
+lines 80-128
+000080:         filt_deltas_enabled : base.bool,
+000081:         filt_deltas         : array[2] array[4] base.u8,
+000082: 
+000083:         // Dequantization parameters.
+000084:         quant_yac_qi     : base.u32[..= 127],
+000085:         quant_ydc_delta  : base.u32,
+000086:         quant_y2dc_delta : base.u32,
+000087:         quant_y2ac_delta : base.u32,
+000088:         quant_uvdc_delta : base.u32,
+000089:         quant_uvac_delta : base.u32,
+000090: 
+000091:         // These 9 bits combine what RFC 6386 calls mb_no_skip_coeff (which we
+000092:         // hold in the 0x100 bit) and prob_skip_false (in the low 8 bits).
+000093:         prob_skip : base.u32[..= 0x1FF],
+000094: 
+000095:         dst_x : base.u32,
+000096:         dst_y : base.u32,
+000097: 
+000098:         swizzler : base.pixel_swizzler,
+000099:         util     : base.utility,
+000100: ) + (
+000101:         // 1056 is (4 planes, 8 bands, 3 contexts, 11 tokens) flattened.
+000102:         coeff_probs : array[1056] base.u8,
+000103: )
+000104: 
+000105: pub func decoder.get_quirk(key: base.u32) base.u64 {
+000106:     if args.key == base.QUIRK_SOURCE_LENGTH {
+000107:         return this.quirk_source_length
+000108:     }
+000109:     return 0
+000110: }
+000111: 
+000112: pub func decoder.set_quirk!(key: base.u32, value: base.u64) base.status {
+000113:     if args.key == base.QUIRK_SOURCE_LENGTH {
+000114:         this.quirk_source_length = args.value
+000115:         return ok
+000116:     }
+000117:     return base."#unsupported option"
+000118: }
+000119: 
+000120: pub func decoder.decode_image_config?(dst: nptr base.image_config, src: base.io_reader) {
+000121:     var status : base.status
+000122: 
+000123:     while true {
+000124:         status =? this.do_decode_image_config?(dst: args.dst, src: args.src)
+000125:         if (status == base."$short read") and args.src.is_closed() {
+000126:             return "#truncated input"
+000127:         }
+000128:         yield? status
+```
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"C005","gap_exists":true,"gap_type":["entry_point","API_protocol","configuration","input_semantics"],"confidence":98,"affected_functions":["wuffs_vp8__decoder__initialize","wuffs_vp8__decoder__set_quirk","wuffs_vp8__decoder__get_quirk","wuffs_vp8__decoder__decode_image_config","wuffs_vp8__decoder__workbuf_len","wuffs_vp8__decoder__decode_frame"],"reason":"H0 fuzzes only wuffs_webp__decoder through fuzz_image_decoder. S1 makes the standalone VP8 decoder depend on a caller-supplied base.QUIRK_SOURCE_LENGTH protocol before decode_image_config, with length-derived partition state and work-buffer sizing. The WebP path supplies one internally derived, valid quirk value, so H0 does not directly fuzz missing, malformed, boundary, or source-inconsistent QUIRK_SOURCE_LENGTH values at the public VP8 API.","evidence":["H0 defines WUFFS_CONFIG__MODULE__VP8 but instantiates only wuffs_webp__decoder and upcasts that decoder to wuffs_base__image_decoder.","S1 adds public wuffs_vp8 decoder get_quirk and set_quirk handling for base.QUIRK_SOURCE_LENGTH.","decoder.do_decode_image_config returns #missing QUIRK_SOURCE_LENGTH when the low bit is clear, #bad QUIRK_SOURCE_LENGTH below 10 bytes, and #unsupported QUIRK_SOURCE_LENGTH above 0x08FF_FFF7 + 10.","decoder.do_decode_image_config derives partitioned_data_length from quirk_source_length and validates part_lens[0] against it.","decoder.workbuf_len and decoder.decode_frame derive wb_len from workbuf_yuv_v_end, partitioned_data_length, and 8 trailing bytes; decode_frame then calls copy_partitions_to_workbuf and decode_other_partition_lengths.","The WebP decoder calls this.vp8.set_quirk with ((this.sub_chunk_length as base.u64) << 1) | 1, preventing H0's hash from independently varying the quirk value or its consistency with the VP8 bytes."],"recommended_action":"Add a standalone VP8 harness that initializes wuffs_vp8__decoder, uses fuzz-controlled QUIRK_SOURCE_LENGTH values—including absent/even, below-minimum, maximum-boundary, oversized, and values inconsistent with the supplied bytes—and exercises decode_image_config, workbuf_len, decode_frame_config, and decode_frame with bounded allocation."}
+tokens used
+36,163

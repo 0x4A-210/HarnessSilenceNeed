@@ -1,0 +1,340 @@
+PROJECT libxml2
+COMMIT 3f05508a53c2a92bc8da0c07317a31ed6cd75204
+PARENT 3bdd0d7b30b428ed38ba2917f88ef270fd590cec
+SUBJECT tree: Report malloc failures in attribute setters
+
+=== COMPLETE PRODUCTION DIFF ===
+diff --git a/include/libxml/tree.h b/include/libxml/tree.h
+index 2b740b6d..bc99548b 100644
+--- a/include/libxml/tree.h
++++ b/include/libxml/tree.h
+@@ -1125,10 +1125,10 @@ XMLPUBFUN xmlChar *
+ XMLPUBFUN int
+ 		xmlNodeGetSpacePreserve	(const xmlNode *cur);
+ #ifdef LIBXML_TREE_ENABLED
+-XMLPUBFUN void
++XMLPUBFUN int
+ 		xmlNodeSetLang		(xmlNodePtr cur,
+ 					 const xmlChar *lang);
+-XMLPUBFUN void
++XMLPUBFUN int
+ 		xmlNodeSetSpacePreserve (xmlNodePtr cur,
+ 					 int val);
+ #endif /* LIBXML_TREE_ENABLED */
+diff --git a/tree.c b/tree.c
+index 51998f52..7ffdebf2 100644
+--- a/tree.c
++++ b/tree.c
+@@ -5052,23 +5052,27 @@ xmlDocSetRootElement(xmlDocPtr doc, xmlNodePtr root) {
+  *
+  * Set the language of a node, i.e. the values of the xml:lang
+  * attribute.
++ *
++ * Return 0 on success, 1 if arguments are invalid, -1 if a
++ * memory allocation failed.
+  */
+-void
++int
+ xmlNodeSetLang(xmlNodePtr cur, const xmlChar *lang) {
+     xmlNsPtr ns;
++    xmlAttrPtr attr;
++    int res;
+ 
+-    if (cur == NULL) return;
+-    switch(cur->type) {
+-        case XML_ELEMENT_NODE:
+-        case XML_ATTRIBUTE_NODE:
+-	    break;
+-        default:
+-	    return;
+-    }
+-    xmlSearchNsByHrefSafe(cur, XML_XML_NAMESPACE, &ns);
+-    if (ns == NULL)
+-	return;
+-    xmlSetNsProp(cur, ns, BAD_CAST "lang", lang);
++    if ((cur == NULL) || (cur->type != XML_ELEMENT_NODE))
++        return(1);
++
++    res = xmlSearchNsByHrefSafe(cur, XML_XML_NAMESPACE, &ns);
++    if (res != 0)
++        return(res);
++    attr = xmlSetNsProp(cur, ns, BAD_CAST "lang", lang);
++    if (attr == NULL)
++        return(-1);
++
++    return(0);
+ }
+ #endif /* LIBXML_TREE_ENABLED */
+ 
+@@ -5085,15 +5089,22 @@ xmlNodeSetLang(xmlNodePtr cur, const xmlChar *lang) {
+ xmlChar *
+ xmlNodeGetLang(const xmlNode *cur) {
+     xmlChar *lang;
++    int res;
+ 
+     if ((cur == NULL) || (cur->type == XML_NAMESPACE_DECL))
+         return(NULL);
++
+     while (cur != NULL) {
+-        lang = xmlGetNsProp(cur, BAD_CAST "lang", XML_XML_NAMESPACE);
++        res = xmlNodeGetAttrValue(cur, BAD_CAST "lang", XML_XML_NAMESPACE,
++                                  &lang);
++        if (res < 0)
++            return(NULL);
+ 	if (lang != NULL)
+ 	    return(lang);
++
+ 	cur = cur->parent;
+     }
++
+     return(NULL);
+ }
+ 
+@@ -5106,30 +5117,34 @@ xmlNodeGetLang(const xmlNode *cur) {
+  *
+  * Set (or reset) the space preserving behaviour of a node, i.e. the
+  * value of the xml:space attribute.
++ *
++ * Return 0 on success, 1 if arguments are invalid, -1 if a
++ * memory allocation failed.
+  */
+-void
++int
+ xmlNodeSetSpacePreserve(xmlNodePtr cur, int val) {
+     xmlNsPtr ns;
++    xmlAttrPtr attr;
++    const char *string;
++    int res;
+ 
+-    if (cur == NULL) return;
+-    switch(cur->type) {
+-        case XML_ELEMENT_NODE:
+-        case XML_ATTRIBUTE_NODE:
+-	    break;
+-        default:
+-            return;
+-    }
+-    xmlSearchNsByHrefSafe(cur, XML_XML_NAMESPACE, &ns);
+-    if (ns == NULL)
+-	return;
+-    switch (val) {
+-    case 0:
+-	xmlSetNsProp(cur, ns, BAD_CAST "space", BAD_CAST "default");
+-	break;
+-    case 1:
+-	xmlSetNsProp(cur, ns, BAD_CAST "space", BAD_CAST "preserve");
+-	break;
+-    }
++    if ((cur == NULL) || (cur->type != XML_ELEMENT_NODE))
++        return(1);
++
++    res = xmlSearchNsByHrefSafe(cur, XML_XML_NAMESPACE, &ns);
++    if (res != 0)
++	return(res);
++
++    if (val == 0)
++        string = "default";
++    else
++        string = "preserve";
++
++    attr = xmlSetNsProp(cur, ns, BAD_CAST "space", BAD_CAST string);
++    if (attr == NULL)
++        return(-1);
++
++    return(0);
+ }
+ #endif /* LIBXML_TREE_ENABLED */
+ 
+@@ -5146,11 +5161,16 @@ xmlNodeSetSpacePreserve(xmlNodePtr cur, int val) {
+ int
+ xmlNodeGetSpacePreserve(const xmlNode *cur) {
+     xmlChar *space;
++        int res;
+ 
+     if ((cur == NULL) || (cur->type != XML_ELEMENT_NODE))
+         return(-1);
++
+     while (cur != NULL) {
+-	space = xmlGetNsProp(cur, BAD_CAST "space", XML_XML_NAMESPACE);
++	res = xmlNodeGetAttrValue(cur, BAD_CAST "space", XML_XML_NAMESPACE,
++                                  &space);
++        if (res < 0)
++            return(-1);
+ 	if (space != NULL) {
+ 	    if (xmlStrEqual(space, BAD_CAST "preserve")) {
+ 		xmlFree(space);
+@@ -5162,8 +5182,10 @@ xmlNodeGetSpacePreserve(const xmlNode *cur) {
+ 	    }
+ 	    xmlFree(space);
+ 	}
++
+ 	cur = cur->parent;
+     }
++
+     return(-1);
+ }
+ 
+@@ -6790,8 +6812,10 @@ xmlUnsetNsProp(xmlNodePtr node, xmlNsPtr ns, const xmlChar *name) {
+  */
+ xmlAttrPtr
+ xmlSetProp(xmlNodePtr node, const xmlChar *name, const xmlChar *value) {
+-    int len;
+-    const xmlChar *nqname;
++    xmlNsPtr ns = NULL;
++    const xmlChar *localname;
++    xmlChar *prefix;
++    int res;
+ 
+     if ((node == NULL) || (name == NULL) || (node->type != XML_ELEMENT_NODE))
+ 	return(NULL);
+@@ -6799,20 +6823,19 @@ xmlSetProp(xmlNodePtr node, const xmlChar *name, const xmlChar *value) {
+     /*
+      * handle QNames
+      */
+-    nqname = xmlSplitQName3(name, &len);
+-    if (nqname != NULL) {
+-        xmlNsPtr ns;
+-	xmlChar *prefix = xmlStrndup(name, len);
+-        int res;
++    localname = xmlSplitQName4(name, &prefix);
++    if (localname == NULL)
++        return(NULL);
+ 
++    if (prefix != NULL) {
+ 	res = xmlSearchNsSafe(node, prefix, &ns);
++	xmlFree(prefix);
+         if (res < 0)
+             return(NULL);
+-	if (prefix != NULL)
+-	    xmlFree(prefix);
+-	if (ns != NULL)
+-	    return(xmlSetNsProp(node, ns, nqname, value));
++        if (ns != NULL)
++            return(xmlSetNsProp(node, ns, localname, value));
+     }
++
+     return(xmlSetNsProp(node, NULL, name, value));
+ }
+ 
+
+
+=== DEVELOPER HARNESS DIFF (GT ONLY) ===
+diff --git a/fuzz/api.c b/fuzz/api.c
+index 61fc63e2..2234bd34 100644
+--- a/fuzz/api.c
++++ b/fuzz/api.c
+@@ -109,9 +109,9 @@ typedef enum {
+     OP_XML_NODE_IS_TEXT,
+     OP_XML_NODE_GET_ATTR_VALUE,
+     OP_XML_NODE_GET_LANG,
+-    OP_XML_NODE_SET_LANG, /* TODO */
++    OP_XML_NODE_SET_LANG,
+     OP_XML_NODE_GET_SPACE_PRESERVE,
+-    OP_XML_NODE_SET_SPACE_PRESERVE, /* TODO */
++    OP_XML_NODE_SET_SPACE_PRESERVE,
+     OP_XML_NODE_GET_BASE,
+     OP_XML_NODE_GET_BASE_SAFE,
+     OP_XML_NODE_SET_BASE,
+@@ -1736,12 +1736,60 @@ LLVMFuzzerTestOneInput(const char *data, size_t size) {
+                 break;
+             }
+ 
+-            case OP_XML_NODE_GET_SPACE_PRESERVE:
++            case OP_XML_NODE_SET_LANG: {
++                xmlNodePtr node;
++                xmlAttrPtr attr;
++                int res;
++
++                startOp("xmlNodeSetLang");
++                node = getNode(0);
++                attr = xmlHasNsProp(
++                    node,
++                    BAD_CAST "lang",
++                    XML_XML_NAMESPACE);
++                xmlFuzzResetMallocFailed();
++                removeChildren((xmlNodePtr) attr, 0);
++                res = xmlNodeSetLang(
++                    node,
++                    getStr(0));
++                oomReport = (res < 0);
++                endOp();
++                break;
++            }
++
++            case OP_XML_NODE_GET_SPACE_PRESERVE: {
++                int res;
++
+                 incIntIdx();
+                 startOp("xmlNodeGetSpacePreserve");
+-                setInt(0, xmlNodeGetSpacePreserve(getNode(0)));
++                res = xmlNodeGetSpacePreserve(getNode(0));
++                if (res >= 0)
++                    oomReport = 0;
++                setInt(0, res);
++                endOp();
++                break;
++            }
++
++            case OP_XML_NODE_SET_SPACE_PRESERVE: {
++                xmlNodePtr node;
++                xmlAttrPtr attr;
++                int res;
++
++                startOp("xmlNodeSetSpacePreserve");
++                node = getNode(0);
++                attr = xmlHasNsProp(
++                    node,
++                    BAD_CAST "space",
++                    XML_XML_NAMESPACE);
++                xmlFuzzResetMallocFailed();
++                removeChildren((xmlNodePtr) attr, 0);
++                res = xmlNodeSetSpacePreserve(
++                    node,
++                    getInt(0));
++                oomReport = (res < 0);
+                 endOp();
+                 break;
++            }
+ 
+             case OP_XML_NODE_GET_BASE: {
+                 xmlChar *base;
+@@ -1897,11 +1945,9 @@ LLVMFuzzerTestOneInput(const char *data, size_t size) {
+                 break;
+             }
+ 
+-#if 0
+-            /* TODO: Split QName */
+             case OP_XML_SET_PROP: {
+                 xmlNodePtr node;
+-                xmlAttrPtr attr;
++                xmlAttrPtr oldAttr, attr;
+                 const xmlChar *name, *value;
+ 
+                 startOp("xmlSetProp");
+@@ -1909,16 +1955,18 @@ LLVMFuzzerTestOneInput(const char *data, size_t size) {
+                 node = getNode(1);
+                 name = getStr(0);
+                 value = getStr(1);
+-                attr = xmlHasProp(node, name);
+-                if (attr != NULL)
+-                    removeChildren((xmlNodePtr) attr, 0);
+-                setNode(0, (xmlNodePtr) xmlSetProp(
+-                    node,
+-                    name,
+-                    value));
++                oldAttr = xmlHasProp(node, name);
++                xmlFuzzResetMallocFailed();
++                if (oldAttr != NULL)
++                    removeChildren((xmlNodePtr) oldAttr, 0);
++                attr = xmlSetProp(node, name, value);
++                oomReport =
++                    (node != NULL && node->type == XML_ELEMENT_NODE &&
++                     name != NULL &&
++                     attr == NULL);
++                setNode(0, (xmlNodePtr) attr);
+                 break;
+             }
+-#endif
+ 
+             case OP_XML_SET_NS_PROP: {
+                 xmlNodePtr node;

@@ -1,0 +1,204 @@
+OpenAI Codex v0.145.0
+--------
+workdir: /tmp/t8-gap_only-T8071-4lan25g2
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a093fc-a00e-7e71-b297-2d4451f2b8b1
+--------
+user
+You are evaluating whether the existing fuzz harness H0 has a material gap for
+the post-commit production program S1. Use only the anonymous case supplied
+below. Do not use tools, files, the network, commit messages, developer harness
+changes, future behavior, or outside knowledge.
+
+Decide whether S1 + H0 misses a fuzz-worthy entry point, API protocol, state,
+configuration, input semantics, or attack surface implicated by the supplied
+source change. Do not perform evolution attribution: if a material gap is
+visible in S1 + H0, report it even if it might already have existed in S0.
+
+Return exactly one JSON object matching the required schema. Ground every claim
+in concrete identifiers visible in the case.
+
+--- BEGIN ANONYMOUS CASE ---
+
+# Anonymous fuzz-harness case
+
+## Case ID
+
+T8071
+
+## Existing harness H0
+
+The complete project-owned C/C++ source for the case's mechanically selected pre-change harness is shown below.
+
+### H0 path: `test/tools/ossfuzz/solc_ossfuzz.cpp`
+
+~~~~cpp
+/*
+	This file is part of solidity.
+
+	solidity is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	solidity is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with solidity.  If not, see <http://www.gnu.org/licenses/>.
+*/
+// SPDX-License-Identifier: GPL-3.0
+
+#include <test/tools/fuzzer_common.h>
+
+#include <test/TestCaseReader.h>
+
+#include <sstream>
+
+using namespace solidity::frontend::test;
+
+// Prototype as we can't use the FuzzerInterface.h header.
+extern "C" int LLVMFuzzerTestOneInput(uint8_t const* _data, size_t _size);
+
+extern "C" int LLVMFuzzerTestOneInput(uint8_t const* _data, size_t _size)
+{
+	if (_size <= 600)
+	{
+		std::string input(reinterpret_cast<char const*>(_data), _size);
+		std::map<std::string, std::string> sourceCode;
+		try
+		{
+			TestCaseReader t = TestCaseReader(std::istringstream(input));
+			sourceCode = t.sources().sources;
+			std::map<std::string, std::string> settings = t.settings();
+			bool compileViaYul =
+				settings.count("compileViaYul") &&
+				(settings.at("compileViaYul") == "also" || settings.at("compileViaYul") == "true");
+			bool optimize = settings.count("optimize") && settings.at("optimize") == "true";
+			FuzzerUtil::testCompiler(
+				sourceCode,
+				optimize,
+				/*_rand=*/static_cast<unsigned>(_size),
+				/*forceSMT=*/true,
+				compileViaYul
+			);
+		}
+		catch (std::runtime_error const&)
+		{
+			return 0;
+		}
+	}
+	return 0;
+}
+~~~~
+
+## Complete S0 -> S1 production-source diff
+
+All changed production C/C++ paths and all hunks are included. Git function-context mode expands each changed function body. Harness, test, example, documentation, build, generated, and vendored paths are excluded by the frozen production-path rule.
+
+~~~~diff
+diff --git a/libsolidity/formal/SMTEncoder.cpp b/libsolidity/formal/SMTEncoder.cpp
+index df902fd86..c8e0cdc92 100644
+--- a/libsolidity/formal/SMTEncoder.cpp
++++ b/libsolidity/formal/SMTEncoder.cpp
+@@ -451,77 +451,78 @@ void SMTEncoder::endVisit(TupleExpression const& _tuple)
+ 
+ void SMTEncoder::endVisit(UnaryOperation const& _op)
+ {
+-	/// We need to shortcut here due to potentially unknown
+-	/// rational number sizes.
+-	if (_op.annotation().type->category() == Type::Category::RationalNumber)
++	/// For constant expressions, we need to shortcut here
++	/// due to potentially unknown rational number sizes that
++	/// can appear in intermediary operations, e.g., ~(2**256 - 1).
++	if (isConstant(_op))
+ 		return;
+ 
+ 	if (TokenTraits::isBitOp(_op.getOperator()) && !*_op.annotation().userDefinedFunction)
+ 		return bitwiseNotOperation(_op);
+ 
+ 	createExpr(_op);
+ 
+ 	// User-defined operators are essentially function calls.
+ 	if (*_op.annotation().userDefinedFunction)
+ 		return;
+ 
+ 	auto const& subExpr = innermostTuple(_op.subExpression());
+ 	auto type = _op.annotation().type;
+ 	switch (_op.getOperator())
+ 	{
+ 	case Token::Not: // !
+ 	{
+ 		solAssert(smt::isBool(*type), "");
+ 		defineExpr(_op, !expr(subExpr));
+ 		break;
+ 	}
+ 	case Token::Inc: // ++ (pre- or postfix)
+ 	case Token::Dec: // -- (pre- or postfix)
+ 	{
+ 		solAssert(smt::isInteger(*type) || smt::isFixedPoint(*type), "");
+ 		solAssert(subExpr.annotation().willBeWrittenTo, "");
+ 		auto innerValue = expr(subExpr);
+ 		auto newValue = arithmeticOperation(
+ 			_op.getOperator() == Token::Inc ? Token::Add : Token::Sub,
+ 			innerValue,
+ 			smtutil::Expression(size_t(1)),
+ 			_op.annotation().type,
+ 			_op
+ 		).first;
+ 		defineExpr(_op, _op.isPrefixOperation() ? newValue : innerValue);
+ 		assignment(subExpr, newValue);
+ 		break;
+ 	}
+ 	case Token::Sub: // -
+ 	{
+ 		defineExpr(_op, 0 - expr(subExpr));
+ 		break;
+ 	}
+ 	case Token::Delete:
+ 	{
+ 		if (auto decl = identifierToVariable(subExpr))
+ 		{
+ 			m_context.newValue(*decl);
+ 			m_context.setZeroValue(*decl);
+ 		}
+ 		else
+ 		{
+ 			solAssert(m_context.knownExpression(subExpr), "");
+ 			auto const& symbVar = m_context.expression(subExpr);
+ 			symbVar->increaseIndex();
+ 			m_context.setZeroValue(*symbVar);
+ 			if (
+ 				dynamic_cast<IndexAccess const*>(&subExpr) ||
+ 				dynamic_cast<MemberAccess const*>(&subExpr)
+ 			)
+ 				indexOrMemberAssignment(subExpr, symbVar->currentValue());
+ 			// Empty push added a zero value anyway, so no need to delete extra.
+ 			else if (!isEmptyPush(subExpr))
+ 				solAssert(false, "");
+ 		}
+ 		break;
+ 	}
+ 	default:
+ 		solAssert(false, "");
+ 	}
+ }
+~~~~
+
+## Uniform context-selection note
+
+Changed function bodies and changed public declarations are supplied by the complete function-context diff above. The optional one-hop/type/macro supplement is empty for every case; no target- or label-guided context is added.
+
+--- END ANONYMOUS CASE ---
+
+codex
+{"case_id":"T8071","gap_exists":false,"gap_type":[],"confidence":94,"affected_functions":["SMTEncoder::endVisit(UnaryOperation const&)"],"reason":"H0 already drives the compiler on attacker-controlled Solidity sources with SMT processing forced, so inputs can directly exercise constant and non-constant unary expressions affected by the changed early-return condition. The change exposes no distinct entry point, protocol, configuration, or input channel absent from H0.","evidence":["H0 constructs sourceCode from TestCaseReader::sources().sources, allowing fuzz input to determine compiler source text.","H0 calls FuzzerUtil::testCompiler(sourceCode, optimize, ..., /*forceSMT=*/true, compileViaYul), directly enabling the formal-analysis path containing SMTEncoder::endVisit.","The changed condition in SMTEncoder::endVisit(UnaryOperation const&) depends on isConstant(_op), while the remainder of the function handles unary operators such as !, ++, --, -, delete, and bitwise operations; all are source-level constructs expressible through H0's sourceCode input.","H0 also varies optimize and compileViaYul through fuzz-supplied settings, so the visible compilation configurations do not reveal an uncovered configuration surface."],"recommended_action":"Retain H0 and add corpus seeds containing constant unary expressions—especially intermediary large rational operations such as ~(2**256 - 1)—to improve reachability, but no new harness entry point is warranted."}
+tokens used
+5,103

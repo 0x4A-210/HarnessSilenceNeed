@@ -1,0 +1,73 @@
+diff --git a/release/c/wuffs-unsupported-snapshot.c b/release/c/wuffs-unsupported-snapshot.c
+index 87bbe88551198a80104d91692d02b1ce7c7f792f..20416672896794eeaca7101eacf814c770bc1978 100644
+--- a/release/c/wuffs-unsupported-snapshot.c
++++ b/release/c/wuffs-unsupported-snapshot.c
+@@ -5705,6 +5705,12 @@ extern const char* wuffs_json__error__unsupported_recursion_depth;
+ 
+ // ---------------- Public Consts
+ 
++#define WUFFS_JSON__DECODER_DEPTH_MAX_INCL 1024
++
++#define WUFFS_JSON__DECODER_DST_TOKEN_BUFFER_LENGTH_MIN_INCL 1
++
++#define WUFFS_JSON__DECODER_SRC_IO_BUFFER_LENGTH_MIN_INCL 100
++
+ // ---------------- Struct Declarations
+ 
+ typedef struct wuffs_json__decoder__struct wuffs_json__decoder;
+diff --git a/std/json/common_consts.wuffs b/std/json/common_consts.wuffs
+index 385cf2672c9ba690417daa76c8fb742638118db4..86b1619fb0afba8e684c2aecd7852af42a5ac9e3 100644
+--- a/std/json/common_consts.wuffs
++++ b/std/json/common_consts.wuffs
+@@ -21,6 +21,27 @@ pub status "#unsupported recursion depth"
+ 
+ pri status "#internal error: inconsistent I/O"
+ 
++// decoder_depth_max_incl is the maximum supported recursion depth: how deeply
++// nested [] arrays and {} objects can be.
++//
++// The JSON spec itself does not define a limit, but allows implementations to
++// set their own limits.
++pub const decoder_depth_max_incl base.u64 = 1024
++
++// decoder_dst_token_buffer_length_min_incl is the minimum length of the dst
++// wuffs_base__token_buffer passed to the decoder.
++pub const decoder_dst_token_buffer_length_min_incl base.u64 = 1
++
++// decoder_src_io_buffer_length_min_incl is the minimum length of the src
++// wuffs_base__io_buffer passed to the decoder.
++//
++// This constrains the src.data.len field and it is the io_buffer capacity (the
++// maximum possible src.meta.ri and src.meta.wi values). It is a property of
++// the backing array's length, not the length of the JSON-formatted input per
++// se. It is perfectly valid to decode "[1,2]" (of length 5) as JSON, as long
++// as that content is placed in an io_buffer whose data.len is at least 100.
++pub const decoder_src_io_buffer_length_min_incl base.u64 = 100
++
+ // Look-Up Tables (LUTs).
+ 
+ pri const lut_backslashes array[256] base.u8 = [
+diff --git a/std/json/decode_json.wuffs b/std/json/decode_json.wuffs
+index f339d6b80e924c70907f9837734f22d4cce34335..2c4ef6acfab55f73624a2e0c929c0adaecb0c0a5 100644
+--- a/std/json/decode_json.wuffs
++++ b/std/json/decode_json.wuffs
+@@ -30,7 +30,8 @@ pub struct decoder? implements base.token_decoder(
+ 	//
+ 	// Wuffs code does not have the capability to dynamically allocate memory,
+ 	// so the maximum depth is hard-coded at compile time. In this case, the
+-	// maximum is 1024 (stack is 1024 bits or 128 bytes).
++	// maximum is 1024 (stack is 1024 bits or 128 bytes), also known as
++	// decoder_depth_max_incl.
+ 	//
+ 	// The [JSON spec](https://tools.ietf.org/html/rfc7159) clearly states, "an
+ 	// implementation may set limits on the maximum depth of nesting".
+@@ -926,7 +927,8 @@ pri func decoder.decode_digits!(src: base.io_reader, n: base.u32[..= 0xFF]) base
+ 			break
+ 		}
+ 		// Cap the maximum supported number length at an arbitrary value, 99.
+-		// The caller's src.data.len should therefore be at least 100.
++		// The caller's src.data.len should therefore be at least 100, also
++		// known as decoder_src_io_buffer_length_min_incl.
+ 		//
+ 		// An example of a JSON number that is 81 bytes long is:
+ 		// https://github.com/nst/JSONTestSuite/blob/master/test_parsing/y_number_double_close_to_zero.json
