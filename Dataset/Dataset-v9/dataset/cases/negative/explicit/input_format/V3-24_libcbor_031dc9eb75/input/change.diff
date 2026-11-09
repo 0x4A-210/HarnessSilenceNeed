@@ -1,0 +1,516 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 01001206db3bb0e1ec02d6a400b6ad5698bb8e75..bf0bbf76630c43ab2b97478e4711da528df54a6e 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -5,6 +5,10 @@ Template:
+ Next
+ ---------------------
+ 
++- BREAKING: [Decoders now accept all well-formed simple values](https://github.com/PJK/libcbor/pull/445)
++  - Previously, `cbor_load` and `cbor_stream_decode` rejected the unassigned simple values 0 to 19 (`0xE0` to `0xF3`) and 32 to 255 (`0xF8 0x20` to `0xF8 0xFF`) with `CBOR_ERR_MALFORMATED` / `CBOR_DECODER_ERROR`, even though RFC 8949 Section 3.3 defines them as well-formed and `cbor_build_ctrl` could already produce them. They are now decoded into ctrl items readable through `cbor_ctrl_value`. `0xF8` followed by a byte below `0x20` remains a well-formedness error as specified
++  - New `simple_value` member appended to `struct cbor_callbacks` and a matching `cbor_null_simple_value_callback` no-op. Like all other members, it must be set: existing callback sets that do not initialize it (e.g. designated initializers that predate the member) will dereference `NULL` on such input. Use `cbor_null_simple_value_callback` to ignore these values, or start from `cbor_empty_callbacks`
++  - Discovered by running the [CBOR Working Group test vectors](https://github.com/cbor-wg/cbor-test-vectors) (`rfc8949-appendixA/mt7-simple`)
+ - BREAKING: [Do not allocate zero-byte buffers for empty items, fixing creation and decoding failures on platforms and custom allocators where `malloc(0)` returns `NULL`](https://github.com/PJK/libcbor/pull/437) (by [afonsojanu](https://github.com/afonsojanu), reported by [hglee](https://github.com/hglee) in [#427](https://github.com/PJK/libcbor/issues/427))
+   - Affected `cbor_new_definite_array(0)`, `cbor_new_definite_map(0)`, `cbor_build_bytestring(_, 0)`, `cbor_build_string("")`, `cbor_build_stringn(_, 0)`, `cbor_copy_definite` of indefinite strings with no data, and `cbor_load`/`cbor_stream_decode` (via the builder) for any input containing an empty string, bytestring, array, or map
+   - `cbor_array_handle`, `cbor_map_handle`, `cbor_bytestring_handle`, and `cbor_string_handle` now return `NULL` for empty definite items on all platforms (previously an implementation-defined `malloc(0)` result, non-`NULL` on glibc/macOS). The pointer was never valid to dereference; code that asserted it was non-`NULL` or passed it to `memcpy` & co. with a zero length must be adjusted
+diff --git a/doc/source/api/type_7_floats_ctrls.rst b/doc/source/api/type_7_floats_ctrls.rst
+index f50fd065ae495c8a36e620b2ab050d0644d9e37e..4be019de77cb7feaebffc6eab8dda2d9466a457a 100644
+--- a/doc/source/api/type_7_floats_ctrls.rst
++++ b/doc/source/api/type_7_floats_ctrls.rst
+@@ -3,6 +3,20 @@ Type 7 – Floats & control tokens
+ 
+ This type combines two completely unrelated types of items -- floating point numbers and special values such as true, false, null, etc. We refer to these special values as 'control values' or 'ctrls' for short throughout the code.
+ 
++Simple values
++~~~~~~~~~~~~~~
++
++`RFC 8949 Section 3.3 <https://www.rfc-editor.org/rfc/rfc8949#section-3.3>`_ defines
++simple values 0 to 255, of which only ``false`` (20), ``true`` (21), ``null`` (22),
++and ``undefined`` (23) are assigned. *libcbor* represents all of them as ctrl items:
++:func:`cbor_ctrl_value` returns the raw value, and :func:`cbor_is_bool`,
++:func:`cbor_is_null`, and :func:`cbor_is_undef` identify the assigned ones.
++
++The unassigned values 0 to 19 and 32 to 255 are well-formed and are decoded and
++encoded as-is. Values 24 to 31 are reserved and cannot be represented in well-formed
++CBOR; the decoders reject them, and :func:`cbor_build_ctrl` will produce an encoding
++that other decoders will reject as well.
++
+ Just like integers, they have different possible width (resulting in different value ranges and precisions).
+ 
+ .. doxygenenum:: cbor_float_width
+diff --git a/src/cbor.c b/src/cbor.c
+index f99f3d51ebfa3574ac41a1023c230eb4c17145a3..45da906d83841d059c6cd0cfdb302f75055b325d 100644
+--- a/src/cbor.c
++++ b/src/cbor.c
+@@ -47,7 +47,8 @@ cbor_item_t* cbor_load(cbor_data source, size_t source_size,
+       .float2 = &cbor_builder_float2_callback,
+       .float4 = &cbor_builder_float4_callback,
+       .float8 = &cbor_builder_float8_callback,
+-      .indef_break = &cbor_builder_indef_break_callback};
++      .indef_break = &cbor_builder_indef_break_callback,
++      .simple_value = &cbor_builder_simple_value_callback};
+ 
+   if (source_size == 0) {
+     result->error.code = CBOR_ERR_NODATA;
+diff --git a/src/cbor/callbacks.c b/src/cbor/callbacks.c
+index 2b58edaa0bc0d6bcfc862e58de32501ea88ec546..839c792378743467ef4ae10b12055f30a51c4aca 100644
+--- a/src/cbor/callbacks.c
++++ b/src/cbor/callbacks.c
+@@ -74,6 +74,9 @@ void cbor_null_boolean_callback(void* _ctx _CBOR_UNUSED,
+ 
+ void cbor_null_indef_break_callback(void* _ctx _CBOR_UNUSED) {}
+ 
++void cbor_null_simple_value_callback(void* _ctx _CBOR_UNUSED,
++                                     uint8_t _CBOR_UNUSED _val) {}
++
+ CBOR_EXPORT const struct cbor_callbacks cbor_empty_callbacks = {
+     /* Type 0 - Unsigned integers */
+     .uint8 = cbor_null_uint8_callback,
+@@ -118,4 +121,7 @@ CBOR_EXPORT const struct cbor_callbacks cbor_empty_callbacks = {
+ 
+     /* Shared indefinites */
+     .indef_break = cbor_null_indef_break_callback,
++
++    /* Type 7 - Simple values other than false, true, null, and undefined */
++    .simple_value = cbor_null_simple_value_callback,
+ };
+diff --git a/src/cbor/callbacks.h b/src/cbor/callbacks.h
+index 35ee2e18335452ef4ab3b93ce2f166ca30a26fa9..1657e6a91b31067ef8a862dd36007633df296c4b 100644
+--- a/src/cbor/callbacks.h
++++ b/src/cbor/callbacks.h
+@@ -105,6 +105,21 @@ struct cbor_callbacks {
+ 
+   /** Indefinite item break */
+   cbor_simple_callback indef_break;
++
++  /** Simple value other than false, true, null, and undefined
++   *
++   * Invoked for the unassigned simple values 0 to 19 (encoded as a single
++   * byte 0xE0 to 0xF3) and 32 to 255 (encoded as 0xF8 followed by the value).
++   * Values 24 to 31 (0xF8 followed by a byte below 0x20) are not well-formed
++   * and are reported as a decoding error instead
++   * (`RFC 8949 Section 3.3
++   * <https://www.rfc-editor.org/rfc/rfc8949#section-3.3>`_).
++   *
++   * Like every other member, this must not be `NULL`. Callback sets written
++   * before this member existed must be updated; use
++   * #cbor_null_simple_value_callback to ignore these values.
++   */
++  cbor_int8_callback simple_value;
+ };
+ 
+ /** Dummy callback implementation - does nothing */
+@@ -179,6 +194,9 @@ CBOR_EXPORT void cbor_null_boolean_callback(void*, bool);
+ /** Dummy callback implementation - does nothing */
+ CBOR_EXPORT void cbor_null_indef_break_callback(void*);
+ 
++/** Dummy callback implementation - does nothing */
++CBOR_EXPORT void cbor_null_simple_value_callback(void*, uint8_t);
++
+ /** Dummy callback bundle - does nothing */
+ CBOR_EXPORT extern const struct cbor_callbacks cbor_empty_callbacks;
+ 
+diff --git a/src/cbor/floats_ctrls.h b/src/cbor/floats_ctrls.h
+index 1c1d0ba5b49426f36958da173877b6fefcc6067e..41b8ce9a17f20517ca8086280799876f89b02649 100644
+--- a/src/cbor/floats_ctrls.h
++++ b/src/cbor/floats_ctrls.h
+@@ -227,7 +227,10 @@ _CBOR_NODISCARD CBOR_EXPORT cbor_item_t* cbor_build_float8(double value);
+ 
+ /** Constructs a ctrl item
+  *
+- * @param value the value to use
++ * @param value the value to use. Any simple value in the range 0 to 255 is
++ * accepted, but 24 to 31 are reserved by RFC 8949 and have no well-formed
++ * encoding; the resulting item will serialize, but decoders (including
++ * libcbor's own) will reject the output
+  * @return Reference to the new ctrl item. The item's reference count is
+  * initialized to one.
+  * @return `NULL` if memory allocation fails
+diff --git a/src/cbor/internal/builder_callbacks.c b/src/cbor/internal/builder_callbacks.c
+index 0b80f2b7213f5554fb7e59d1a33e2826491aa0c9..a683a6792a20551b4dd734a6b9dd4e020aeb587a 100644
+--- a/src/cbor/internal/builder_callbacks.c
++++ b/src/cbor/internal/builder_callbacks.c
+@@ -422,6 +422,13 @@ void cbor_builder_undefined_callback(void* context) {
+   _cbor_builder_append(res, ctx);
+ }
+ 
++void cbor_builder_simple_value_callback(void* context, uint8_t value) {
++  struct _cbor_decoder_context* ctx = context;
++  cbor_item_t* res = cbor_build_ctrl(value);
++  CHECK_RES(ctx, res);
++  _cbor_builder_append(res, ctx);
++}
++
+ void cbor_builder_boolean_callback(void* context, bool value) {
+   struct _cbor_decoder_context* ctx = context;
+   cbor_item_t* res = cbor_build_bool(value);
+diff --git a/src/cbor/internal/builder_callbacks.h b/src/cbor/internal/builder_callbacks.h
+index 0e034306952b98b3830e780fba110e86267df145..bb9da2572292408c2b383156fc15d187dbe767a8 100644
+--- a/src/cbor/internal/builder_callbacks.h
++++ b/src/cbor/internal/builder_callbacks.h
+@@ -76,6 +76,8 @@ void cbor_builder_undefined_callback(void*);
+ 
+ void cbor_builder_boolean_callback(void*, bool);
+ 
++void cbor_builder_simple_value_callback(void*, uint8_t);
++
+ void cbor_builder_indef_break_callback(void*);
+ 
+ #ifdef __cplusplus
+diff --git a/src/cbor/streaming.c b/src/cbor/streaming.c
+index 7608e53efc54f87574bed6f5649ffff6fae2d173..8d0bcfc14e81f5ccc5cee91b458f01357b90524f 100644
+--- a/src/cbor/streaming.c
++++ b/src/cbor/streaming.c
+@@ -535,10 +535,12 @@ struct cbor_decoder_result cbor_stream_decode(
+     case 0xF0: /* Fallthrough */
+     case 0xF1: /* Fallthrough */
+     case 0xF2: /* Fallthrough */
+-    case 0xF3: /* Simple value - unassigned */
+-    {
+-      return (struct cbor_decoder_result){.status = CBOR_DECODER_ERROR};
+-    }
++    case 0xF3:
++      /* Simple value 0..19, unassigned but well-formed */
++      {
++        callbacks->simple_value(context, (uint8_t)(*source - 0xE0));
++        return result;
++      }
+     case 0xF4:
+       /* False */
+       {
+@@ -564,8 +566,20 @@ struct cbor_decoder_result cbor_stream_decode(
+         return result;
+       }
+     case 0xF8:
+-      /* 1B simple value, unassigned */
+-      { return (struct cbor_decoder_result){.status = CBOR_DECODER_ERROR}; }
++      /* 1B simple value */
++      {
++        if (claim_bytes(1, source_size, &result)) {
++          uint8_t value = source[1];
++          if (value < 32) {
++            /* RFC 8949 Section 3.3: 0xF8 followed by a byte below 0x20 is not
++             * well-formed (values 0..23 have a one-byte encoding, 24..31 are
++             * reserved) */
++            return (struct cbor_decoder_result){.status = CBOR_DECODER_ERROR};
++          }
++          callbacks->simple_value(context, value);
++        }
++        return result;
++      }
+     case 0xF9:
+       /* 2B float */
+       {
+diff --git a/test/callbacks_test.c b/test/callbacks_test.c
+index 1045ed1bc254ab82efcafed04009bb71a2eb78a6..bdcb26ad67e407c8da21f9a917485305b4895585 100644
+--- a/test/callbacks_test.c
++++ b/test/callbacks_test.c
+@@ -29,6 +29,17 @@ static void test_default_callbacks(void** _state _CBOR_UNUSED) {
+   }
+ }
+ 
++unsigned char simple_values_data[] = {0x82, 0xE0, 0xF8, 0xFF};
++static void test_default_simple_value_callback(void** _state _CBOR_UNUSED) {
++  size_t read = 0;
++  while (read < 4) {
++    struct cbor_decoder_result result = cbor_stream_decode(
++        simple_values_data + read, 4 - read, &cbor_empty_callbacks, NULL);
++    assert_true(result.status == CBOR_DECODER_FINISHED);
++    read += result.read;
++  }
++}
++
+ unsigned char bytestring_data[] = {0x01, 0x02, 0x03};
+ static void test_builder_byte_string_callback_append(
+     void** _state _CBOR_UNUSED) {
+@@ -415,6 +426,7 @@ static void test_invalid_state_indef_break(void** _state _CBOR_UNUSED) {
+ int main(void) {
+   const struct CMUnitTest tests[] = {
+       cmocka_unit_test(test_default_callbacks),
++      cmocka_unit_test(test_default_simple_value_callback),
+       cmocka_unit_test(test_builder_byte_string_callback_append),
+       cmocka_unit_test(test_builder_byte_string_callback_append_alloc_failure),
+       cmocka_unit_test(
+diff --git a/test/cbor_serialize_test.c b/test/cbor_serialize_test.c
+index 2d3dc0420421b338bfe41de121fa3b25dadcc04b..de1d68eabc8f663a5c1eac22b2a37665c270a9d1 100644
+--- a/test/cbor_serialize_test.c
++++ b/test/cbor_serialize_test.c
+@@ -554,6 +554,27 @@ static void test_serialize_long_ctrl(void** _state _CBOR_UNUSED) {
+   cbor_decref(&item);
+ }
+ 
++static void test_serialize_unassigned_ctrl(void** _state _CBOR_UNUSED) {
++  // Unassigned simple values on both sides of the one-byte/two-byte boundary
++  cbor_item_t* item = cbor_build_ctrl(0);
++  assert_size_equal(1, cbor_serialize(item, buffer, 512));
++  assert_memory_equal(buffer, ((unsigned char[]){0xE0}), 1);
++  assert_size_equal(cbor_serialized_size(item), 1);
++  cbor_decref(&item);
++
++  item = cbor_build_ctrl(19);
++  assert_size_equal(1, cbor_serialize(item, buffer, 512));
++  assert_memory_equal(buffer, ((unsigned char[]){0xF3}), 1);
++  assert_size_equal(cbor_serialized_size(item), 1);
++  cbor_decref(&item);
++
++  item = cbor_build_ctrl(32);
++  assert_size_equal(2, cbor_serialize(item, buffer, 512));
++  assert_memory_equal(buffer, ((unsigned char[]){0xF8, 0x20}), 2);
++  assert_size_equal(cbor_serialized_size(item), 2);
++  cbor_decref(&item);
++}
++
+ static void test_auto_serialize(void** _state _CBOR_UNUSED) {
+   cbor_item_t* item = cbor_new_definite_array(4);
+   for (size_t i = 0; i < 4; i++) {
+@@ -753,6 +774,7 @@ int main(void) {
+       cmocka_unit_test(test_serialize_double),
+       cmocka_unit_test(test_serialize_ctrl),
+       cmocka_unit_test(test_serialize_long_ctrl),
++      cmocka_unit_test(test_serialize_unassigned_ctrl),
+       cmocka_unit_test(test_auto_serialize),
+       cmocka_unit_test(test_auto_serialize_no_size),
+       cmocka_unit_test(test_auto_serialize_too_large),
+diff --git a/test/cbor_stream_decode_test.c b/test/cbor_stream_decode_test.c
+index d1befd09b1315855dc79fa269545ef5129a1d3dc..912dcb311e8902f0f83a98dc24b6847f10e8921c 100644
+--- a/test/cbor_stream_decode_test.c
++++ b/test/cbor_stream_decode_test.c
+@@ -667,6 +667,52 @@ static void test_undef_decoding(void** _state _CBOR_UNUSED) {
+   assert_decoder_result(1, CBOR_DECODER_FINISHED, decode(undef_data, 1));
+ }
+ 
++unsigned char simple_value_0_data[] = {0xE0};
++static void test_simple_value_0_decoding(void** _state _CBOR_UNUSED) {
++  assert_simple_value(0);
++  assert_decoder_result(1, CBOR_DECODER_FINISHED,
++                        decode(simple_value_0_data, 1));
++}
++
++unsigned char simple_value_19_data[] = {0xF3};
++static void test_simple_value_19_decoding(void** _state _CBOR_UNUSED) {
++  assert_simple_value(19);
++  assert_decoder_result(1, CBOR_DECODER_FINISHED,
++                        decode(simple_value_19_data, 1));
++}
++
++unsigned char simple_value_32_data[] = {0xF8, 0x20};
++static void test_simple_value_32_decoding(void** _state _CBOR_UNUSED) {
++  assert_simple_value(32);
++  assert_decoder_result(2, CBOR_DECODER_FINISHED,
++                        decode(simple_value_32_data, 2));
++
++  assert_minimum_input_size(2, simple_value_32_data);
++}
++
++unsigned char simple_value_255_data[] = {0xF8, 0xFF};
++static void test_simple_value_255_decoding(void** _state _CBOR_UNUSED) {
++  assert_simple_value(255);
++  assert_decoder_result(2, CBOR_DECODER_FINISHED,
++                        decode(simple_value_255_data, 2));
++}
++
++/* RFC 8949 Section 3.3: 0xF8 followed by a byte below 0x20 is not
++ * well-formed. Values 0..23 must use the one-byte encoding and 24..31 are
++ * reserved. */
++unsigned char simple_value_two_byte_0_data[] = {0xF8, 0x00};
++unsigned char simple_value_two_byte_23_data[] = {0xF8, 0x17};
++unsigned char simple_value_24_data[] = {0xF8, 0x18};
++unsigned char simple_value_31_data[] = {0xF8, 0x1F};
++static void test_simple_value_reserved_decoding(void** _state _CBOR_UNUSED) {
++  assert_decoder_result(0, CBOR_DECODER_ERROR,
++                        decode(simple_value_two_byte_0_data, 2));
++  assert_decoder_result(0, CBOR_DECODER_ERROR,
++                        decode(simple_value_two_byte_23_data, 2));
++  assert_decoder_result(0, CBOR_DECODER_ERROR, decode(simple_value_24_data, 2));
++  assert_decoder_result(0, CBOR_DECODER_ERROR, decode(simple_value_31_data, 2));
++}
++
+ #define stream_test(f) cmocka_unit_test_teardown(f, clean_up_stream_assertions)
+ 
+ int main(void) {
+@@ -738,6 +784,12 @@ int main(void) {
+       stream_test(test_false_decoding),
+       stream_test(test_true_decoding),
+       stream_test(test_null_decoding),
+-      stream_test(test_undef_decoding)};
++      stream_test(test_undef_decoding),
++
++      stream_test(test_simple_value_0_decoding),
++      stream_test(test_simple_value_19_decoding),
++      stream_test(test_simple_value_32_decoding),
++      stream_test(test_simple_value_255_decoding),
++      stream_test(test_simple_value_reserved_decoding)};
+   return cmocka_run_group_tests(tests, NULL, NULL);
+ }
+diff --git a/test/float_ctrl_encoders_test.c b/test/float_ctrl_encoders_test.c
+index 9b388c4d20e9150ce6fda6b373918a9d2379d3a3..9fb986ef81e295cae02a360d4570963477e9c3ba 100644
+--- a/test/float_ctrl_encoders_test.c
++++ b/test/float_ctrl_encoders_test.c
+@@ -29,6 +29,36 @@ static void test_undef(void** _state _CBOR_UNUSED) {
+   assert_memory_equal(buffer, ((unsigned char[]){0xF7}), 1);
+ }
+ 
++static void test_simple_values(void** _state _CBOR_UNUSED) {
++  // 0..23 use the one-byte encoding
++  assert_size_equal(1, cbor_encode_ctrl(0, buffer, 512));
++  assert_memory_equal(buffer, ((unsigned char[]){0xE0}), 1);
++  assert_size_equal(1, cbor_encode_ctrl(19, buffer, 512));
++  assert_memory_equal(buffer, ((unsigned char[]){0xF3}), 1);
++  assert_size_equal(1, cbor_encode_ctrl(20, buffer, 512));
++  assert_memory_equal(buffer, ((unsigned char[]){0xF4}), 1);
++  assert_size_equal(1, cbor_encode_ctrl(23, buffer, 512));
++  assert_memory_equal(buffer, ((unsigned char[]){0xF7}), 1);
++
++  // 32..255 use the two-byte encoding
++  assert_size_equal(2, cbor_encode_ctrl(32, buffer, 512));
++  assert_memory_equal(buffer, ((unsigned char[]){0xF8, 0x20}), 2);
++  assert_size_equal(2, cbor_encode_ctrl(255, buffer, 512));
++  assert_memory_equal(buffer, ((unsigned char[]){0xF8, 0xFF}), 2);
++
++  // 24..31 are reserved by RFC 8949 and have no well-formed encoding. The
++  // encoder does not reject them; this pins the current (ill-formed) output
++  // so that any change is deliberate.
++  assert_size_equal(2, cbor_encode_ctrl(24, buffer, 512));
++  assert_memory_equal(buffer, ((unsigned char[]){0xF8, 0x18}), 2);
++  assert_size_equal(2, cbor_encode_ctrl(31, buffer, 512));
++  assert_memory_equal(buffer, ((unsigned char[]){0xF8, 0x1F}), 2);
++
++  // Insufficient buffer
++  assert_size_equal(0, cbor_encode_ctrl(0, buffer, 0));
++  assert_size_equal(0, cbor_encode_ctrl(32, buffer, 1));
++}
++
+ static void test_break(void** _state _CBOR_UNUSED) {
+   assert_size_equal(1, cbor_encode_break(buffer, 512));
+   assert_memory_equal(buffer, ((unsigned char[]){0xFF}), 1);
+@@ -288,6 +318,7 @@ int main(void) {
+       cmocka_unit_test(test_bools),
+       cmocka_unit_test(test_null),
+       cmocka_unit_test(test_undef),
++      cmocka_unit_test(test_simple_values),
+       cmocka_unit_test(test_break),
+       cmocka_unit_test(test_half),
+       cmocka_unit_test(test_float),
+diff --git a/test/float_ctrl_test.c b/test/float_ctrl_test.c
+index 5a19d58b68e1215eaaf71f0a2ba26a5fc170531c..6f226c3f3f2893bbd0d39f649869f6c85abb0ef7 100644
+--- a/test/float_ctrl_test.c
++++ b/test/float_ctrl_test.c
+@@ -88,6 +88,49 @@ static void test_undef(void** _state _CBOR_UNUSED) {
+   assert_null(float_ctrl);
+ }
+ 
++unsigned char simple_value_data[][2] = {
++    {0xE0, 0x00}, {0xF3, 0x00}, {0xF8, 0x20}, {0xF8, 0xFF}};
++size_t simple_value_lengths[] = {1, 1, 2, 2};
++uint8_t simple_values[] = {0, 19, 32, 255};
++
++/* Unassigned simple values are well-formed and must round-trip */
++static void test_simple_values(void** _state _CBOR_UNUSED) {
++  for (size_t i = 0; i < 4; i++) {
++    float_ctrl = cbor_load(simple_value_data[i], simple_value_lengths[i], &res);
++    assert_non_null(float_ctrl);
++    assert_size_equal(res.read, simple_value_lengths[i]);
++    assert_true(cbor_isa_float_ctrl(float_ctrl));
++    assert_true(cbor_float_ctrl_is_ctrl(float_ctrl));
++    assert_true(cbor_float_get_width(float_ctrl) == CBOR_FLOAT_0);
++    assert_false(cbor_is_bool(float_ctrl));
++    assert_false(cbor_is_null(float_ctrl));
++    assert_false(cbor_is_undef(float_ctrl));
++    assert_int_equal(cbor_ctrl_value(float_ctrl), simple_values[i]);
++
++    unsigned char buffer[2];
++    assert_size_equal(cbor_serialize(float_ctrl, buffer, 2),
++                      simple_value_lengths[i]);
++    assert_memory_equal(buffer, simple_value_data[i], simple_value_lengths[i]);
++
++    cbor_decref(&float_ctrl);
++    assert_null(float_ctrl);
++  }
++}
++
++static void test_simple_value_alloc_failure(void** _state _CBOR_UNUSED) {
++  WITH_FAILING_MALLOC({
++    assert_null(cbor_load(simple_value_data[0], 1, &res));
++    assert_true(res.error.code == CBOR_ERR_MEMERROR);
++  });
++}
++
++/* 0xF8 followed by a byte below 0x20 is not well-formed */
++unsigned char reserved_simple_value_data[] = {0xF8, 0x1F};
++static void test_reserved_simple_value(void** _state _CBOR_UNUSED) {
++  assert_null(cbor_load(reserved_simple_value_data, 2, &res));
++  assert_true(res.error.code == CBOR_ERR_MALFORMATED);
++}
++
+ unsigned char bool_data[] = {0xF4, 0xF5};
+ 
+ static void test_bool(void** _state _CBOR_UNUSED) {
+@@ -152,6 +195,9 @@ int main(void) {
+       cmocka_unit_test(test_float8),
+       cmocka_unit_test(test_null),
+       cmocka_unit_test(test_undef),
++      cmocka_unit_test(test_simple_values),
++      cmocka_unit_test(test_simple_value_alloc_failure),
++      cmocka_unit_test(test_reserved_simple_value),
+       cmocka_unit_test(test_bool),
+       cmocka_unit_test(test_float_ctrl_creation),
+       cmocka_unit_test(test_ctrl_on_float),
+diff --git a/test/stream_expectations.c b/test/stream_expectations.c
+index 2a1b512f36c6eb6d616d4dfa7b3517bcd920dce9..9d04e4752162c69471a5ec8c96d67470987fd240 100644
+--- a/test/stream_expectations.c
++++ b/test/stream_expectations.c
+@@ -282,6 +282,17 @@ void undef_callback(void* _context _CBOR_UNUSED) {
+   current_expectation++;
+ }
+ 
++void assert_simple_value(uint8_t value) {
++  assertions_queue[queue_size++] =
++      (struct test_assertion){SIMPLE_VALUE_EQ, {.int8 = value}};
++}
++
++void simple_value_callback(void* _context _CBOR_UNUSED, uint8_t actual) {
++  assert_true(current().expectation == SIMPLE_VALUE_EQ);
++  assert_true(current().data.int8 == actual);
++  current_expectation++;
++}
++
+ const struct cbor_callbacks asserting_callbacks = {
+     .uint8 = &uint8_callback,
+     .uint16 = &uint16_callback,
+@@ -314,7 +325,8 @@ const struct cbor_callbacks asserting_callbacks = {
+     .undefined = &undef_callback,
+     .boolean = &bool_callback,
+     .null = &null_callback,
+-    .indef_break = &indef_break_callback};
++    .indef_break = &indef_break_callback,
++    .simple_value = &simple_value_callback};
+ 
+ struct cbor_decoder_result decode(cbor_data source, size_t source_size) {
+   int last_expectation = current_expectation;
+diff --git a/test/stream_expectations.h b/test/stream_expectations.h
+index f67d025f9eaa0897eb38721049428769e0d3e61c..3e71a42909990ffc535879bc405ccaabcce8b11d 100644
+--- a/test/stream_expectations.h
++++ b/test/stream_expectations.h
+@@ -50,6 +50,7 @@ enum test_expectation {
+   BOOL_EQ,
+   NIL,
+   UNDEF,
++  SIMPLE_VALUE_EQ,
+   INDEF_BREAK /* Expect "Break" */
+ };
+ 
+@@ -112,6 +113,7 @@ void assert_double(double);
+ void assert_bool(bool);
+ void assert_nil(void); /* assert_null already exists */
+ void assert_undef(void);
++void assert_simple_value(uint8_t);
+ 
+ void assert_indef_break(void);
+ 
+@@ -148,5 +150,6 @@ void indef_break_callback(void*);
+ void bool_callback(void*, bool);
+ void null_callback(void*);
+ void undef_callback(void*);
++void simple_value_callback(void*, uint8_t);
+ 
+ #endif

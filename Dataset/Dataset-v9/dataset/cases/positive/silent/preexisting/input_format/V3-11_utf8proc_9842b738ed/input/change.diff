@@ -1,0 +1,140 @@
+diff --git a/NEWS.md b/NEWS.md
+index 76835d337f85c80c69e8575ca1d7ddee34e50997..58b2f78da3a7a8ba9c69c02e60327236acdd45bd 100644
+--- a/NEWS.md
++++ b/NEWS.md
+@@ -14,7 +14,13 @@ unreleased
+ - New `utf8proc_free` function to free memory allocated by utf8proc ([#338]).
+   (You can also use your own memory allocator by calling lower-level APIs.)
+ 
+-- `utf8proc_normalize_utf32` can now handle invalid codepoints ≥ 0x110000 ([#352]).
++- `utf8proc_normalize_utf32` can now handle invalid codepoints ≥ 0x110000.
++  They are passed through unchanged rather than dropped, and composition never
++  runs across one ([#352], [#355]).
++
++- Fix `UTF8PROC_CHARBOUND` emitting no `0xff` grapheme markers when combined
++  with `UTF8PROC_COMPOSE` or `UTF8PROC_DECOMPOSE`, a regression in 2.11.3
++  ([#355]).
+ 
+ - [Zig](https://ziglang.org/learn/build-system/) build scripts ([#351]).
+ 
+@@ -519,3 +525,4 @@ Release of version 1.0.1
+ [#352]: https://github.com/JuliaStrings/utf8proc/issues/352
+ [#353]: https://github.com/JuliaStrings/utf8proc/issues/353
+ [#354]: https://github.com/JuliaStrings/utf8proc/issues/354
++[#355]: https://github.com/JuliaStrings/utf8proc/issues/355
+diff --git a/test/graphemetest.c b/test/graphemetest.c
+index 44275ffb951556b8ce0c9b575b9750762137ab37..64fca0d768bd69ef04a1cd1244f6848e85f51dd5 100644
+--- a/test/graphemetest.c
++++ b/test/graphemetest.c
+@@ -116,6 +116,29 @@ int main(int argc, char **argv)
+         utf8proc_free(g);
+     };
+ 
++    /* issue 356: UTF8PROC_CHARBOUND must still insert 0xff markers when
++       combined with UTF8PROC_COMPOSE or UTF8PROC_DECOMPOSE */
++    {
++        /* "e\u0301xy" -> NFC "\u00e9xy" with a marker before each grapheme */
++        utf8proc_uint8_t input[] = {0x65,0xcc,0x81,0x78,0x79,0x00};
++        utf8proc_uint8_t output[] = {0xff,0xc3,0xa9,0xff,0x78,0xff,0x79,0x00};
++        utf8proc_ssize_t glen;
++        utf8proc_uint8_t *g;
++        glen = utf8proc_map(input, 0, &g, UTF8PROC_NULLTERM | UTF8PROC_CHARBOUND | UTF8PROC_COMPOSE);
++        check(glen == 7, "CHARBOUND|COMPOSE returned length %zd, expected 7", glen);
++        check(!strcmp((char*)g, (char*)output), "CHARBOUND|COMPOSE dropped grapheme markers");
++        utf8proc_free(g);
++
++        /* same input, decomposed: "e\u0301xy" is unchanged by NFD */
++        {
++            utf8proc_uint8_t nfd[] = {0xff,0x65,0xcc,0x81,0xff,0x78,0xff,0x79,0x00};
++            glen = utf8proc_map(input, 0, &g, UTF8PROC_NULLTERM | UTF8PROC_CHARBOUND | UTF8PROC_DECOMPOSE);
++            check(glen == 8, "CHARBOUND|DECOMPOSE returned length %zd, expected 8", glen);
++            check(!strcmp((char*)g, (char*)nfd), "CHARBOUND|DECOMPOSE dropped grapheme markers");
++            utf8proc_free(g);
++        }
++    };
++
+     /* https://github.com/JuliaLang/julia/issues/37680 */
+     checkline("/ 1f1f8 1f1ea / 1f1f8 1f1ea /", true); /* Two swedish flags after each other */
+     checkline("/ 1f926 1f3fc 200d 2642 fe0f /", true); /* facepalm + pale skin + zwj + male sign + FE0F */
+diff --git a/test/misc.c b/test/misc.c
+index 7ea2ebcc0d3ea8d2d639dcaef3acd68d261e9964..03834cc16f40683762e02a4adf316c9793719bce 100644
+--- a/test/misc.c
++++ b/test/misc.c
+@@ -44,11 +44,55 @@ static void issue317(void) /* #317 */
+     }
+ }
+ 
++/* check that utf8proc_normalize_utf32 passes uninterpretable codepoints through
++   rather than deleting them, and never composes across one */
++static void check_normalize_utf32(const char *name,
++                                  const utf8proc_int32_t *input, utf8proc_ssize_t len,
++                                  const utf8proc_int32_t *expected, utf8proc_ssize_t expected_len)
++{
++    utf8proc_int32_t buffer[8];
++    utf8proc_ssize_t i, result;
++
++    check(len <= (utf8proc_ssize_t) (sizeof(buffer)/sizeof(*buffer)), "%s: test buffer too small", name);
++    for (i = 0; i < len; ++i) buffer[i] = input[i];
++    result = utf8proc_normalize_utf32(buffer, len, UTF8PROC_COMPOSE);
++    check(result == expected_len, "%s: returned length %zd, expected %zd", name, result, expected_len);
++    for (i = 0; i < expected_len; ++i)
++        check(buffer[i] == expected[i], "%s: buffer[%zd] = 0x%x, expected 0x%x",
++              name, i, buffer[i], expected[i]);
++}
++
++static void issue288(void) /* #288 */
++{
++    /* baseline: composition still happens */
++    {
++        utf8proc_int32_t input[] = {0x0041, 0x0301};        /* "A" + combining acute */
++        utf8proc_int32_t expected[] = {0x00c1};             /* "\u00c1" */
++        check_normalize_utf32("compose", input, 2, expected, 1);
++    }
++
++    /* an out-of-range codepoint is preserved, and blocks composition across it
++       (unsafe_get_property would read past utf8proc_stage1table) */
++    {
++        utf8proc_int32_t input[] = {0x0041, 0x110000, 0x0301};
++        check_normalize_utf32("out-of-range codepoint", input, 3, input, 3);
++    }
++
++    /* likewise the grapheme-break sentinel written by utf8proc_decompose_char */
++    {
++        utf8proc_int32_t input[] = {0x0041, -1, 0x0301};
++        check_normalize_utf32("grapheme-break sentinel", input, 3, input, 3);
++    }
++
++    printf("PASSED: utf8proc_normalize_utf32 preserves uninterpretable codepoints\n");
++}
++
+ int main(void)
+ {
+     issue128();
+     issue102();
+     issue317();
++    issue288();
+ #ifdef UNICODE_VERSION
+     printf("Unicode version: Makefile has %s, has API %s\n", UNICODE_VERSION, utf8proc_unicode_version());
+     check(!strcmp(UNICODE_VERSION, utf8proc_unicode_version()), "utf8proc_unicode_version mismatch");
+diff --git a/utf8proc.c b/utf8proc.c
+index c47349e12fc2ace8893468d4b5ce979be227121d..fef7e7be42c47fa82a5f3a124c806ba7e47ec638 100644
+--- a/utf8proc.c
++++ b/utf8proc.c
+@@ -656,8 +656,15 @@ UTF8PROC_DLLEXPORT utf8proc_ssize_t utf8proc_normalize_utf32(utf8proc_int32_t *b
+     for (rpos = 0; rpos < length; rpos++) {
+       utf8proc_int32_t current_char = buffer[rpos];
+       if (current_char < 0 || current_char >= 0x110000) {
+-        /* skip grapheme-break sentinel or out-of-range codepoint;
+-           unsafe_get_property would OOB on utf8proc_stage1table (idx = uc >> 8) */
++        /* grapheme-break sentinel or out-of-range codepoint: pass it through
++           unchanged, but never compose across it, since we cannot inspect it
++           (unsafe_get_property would OOB on utf8proc_stage1table, idx = uc >> 8).
++           utf8proc_reencode drops what cannot be encoded, so this is invisible
++           to utf8proc_map. */
++        buffer[wpos++] = current_char;
++        starter = NULL;
++        starter_property = NULL;
++        max_combining_class = -1;
+         continue;
+       }
+       const utf8proc_property_t *current_property = unsafe_get_property(current_char);

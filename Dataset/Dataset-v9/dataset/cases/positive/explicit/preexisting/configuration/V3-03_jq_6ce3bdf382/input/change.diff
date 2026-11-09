@@ -1,0 +1,212 @@
+diff --git a/docs/content/manual/dev/manual.yml b/docs/content/manual/dev/manual.yml
+index 08ad00132e1ea699e7959323a7f10698c8acd576..12e1837cf2189e6802230b061bde0f9f40b5eb04 100644
+--- a/docs/content/manual/dev/manual.yml
++++ b/docs/content/manual/dev/manual.yml
+@@ -373,10 +373,7 @@ sections:
+           such `1E1234567890`, precision will be lost if the exponent
+           is too large.
+ 
+-          (3) In jq programs, a leading minus sign will trigger the
+-          conversion of the number to an IEEE754 representation.
+-
+-          (4) Comparisons are carried out using the untruncated
++          (3) Comparisons are carried out using the untruncated
+           big decimal representation of numbers if available, as
+           illustrated in one of the following examples.
+ 
+@@ -395,15 +392,19 @@ sections:
+             input: '0.12345678901234567890123456789'
+             output: ['0.12345678901234567890123456789']
+ 
+-          - program: '[., tojson] | . == if have_decnum then [12345678909876543212345,"12345678909876543212345"] else [12345678909876543000000,"12345678909876543000000"] end'
++          - program: '[., tojson] == if have_decnum then [12345678909876543212345,"12345678909876543212345"] else [12345678909876543000000,"12345678909876543000000"] end'
+             input: '12345678909876543212345'
+             output: ['true']
+ 
++          - program: '[1234567890987654321,-1234567890987654321 | tojson] == if have_decnum then ["1234567890987654321","-1234567890987654321"] else ["1234567890987654400","-1234567890987654400"] end'
++            input: 'null'
++            output: ['true']
++
+           - program: '. < 0.12345678901234567890123456788'
+             input: '0.12345678901234567890123456789'
+             output: ['false']
+ 
+-          - program: 'map([., . == 1]) | tojson | . == if have_decnum then "[[1,true],[1.000,true],[1.0,true],[1.00,true]]" else "[[1,true],[1,true],[1,true],[1,true]]" end'
++          - program: 'map([., . == 1]) | tojson == if have_decnum then "[[1,true],[1.000,true],[1.0,true],[1.00,true]]" else "[[1,true],[1,true],[1,true],[1,true]]" end'
+             input: '[1, 1.000, 1.0, 100e-2]'
+             output: ['true']
+ 
+diff --git a/jq.1.prebuilt b/jq.1.prebuilt
+index 603f326bd710d3425a374adb77db32d37a290ffe..8c21b1868068c6f02440bf5caf618ccb985353d2 100644
+--- a/jq.1.prebuilt
++++ b/jq.1.prebuilt
+@@ -298,10 +298,7 @@ The following remarks are therefore offered with the understanding that they are
+ (2) jq will attempt to maintain the original decimal precision of number literals (if the \fB\-\-disable\-decnum\fR build configuration option was not used), but in expressions such \fB1E1234567890\fR, precision will be lost if the exponent is too large\.
+ .
+ .P
+-(3) In jq programs, a leading minus sign will trigger the conversion of the number to an IEEE754 representation\.
+-.
+-.P
+-(4) Comparisons are carried out using the untruncated big decimal representation of numbers if available, as illustrated in one of the following examples\.
++(3) Comparisons are carried out using the untruncated big decimal representation of numbers if available, as illustrated in one of the following examples\.
+ .
+ .P
+ The examples below use the builtin function \fBhave_decnum\fR in order to demonstrate the expected effects of using / not using the \fB\-\-disable\-decnum\fR build configuration option, and also to allow automated tests derived from these examples to pass regardless of whether that option is used\.
+@@ -318,15 +315,19 @@ jq \'\.\'
+    0\.12345678901234567890123456789
+ => 0\.12345678901234567890123456789
+ 
+-jq \'[\., tojson] | \. == if have_decnum then [12345678909876543212345,"12345678909876543212345"] else [12345678909876543000000,"12345678909876543000000"] end\'
++jq \'[\., tojson] == if have_decnum then [12345678909876543212345,"12345678909876543212345"] else [12345678909876543000000,"12345678909876543000000"] end\'
+    12345678909876543212345
+ => true
+ 
++jq \'[1234567890987654321,\-1234567890987654321 | tojson] == if have_decnum then ["1234567890987654321","\-1234567890987654321"] else ["1234567890987654400","\-1234567890987654400"] end\'
++   null
++=> true
++
+ jq \'\. < 0\.12345678901234567890123456788\'
+    0\.12345678901234567890123456789
+ => false
+ 
+-jq \'map([\., \. == 1]) | tojson | \. == if have_decnum then "[[1,true],[1\.000,true],[1\.0,true],[1\.00,true]]" else "[[1,true],[1,true],[1,true],[1,true]]" end\'
++jq \'map([\., \. == 1]) | tojson == if have_decnum then "[[1,true],[1\.000,true],[1\.0,true],[1\.00,true]]" else "[[1,true],[1,true],[1,true],[1,true]]" end\'
+    [1, 1\.000, 1\.0, 100e\-2]
+ => true
+ 
+diff --git a/src/builtin.c b/src/builtin.c
+index d9553775a621b8d0316e0ef28e7326de2a38f48c..c0aba960b0b201681d5cb6144446ac497e925803 100644
+--- a/src/builtin.c
++++ b/src/builtin.c
+@@ -256,7 +256,7 @@ static jv f_negate(jq_state *jq, jv input) {
+   if (jv_get_kind(input) != JV_KIND_NUMBER) {
+     return type_error(input, "cannot be negated");
+   }
+-  jv ret = jv_number(-jv_number_value(input));
++  jv ret = jv_number_negate(input);
+   jv_free(input);
+   return ret;
+ }
+diff --git a/src/jv.c b/src/jv.c
+index b77e2d2ddde950367673120d62f36c9914e8b106..e7ae561975cc0e090a59d2bcdb72b863ba6c56dd 100644
+--- a/src/jv.c
++++ b/src/jv.c
+@@ -562,7 +562,6 @@ static decNumber* jvp_dec_number_ptr(jv j) {
+ }
+ 
+ static jvp_literal_number* jvp_literal_number_alloc(unsigned literal_length) {
+-
+   /* The number of units needed is ceil(DECNUMDIGITS/DECDPUN)         */
+   int units = ((literal_length+DECDPUN-1)/DECDPUN);
+ 
+@@ -571,19 +570,18 @@ static jvp_literal_number* jvp_literal_number_alloc(unsigned literal_length) {
+     + sizeof(decNumberUnit) * units
+   );
+ 
++  n->refcnt = JV_REFCNT_INIT;
++  n->num_double = NAN;
++  n->literal_data = NULL;
+   return n;
+ }
+ 
+ static jv jvp_literal_number_new(const char * literal) {
++  jvp_literal_number* n = jvp_literal_number_alloc(strlen(literal));
+ 
+-  jvp_literal_number * n = jvp_literal_number_alloc(strlen(literal));
+-
+-  n->refcnt = JV_REFCNT_INIT;
+-  n->literal_data = NULL;
+   decContext *ctx = DEC_CONTEXT();
+   decContextClearStatus(ctx, DEC_Conversion_syntax);
+   decNumberFromString(&n->num_decimal, literal, ctx);
+-  n->num_double = NAN;
+ 
+   if (ctx->status & DEC_Conversion_syntax) {
+     jv_mem_free(n);
+@@ -734,6 +732,21 @@ int jvp_number_is_nan(jv n) {
+   return n.u.number != n.u.number;
+ }
+ 
++jv jv_number_negate(jv n) {
++  assert(JVP_HAS_KIND(n, JV_KIND_NUMBER));
++
++#ifdef USE_DECNUM
++  if (JVP_HAS_FLAGS(n, JVP_FLAGS_NUMBER_LITERAL)) {
++    jvp_literal_number* m = jvp_literal_number_alloc(jvp_dec_number_ptr(n)->digits);
++
++    decNumberMinus(&m->num_decimal, jvp_dec_number_ptr(n), DEC_CONTEXT());
++    jv r = {JVP_FLAGS_NUMBER_LITERAL, 0, 0, 0, {&m->refcnt}};
++    return r;
++  }
++#endif
++  return jv_number(-jv_number_value(n));
++}
++
+ int jvp_number_cmp(jv a, jv b) {
+   assert(JVP_HAS_KIND(a, JV_KIND_NUMBER));
+   assert(JVP_HAS_KIND(b, JV_KIND_NUMBER));
+diff --git a/src/jv.h b/src/jv.h
+index bde2ed4d6c30165c03ec68104f3b276dd353e8b4..8342956916e10936e09d36bcafe918779357837a 100644
+--- a/src/jv.h
++++ b/src/jv.h
+@@ -74,8 +74,9 @@ jv jv_number(double);
+ jv jv_number_with_literal(const char*);
+ double jv_number_value(jv);
+ int jv_is_integer(jv);
++jv jv_number_negate(jv);
+ 
+-int jv_number_has_literal(jv n);
++int jv_number_has_literal(jv);
+ const char* jv_number_get_literal(jv);
+ 
+ jv jv_array(void);
+diff --git a/tests/jq.test b/tests/jq.test
+index b9b1f8d2c408187fb34b3f26ae0f0bdb3559dd20..d8758b431ed77d404df2116d7fe86d6198aedee9 100644
+--- a/tests/jq.test
++++ b/tests/jq.test
+@@ -1985,6 +1985,19 @@ true
+ {"x":13911860366432393}
+ 13911860366432382
+ 
++# Unary negation preserves numerical precision
++-. | tojson == if have_decnum then "-13911860366432393" else "-13911860366432392" end
++13911860366432393
++true
++
++-. | tojson == if have_decnum then "0.12345678901234567890123456789" else "0.12345678901234568" end
++-0.12345678901234567890123456789
++true
++
++[1E+1000,-1E+1000 | tojson] == if have_decnum then ["1E+1000","-1E+1000"] else ["1.7976931348623157e+308","-1.7976931348623157e+308"] end
++null
++true
++
+ . |= try . catch .
+ 1
+ 1
+diff --git a/tests/man.test b/tests/man.test
+index 12957c8fc43cbffe2a708f5980c92b12083d0897..5ec2e47408dfd8253ceeddf44efdd468cb13634b 100644
+--- a/tests/man.test
++++ b/tests/man.test
+@@ -6,15 +6,19 @@
+ 0.12345678901234567890123456789
+ 0.12345678901234567890123456789
+ 
+-[., tojson] | . == if have_decnum then [12345678909876543212345,"12345678909876543212345"] else [12345678909876543000000,"12345678909876543000000"] end
++[., tojson] == if have_decnum then [12345678909876543212345,"12345678909876543212345"] else [12345678909876543000000,"12345678909876543000000"] end
+ 12345678909876543212345
+ true
+ 
++[1234567890987654321,-1234567890987654321 | tojson] == if have_decnum then ["1234567890987654321","-1234567890987654321"] else ["1234567890987654400","-1234567890987654400"] end
++null
++true
++
+ . < 0.12345678901234567890123456788
+ 0.12345678901234567890123456789
+ false
+ 
+-map([., . == 1]) | tojson | . == if have_decnum then "[[1,true],[1.000,true],[1.0,true],[1.00,true]]" else "[[1,true],[1,true],[1,true],[1,true]]" end
++map([., . == 1]) | tojson == if have_decnum then "[[1,true],[1.000,true],[1.0,true],[1.00,true]]" else "[[1,true],[1,true],[1,true],[1,true]]" end
+ [1, 1.000, 1.0, 100e-2]
+ true
+ 

@@ -1,0 +1,264 @@
+diff --git a/ChangeLog b/ChangeLog
+index 0ca4b5905a43d9e9bf69628bf61e4e70eb9d9fde..32c2869935e84cf0dc3d362c44313446acaef9c1 100644
+--- a/ChangeLog
++++ b/ChangeLog
+@@ -27,6 +27,9 @@ Other changes
+    arrays to be allocated with the exact size needed, when known.
+ * Parsing of surrogate pairs in unicode escapes now properly handles
+    incremental parsing.
++* Fix incremental parsing of numbers, especially those with exponents, e.g.
++   so parsing "[0", "e+", "-]" now properly returns an error.
++  Strict mode now rejects missing exponents ("0e").
+ 
+ 
+ ***
+diff --git a/json_tokener.c b/json_tokener.c
+index 385557092745d57b2f2faf0680854e46a947e103..b949d105decc00ed8a8bdc18381118b585ff8022 100644
+--- a/json_tokener.c
++++ b/json_tokener.c
+@@ -97,6 +97,8 @@ static const char *json_tokener_errors[] = {
+  */
+ static json_bool json_tokener_validate_utf8(const char c, unsigned int *nBytes);
+ 
++static int json_tokener_parse_double(const char *buf, int len, double *retval);
++
+ const char *json_tokener_error_desc(enum json_tokener_error jerr)
+ {
+ 	int jerr_int = (int)jerr;
+@@ -837,6 +839,25 @@ struct json_object *json_tokener_parse_ex(struct json_tokener *tok, const char *
+ 			int case_len = 0;
+ 			int is_exponent = 0;
+ 			int negativesign_next_possible_location = 1;
++			if (printbuf_length(tok->pb) > 0)
++			{
++				/* We don't save all state from the previous incremental parse
++				   so we need to re-generate it based on the saved string so far.
++				 */
++				char *e_loc = strchr(tok->pb->buf, 'e');
++				if (!e_loc)
++					e_loc = strchr(tok->pb->buf, 'E');
++				if (e_loc)
++				{
++					char *last_saved_char =
++					    &tok->pb->buf[printbuf_length(tok->pb) - 1];
++					is_exponent = 1;
++					/* If the "e" isn't at the end, we can't start with a '-' */
++					if (e_loc != last_saved_char)
++						negativesign_next_possible_location = -1;
++					// else leave it set to 1, i.e. start of the new input
++				}
++			}
+ 			while (c && strchr(json_number_chars, c))
+ 			{
+ 				++case_len;
+@@ -847,8 +868,9 @@ struct json_object *json_tokener_parse_ex(struct json_tokener *tok, const char *
+ 				 * protected from input starting with '.' or
+ 				 * e/E.
+ 				 */
+-				if (c == '.')
++				switch (c)
+ 				{
++				case '.':
+ 					if (tok->is_double != 0)
+ 					{
+ 						/* '.' can only be found once, and out of the exponent part.
+@@ -859,9 +881,9 @@ struct json_object *json_tokener_parse_ex(struct json_tokener *tok, const char *
+ 						goto out;
+ 					}
+ 					tok->is_double = 1;
+-				}
+-				if (c == 'e' || c == 'E')
+-				{
++					break;
++				case 'e': /* FALLTHRU */
++				case 'E':
+ 					if (is_exponent != 0)
+ 					{
+ 						/* only one exponent possible */
+@@ -872,15 +894,19 @@ struct json_object *json_tokener_parse_ex(struct json_tokener *tok, const char *
+ 					tok->is_double = 1;
+ 					/* the exponent part can begin with a negative sign */
+ 					negativesign_next_possible_location = case_len + 1;
+-				}
+-				if (c == '-' && case_len != negativesign_next_possible_location)
+-				{
+-					/* If the negative sign is not where expected (ie
+-					 * start of input or start of exponent part), the
+-					 * input is invalid.
+-					 */
+-					tok->err = json_tokener_error_parse_number;
+-					goto out;
++					break;
++				case '-':
++					if (case_len != negativesign_next_possible_location)
++					{
++						/* If the negative sign is not where expected (ie
++						 * start of input or start of exponent part), the
++						 * input is invalid.
++						 */
++						tok->err = json_tokener_error_parse_number;
++						goto out;
++					}
++					break;
++				default: break;
+ 				}
+ 
+ 				if (!ADVANCE_CHAR(str, tok) || !PEEK_CHAR(c, tok))
+@@ -899,6 +925,22 @@ struct json_object *json_tokener_parse_ex(struct json_tokener *tok, const char *
+ 				tok->st_pos = 0;
+ 				goto redo_char;
+ 			}
++			if (tok->is_double && !(tok->flags & JSON_TOKENER_STRICT))
++			{
++				/* Trim some chars off the end, to allow things
++				   like "123e+" to parse ok. */
++				while (printbuf_length(tok->pb) > 1)
++				{
++					char last_char = tok->pb->buf[printbuf_length(tok->pb) - 1];
++					if (last_char != 'e' && last_char != 'E' &&
++					    last_char != '-' && last_char != '+')
++					{
++						break;
++					}
++					tok->pb->buf[printbuf_length(tok->pb) - 1] = '\0';
++					printbuf_length(tok->pb)--;
++				}
++			}
+ 		}
+ 			{
+ 				int64_t num64;
+@@ -935,7 +977,8 @@ struct json_object *json_tokener_parse_ex(struct json_tokener *tok, const char *
+ 					}
+ 				}
+ 				else if (tok->is_double &&
+-				         json_parse_double(tok->pb->buf, &numd) == 0)
++				         json_tokener_parse_double(
++				             tok->pb->buf, printbuf_length(tok->pb), &numd) == 0)
+ 				{
+ 					current = json_object_new_double_s(numd, tok->pb->buf);
+ 					if (current == NULL)
+@@ -1204,3 +1247,12 @@ size_t json_tokener_get_parse_end(struct json_tokener *tok)
+ 	assert(tok->char_offset >= 0); /* Drop this line when char_offset becomes a size_t */
+ 	return (size_t)tok->char_offset;
+ }
++
++static int json_tokener_parse_double(const char *buf, int len, double *retval)
++{
++	char *end;
++	*retval = strtod(buf, &end);
++	if (buf + len == end)
++		return 0; // It worked
++	return 1;
++}
+diff --git a/json_util.c b/json_util.c
+index e8e2ec6bcb2ac1f0fff3479af79fa8b2e649b88f..a0655234b7d234c12bffae30ba6be98bdd231aad 100644
+--- a/json_util.c
++++ b/json_util.c
+@@ -222,6 +222,7 @@ int json_object_to_file(const char *filename, struct json_object *obj)
+ 	return json_object_to_file_ext(filename, obj, JSON_C_TO_STRING_PLAIN);
+ }
+ 
++// Deprecated json_parse_double function.  See json_tokener_parse_double instead.
+ int json_parse_double(const char *buf, double *retval)
+ {
+ 	char *end;
+@@ -250,7 +251,7 @@ int json_parse_uint64(const char *buf, uint64_t *retval)
+ 	while (*buf == ' ')
+ 		buf++;
+ 	if (*buf == '-')
+-		return 1;  /* error: uint cannot be negative */
++		return 1; /* error: uint cannot be negative */
+ 
+ 	val = strtoull(buf, &end, 10);
+ 	if (end != buf)
+diff --git a/json_util.h b/json_util.h
+index 7520f036c4f263598cfc86cc0f105d9965c2dc33..1f663e872ad8e74242181c43c4563ba4bc2efc01 100644
+--- a/json_util.h
++++ b/json_util.h
+@@ -103,6 +103,9 @@ JSON_EXPORT const char *json_util_get_last_err(void);
+ /* these parsing helpers return zero on success */
+ JSON_EXPORT int json_parse_int64(const char *buf, int64_t *retval);
+ JSON_EXPORT int json_parse_uint64(const char *buf, uint64_t *retval);
++/**
++ * @deprecated
++ */
+ JSON_EXPORT int json_parse_double(const char *buf, double *retval);
+ 
+ /**
+diff --git a/tests/test_parse.c b/tests/test_parse.c
+index c2a271ccb45687bbcf9a9698599a1f2fd353a3f3..2e1721516d29dc20273b994404c84f81cb2d8b53 100644
+--- a/tests/test_parse.c
++++ b/tests/test_parse.c
+@@ -343,9 +343,34 @@ struct incremental_step
+     /* This should parse as the number 12, since it continues the "1" */
+     {"2", 2, 1, json_tokener_success, 0},
+     {"12{", 3, 2, json_tokener_success, 1},
+-    /* Parse number in strict model */
++    /* Parse number in strict mode */
+     {"[02]", -1, 3, json_tokener_error_parse_number, 1, JSON_TOKENER_STRICT},
+ 
++    {"0e+0", 5, 4, json_tokener_success, 1},
++    {"[0e+0]", -1, -1, json_tokener_success, 1},
++
++    /* The behavior when missing the exponent varies slightly */
++    {"0e", 2, 2, json_tokener_continue, 1},
++    {"0e", 3, 2, json_tokener_success, 1},
++    {"0e", 3, 2, json_tokener_error_parse_eof, 1, JSON_TOKENER_STRICT},
++    {"[0e]", -1, -1, json_tokener_success, 1},
++    {"[0e]", -1, 3, json_tokener_error_parse_number, 1, JSON_TOKENER_STRICT},
++
++    {"0e+", 3, 3, json_tokener_continue, 1},
++    {"0e+", 4, 3, json_tokener_success, 1},
++    {"0e+", 4, 3, json_tokener_error_parse_eof, 1, JSON_TOKENER_STRICT},
++    {"[0e+]", -1, -1, json_tokener_success, 1},
++    {"[0e+]", -1, 4, json_tokener_error_parse_number, 1, JSON_TOKENER_STRICT},
++
++    {"0e-", 3, 3, json_tokener_continue, 1},
++    {"0e-", 4, 3, json_tokener_success, 1},
++    {"0e-", 4, 3, json_tokener_error_parse_eof, 1, JSON_TOKENER_STRICT},
++    {"[0e-]", -1, -1, json_tokener_success, 1},
++    {"[0e-]", -1, 4, json_tokener_error_parse_number, 1, JSON_TOKENER_STRICT},
++
++    {"0e+-", 5, 3, json_tokener_error_parse_number, 1},
++    {"[0e+-]", -1, 4, json_tokener_error_parse_number, 1},
++
+     /* Similar tests for other kinds of objects: */
+     /* These could all return success immediately, since regardless of
+ 	   what follows the false/true/null token we *will* return a json object,
+diff --git a/tests/test_parse.expected b/tests/test_parse.expected
+index 6ed5520384d348487ca92c7817e952348e393f48..48539fcdf8bd1b523d8150077cf0b7cbe425c361 100644
+--- a/tests/test_parse.expected
++++ b/tests/test_parse.expected
+@@ -145,6 +145,25 @@ json_tokener_parse_ex(tok, 1           ,   1) ... OK: got correct error: continu
+ json_tokener_parse_ex(tok, 2           ,   2) ... OK: got object of type [int]: 12
+ json_tokener_parse_ex(tok, 12{         ,   3) ... OK: got object of type [int]: 12
+ json_tokener_parse_ex(tok, [02]        ,   4) ... OK: got correct error: number expected
++json_tokener_parse_ex(tok, 0e+0        ,   5) ... OK: got object of type [double]: 0e+0
++json_tokener_parse_ex(tok, [0e+0]      ,   6) ... OK: got object of type [array]: [ 0e+0 ]
++json_tokener_parse_ex(tok, 0e          ,   2) ... OK: got correct error: continue
++json_tokener_parse_ex(tok, 0e          ,   3) ... OK: got object of type [double]: 0
++json_tokener_parse_ex(tok, 0e          ,   3) ... OK: got correct error: unexpected end of data
++json_tokener_parse_ex(tok, [0e]        ,   4) ... OK: got object of type [array]: [ 0 ]
++json_tokener_parse_ex(tok, [0e]        ,   4) ... OK: got correct error: number expected
++json_tokener_parse_ex(tok, 0e+         ,   3) ... OK: got correct error: continue
++json_tokener_parse_ex(tok, 0e+         ,   4) ... OK: got object of type [double]: 0
++json_tokener_parse_ex(tok, 0e+         ,   4) ... OK: got correct error: unexpected end of data
++json_tokener_parse_ex(tok, [0e+]       ,   5) ... OK: got object of type [array]: [ 0 ]
++json_tokener_parse_ex(tok, [0e+]       ,   5) ... OK: got correct error: number expected
++json_tokener_parse_ex(tok, 0e-         ,   3) ... OK: got correct error: continue
++json_tokener_parse_ex(tok, 0e-         ,   4) ... OK: got object of type [double]: 0
++json_tokener_parse_ex(tok, 0e-         ,   4) ... OK: got correct error: unexpected end of data
++json_tokener_parse_ex(tok, [0e-]       ,   5) ... OK: got object of type [array]: [ 0 ]
++json_tokener_parse_ex(tok, [0e-]       ,   5) ... OK: got correct error: number expected
++json_tokener_parse_ex(tok, 0e+-        ,   5) ... OK: got correct error: number expected
++json_tokener_parse_ex(tok, [0e+-]      ,   6) ... OK: got correct error: number expected
+ json_tokener_parse_ex(tok, false       ,   5) ... OK: got correct error: continue
+ json_tokener_parse_ex(tok, false       ,   6) ... OK: got object of type [boolean]: false
+ json_tokener_parse_ex(tok, true        ,   4) ... OK: got correct error: continue
+@@ -246,5 +265,5 @@ json_tokener_parse_ex(tok, "\ud855
+ json_tokener_parse_ex(tok, "\ud0031¿"  ,  10) ... OK: got correct error: invalid utf-8 string
+ json_tokener_parse_ex(tok, 11Å11       ,   5) ... OK: got correct error: invalid utf-8 string
+ json_tokener_parse_ex(tok, {"1Å":1}    ,   8) ... OK: got correct error: invalid utf-8 string
+-End Incremental Tests OK=160 ERROR=0
++End Incremental Tests OK=179 ERROR=0
+ ==================================

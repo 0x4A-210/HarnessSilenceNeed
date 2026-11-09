@@ -1,0 +1,650 @@
+diff --git a/README.md b/README.md
+index 422c066273b926d5f62fc43a08178b71a9a08cab..e404f468fa2b504abad668ee91e389241d8354c5 100644
+--- a/README.md
++++ b/README.md
+@@ -102,6 +102,10 @@ extensions:
+ * With the flag `MD_FLAG_STRIKETHROUGH`, strike-through spans are enabled
+   (text enclosed in tilde marks, e.g. `~foo bar~`).
+ 
++* With the flag `MD_FLAG_SPOILERS`, spoiler spans are enabled
++  (text enclosed in double pipe marks, e.g. `||hidden text||`). (Note that the
++  HTML renderer outputs them in a custom tag `<x-spoiler>`.)
++
+ * With the flag `MD_FLAG_PERMISSIVEURLAUTOLINKS` permissive URL autolinks
+   (not enclosed in `<` and `>`) are supported.
+ 
+diff --git a/md2html/md2html.c b/md2html/md2html.c
+index de4ab18ec5d7634b397a646dcb032e48431cf453..4ae6efa1580528cd27b8fdbded6237de53203114 100644
+--- a/md2html/md2html.c
++++ b/md2html/md2html.c
+@@ -253,6 +253,7 @@ static const CMDLINE_OPTION cmdline_options[] = {
+     {  0,  "fpermissive-email-autolinks",   '@', 0 },
+     {  0,  "fpermissive-url-autolinks",     'U', 0 },
+     {  0,  "fpermissive-www-autolinks",     '.', 0 },
++    {  0,  "fspoilers",                     'P', 0 },
+     {  0,  "fstrikethrough",                'S', 0 },
+     {  0,  "ftables",                       'T', 0 },
+     {  0,  "ftasklists",                    'X', 0 },
+@@ -308,6 +309,7 @@ usage(void)
+         "                       --fpermissive-email-autolinks\n"
+         "      --fhard-soft-breaks\n"
+         "                       Force all soft breaks to act as hard breaks\n"
++        "      --fspoilers      Enable spoiler spans (||hidden text||)\n"
+         "      --fstrikethrough Enable strike-through spans\n"
+         "      --ftables        Enable tables\n"
+         "      --ftasklists     Enable task lists\n"
+@@ -382,6 +384,7 @@ cmdline_callback(int opt, char const* value, void* data)
+         case '@':   parser_flags |= MD_FLAG_PERMISSIVEEMAILAUTOLINKS; break;
+         case 'V':   parser_flags |= MD_FLAG_PERMISSIVEAUTOLINKS; break;
+         case 'T':   parser_flags |= MD_FLAG_TABLES; break;
++        case 'P':   parser_flags |= MD_FLAG_SPOILERS; break;
+         case 'S':   parser_flags |= MD_FLAG_STRIKETHROUGH; break;
+         case 'L':   parser_flags |= MD_FLAG_LATEXMATHSPANS; break;
+         case 'K':   parser_flags |= MD_FLAG_WIKILINKS; break;
+diff --git a/src/md4c-html.c b/src/md4c-html.c
+index 6d470066fb01fb27b66ba8d5a39d9ef4ff4e2eee..c5c86fd0f04c48c8ff3b8f07fb8d22547382bec7 100644
+--- a/src/md4c-html.c
++++ b/src/md4c-html.c
+@@ -466,6 +466,7 @@ enter_span_callback(MD_SPANTYPE type, void* detail, void* userdata)
+         case MD_SPAN_IMG:               render_open_img_span(r, (MD_SPAN_IMG_DETAIL*) detail); break;
+         case MD_SPAN_CODE:              RENDER_VERBATIM(r, "<code>"); break;
+         case MD_SPAN_DEL:               RENDER_VERBATIM(r, "<del>"); break;
++        case MD_SPAN_SPOILER:           RENDER_VERBATIM(r, "<x-spoiler>"); break;
+         case MD_SPAN_LATEXMATH:         RENDER_VERBATIM(r, "<x-equation>"); break;
+         case MD_SPAN_LATEXMATH_DISPLAY: RENDER_VERBATIM(r, "<x-equation type=\"display\">"); break;
+         case MD_SPAN_WIKILINK:          render_open_wikilink_span(r, (MD_SPAN_WIKILINK_DETAIL*) detail); break;
+@@ -492,6 +493,7 @@ leave_span_callback(MD_SPANTYPE type, void* detail, void* userdata)
+         case MD_SPAN_IMG:               render_close_img_span(r, (MD_SPAN_IMG_DETAIL*) detail); break;
+         case MD_SPAN_CODE:              RENDER_VERBATIM(r, "</code>"); break;
+         case MD_SPAN_DEL:               RENDER_VERBATIM(r, "</del>"); break;
++        case MD_SPAN_SPOILER:           RENDER_VERBATIM(r, "</x-spoiler>"); break;
+         case MD_SPAN_LATEXMATH:         /*fall through*/
+         case MD_SPAN_LATEXMATH_DISPLAY: RENDER_VERBATIM(r, "</x-equation>"); break;
+         case MD_SPAN_WIKILINK:          RENDER_VERBATIM(r, "</x-wikilink>"); break;
+diff --git a/src/md4c.c b/src/md4c.c
+index b4fdbefc7285eeb79ba72c16636f9ca05aa552c3..ea3aa0f2cc1a7a253c1cb1eeb443edad308ac060 100644
+--- a/src/md4c.c
++++ b/src/md4c.c
+@@ -198,7 +198,7 @@ struct MD_CTX_tag {
+ #endif
+ 
+     /* For resolving of inline spans. */
+-    MD_MARKSTACK opener_stacks[16];
++    MD_MARKSTACK opener_stacks[17];
+ #define ASTERISK_OPENERS_oo_mod3_0      (ctx->opener_stacks[0])     /* Opener-only */
+ #define ASTERISK_OPENERS_oo_mod3_1      (ctx->opener_stacks[1])
+ #define ASTERISK_OPENERS_oo_mod3_2      (ctx->opener_stacks[2])
+@@ -215,6 +215,7 @@ struct MD_CTX_tag {
+ #define TILDE_OPENERS_2                 (ctx->opener_stacks[13])
+ #define BRACKET_OPENERS                 (ctx->opener_stacks[14])
+ #define DOLLAR_OPENERS                  (ctx->opener_stacks[15])
++#define PIPE_OPENERS                    (ctx->opener_stacks[16])
+ 
+     /* Stack of dummies which need to call free() for pointers stored in them.
+      * These are constructed during inline parsing and freed after all the block
+@@ -2751,7 +2752,8 @@ md_build_mark_char_map(MD_CTX* ctx)
+     if(ctx->parser.flags & MD_FLAG_PERMISSIVEWWWAUTOLINKS)
+         ctx->mark_char_map['.'] = 1;
+ 
+-    if((ctx->parser.flags & MD_FLAG_TABLES) || (ctx->parser.flags & MD_FLAG_WIKILINKS))
++    if((ctx->parser.flags & MD_FLAG_TABLES) || (ctx->parser.flags & MD_FLAG_WIKILINKS) ||
++       (ctx->parser.flags & MD_FLAG_SPOILERS))
+         ctx->mark_char_map['|'] = 1;
+ 
+     if(ctx->parser.flags & MD_FLAG_COLLAPSEWHITESPACE) {
+@@ -3279,6 +3281,17 @@ md_collect_marks(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines, int table_m
+                 continue;
+             }
+ 
++            /* A potential spoiler delimiter: || ... ||
++             * Checked before the single-| handler so a double pipe is consumed
++             * as one mark and does not become two cell boundaries. */
++            if(ch == _T('|') && (ctx->parser.flags & MD_FLAG_SPOILERS)) {
++                if(off + 1 < line->end && CH(off+1) == _T('|')) {
++                    ADD_MARK(ch, off, off+2, MD_MARK_POTENTIAL_OPENER | MD_MARK_POTENTIAL_CLOSER);
++                    off += 2;
++                    continue;
++                }
++            }
++
+             /* A potential table cell boundary or wiki link label delimiter. */
+             if((table_mode || ctx->parser.flags & MD_FLAG_WIKILINKS) && ch == _T('|')) {
+                 ADD_MARK(ch, off, off+1, 0);
+@@ -3838,6 +3851,23 @@ md_analyze_dollar(MD_CTX* ctx, int mark_index)
+         md_mark_stack_push(ctx, &DOLLAR_OPENERS, mark_index);
+ }
+ 
++static void
++md_analyze_pipe(MD_CTX* ctx, int mark_index)
++{
++    MD_MARK* mark = &ctx->marks[mark_index];
++
++    if((mark->flags & MD_MARK_POTENTIAL_CLOSER)  &&  PIPE_OPENERS.top >= 0) {
++        int opener_index = PIPE_OPENERS.top;
++
++        md_pop_openers(ctx, opener_index);
++        md_resolve_range(ctx, opener_index, mark_index);
++        return;
++    }
++
++    if(mark->flags & MD_MARK_POTENTIAL_OPENER)
++        md_mark_stack_push(ctx, &PIPE_OPENERS, mark_index);
++}
++
+ static MD_MARK*
+ md_scan_left_for_resolved_mark(MD_CTX* ctx, MD_MARK* mark_from, OFF off, MD_MARK** p_cursor)
+ {
+@@ -4071,7 +4101,6 @@ md_analyze_marks(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines,
+             case '!':   /* Pass through. */
+             case ']':   md_analyze_bracket(ctx, i); break;
+             case '&':   md_analyze_entity(ctx, i); break;
+-            case '|':   md_analyze_table_cell_boundary(ctx, i); break;
+             case '_':   /* Pass through. */
+             case '*':   md_analyze_emph(ctx, i); break;
+             case '~':   md_analyze_tilde(ctx, i); break;
+@@ -4096,6 +4125,7 @@ md_analyze_marks(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines,
+ static int
+ md_analyze_inlines(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines, int table_mode)
+ {
++    int i;
+     int ret;
+ 
+     /* Reset the previously collected stack of marks. */
+@@ -4115,7 +4145,12 @@ md_analyze_inlines(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines, int table
+         /* (2) Analyze table cell boundaries. */
+         MD_ASSERT(n_lines == 1);
+         ctx->n_table_cell_boundaries = 0;
+-        md_analyze_marks(ctx, lines, n_lines, 0, ctx->n_marks, _T("|"), 0);
++        for(i = 0; i < ctx->n_marks; i++) {
++            MD_MARK* mark = &ctx->marks[i];
++            if(!(mark->flags & MD_MARK_RESOLVED) &&
++               mark->ch == '|' && mark->end - mark->beg == 1)
++                md_analyze_table_cell_boundary(ctx, i);
++        }
+         return ret;
+     }
+ 
+@@ -4135,6 +4170,16 @@ md_analyze_link_contents(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines,
+     md_analyze_marks(ctx, lines, n_lines, mark_beg, mark_end, _T("&"), 0);
+     md_analyze_marks(ctx, lines, n_lines, mark_beg, mark_end, _T("*_~$"), 0);
+ 
++    if(ctx->parser.flags & MD_FLAG_SPOILERS) {
++        for(i = mark_beg; i < mark_end; i++) {
++            MD_MARK* mark = &ctx->marks[i];
++            if(mark->flags & MD_MARK_RESOLVED)
++                continue;
++            if(mark->ch == '|' && mark->end - mark->beg == 2)
++                md_analyze_pipe(ctx, i);
++        }
++    }
++
+     if((ctx->parser.flags & MD_FLAG_PERMISSIVEAUTOLINKS) != 0) {
+         /* These have to be processed last, as they may be greedy and expand
+          * from their original mark. Also their implementation must be careful
+@@ -4298,6 +4343,15 @@ md_process_inlines(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines)
+                         MD_LEAVE_SPAN(MD_SPAN_DEL, NULL);
+                     break;
+ 
++                case '|':
++                    if(mark->end - mark->beg == 2) {
++                        if(mark->flags & MD_MARK_OPENER)
++                            MD_ENTER_SPAN(MD_SPAN_SPOILER, NULL);
++                        else
++                            MD_LEAVE_SPAN(MD_SPAN_SPOILER, NULL);
++                    }
++                    break;
++
+                 case '$':
+                     if(mark->flags & MD_MARK_OPENER) {
+                         MD_ENTER_SPAN((mark->end - off) % 2 ? MD_SPAN_LATEXMATH : MD_SPAN_LATEXMATH_DISPLAY, NULL);
+diff --git a/src/md4c.h b/src/md4c.h
+index 8d6be1cb4631528e7c387ca2e49ce42d1ef87477..1c0f41d9a4fe7411b5017dce285bf08dde481c78 100644
+--- a/src/md4c.h
++++ b/src/md4c.h
+@@ -145,7 +145,12 @@ typedef enum MD_SPANTYPE {
+ 
+     /* <u>...</u>
+      * Note: Recognized only when MD_FLAG_UNDERLINE is enabled. */
+-    MD_SPAN_U
++    MD_SPAN_U,
++
++    /* Spoiler (hidden content revealed on interaction).
++     * Syntax: ||hidden text||
++     * Note: Recognized only when MD_FLAG_SPOILERS is enabled. */
++    MD_SPAN_SPOILER
+ } MD_SPANTYPE;
+ 
+ /* Text is the actual textual contents of span. */
+@@ -318,6 +323,7 @@ typedef struct MD_SPAN_WIKILINK {
+ #define MD_FLAG_WIKILINKS                   0x2000  /* Enable wiki links extension. */
+ #define MD_FLAG_UNDERLINE                   0x4000  /* Enable underline extension (and disables '_' for normal emphasis). */
+ #define MD_FLAG_HARD_SOFT_BREAKS            0x8000  /* Force all soft breaks to act as hard breaks. */
++#define MD_FLAG_SPOILERS                    0x10000 /* Enable ||hidden text|| spoiler spans. */
+ 
+ #define MD_FLAG_PERMISSIVEAUTOLINKS         (MD_FLAG_PERMISSIVEEMAILAUTOLINKS | MD_FLAG_PERMISSIVEURLAUTOLINKS | MD_FLAG_PERMISSIVEWWWAUTOLINKS)
+ #define MD_FLAG_NOHTML                      (MD_FLAG_NOHTMLBLOCKS | MD_FLAG_NOHTMLSPANS)
+diff --git a/test/spec-spoilers.txt b/test/spec-spoilers.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f9b403e1370258d3bcd841d5e57720d85ac1339
+--- /dev/null
++++ b/test/spec-spoilers.txt
+@@ -0,0 +1,419 @@
++
++# Spoiler Spans
++
++With the flag `MD_FLAG_SPOILERS`, MD4C enables recognition of inline spoiler
++spans using the `||text||` syntax (popularized by Telegram and Discord).
++
++A spoiler span is content wrapped in exactly two consecutive pipe characters
++(`||`) on each side.  The content is intended to be hidden by default and
++revealed on user interaction (tap, hover, click, etc.).  Rendering of the
++hidden state is the application's responsibility; the HTML renderer wraps the
++content in `<x-spoiler>` tags.
++
++
++## Basic recognition
++
++```````````````````````````````` example
++||Hello, world!||
++.
++<p><x-spoiler>Hello, world!</x-spoiler></p>
++.
++--fspoilers
++````````````````````````````````
++
++Spoilers may appear inline alongside normal text:
++
++```````````````````````````````` example
++This is normal text with ||hidden content|| revealed here.
++.
++<p>This is normal text with <x-spoiler>hidden content</x-spoiler> revealed here.</p>
++.
++--fspoilers
++````````````````````````````````
++
++Multiple independent spoiler spans in the same paragraph:
++
++```````````````````````````````` example
++||first|| and ||second||
++.
++<p><x-spoiler>first</x-spoiler> and <x-spoiler>second</x-spoiler></p>
++.
++--fspoilers
++````````````````````````````````
++
++A spoiler span at the very start and end of a paragraph:
++
++```````````````````````````````` example
++||entire paragraph is a spoiler||
++.
++<p><x-spoiler>entire paragraph is a spoiler</x-spoiler></p>
++.
++--fspoilers
++````````````````````````````````
++
++
++## Flag required
++
++Without `MD_FLAG_SPOILERS` the `||` sequence is treated as literal text:
++
++```````````````````````````````` example
++||hidden||
++.
++<p>||hidden||</p>
++.
++````````````````````````````````
++
++
++## Nested inline spans inside a spoiler
++
++Emphasis inside a spoiler:
++
++```````````````````````````````` example
++||nested *emphasis*||
++.
++<p><x-spoiler>nested <em>emphasis</em></x-spoiler></p>
++.
++--fspoilers
++````````````````````````````````
++
++Strong emphasis inside a spoiler:
++
++```````````````````````````````` example
++||**bold** and _italic_ together||
++.
++<p><x-spoiler><strong>bold</strong> and <em>italic</em> together</x-spoiler></p>
++.
++--fspoilers
++````````````````````````````````
++
++Inline code inside a spoiler:
++
++```````````````````````````````` example
++||spoiler with `code`||
++.
++<p><x-spoiler>spoiler with <code>code</code></x-spoiler></p>
++.
++--fspoilers
++````````````````````````````````
++
++A link inside a spoiler:
++
++```````````````````````````````` example
++||spoiler with [a link](http://example.com)||
++.
++<p><x-spoiler>spoiler with <a href="http://example.com">a link</a></x-spoiler></p>
++.
++--fspoilers
++````````````````````````````````
++
++Strikethrough inside a spoiler (requires both flags):
++
++```````````````````````````````` example
++||~~strikethrough inside spoiler~~||
++.
++<p><x-spoiler><del>strikethrough inside spoiler</del></x-spoiler></p>
++.
++--fspoilers --fstrikethrough
++````````````````````````````````
++
++A spoiler inside strikethrough:
++
++```````````````````````````````` example
++~~del with ||spoiler|| inside~~
++.
++<p><del>del with <x-spoiler>spoiler</x-spoiler> inside</del></p>
++.
++--fspoilers --fstrikethrough
++````````````````````````````````
++
++
++## Suppression inside code spans and code blocks
++
++Pipe characters inside a code span are not recognized as spoiler delimiters:
++
++```````````````````````````````` example
++`code with ||pipes||`
++.
++<p><code>code with ||pipes||</code></p>
++.
++--fspoilers
++````````````````````````````````
++
++Similarly inside a fenced code block:
++
++```````````````````````````````` example
++```
++||not a spoiler||
++```
++.
++<pre><code>||not a spoiler||
++</code></pre>
++.
++--fspoilers
++````````````````````````````````
++
++And inside an indented code block:
++
++```````````````````````````````` example
++    ||not a spoiler||
++.
++<pre><code>||not a spoiler||
++</code></pre>
++.
++--fspoilers
++````````````````````````````````
++
++
++## Unmatched delimiters
++
++A lone `||` with no matching closer is left as literal text:
++
++```````````````````````````````` example
++||unclosed spoiler
++.
++<p>||unclosed spoiler</p>
++.
++--fspoilers
++````````````````````````````````
++
++A lone closer with no preceding opener is also left as literal text:
++
++```````````````````````````````` example
++unclosed spoiler||
++.
++<p>unclosed spoiler||</p>
++.
++--fspoilers
++````````````````````````````````
++
++
++## Backslash escaping
++
++A backslash before the first pipe escapes it, breaking the `||` pair and
++preventing spoiler recognition:
++
++```````````````````````````````` example
++\||not a spoiler||
++.
++<p>||not a spoiler||</p>
++.
++--fspoilers
++````````````````````````````````
++
++
++## Paragraph boundary
++
++A spoiler cannot span a paragraph break (same rule as emphasis):
++
++```````````````````````````````` example
++||starts here
++
++ends here||
++.
++<p>||starts here</p>
++<p>ends here||</p>
++.
++--fspoilers
++````````````````````````````````
++
++
++## Soft line break inside a spoiler
++
++A soft line break within the same block is permitted:
++
++```````````````````````````````` example
++||multi
++line spoiler||
++.
++<p><x-spoiler>multi
++line spoiler</x-spoiler></p>
++.
++--fspoilers
++````````````````````````````````
++
++
++## Empty spoiler
++
++Two consecutive `||` pairs produce an empty spoiler span:
++
++```````````````````````````````` example
++||||
++.
++<p><x-spoiler></x-spoiler></p>
++.
++--fspoilers
++````````````````````````````````
++
++
++## Block-level contexts
++
++### ATX headings
++
++```````````````````````````````` example
++# ||heading spoiler||
++.
++<h1><x-spoiler>heading spoiler</x-spoiler></h1>
++.
++--fspoilers
++````````````````````````````````
++
++```````````````````````````````` example
++## ||level two||
++.
++<h2><x-spoiler>level two</x-spoiler></h2>
++.
++--fspoilers
++````````````````````````````````
++
++### Block quotes
++
++```````````````````````````````` example
++> ||hidden in a quote||
++.
++<blockquote>
++<p><x-spoiler>hidden in a quote</x-spoiler></p>
++</blockquote>
++.
++--fspoilers
++````````````````````````````````
++
++Nested block quotes:
++
++```````````````````````````````` example
++> > ||nested quote spoiler||
++.
++<blockquote>
++<blockquote>
++<p><x-spoiler>nested quote spoiler</x-spoiler></p>
++</blockquote>
++</blockquote>
++.
++--fspoilers
++````````````````````````````````
++
++### Unordered lists
++
++```````````````````````````````` example
++- ||list item spoiler||
++- normal item
++.
++<ul>
++<li><x-spoiler>list item spoiler</x-spoiler></li>
++<li>normal item</li>
++</ul>
++.
++--fspoilers
++````````````````````````````````
++
++### Ordered lists
++
++```````````````````````````````` example
++1. ||first item||
++2. normal item
++.
++<ol>
++<li><x-spoiler>first item</x-spoiler></li>
++<li>normal item</li>
++</ol>
++.
++--fspoilers
++````````````````````````````````
++
++### Task lists (requires `MD_FLAG_TASKLISTS`)
++
++```````````````````````````````` example
++- [ ] ||task item spoiler||
++- [x] done
++.
++<ul>
++<li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox" disabled><x-spoiler>task item spoiler</x-spoiler></li>
++<li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox" disabled checked>done</li>
++</ul>
++.
++--fspoilers --ftasklists
++````````````````````````````````
++
++### Tables (requires `MD_FLAG_TABLES`)
++
++A spoiler inside a table cell:
++
++```````````````````````````````` example
++| A | B |
++|---|---|
++| ||spoiler|| | baz |
++.
++<table>
++<thead>
++<tr>
++<th>A</th>
++<th>B</th>
++</tr>
++</thead>
++<tbody>
++<tr>
++<td><x-spoiler>spoiler</x-spoiler></td>
++<td>baz</td>
++</tr>
++</tbody>
++</table>
++.
++--fspoilers --ftables
++````````````````````````````````
++
++Spoiler parsing must not interfere with table cell boundary detection:
++
++```````````````````````````````` example
++x
++|-
++||||||||||
++.
++<table>
++<thead>
++<tr>
++<th>x</th>
++</tr>
++</thead>
++<tbody>
++<tr>
++<td><x-spoiler></x-spoiler><x-spoiler></x-spoiler>||</td>
++</tr>
++</tbody>
++</table>
++.
++--fspoilers --github
++````````````````````````````````
++
++
++## Interaction with other extensions
++
++### Wiki links (requires `MD_FLAG_WIKILINKS`)
++
++A spoiler inside the display portion of a wiki link:
++
++```````````````````````````````` example
++[[target|display with ||spoiler||]]
++.
++<p><x-wikilink data-target="target">display with <x-spoiler>spoiler</x-spoiler></x-wikilink></p>
++.
++--fspoilers --fwiki-links
++````````````````````````````````
++
++Wiki links with a `|` separator must not be mistaken for spoiler delimiters:
++
++```````````````````````````````` example
++[[foo|bar]]
++.
++<p><x-wikilink data-target="foo">bar</x-wikilink></p>
++.
++--fspoilers --fwiki-links
++````````````````````````````````
++
++A wiki link whose label contains an unrelated `|` character:
++
++```````````````````````````````` example
++[[foo|bar|baz]]
++.
++<p><x-wikilink data-target="foo">bar|baz</x-wikilink></p>
++.
++--fspoilers --fwiki-links
++````````````````````````````````

@@ -1,0 +1,92 @@
+diff --git a/include/nlohmann/detail/input/lexer.hpp b/include/nlohmann/detail/input/lexer.hpp
+index a67a0228c6fdc4abf29861cf1f495bdfad5b94d5..052bc4de9a998a5a0f0311e32632fe802af8ea2c 100644
+--- a/include/nlohmann/detail/input/lexer.hpp
++++ b/include/nlohmann/detail/input/lexer.hpp
+@@ -941,10 +941,15 @@ class lexer : public lexer_base<BasicJsonType>
+                         case '\n':
+                         case '\r':
+                         case char_traits<char_type>::eof():
++                            return true;
++
+ #if !JSON_STRICT_NUL_HANDLING
+                         case '\0':
+-#endif
++                            // a NUL byte is the end of the input (see scan()),
++                            // so leave it for scan() to see
++                            unget();
+                             return true;
++#endif
+ 
+                         default:
+                             break;
+diff --git a/single_include/nlohmann/json.hpp b/single_include/nlohmann/json.hpp
+index 349977636a28762c5bb6aa8d96ab913f0bdd1671..884430274f4bac3921209a62791484dc2291eb18 100644
+--- a/single_include/nlohmann/json.hpp
++++ b/single_include/nlohmann/json.hpp
+@@ -11027,10 +11027,15 @@ class lexer : public lexer_base<BasicJsonType>
+                         case '\n':
+                         case '\r':
+                         case char_traits<char_type>::eof():
++                            return true;
++
+ #if !JSON_STRICT_NUL_HANDLING
+                         case '\0':
+-#endif
++                            // a NUL byte is the end of the input (see scan()),
++                            // so leave it for scan() to see
++                            unget();
+                             return true;
++#endif
+ 
+                         default:
+                             break;
+diff --git a/tests/src/unit-class_parser.cpp b/tests/src/unit-class_parser.cpp
+index f67ba631b80e4b5f83d5bbe6a68d8d16a68ee2ef..75f3757e890dd57acfb74d5dabf005680769faa4 100644
+--- a/tests/src/unit-class_parser.cpp
++++ b/tests/src/unit-class_parser.cpp
+@@ -592,6 +592,45 @@ TEST_CASE("parser class")
+ 
+                 // parsing from a string literal is unaffected either way
+                 CHECK(json::parse("123") == json(123));
++
++                // a NUL byte that ends a // comment ends the input just
++                // like a NUL byte anywhere else (issue #5659); before the
++                // fix, the NUL was consumed as part of the comment, and
++                // scanning continued with whatever followed it
++                {
++                    // same as "//c" alone (real end of input after the
++                    // comment), rather than continuing with "[1]"
++                    std::string s1 = "//c";
++                    s1.push_back('\0');
++                    s1 += "[1]";
++                    json _; // NOLINT(readability-identifier-naming)
++                    CHECK_THROWS_WITH_AS(_ = json::parse(s1, nullptr, true, true),
++                                         "[json.exception.parse_error.101] parse error at line 1, column 4: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal",
++                                         json::parse_error&);
++                    CHECK_FALSE(json::accept(s1, true, true));
++                }
++
++                {
++                    // same as "[1, //c" alone, rather than continuing with " 2]"
++                    std::string s2 = "[1, //c";
++                    s2.push_back('\0');
++                    s2 += " 2]";
++                    json _; // NOLINT(readability-identifier-naming)
++                    CHECK_THROWS_WITH_AS(_ = json::parse(s2, nullptr, true, true),
++                                         "[json.exception.parse_error.101] parse error at line 1, column 8: syntax error while parsing value - unexpected end of input; expected '[', '{', or a literal",
++                                         json::parse_error&);
++                    CHECK_FALSE(json::accept(s2, true, true));
++                }
++
++                {
++                    // same as "1 //c" alone: the comment (and the NUL that
++                    // ends it) is ignored, and "x" is never reached
++                    std::string s3 = "1 //c";
++                    s3.push_back('\0');
++                    s3 += "x";
++                    CHECK(json::parse(s3, nullptr, true, true) == json(1));
++                    CHECK(json::accept(s3, true, true));
++                }
+             }
+ #endif
+ 

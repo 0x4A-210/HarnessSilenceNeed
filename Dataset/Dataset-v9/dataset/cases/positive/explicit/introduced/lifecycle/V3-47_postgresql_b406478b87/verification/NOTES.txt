@@ -1,0 +1,12 @@
+PostgreSQL lifecycle case (initialisation order).
+M  = postgres b406478b87e2234c0be4ca4105eee3bb466a646b "process startup: Always call Init[Auxiliary]Process() before BaseInit()." (Andres Freund, 2021-08-05)
+     BaseInit() no longer calls InitCommunication()/CreateSharedMemoryAndSemaphores(); callers must create shared memory, call InitProcess(), then BaseInit().
+S0 = 0de13bbc47d19c95de132cc85c341fdab079c170 (M^)
+H0 = google/oss-fuzz projects/postgresql @ 0ec1cb254~1 (fuzzer/fuzzer_initialize.c: ... InitializeMaxBackends(); BaseInit(); InitProcess(); ...)
+H1 = google/oss-fuzz 0ec1cb254 "[PostgreSQL] Fix in FuzzerInitialize (Postgres commit b406478b87e2234c0be4ca4105eee3bb466a646b). (#6470)" 2021-09-20:
+     CreateSharedMemoryAndSemaphores(); InitProcess(); BaseInit();
+Build: unmodified OSS-Fuzz build.sh of H0/H1 via `compile` in base-builder:latest; Dockerfile steps reproduced in the container
+  (apt-get make libreadline-dev zlib1g-dev bison flex; zip seed corpus from src/test/regress/sql; mkdir bld). No source/harness changes.
+Run: simple_query_fuzzer on trigger_input_comments.sql (= src/test/regress/sql/comments.sql of S1); ASAN_OPTIONS=handle_abort=1 to get a stack.
+  The failure is in LLVMFuzzerInitialize, i.e. independent of the input.
+  S0+H0: exit 0 ; S1+H0: abort() from elog(PANIC, "proc header uninitialized") at proc.c:312 in InitProcess <- FuzzerInitialize:86 ; S1+H1: exit 0

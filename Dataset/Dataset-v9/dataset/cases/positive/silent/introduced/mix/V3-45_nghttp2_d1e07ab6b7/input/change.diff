@@ -1,0 +1,1235 @@
+diff --git a/doc/Makefile.am b/doc/Makefile.am
+index ebbd90785913f348fdb72316a1d7ecb3cb3a9945..6256ab45f147cdec60c9104d623774628a1594fe 100644
+--- a/doc/Makefile.am
++++ b/doc/Makefile.am
+@@ -172,6 +172,7 @@ APIDOCS= \
+ 	nghttp2_submit_origin.rst \
+ 	nghttp2_submit_ping.rst \
+ 	nghttp2_submit_priority.rst \
++	nghttp2_submit_priority_update.rst \
+ 	nghttp2_submit_push_promise.rst \
+ 	nghttp2_submit_request.rst \
+ 	nghttp2_submit_response.rst \
+diff --git a/lib/includes/nghttp2/nghttp2.h b/lib/includes/nghttp2/nghttp2.h
+index ec625b9c7cf672b48e572ac84cdc6cda369f10cd..71f957f5b837cf4ea86b57c5f8deaa7de8a33bba 100644
+--- a/lib/includes/nghttp2/nghttp2.h
++++ b/lib/includes/nghttp2/nghttp2.h
+@@ -634,7 +634,11 @@ typedef enum {
+    * The ORIGIN frame, which is defined by `RFC 8336
+    * <https://tools.ietf.org/html/rfc8336>`_.
+    */
+-  NGHTTP2_ORIGIN = 0x0c
++  NGHTTP2_ORIGIN = 0x0c,
++  /**
++   * The PRIORITY_UPDATE frame, which is defined by :rfc:`9218`.
++   */
++  NGHTTP2_PRIORITY_UPDATE = 0x10
+ } nghttp2_frame_type;
+ 
+ /**
+@@ -4811,6 +4815,74 @@ NGHTTP2_EXTERN int nghttp2_submit_origin(nghttp2_session *session,
+                                          const nghttp2_origin_entry *ov,
+                                          size_t nov);
+ 
++/**
++ * @struct
++ *
++ * The payload of PRIORITY_UPDATE frame.  PRIORITY_UPDATE frame is a
++ * non-critical extension to HTTP/2.  If this frame is received, and
++ * `nghttp2_option_set_user_recv_extension_type()` is not set, and
++ * `nghttp2_option_set_builtin_recv_extension_type()` is set for
++ * :enum:`nghttp2_frame_type.NGHTTP2_PRIORITY_UPDATE`,
++ * ``nghttp2_extension.payload`` will point to this struct.
++ *
++ * It has the following members:
++ */
++typedef struct {
++  /**
++   * The stream ID of the stream whose priority is updated.
++   */
++  int32_t stream_id;
++  /**
++   * The pointer to Priority field value.  It is not necessarily
++   * NULL-terminated.
++   */
++  uint8_t *field_value;
++  /**
++   * The length of the :member:`field_value`.
++   */
++  size_t field_value_len;
++} nghttp2_ext_priority_update;
++
++/**
++ * @function
++ *
++ * Submits PRIORITY_UPDATE frame.
++ *
++ * PRIORITY_UPDATE frame is a non-critical extension to HTTP/2, and
++ * defined in :rfc:`9218#section-7.1`.
++ *
++ * The |flags| is currently ignored and should be
++ * :enum:`nghttp2_flag.NGHTTP2_FLAG_NONE`.
++ *
++ * The |stream_id| is the ID of stream which is prioritized.  The
++ * |field_value| points to the Priority field value.  The
++ * |field_value_len| is the length of the Priority field value.
++ *
++ * If this function is called by server,
++ * :enum:`nghttp2_error.NGHTTP2_ERR_INVALID_STATE` is returned.
++ *
++ * If
++ * :enum:`nghttp2_settings_id.NGHTTP2_SETTINGS_NO_RFC7540_PRIORITIES`
++ * of value of 0 is received by a remote endpoint (or it is omitted),
++ * this function does nothing and returns 0.
++ *
++ * This function returns 0 if it succeeds, or one of the following
++ * negative error codes:
++ *
++ * :enum:`nghttp2_error.NGHTTP2_ERR_NOMEM`
++ *     Out of memory
++ * :enum:`nghttp2_error.NGHTTP2_ERR_INVALID_STATE`
++ *     The function is called from server side session
++ * :enum:`nghttp2_error.NGHTTP2_ERR_INVALID_ARGUMENT`
++ *     The |field_value_len| is larger than 16380; or |stream_id| is
++ *     0.
++ */
++NGHTTP2_EXTERN int nghttp2_submit_priority_update(nghttp2_session *session,
++                                                  uint8_t flags,
++                                                  int32_t stream_id,
++                                                  const uint8_t *field_value,
++                                                  size_t field_value_len);
++
+ /**
+  * @function
+  *
+diff --git a/lib/nghttp2_frame.c b/lib/nghttp2_frame.c
+index b0637f682b1f8ea4bc20ebd2e147c4ed337ced80..35072c15fc18e6209172fa6db05a4d45b899b5e1 100644
+--- a/lib/nghttp2_frame.c
++++ b/lib/nghttp2_frame.c
+@@ -253,6 +253,31 @@ void nghttp2_frame_origin_free(nghttp2_extension *frame, nghttp2_mem *mem) {
+   nghttp2_mem_free(mem, origin->ov);
+ }
+ 
++void nghttp2_frame_priority_update_init(nghttp2_extension *frame,
++                                        int32_t stream_id, uint8_t *field_value,
++                                        size_t field_value_len) {
++  nghttp2_ext_priority_update *priority_update;
++
++  nghttp2_frame_hd_init(&frame->hd, 4 + field_value_len,
++                        NGHTTP2_PRIORITY_UPDATE, NGHTTP2_FLAG_NONE, 0);
++
++  priority_update = frame->payload;
++  priority_update->stream_id = stream_id;
++  priority_update->field_value = field_value;
++  priority_update->field_value_len = field_value_len;
++}
++
++void nghttp2_frame_priority_update_free(nghttp2_extension *frame,
++                                        nghttp2_mem *mem) {
++  nghttp2_ext_priority_update *priority_update;
++
++  priority_update = frame->payload;
++  if (priority_update == NULL) {
++    return;
++  }
++  nghttp2_mem_free(mem, priority_update->field_value);
++}
++
+ size_t nghttp2_frame_priority_len(uint8_t flags) {
+   if (flags & NGHTTP2_FLAG_PRIORITY) {
+     return NGHTTP2_PRIORITY_SPECLEN;
+@@ -876,6 +901,57 @@ int nghttp2_frame_unpack_origin_payload(nghttp2_extension *frame,
+   return 0;
+ }
+ 
++int nghttp2_frame_pack_priority_update(nghttp2_bufs *bufs,
++                                       nghttp2_extension *frame) {
++  int rv;
++  nghttp2_buf *buf;
++  nghttp2_ext_priority_update *priority_update;
++
++  /* This is required with --disable-assert. */
++  (void)rv;
++
++  priority_update = frame->payload;
++
++  buf = &bufs->head->buf;
++
++  assert(nghttp2_buf_avail(buf) >= 4 + priority_update->field_value_len);
++
++  buf->pos -= NGHTTP2_FRAME_HDLEN;
++
++  nghttp2_frame_pack_frame_hd(buf->pos, &frame->hd);
++
++  nghttp2_put_uint32be(buf->last, (uint32_t)priority_update->stream_id);
++  buf->last += 4;
++
++  rv = nghttp2_bufs_add(bufs, priority_update->field_value,
++                        priority_update->field_value_len);
++
++  assert(rv == 0);
++
++  return 0;
++}
++
++void nghttp2_frame_unpack_priority_update_payload(nghttp2_extension *frame,
++                                                  uint8_t *payload,
++                                                  size_t payloadlen) {
++  nghttp2_ext_priority_update *priority_update;
++
++  assert(payloadlen >= 4);
++
++  priority_update = frame->payload;
++
++  priority_update->stream_id =
++      nghttp2_get_uint32(payload) & NGHTTP2_STREAM_ID_MASK;
++
++  if (payloadlen > 4) {
++    priority_update->field_value = payload + 4;
++    priority_update->field_value_len = payloadlen - 4;
++  } else {
++    priority_update->field_value = NULL;
++    priority_update->field_value_len = 0;
++  }
++}
++
+ nghttp2_settings_entry *nghttp2_frame_iv_copy(const nghttp2_settings_entry *iv,
+                                               size_t niv, nghttp2_mem *mem) {
+   nghttp2_settings_entry *iv_copy;
+diff --git a/lib/nghttp2_frame.h b/lib/nghttp2_frame.h
+index 3859926ebbcbac2a4db62bff5fff65c15967530c..5f6152b74587ae9d18aefcf2246ea002737dacf1 100644
+--- a/lib/nghttp2_frame.h
++++ b/lib/nghttp2_frame.h
+@@ -73,6 +73,7 @@
+ typedef union {
+   nghttp2_ext_altsvc altsvc;
+   nghttp2_ext_origin origin;
++  nghttp2_ext_priority_update priority_update;
+ } nghttp2_ext_frame_payload;
+ 
+ void nghttp2_frame_pack_frame_hd(uint8_t *buf, const nghttp2_frame_hd *hd);
+@@ -423,6 +424,31 @@ int nghttp2_frame_pack_origin(nghttp2_bufs *bufs, nghttp2_extension *ext);
+ int nghttp2_frame_unpack_origin_payload(nghttp2_extension *frame,
+                                         const uint8_t *payload,
+                                         size_t payloadlen, nghttp2_mem *mem);
++
++/*
++ * Packs PRIORITY_UPDATE frame |frame| in wire frame format and store
++ * it in |bufs|.
++ *
++ * The caller must make sure that nghttp2_bufs_reset(bufs) is called
++ * before calling this function.
++ *
++ * This function always succeeds and returns 0.
++ */
++int nghttp2_frame_pack_priority_update(nghttp2_bufs *bufs,
++                                       nghttp2_extension *ext);
++
++/*
++ * Unpacks PRIORITY_UPDATE wire format into |frame|.  The |payload| of
++ * |payloadlen| bytes contains frame payload.  This function assumes
++ * that frame->payload points to the nghttp2_ext_priority_update
++ * object.
++ *
++ * This function always succeeds and returns 0.
++ */
++void nghttp2_frame_unpack_priority_update_payload(nghttp2_extension *frame,
++                                                  uint8_t *payload,
++                                                  size_t payloadlen);
++
+ /*
+  * Initializes HEADERS frame |frame| with given values.  |frame| takes
+  * ownership of |nva|, so caller must not free it. If |stream_id| is
+@@ -538,6 +564,25 @@ void nghttp2_frame_origin_init(nghttp2_extension *frame,
+  */
+ void nghttp2_frame_origin_free(nghttp2_extension *frame, nghttp2_mem *mem);
+ 
++/*
++ * Initializes PRIORITY_UPDATE frame |frame| with given values.  This
++ * function assumes that frame->payload points to
++ * nghttp2_ext_priority_update object.  On success, this function
++ * takes ownership of |field_value|, so caller must not free it.
++ */
++void nghttp2_frame_priority_update_init(nghttp2_extension *frame,
++                                        int32_t stream_id, uint8_t *field_value,
++                                        size_t field_value_len);
++
++/*
++ * Frees up resources under |frame|.  This function does not free
++ * nghttp2_ext_priority_update object pointed by frame->payload.  This
++ * function only frees field_value pointed by
++ * nghttp2_ext_priority_update.field_value.
++ */
++void nghttp2_frame_priority_update_free(nghttp2_extension *frame,
++                                        nghttp2_mem *mem);
++
+ /*
+  * Returns the number of padding bytes after payload.  The total
+  * padding length is given in the |padlen|.  The returned value does
+diff --git a/lib/nghttp2_http.c b/lib/nghttp2_http.c
+index 81f5b6e990315d64f788587b22a4330546562296..5e772230b161afeacd6a001dbfd858f88c7bd836 100644
+--- a/lib/nghttp2_http.c
++++ b/lib/nghttp2_http.c
+@@ -84,14 +84,14 @@ static int lws(const uint8_t *s, size_t n) {
+ }
+ 
+ static int check_pseudo_header(nghttp2_stream *stream, const nghttp2_hd_nv *nv,
+-                               int flag) {
++                               uint32_t flag) {
+   if (stream->http_flags & flag) {
+     return 0;
+   }
+   if (lws(nv->value->base, nv->value->len)) {
+     return 0;
+   }
+-  stream->http_flags = (uint16_t)(stream->http_flags | flag);
++  stream->http_flags = stream->http_flags | flag;
+   return 1;
+ }
+ 
+@@ -217,11 +217,16 @@ static int http_request_on_header(nghttp2_stream *stream, nghttp2_hd_nv *nv,
+     break;
+   case NGHTTP2_TOKEN_PRIORITY:
+     if (!trailer &&
+-        (stream->flags & NGHTTP2_STREAM_FLAG_NO_RFC7540_PRIORITIES)) {
++        (stream->flags & NGHTTP2_STREAM_FLAG_NO_RFC7540_PRIORITIES) &&
++        !(stream->http_flags & NGHTTP2_HTTP_FLAG_BAD_PRIORITY)) {
+       nghttp2_extpri_from_uint8(&extpri, stream->http_extpri);
+       if (nghttp2_http_parse_priority(&extpri, nv->value->base,
+                                       nv->value->len) == 0) {
+         stream->http_extpri = nghttp2_extpri_to_uint8(&extpri);
++        stream->http_flags |= NGHTTP2_HTTP_FLAG_PRIORITY;
++      } else {
++        stream->http_flags &= (uint32_t)~NGHTTP2_HTTP_FLAG_PRIORITY;
++        stream->http_flags |= NGHTTP2_HTTP_FLAG_BAD_PRIORITY;
+       }
+     }
+     break;
+@@ -460,16 +465,15 @@ int nghttp2_http_on_response_headers(nghttp2_stream *stream) {
+ 
+   if (stream->status_code / 100 == 1) {
+     /* non-final response */
+-    stream->http_flags =
+-        (uint16_t)((stream->http_flags & NGHTTP2_HTTP_FLAG_METH_ALL) |
+-                   NGHTTP2_HTTP_FLAG_EXPECT_FINAL_RESPONSE);
++    stream->http_flags = (stream->http_flags & NGHTTP2_HTTP_FLAG_METH_ALL) |
++                         NGHTTP2_HTTP_FLAG_EXPECT_FINAL_RESPONSE;
+     stream->content_length = -1;
+     stream->status_code = -1;
+     return 0;
+   }
+ 
+   stream->http_flags =
+-      (uint16_t)(stream->http_flags & ~NGHTTP2_HTTP_FLAG_EXPECT_FINAL_RESPONSE);
++      stream->http_flags & (uint32_t)~NGHTTP2_HTTP_FLAG_EXPECT_FINAL_RESPONSE;
+ 
+   if (!expect_response_body(stream)) {
+     stream->content_length = 0;
+diff --git a/lib/nghttp2_option.c b/lib/nghttp2_option.c
+index 34348e6606ccf4206048f3f2f76d75a2ec366cc8..ab98df597ca2b6436456052d5791f31bd271b3be 100644
+--- a/lib/nghttp2_option.c
++++ b/lib/nghttp2_option.c
+@@ -90,6 +90,10 @@ void nghttp2_option_set_builtin_recv_extension_type(nghttp2_option *option,
+     option->opt_set_mask |= NGHTTP2_OPT_BUILTIN_RECV_EXT_TYPES;
+     option->builtin_recv_ext_types |= NGHTTP2_TYPEMASK_ORIGIN;
+     return;
++  case NGHTTP2_PRIORITY_UPDATE:
++    option->opt_set_mask |= NGHTTP2_OPT_BUILTIN_RECV_EXT_TYPES;
++    option->builtin_recv_ext_types |= NGHTTP2_TYPEMASK_PRIORITY_UPDATE;
++    return;
+   default:
+     return;
+   }
+diff --git a/lib/nghttp2_outbound_item.c b/lib/nghttp2_outbound_item.c
+index f651c8029ac0244f8e7b2de2559e5ffbbcc8563c..2a3041db19535529dd5596ae90b4dbb0e43f10c4 100644
+--- a/lib/nghttp2_outbound_item.c
++++ b/lib/nghttp2_outbound_item.c
+@@ -89,6 +89,9 @@ void nghttp2_outbound_item_free(nghttp2_outbound_item *item, nghttp2_mem *mem) {
+     case NGHTTP2_ORIGIN:
+       nghttp2_frame_origin_free(&frame->ext, mem);
+       break;
++    case NGHTTP2_PRIORITY_UPDATE:
++      nghttp2_frame_priority_update_free(&frame->ext, mem);
++      break;
+     default:
+       assert(0);
+       break;
+diff --git a/lib/nghttp2_session.c b/lib/nghttp2_session.c
+index 27ea0d04cc7a6f24bceb9369d10f7bffe1a7473f..7a43f4d7638a5e5d7c7a125ae4f7d0d1132a8da1 100644
+--- a/lib/nghttp2_session.c
++++ b/lib/nghttp2_session.c
+@@ -355,6 +355,14 @@ static void session_inbound_frame_reset(nghttp2_session *session) {
+         }
+         nghttp2_frame_origin_free(&iframe->frame.ext, mem);
+         break;
++      case NGHTTP2_PRIORITY_UPDATE:
++        if ((session->builtin_recv_ext_types &
++             NGHTTP2_TYPEMASK_PRIORITY_UPDATE) == 0) {
++          break;
++        }
++        /* Do not call nghttp2_frame_priority_update_free, because all
++           fields point to sbuf. */
++        break;
+       }
+     }
+ 
+@@ -2055,6 +2063,28 @@ static int session_predicate_origin_send(nghttp2_session *session) {
+   return 0;
+ }
+ 
++static int session_predicate_priority_update_send(nghttp2_session *session,
++                                                  int32_t stream_id) {
++  nghttp2_stream *stream;
++
++  if (session_is_closing(session)) {
++    return NGHTTP2_ERR_SESSION_CLOSING;
++  }
++
++  stream = nghttp2_session_get_stream(session, stream_id);
++  if (stream == NULL) {
++    return 0;
++  }
++  if (stream->state == NGHTTP2_STREAM_CLOSING) {
++    return NGHTTP2_ERR_STREAM_CLOSING;
++  }
++  if (stream->shut_flags & NGHTTP2_SHUT_RD) {
++    return NGHTTP2_ERR_INVALID_STREAM_STATE;
++  }
++
++  return 0;
++}
++
+ /* Take into account settings max frame size and both connection-level
+    flow control here */
+ static ssize_t
+@@ -2600,6 +2630,18 @@ static int session_prep_frame(nghttp2_session *session,
+       }
+ 
+       return 0;
++    case NGHTTP2_PRIORITY_UPDATE: {
++      nghttp2_ext_priority_update *priority_update = frame->ext.payload;
++      rv = session_predicate_priority_update_send(session,
++                                                  priority_update->stream_id);
++      if (rv != 0) {
++        return rv;
++      }
++
++      nghttp2_frame_pack_priority_update(&session->aob.framebufs, &frame->ext);
++
++      return 0;
++    }
+     default:
+       /* Unreachable here */
+       assert(0);
+@@ -4028,7 +4070,8 @@ static int session_end_stream_headers_received(nghttp2_session *session,
+ 
+   if (session->server && session_enforce_http_messaging(session) &&
+       frame->headers.cat == NGHTTP2_HCAT_REQUEST &&
+-      (stream->flags & NGHTTP2_STREAM_FLAG_NO_RFC7540_PRIORITIES)) {
++      (stream->flags & NGHTTP2_STREAM_FLAG_NO_RFC7540_PRIORITIES) &&
++      (stream->http_flags & NGHTTP2_HTTP_FLAG_PRIORITY)) {
+     rv = session_update_stream_priority(session, stream, stream->http_extpri);
+     if (rv != 0) {
+       assert(nghttp2_is_fatal(rv));
+@@ -5240,6 +5283,77 @@ int nghttp2_session_on_origin_received(nghttp2_session *session,
+   return session_call_on_frame_received(session, frame);
+ }
+ 
++int nghttp2_session_on_priority_update_received(nghttp2_session *session,
++                                                nghttp2_frame *frame) {
++  nghttp2_ext_priority_update *priority_update;
++  nghttp2_stream *stream;
++  nghttp2_priority_spec pri_spec;
++  nghttp2_extpri extpri;
++  int rv;
++
++  assert(session->server);
++
++  priority_update = frame->ext.payload;
++
++  if (frame->hd.stream_id != 0) {
++    return session_handle_invalid_connection(session, frame, NGHTTP2_ERR_PROTO,
++                                             "PRIORITY_UPDATE: stream_id == 0");
++  }
++
++  if (nghttp2_session_is_my_stream_id(session, priority_update->stream_id)) {
++    if (session_detect_idle_stream(session, priority_update->stream_id)) {
++      return session_handle_invalid_connection(
++          session, frame, NGHTTP2_ERR_PROTO,
++          "PRIORITY_UPDATE: prioritizing idle push is not allowed");
++    }
++
++    /* TODO Ignore priority signal to a push stream for now */
++    return session_call_on_frame_received(session, frame);
++  }
++
++  stream = nghttp2_session_get_stream_raw(session, priority_update->stream_id);
++  if (stream) {
++    /* Stream already exists. */
++  } else if (session_detect_idle_stream(session, priority_update->stream_id)) {
++    if (session->num_idle_streams + session->num_incoming_streams >=
++        session->local_settings.max_concurrent_streams) {
++      return session_handle_invalid_connection(
++          session, frame, NGHTTP2_ERR_PROTO,
++          "PRIORITY_UPDATE: max concurrent streams exceeded");
++    }
++
++    nghttp2_priority_spec_default_init(&pri_spec);
++    stream = nghttp2_session_open_stream(session, priority_update->stream_id,
++                                         NGHTTP2_FLAG_NONE, &pri_spec,
++                                         NGHTTP2_STREAM_IDLE, NULL);
++    if (!stream) {
++      return NGHTTP2_ERR_NOMEM;
++    }
++  } else {
++    return session_call_on_frame_received(session, frame);
++  }
++
++  extpri.urgency = NGHTTP2_EXTPRI_DEFAULT_URGENCY;
++  extpri.inc = 0;
++
++  rv = nghttp2_http_parse_priority(&extpri, priority_update->field_value,
++                                   priority_update->field_value_len);
++  if (rv != 0) {
++    /* Just ignore field_value if it cannot be parsed. */
++    return session_call_on_frame_received(session, frame);
++  }
++
++  rv = session_update_stream_priority(session, stream,
++                                      nghttp2_extpri_to_uint8(&extpri));
++  if (rv != 0) {
++    if (nghttp2_is_fatal(rv)) {
++      return rv;
++    }
++  }
++
++  return session_call_on_frame_received(session, frame);
++}
++
+ static int session_process_altsvc_frame(nghttp2_session *session) {
+   nghttp2_inbound_frame *iframe = &session->iframe;
+   nghttp2_frame *frame = &iframe->frame;
+@@ -5274,6 +5388,16 @@ static int session_process_origin_frame(nghttp2_session *session) {
+   return nghttp2_session_on_origin_received(session, frame);
+ }
+ 
++static int session_process_priority_update_frame(nghttp2_session *session) {
++  nghttp2_inbound_frame *iframe = &session->iframe;
++  nghttp2_frame *frame = &iframe->frame;
++
++  nghttp2_frame_unpack_priority_update_payload(&frame->ext, iframe->sbuf.pos,
++                                               nghttp2_buf_len(&iframe->sbuf));
++
++  return nghttp2_session_on_priority_update_received(session, frame);
++}
++
+ static int session_process_extension_frame(nghttp2_session *session) {
+   int rv;
+   nghttp2_inbound_frame *iframe = &session->iframe;
+@@ -6225,6 +6349,49 @@ ssize_t nghttp2_session_mem_recv(nghttp2_session *session, const uint8_t *in,
+ 
+             iframe->state = NGHTTP2_IB_READ_ORIGIN_PAYLOAD;
+ 
++            break;
++          case NGHTTP2_PRIORITY_UPDATE:
++            if ((session->builtin_recv_ext_types &
++                 NGHTTP2_TYPEMASK_PRIORITY_UPDATE) == 0) {
++              busy = 1;
++              iframe->state = NGHTTP2_IB_IGN_PAYLOAD;
++              break;
++            }
++
++            DEBUGF("recv: PRIORITY_UPDATE\n");
++
++            iframe->frame.hd.flags = NGHTTP2_FLAG_NONE;
++            iframe->frame.ext.payload =
++                &iframe->ext_frame_payload.priority_update;
++
++            if (!session->server) {
++              rv = nghttp2_session_terminate_session_with_reason(
++                  session, NGHTTP2_PROTOCOL_ERROR,
++                  "PRIORITY_UPDATE is received from server");
++              if (nghttp2_is_fatal(rv)) {
++                return rv;
++              }
++              return (ssize_t)inlen;
++            }
++
++            if (iframe->payloadleft < 4) {
++              busy = 1;
++              iframe->state = NGHTTP2_IB_FRAME_SIZE_ERROR;
++              break;
++            }
++
++            if (session->pending_no_rfc7540_priorities != 1 ||
++                iframe->payloadleft > sizeof(iframe->raw_sbuf)) {
++              busy = 1;
++              iframe->state = NGHTTP2_IB_IGN_PAYLOAD;
++              break;
++            }
++
++            busy = 1;
++
++            iframe->state = NGHTTP2_IB_READ_NBYTE;
++            inbound_frame_set_mark(iframe, iframe->payloadleft);
++
+             break;
+           default:
+             busy = 1;
+@@ -6496,6 +6663,18 @@ ssize_t nghttp2_session_mem_recv(nghttp2_session *session, const uint8_t *in,
+ 
+         iframe->state = NGHTTP2_IB_READ_ALTSVC_PAYLOAD;
+ 
++        break;
++      case NGHTTP2_PRIORITY_UPDATE:
++        DEBUGF("recv: prioritized_stream_id=%d\n",
++               nghttp2_get_uint32(iframe->sbuf.pos) & NGHTTP2_STREAM_ID_MASK);
++
++        rv = session_process_priority_update_frame(session);
++        if (nghttp2_is_fatal(rv)) {
++          return rv;
++        }
++
++        session_inbound_frame_reset(session);
++
+         break;
+       }
+       default:
+diff --git a/lib/nghttp2_session.h b/lib/nghttp2_session.h
+index 0d2352e1e4dc281fc029657d0045dbf5c6871858..b4afa7bbf7f07702c7995a319f560f36c4737020 100644
+--- a/lib/nghttp2_session.h
++++ b/lib/nghttp2_session.h
+@@ -62,7 +62,8 @@ typedef enum {
+ typedef enum {
+   NGHTTP2_TYPEMASK_NONE = 0,
+   NGHTTP2_TYPEMASK_ALTSVC = 1 << 0,
+-  NGHTTP2_TYPEMASK_ORIGIN = 1 << 1
++  NGHTTP2_TYPEMASK_ORIGIN = 1 << 1,
++  NGHTTP2_TYPEMASK_PRIORITY_UPDATE = 1 << 2
+ } nghttp2_typemask;
+ 
+ typedef enum {
+@@ -151,10 +152,8 @@ typedef struct {
+   /* padding length for the current frame */
+   size_t padlen;
+   nghttp2_inbound_state state;
+-  /* Small buffer.  Currently the largest contiguous chunk to buffer
+-     is frame header.  We buffer part of payload, but they are smaller
+-     than frame header. */
+-  uint8_t raw_sbuf[NGHTTP2_FRAME_HDLEN];
++  /* Small fixed sized buffer. */
++  uint8_t raw_sbuf[32];
+ } nghttp2_inbound_frame;
+ 
+ typedef struct {
+@@ -786,6 +785,19 @@ int nghttp2_session_on_altsvc_received(nghttp2_session *session,
+ int nghttp2_session_on_origin_received(nghttp2_session *session,
+                                        nghttp2_frame *frame);
+ 
++/*
++ * Called when PRIORITY_UPDATE is received, assuming |frame| is
++ * properly initialized.
++ *
++ * This function returns 0 if it succeeds, or one of the following
++ * negative error codes:
++ *
++ * NGHTTP2_ERR_CALLBACK_FAILURE
++ *     The callback function failed.
++ */
++int nghttp2_session_on_priority_update_received(nghttp2_session *session,
++                                                nghttp2_frame *frame);
++
+ /*
+  * Called when DATA is received, assuming |frame| is properly
+  * initialized.
+diff --git a/lib/nghttp2_stream.h b/lib/nghttp2_stream.h
+index 0a11b4cd21d90fb4fcd891c66083195404b5aa1f..4f5585e8c23939a237b9f8c299717f38c1400477 100644
+--- a/lib/nghttp2_stream.h
++++ b/lib/nghttp2_stream.h
+@@ -134,6 +134,11 @@ typedef enum {
+   /* set if final response is expected */
+   NGHTTP2_HTTP_FLAG_EXPECT_FINAL_RESPONSE = 1 << 14,
+   NGHTTP2_HTTP_FLAG__PROTOCOL = 1 << 15,
++  /* set if priority header field is received */
++  NGHTTP2_HTTP_FLAG_PRIORITY = 1 << 16,
++  /* set if an error is encountered while parsing priority header
++     field */
++  NGHTTP2_HTTP_FLAG_BAD_PRIORITY = 1 << 17,
+ } nghttp2_http_flag;
+ 
+ struct nghttp2_stream {
+@@ -206,7 +211,7 @@ struct nghttp2_stream {
+   /* status code from remote server */
+   int16_t status_code;
+   /* Bitwise OR of zero or more nghttp2_http_flag values */
+-  uint16_t http_flags;
++  uint32_t http_flags;
+   /* This is bitwise-OR of 0 or more of nghttp2_stream_flag. */
+   uint8_t flags;
+   /* Bitwise OR of zero or more nghttp2_shut_flag values */
+diff --git a/lib/nghttp2_submit.c b/lib/nghttp2_submit.c
+index 499ae835c11e9b979b1c68e24db5388bf04695d2..da692c930022b6e2d1c356cf3178cca72469a9b6 100644
+--- a/lib/nghttp2_submit.c
++++ b/lib/nghttp2_submit.c
+@@ -667,6 +667,78 @@ fail_item_malloc:
+   return rv;
+ }
+ 
++int nghttp2_submit_priority_update(nghttp2_session *session, uint8_t flags,
++                                   int32_t stream_id,
++                                   const uint8_t *field_value,
++                                   size_t field_value_len) {
++  nghttp2_mem *mem;
++  uint8_t *buf, *p;
++  nghttp2_outbound_item *item;
++  nghttp2_frame *frame;
++  nghttp2_ext_priority_update *priority_update;
++  int rv;
++  (void)flags;
++
++  mem = &session->mem;
++
++  if (session->remote_settings.no_rfc7540_priorities == 0) {
++    return 0;
++  }
++
++  if (session->server) {
++    return NGHTTP2_ERR_INVALID_STATE;
++  }
++
++  if (stream_id == 0 || 4 + field_value_len > NGHTTP2_MAX_PAYLOADLEN) {
++    return NGHTTP2_ERR_INVALID_ARGUMENT;
++  }
++
++  if (field_value_len) {
++    buf = nghttp2_mem_malloc(mem, field_value_len + 1);
++    if (buf == NULL) {
++      return NGHTTP2_ERR_NOMEM;
++    }
++
++    p = nghttp2_cpymem(buf, field_value, field_value_len);
++    *p = '\0';
++  } else {
++    buf = NULL;
++  }
++
++  item = nghttp2_mem_malloc(mem, sizeof(nghttp2_outbound_item));
++  if (item == NULL) {
++    rv = NGHTTP2_ERR_NOMEM;
++    goto fail_item_malloc;
++  }
++
++  nghttp2_outbound_item_init(item);
++
++  item->aux_data.ext.builtin = 1;
++
++  priority_update = &item->ext_frame_payload.priority_update;
++
++  frame = &item->frame;
++  frame->ext.payload = priority_update;
++
++  nghttp2_frame_priority_update_init(&frame->ext, stream_id, buf,
++                                     field_value_len);
++
++  rv = nghttp2_session_add_item(session, item);
++  if (rv != 0) {
++    nghttp2_frame_priority_update_free(&frame->ext, mem);
++    nghttp2_mem_free(mem, item);
++
++    return rv;
++  }
++
++  return 0;
++
++fail_item_malloc:
++  free(buf);
++
++  return rv;
++}
++
+ static uint8_t set_request_flags(const nghttp2_priority_spec *pri_spec,
+                                  const nghttp2_data_provider *data_prd) {
+   uint8_t flags = NGHTTP2_FLAG_NONE;
+diff --git a/src/app_helper.cc b/src/app_helper.cc
+index 485197e8436bfdda0f9c7bdcc5629059bf98c10b..78b39d28760260842672dd2cea4b73dfd26d2028 100644
+--- a/src/app_helper.cc
++++ b/src/app_helper.cc
+@@ -112,6 +112,8 @@ std::string strframetype(uint8_t type) {
+     return "ALTSVC";
+   case NGHTTP2_ORIGIN:
+     return "ORIGIN";
++  case NGHTTP2_PRIORITY_UPDATE:
++    return "PRIORITY_UPDATE";
+   }
+ 
+   std::string s = "extension(0x";
+@@ -366,6 +368,17 @@ void print_frame(print_type ptype, const nghttp2_frame *frame) {
+     }
+     break;
+   }
++  case NGHTTP2_PRIORITY_UPDATE: {
++    auto priority_update =
++        static_cast<nghttp2_ext_priority_update *>(frame->ext.payload);
++    print_frame_attr_indent();
++    fprintf(outfile,
++            "(prioritized_stream_id=%d, priority_field_value=[%.*s])\n",
++            priority_update->stream_id,
++            static_cast<int>(priority_update->field_value_len),
++            priority_update->field_value);
++    break;
++  }
+   default:
+     break;
+   }
+diff --git a/tests/main.c b/tests/main.c
+index ccef9cf5258a285bf07173c472a65a5f1c92a52b..9d62f06b665c2d71f3330c15a7e873ba2713c30b 100644
+--- a/tests/main.c
++++ b/tests/main.c
+@@ -115,6 +115,8 @@ int main(void) {
+                    test_nghttp2_session_recv_altsvc) ||
+       !CU_add_test(pSuite, "session_recv_origin",
+                    test_nghttp2_session_recv_origin) ||
++      !CU_add_test(pSuite, "session_recv_priority_update",
++                   test_nghttp2_session_recv_priority_update) ||
+       !CU_add_test(pSuite, "session_continue", test_nghttp2_session_continue) ||
+       !CU_add_test(pSuite, "session_add_frame",
+                    test_nghttp2_session_add_frame) ||
+@@ -215,6 +217,8 @@ int main(void) {
+       !CU_add_test(pSuite, "submit_extension", test_nghttp2_submit_extension) ||
+       !CU_add_test(pSuite, "submit_altsvc", test_nghttp2_submit_altsvc) ||
+       !CU_add_test(pSuite, "submit_origin", test_nghttp2_submit_origin) ||
++      !CU_add_test(pSuite, "submit_priority_update",
++                   test_nghttp2_submit_priority_update) ||
+       !CU_add_test(pSuite, "submit_rst_stream",
+                    test_nghttp2_submit_rst_stream) ||
+       !CU_add_test(pSuite, "session_open_stream",
+@@ -376,6 +380,8 @@ int main(void) {
+                    test_nghttp2_frame_pack_altsvc) ||
+       !CU_add_test(pSuite, "frame_pack_origin",
+                    test_nghttp2_frame_pack_origin) ||
++      !CU_add_test(pSuite, "frame_pack_priority_update",
++                   test_nghttp2_frame_pack_priority_update) ||
+       !CU_add_test(pSuite, "nv_array_copy", test_nghttp2_nv_array_copy) ||
+       !CU_add_test(pSuite, "iv_check", test_nghttp2_iv_check) ||
+       !CU_add_test(pSuite, "hd_deflate", test_nghttp2_hd_deflate) ||
+diff --git a/tests/nghttp2_frame_test.c b/tests/nghttp2_frame_test.c
+index de409318f900ea381c199af024d94b584f9ceabe..495e35d65846cabb477ebd0324700514ad81cdb3 100644
+--- a/tests/nghttp2_frame_test.c
++++ b/tests/nghttp2_frame_test.c
+@@ -600,6 +600,43 @@ void test_nghttp2_frame_pack_origin(void) {
+   nghttp2_bufs_free(&bufs);
+ }
+ 
++void test_nghttp2_frame_pack_priority_update(void) {
++  nghttp2_extension frame, oframe;
++  nghttp2_ext_priority_update priority_update, opriority_update;
++  nghttp2_bufs bufs;
++  int rv;
++  size_t payloadlen;
++  static const uint8_t field_value[] = "i,u=0";
++
++  frame_pack_bufs_init(&bufs);
++
++  frame.payload = &priority_update;
++  oframe.payload = &opriority_update;
++
++  nghttp2_frame_priority_update_init(&frame, 1000000007, (uint8_t *)field_value,
++                                     sizeof(field_value) - 1);
++
++  payloadlen = 4 + sizeof(field_value) - 1;
++
++  rv = nghttp2_frame_pack_priority_update(&bufs, &frame);
++
++  CU_ASSERT(0 == rv);
++  CU_ASSERT(NGHTTP2_FRAME_HDLEN + payloadlen == nghttp2_bufs_len(&bufs));
++
++  rv = unpack_framebuf((nghttp2_frame *)&oframe, &bufs);
++
++  CU_ASSERT(0 == rv);
++
++  check_frame_header(payloadlen, NGHTTP2_PRIORITY_UPDATE, NGHTTP2_FLAG_NONE, 0,
++                     &oframe.hd);
++
++  CU_ASSERT(sizeof(field_value) - 1 == opriority_update.field_value_len);
++  CU_ASSERT(0 == memcmp(field_value, opriority_update.field_value,
++                        sizeof(field_value) - 1));
++
++  nghttp2_bufs_free(&bufs);
++}
++
+ void test_nghttp2_nv_array_copy(void) {
+   nghttp2_nv *nva;
+   ssize_t rv;
+diff --git a/tests/nghttp2_frame_test.h b/tests/nghttp2_frame_test.h
+index 488d710c4c9f6c4e85abbea54b53b128583b3911..dc0762573b222a8cf941e5ef37b2d9cb571f7ef1 100644
+--- a/tests/nghttp2_frame_test.h
++++ b/tests/nghttp2_frame_test.h
+@@ -40,6 +40,7 @@ void test_nghttp2_frame_pack_goaway(void);
+ void test_nghttp2_frame_pack_window_update(void);
+ void test_nghttp2_frame_pack_altsvc(void);
+ void test_nghttp2_frame_pack_origin(void);
++void test_nghttp2_frame_pack_priority_update(void);
+ void test_nghttp2_nv_array_copy(void);
+ void test_nghttp2_iv_check(void);
+ 
+diff --git a/tests/nghttp2_session_test.c b/tests/nghttp2_session_test.c
+index 71e6b79eb331727f5f99522e42c0b2a8d0cc7cc3..0cac46f7f7b1fd8b989249d6259dc35518854421 100644
+--- a/tests/nghttp2_session_test.c
++++ b/tests/nghttp2_session_test.c
+@@ -2730,6 +2730,209 @@ void test_nghttp2_session_recv_origin(void) {
+   nghttp2_bufs_free(&bufs);
+ }
+ 
++void test_nghttp2_session_recv_priority_update(void) {
++  nghttp2_session *session;
++  nghttp2_session_callbacks callbacks;
++  my_user_data ud;
++  nghttp2_bufs bufs;
++  ssize_t rv;
++  nghttp2_option *option;
++  nghttp2_extension frame;
++  nghttp2_ext_priority_update priority_update;
++  nghttp2_stream *stream;
++  nghttp2_hd_deflater deflater;
++  nghttp2_mem *mem;
++  uint8_t large_field_value[sizeof(session->iframe.raw_sbuf) + 1];
++  nghttp2_outbound_item *item;
++  size_t i;
++  int32_t stream_id;
++  static const uint8_t field_value[] = "u=2,i";
++
++  mem = nghttp2_mem_default();
++
++  memset(large_field_value, ' ', sizeof(large_field_value));
++  memcpy(large_field_value, field_value, sizeof(field_value) - 1);
++
++  frame_pack_bufs_init(&bufs);
++
++  frame.payload = &priority_update;
++
++  memset(&callbacks, 0, sizeof(nghttp2_session_callbacks));
++
++  callbacks.on_frame_recv_callback = on_frame_recv_callback;
++
++  nghttp2_option_new(&option);
++  nghttp2_option_set_builtin_recv_extension_type(option,
++                                                 NGHTTP2_PRIORITY_UPDATE);
++
++  nghttp2_session_server_new2(&session, &callbacks, &ud, option);
++
++  session->pending_no_rfc7540_priorities = 1;
++
++  nghttp2_frame_priority_update_init(&frame, 1, (uint8_t *)field_value,
++                                     sizeof(field_value) - 1);
++
++  nghttp2_frame_pack_priority_update(&bufs, &frame);
++
++  open_recv_stream(session, 1);
++
++  ud.frame_recv_cb_called = 0;
++  rv = nghttp2_session_mem_recv(session, bufs.head->buf.pos,
++                                nghttp2_bufs_len(&bufs));
++
++  CU_ASSERT((ssize_t)nghttp2_bufs_len(&bufs) == rv);
++  CU_ASSERT(1 == ud.frame_recv_cb_called);
++  CU_ASSERT(NGHTTP2_PRIORITY_UPDATE == ud.recv_frame_hd.type);
++  CU_ASSERT(NGHTTP2_FLAG_NONE == ud.recv_frame_hd.flags);
++  CU_ASSERT(0 == ud.recv_frame_hd.stream_id);
++
++  stream = nghttp2_session_get_stream_raw(session, 1);
++
++  CU_ASSERT(2 == nghttp2_extpri_uint8_urgency(stream->extpri));
++  CU_ASSERT(1 == nghttp2_extpri_uint8_inc(stream->extpri));
++
++  nghttp2_session_del(session);
++  nghttp2_bufs_reset(&bufs);
++
++  /* Check that priority which is received in idle state is
++     retained. */
++  nghttp2_session_server_new2(&session, &callbacks, &ud, option);
++
++  session->pending_no_rfc7540_priorities = 1;
++
++  nghttp2_frame_priority_update_init(&frame, 1, (uint8_t *)field_value,
++                                     sizeof(field_value) - 1);
++
++  nghttp2_frame_pack_priority_update(&bufs, &frame);
++
++  ud.frame_recv_cb_called = 0;
++  rv = nghttp2_session_mem_recv(session, bufs.head->buf.pos,
++                                nghttp2_bufs_len(&bufs));
++
++  CU_ASSERT((ssize_t)nghttp2_bufs_len(&bufs) == rv);
++  CU_ASSERT(1 == ud.frame_recv_cb_called);
++  CU_ASSERT(NGHTTP2_PRIORITY_UPDATE == ud.recv_frame_hd.type);
++  CU_ASSERT(NGHTTP2_FLAG_NONE == ud.recv_frame_hd.flags);
++  CU_ASSERT(0 == ud.recv_frame_hd.stream_id);
++
++  stream = nghttp2_session_get_stream_raw(session, 1);
++
++  CU_ASSERT(NGHTTP2_STREAM_IDLE == stream->state);
++  CU_ASSERT(2 == nghttp2_extpri_uint8_urgency(stream->extpri));
++  CU_ASSERT(1 == nghttp2_extpri_uint8_inc(stream->extpri));
++
++  nghttp2_hd_deflate_init(&deflater, mem);
++  nghttp2_bufs_reset(&bufs);
++  rv = pack_headers(&bufs, &deflater, 1, NGHTTP2_FLAG_END_HEADERS, reqnv,
++                    ARRLEN(reqnv), mem);
++
++  CU_ASSERT(0 == rv);
++
++  ud.frame_recv_cb_called = 0;
++  rv = nghttp2_session_mem_recv(session, bufs.head->buf.pos,
++                                nghttp2_bufs_len(&bufs));
++
++  CU_ASSERT((ssize_t)nghttp2_bufs_len(&bufs) == rv);
++  CU_ASSERT(1 == ud.frame_recv_cb_called);
++  CU_ASSERT(NGHTTP2_HEADERS == ud.recv_frame_hd.type);
++  CU_ASSERT(NGHTTP2_STREAM_OPENING == stream->state);
++  CU_ASSERT(2 == nghttp2_extpri_uint8_urgency(stream->extpri));
++  CU_ASSERT(1 == nghttp2_extpri_uint8_inc(stream->extpri));
++
++  nghttp2_hd_deflate_free(&deflater);
++
++  nghttp2_session_del(session);
++  nghttp2_bufs_reset(&bufs);
++
++  /* PRIORITY_UPDATE with too large field_value is discarded */
++  nghttp2_session_server_new2(&session, &callbacks, &ud, option);
++
++  session->pending_no_rfc7540_priorities = 1;
++
++  nghttp2_frame_priority_update_init(&frame, 1, large_field_value,
++                                     sizeof(large_field_value));
++
++  nghttp2_frame_pack_priority_update(&bufs, &frame);
++
++  open_recv_stream(session, 1);
++
++  ud.frame_recv_cb_called = 0;
++  rv = nghttp2_session_mem_recv(session, bufs.head->buf.pos,
++                                nghttp2_bufs_len(&bufs));
++
++  CU_ASSERT((ssize_t)nghttp2_bufs_len(&bufs) == rv);
++  CU_ASSERT(0 == ud.frame_recv_cb_called);
++
++  stream = nghttp2_session_get_stream_raw(session, 1);
++
++  CU_ASSERT(NGHTTP2_EXTPRI_DEFAULT_URGENCY == stream->extpri);
++
++  nghttp2_session_del(session);
++  nghttp2_bufs_reset(&bufs);
++
++  /* Connection error if client receives PRIORITY_UPDATE. */
++  nghttp2_session_client_new2(&session, &callbacks, &ud, option);
++
++  session->pending_no_rfc7540_priorities = 1;
++
++  nghttp2_frame_priority_update_init(&frame, 1, (uint8_t *)field_value,
++                                     sizeof(field_value) - 1);
++
++  nghttp2_frame_pack_priority_update(&bufs, &frame);
++
++  open_sent_stream(session, 1);
++
++  ud.frame_recv_cb_called = 0;
++  rv = nghttp2_session_mem_recv(session, bufs.head->buf.pos,
++                                nghttp2_bufs_len(&bufs));
++
++  CU_ASSERT((ssize_t)nghttp2_bufs_len(&bufs) == rv);
++  CU_ASSERT(0 == ud.frame_recv_cb_called);
++
++  item = nghttp2_session_get_next_ob_item(session);
++  CU_ASSERT(NGHTTP2_GOAWAY == item->frame.hd.type);
++  CU_ASSERT(NGHTTP2_PROTOCOL_ERROR == item->frame.goaway.error_code);
++
++  nghttp2_session_del(session);
++  nghttp2_bufs_reset(&bufs);
++
++  /* The number of idle streams exceeds the maximum. */
++  nghttp2_session_server_new2(&session, &callbacks, &ud, option);
++
++  session->pending_no_rfc7540_priorities = 1;
++  session->local_settings.max_concurrent_streams = 100;
++
++  for (i = 0; i < 101; ++i) {
++    stream_id = (int32_t)(i * 2 + 1);
++    nghttp2_frame_priority_update_init(
++        &frame, stream_id, (uint8_t *)field_value, sizeof(field_value) - 1);
++
++    nghttp2_frame_pack_priority_update(&bufs, &frame);
++
++    ud.frame_recv_cb_called = 0;
++    rv = nghttp2_session_mem_recv(session, bufs.head->buf.pos,
++                                  nghttp2_bufs_len(&bufs));
++
++    if (i < 100) {
++      CU_ASSERT((ssize_t)nghttp2_bufs_len(&bufs) == rv);
++      CU_ASSERT(1 == ud.frame_recv_cb_called);
++      CU_ASSERT(NGHTTP2_PRIORITY_UPDATE == ud.recv_frame_hd.type);
++    } else {
++      CU_ASSERT(0 == ud.frame_recv_cb_called);
++    }
++
++    nghttp2_bufs_reset(&bufs);
++  }
++
++  item = nghttp2_session_get_next_ob_item(session);
++  CU_ASSERT(NGHTTP2_GOAWAY == item->frame.hd.type);
++  CU_ASSERT(NGHTTP2_PROTOCOL_ERROR == item->frame.goaway.error_code);
++
++  nghttp2_session_del(session);
++  nghttp2_option_del(option);
++  nghttp2_bufs_free(&bufs);
++}
++
+ void test_nghttp2_session_continue(void) {
+   nghttp2_session *session;
+   nghttp2_session_callbacks callbacks;
+@@ -6577,6 +6780,110 @@ void test_nghttp2_submit_origin(void) {
+   nghttp2_session_del(session);
+ }
+ 
++void test_nghttp2_submit_priority_update(void) {
++  nghttp2_session *session;
++  nghttp2_session_callbacks callbacks;
++  const uint8_t field_value[] = "i";
++  my_user_data ud;
++  const uint8_t *data;
++  int rv;
++  nghttp2_frame frame;
++  nghttp2_ext_priority_update priority_update;
++  ssize_t len;
++  int32_t stream_id;
++
++  memset(&callbacks, 0, sizeof(nghttp2_session_callbacks));
++  callbacks.on_frame_send_callback = on_frame_send_callback;
++
++  nghttp2_session_client_new(&session, &callbacks, &ud);
++
++  session->pending_no_rfc7540_priorities = 1;
++
++  stream_id =
++      nghttp2_submit_request(session, NULL, reqnv, ARRLEN(reqnv), NULL, NULL);
++
++  CU_ASSERT(1 == stream_id);
++
++  len = nghttp2_session_mem_send(session, &data);
++
++  CU_ASSERT(len > 0);
++
++  rv = nghttp2_submit_priority_update(session, NGHTTP2_FLAG_NONE, stream_id,
++                                      field_value, sizeof(field_value) - 1);
++
++  CU_ASSERT(0 == rv);
++
++  frame.ext.payload = &priority_update;
++
++  ud.frame_send_cb_called = 0;
++  len = nghttp2_session_mem_send(session, &data);
++
++  CU_ASSERT(len > 0);
++  CU_ASSERT(1 == ud.frame_send_cb_called);
++
++  nghttp2_frame_unpack_frame_hd(&frame.hd, data);
++  nghttp2_frame_unpack_priority_update_payload(
++      &frame.ext, (uint8_t *)(data + NGHTTP2_FRAME_HDLEN),
++      (size_t)len - NGHTTP2_FRAME_HDLEN);
++
++  CU_ASSERT(0 == frame.hd.stream_id);
++  CU_ASSERT(NGHTTP2_PRIORITY_UPDATE == frame.hd.type);
++  CU_ASSERT(stream_id == priority_update.stream_id);
++  CU_ASSERT(sizeof(field_value) - 1 == priority_update.field_value_len);
++  CU_ASSERT(0 == memcmp(field_value, priority_update.field_value,
++                        sizeof(field_value) - 1));
++
++  nghttp2_session_del(session);
++
++  /* Submitting PRIORITY_UPDATE frame from server session is error */
++  nghttp2_session_server_new(&session, &callbacks, &ud);
++
++  open_recv_stream(session, 1);
++
++  rv = nghttp2_submit_priority_update(session, NGHTTP2_FLAG_NONE, 1,
++                                      field_value, sizeof(field_value) - 1);
++
++  CU_ASSERT(NGHTTP2_ERR_INVALID_STATE == rv);
++
++  nghttp2_session_del(session);
++
++  /* Submitting PRIORITY_UPDATE with empty field_value */
++  nghttp2_session_client_new(&session, &callbacks, &ud);
++
++  stream_id =
++      nghttp2_submit_request(session, NULL, reqnv, ARRLEN(reqnv), NULL, NULL);
++
++  CU_ASSERT(1 == stream_id);
++
++  len = nghttp2_session_mem_send(session, &data);
++
++  CU_ASSERT(len > 0);
++
++  rv = nghttp2_submit_priority_update(session, NGHTTP2_FLAG_NONE, stream_id,
++                                      NULL, 0);
++
++  CU_ASSERT(0 == rv);
++
++  frame.ext.payload = &priority_update;
++
++  len = nghttp2_session_mem_send(session, &data);
++
++  CU_ASSERT(len > 0);
++
++  nghttp2_frame_unpack_frame_hd(&frame.hd, data);
++  nghttp2_frame_unpack_priority_update_payload(
++      &frame.ext, (uint8_t *)(data + NGHTTP2_FRAME_HDLEN),
++      (size_t)len - NGHTTP2_FRAME_HDLEN);
++
++  CU_ASSERT(0 == frame.hd.stream_id);
++  CU_ASSERT(NGHTTP2_PRIORITY_UPDATE == frame.hd.type);
++  CU_ASSERT(stream_id == priority_update.stream_id);
++  CU_ASSERT(0 == priority_update.field_value_len);
++  CU_ASSERT(NULL == priority_update.field_value);
++
++  nghttp2_session_del(session);
++}
++
+ void test_nghttp2_submit_rst_stream(void) {
+   nghttp2_session *session;
+   nghttp2_session_callbacks callbacks;
+diff --git a/tests/nghttp2_session_test.h b/tests/nghttp2_session_test.h
+index 6deff433240a175457d756eb2373c2e53b1c18d5..add36d9fc37e9e31a020d8111cfb7f963a6ed694 100644
+--- a/tests/nghttp2_session_test.h
++++ b/tests/nghttp2_session_test.h
+@@ -50,6 +50,7 @@ void test_nghttp2_session_recv_too_large_frame_length(void);
+ void test_nghttp2_session_recv_extension(void);
+ void test_nghttp2_session_recv_altsvc(void);
+ void test_nghttp2_session_recv_origin(void);
++void test_nghttp2_session_recv_priority_update(void);
+ void test_nghttp2_session_continue(void);
+ void test_nghttp2_session_add_frame(void);
+ void test_nghttp2_session_on_request_headers_received(void);
+@@ -104,6 +105,7 @@ void test_nghttp2_submit_invalid_nv(void);
+ void test_nghttp2_submit_extension(void);
+ void test_nghttp2_submit_altsvc(void);
+ void test_nghttp2_submit_origin(void);
++void test_nghttp2_submit_priority_update(void);
+ void test_nghttp2_submit_rst_stream(void);
+ void test_nghttp2_session_open_stream(void);
+ void test_nghttp2_session_open_stream_with_idle_stream_dep(void);
+diff --git a/tests/nghttp2_test_helper.c b/tests/nghttp2_test_helper.c
+index d741d5ef1ab07d6ddc868b663b6858ed70f3d410..0912a30ba1ea23468cb536a52e7fcaf38d240fd5 100644
+--- a/tests/nghttp2_test_helper.c
++++ b/tests/nghttp2_test_helper.c
+@@ -88,6 +88,11 @@ int unpack_frame(nghttp2_frame *frame, const uint8_t *in, size_t len) {
+     rv = nghttp2_frame_unpack_origin_payload(&frame->ext, payload, payloadlen,
+                                              mem);
+     break;
++  case NGHTTP2_PRIORITY_UPDATE:
++    assert(payloadlen >= 4);
++    nghttp2_frame_unpack_priority_update_payload(
++        &frame->ext, (uint8_t *)payload, payloadlen);
++    break;
+   default:
+     /* Must not be reachable */
+     assert(0);
