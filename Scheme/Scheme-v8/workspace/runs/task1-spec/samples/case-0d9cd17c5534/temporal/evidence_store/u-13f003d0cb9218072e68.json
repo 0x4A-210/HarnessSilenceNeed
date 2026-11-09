@@ -1,0 +1,19 @@
+{
+  "unit_id": "u-13f003d0cb9218072e68",
+  "original_unit_id": "7ebf976688c31871ed8e",
+  "kind": "after_source",
+  "path": "input/source/lib/compress/zstd_ldm.c",
+  "version": "after",
+  "name": "ZSTD_ldm_blockCompress",
+  "start": 664,
+  "end": 728,
+  "line_origin": "file",
+  "sha256": "dcffeee40c2614f15aa1c4f696faf1226b92ad6eb238ad8776d040dd51a1e2f6",
+  "text": "size_t ZSTD_ldm_blockCompress(rawSeqStore_t* rawSeqStore,\n    ZSTD_matchState_t* ms, seqStore_t* seqStore, U32 rep[ZSTD_REP_NUM],\n    ZSTD_paramSwitch_e useRowMatchFinder,\n    void const* src, size_t srcSize)\n{\n    const ZSTD_compressionParameters* const cParams = &ms->cParams;\n    unsigned const minMatch = cParams->minMatch;\n    ZSTD_blockCompressor const blockCompressor =\n        ZSTD_selectBlockCompressor(cParams->strategy, useRowMatchFinder, ZSTD_matchState_dictMode(ms));\n    /* Input bounds */\n    BYTE const* const istart = (BYTE const*)src;\n    BYTE const* const iend = istart + srcSize;\n    /* Input positions */\n    BYTE const* ip = istart;\n\n    DEBUGLOG(5, \"ZSTD_ldm_blockCompress: srcSize=%zu\", srcSize);\n    /* If using opt parser, use LDMs only as candidates rather than always accepting them */\n    if (cParams->strategy >= ZSTD_btopt) {\n        size_t lastLLSize;\n        ms->ldmSeqStore = rawSeqStore;\n        lastLLSize = blockCompressor(ms, seqStore, rep, src, srcSize);\n        ZSTD_ldm_skipRawSeqStoreBytes(rawSeqStore, srcSize);\n        return lastLLSize;\n    }\n\n    assert(rawSeqStore->pos <= rawSeqStore->size);\n    assert(rawSeqStore->size <= rawSeqStore->capacity);\n    /* Loop through each sequence and apply the block compressor to the literals */\n    while (rawSeqStore->pos < rawSeqStore->size && ip < iend) {\n        /* maybeSplitSequence updates rawSeqStore->pos */\n        rawSeq const sequence = maybeSplitSequence(rawSeqStore,\n                                                   (U32)(iend - ip), minMatch);\n        int i;\n        /* End signal */\n        if (sequence.offset == 0)\n            break;\n\n        assert(ip + sequence.litLength + sequence.matchLength <= iend);\n\n        /* Fill tables for block compressor */\n        ZSTD_ldm_limitTableUpdate(ms, ip);\n        ZSTD_ldm_fillFastTables(ms, ip);\n        /* Run the block compressor */\n        DEBUGLOG(5, \"pos %u : calling block compressor on segment of size %u\", (unsigned)(ip-istart), sequence.litLength);\n        {\n            size_t const newLitLength =\n                blockCompressor(ms, seqStore, rep, ip, sequence.litLength);\n            ip += sequence.litLength;\n            /* Update the repcodes */\n            for (i = ZSTD_REP_NUM - 1; i > 0; i--)\n                rep[i] = rep[i-1];\n            rep[0] = sequence.offset;\n            /* Store the sequence */\n            ZSTD_storeSeq(seqStore, newLitLength, ip - newLitLength, iend,\n                          OFFSET_TO_OFFBASE(sequence.offset),\n                          sequence.matchLength);\n            ip += sequence.matchLength;\n        }\n    }\n    /* Fill the tables for the block compressor */\n    ZSTD_ldm_limitTableUpdate(ms, ip);\n    ZSTD_ldm_fillFastTables(ms, ip);\n    /* Compress the last literals */\n    return blockCompressor(ms, seqStore, rep, ip, iend - ip);\n}\n",
+  "change_ids": [],
+  "invariant_source": true,
+  "unit_kind": "function",
+  "page_ids": [
+    "after-whole-7ebf976688c31871ed8e-0000"
+  ]
+}

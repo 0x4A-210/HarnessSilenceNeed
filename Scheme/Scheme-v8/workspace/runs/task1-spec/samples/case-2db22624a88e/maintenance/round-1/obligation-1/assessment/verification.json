@@ -1,0 +1,109 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0001",
+          "status": "unknown",
+          "reason": "The supplied after-function shows an array print depth check, but no g0001 added/removed diff page identifies the exact change. The focused candidate concerns only object printing.",
+          "errors": []
+        },
+        {
+          "change_id": "g0002",
+          "status": "blocked",
+          "reason": "The new object print depth check rejects a valid, constructible deep object tree, but the target prints only a parsed tree. Parsing rejects the container needed to reach print depth 1000.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "unknown",
+          "reason": "The supplied harness build script delegates to fuzzing/ossfuzz.sh, whose contents are not supplied.",
+          "errors": []
+        },
+        "input": {
+          "status": "pass",
+          "reason": "A finite input with four valid flag bytes and a NUL-terminated JSON payload passes the entry guards and is passed to the parser; the parser accepts valid values.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "pass",
+          "reason": "For successful parsing, the target frees any print result and deletes the parsed tree; the source uses default allocation hooks and frees print buffers on print failure.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "blocked",
+          "reason": "Every target print call receives only the parser result. The parser's depth guard prevents that result from reaching the new object print guard.",
+          "errors": []
+        }
+      },
+      "errors": [],
+      "missing_information": [],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "kind": "state",
+        "necessary": true,
+        "established": true,
+        "requirement": "Make the supported rejection of a constructible object at print depth 1000 reachable from the read target.",
+        "target_route": "Four valid flag bytes and a NUL-terminated JSON payload enter cJSON_ParseWithOpts. On parse success, a flag selects cJSON_PrintBuffered, cJSON_Print, or cJSON_PrintUnformatted; each reaches print_value and then print_object for an object.",
+        "failure_condition": "A finite chain of 1001 nested objects can be constructed and would reach print_object with depth 1000. The target cannot pass it to printing because cJSON_ParseWithOpts rejects the 1001st container and the target prints only the parser result.",
+        "alternative_paths": "All three selected print calls receive the same parsed tree. Flag choices and trailing input do not deepen it; the later optional minify call acts on a separate byte copy and does not supply a tree to printing.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-789fe5c16f80b1db0377a397",
+            "quote": "static cJSON_bool print_object(const cJSON * const item, printbuffer * const output_buffer)\n{\n    unsigned char *output_pointer = NULL;\n    size_t length = 0;\n    cJSON *current_item = item->child;\n\n    if (output_buffer == NULL)\n    {\n        return false;\n    }\n\n    if (output_buffer->depth >= CJSON_NESTING_LIMIT)\n    {\n        return false; /* nesting is too deep */\n    }\n\n    /* Compose the output: */\n    length = (size_t) (output_buffer->format ? 2 : 1); /* fmt: {\\n */\n    output_pointer = ensure(output_buffer, length + 1);\n    if (output_pointer == NULL)\n    {\n        return false;\n    }\n\n    *output_pointer++ = '{';\n    output_buffer->depth++;\n    if (output_buffer->format)\n"
+          },
+          {
+            "evidence_id": "loc-ea9a1f9091ad3392113e50ff",
+            "quote": "CJSON_PUBLIC(cJSON *) cJSON_CreateObject(void)\n{\n    cJSON *item = cJSON_New_Item(&global_hooks);\n    if (item)\n    {\n        item->type = cJSON_Object;\n    }\n\n    return item;\n}\n"
+          },
+          {
+            "evidence_id": "loc-52d7ec246f43c8700ef3cbe9",
+            "quote": "static cJSON_bool add_item_to_object(cJSON * const object, const char * const string, cJSON * const item, const internal_hooks * const hooks, const cJSON_bool constant_key)\n{\n    char *new_key = NULL;\n    int new_type = cJSON_Invalid;\n\n    if ((object == NULL) || (string == NULL) || (item == NULL) || (object == item))\n    {\n        return false;\n    }\n\n    if (constant_key)\n    {\n        new_key = (char*)cast_away_const(string);\n        new_type = item->type | cJSON_StringIsConst;\n    }\n    else\n    {\n        new_key = (char*)cJSON_strdup((const unsigned char*)string, hooks);\n        if (new_key == NULL)\n        {\n            return false;\n        }\n\n        new_type = item->type & ~cJSON_StringIsConst;\n    }\n\n    if (!(item->type & cJSON_StringIsConst) && (item->string != NULL))\n    {\n        hooks->deallocate(item->string);\n    }\n\n    item->string = new_key;\n    item->type = new_type;\n\n    return add_item_to_array(object, item);\n}\n\nCJSON_PUBLIC(cJSON_bool) cJSON_AddItemToObject(cJSON *object, const char *string, cJSON *item)\n{\n    return add_item_to_object(object, string, item, &global_hooks, false);\n}\n"
+          },
+          {
+            "evidence_id": "loc-24d543d0844e63b16f26d7e7",
+            "quote": "static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_buffer)\n{\n    cJSON *head = NULL; /* linked list head */\n    cJSON *current_item = NULL;\n\n    if (input_buffer->depth >= CJSON_NESTING_LIMIT)\n    {\n        return false; /* to deeply nested */\n    }\n    input_buffer->depth++;\n"
+          },
+          {
+            "evidence_id": "loc-b3d85ce0ddb091940c8dd8e2",
+            "quote": "#define CJSON_NESTING_LIMIT 1000\n#endif\n"
+          },
+          {
+            "evidence_id": "loc-4e0a51f5c4cbd2c229d1a9ac",
+            "quote": "        case cJSON_String:\n            return print_string(item, output_buffer);\n\n        case cJSON_Array:\n            return print_array(item, output_buffer);\n\n        case cJSON_Object:\n            return print_object(item, output_buffer);\n\n"
+          },
+          {
+            "evidence_id": "loc-2bdf837a78d4cee1b297f89a",
+            "quote": "CJSON_PUBLIC(char *) cJSON_PrintBuffered(const cJSON *item, int prebuffer, cJSON_bool fmt)\n{\n    printbuffer p = { 0, 0, 0, 0, 0, 0, { 0, 0, 0 } };\n\n    if (prebuffer < 0)\n    {\n        return NULL;\n    }\n\n    p.buffer = (unsigned char*)global_hooks.allocate((size_t)prebuffer);\n    if (!p.buffer)\n    {\n        return NULL;\n    }\n\n    p.length = (size_t)prebuffer;\n    p.offset = 0;\n    p.noalloc = false;\n    p.format = fmt;\n    p.hooks = global_hooks;\n\n    if (!print_value(item, &p))\n    {\n        global_hooks.deallocate(p.buffer);\n        p.buffer = NULL;\n        return NULL;\n    }\n\n    return (char*)p.buffer;\n"
+          },
+          {
+            "evidence_id": "loc-b7d64451177567b034b6ec12",
+            "quote": "static unsigned char *print(const cJSON * const item, cJSON_bool format, const internal_hooks * const hooks)\n{\n    static const size_t default_buffer_size = 256;\n    printbuffer buffer[1];\n    unsigned char *printed = NULL;\n\n    memset(buffer, 0, sizeof(buffer));\n\n    /* create buffer */\n    buffer->buffer = (unsigned char*) hooks->allocate(default_buffer_size);\n    buffer->length = default_buffer_size;\n    buffer->format = format;\n    buffer->hooks = *hooks;\n    if (buffer->buffer == NULL)\n    {\n        goto fail;\n    }\n\n    /* print the value */\n    if (!print_value(item, buffer))\n    {\n        goto fail;\n    }\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-63bbc19aeb781ae4ddde71d2",
+            "quote": "    if(size <= offset) return 0;\n    if(data[size-1] != '\\0') return 0;\n    if(data[0] != '1' && data[0] != '0') return 0;\n    if(data[1] != '1' && data[1] != '0') return 0;\n    if(data[2] != '1' && data[2] != '0') return 0;\n    if(data[3] != '1' && data[3] != '0') return 0;\n\n    minify              = data[0] == '1' ? 1 : 0;\n    require_termination = data[1] == '1' ? 1 : 0;\n    formatted           = data[2] == '1' ? 1 : 0;\n    buffered            = data[3] == '1' ? 1 : 0;\n\n    json = cJSON_ParseWithOpts((const char*)data + offset, NULL, require_termination);\n\n    if(json == NULL) return 0;\n\n    if(buffered)\n    {\n        printed_json = cJSON_PrintBuffered(json, 1, formatted);\n    }\n    else\n    {\n        /* unbuffered printing */\n        if(formatted)\n        {\n            printed_json = cJSON_Print(json);\n        }\n        else\n        {\n            printed_json = cJSON_PrintUnformatted(json);\n        }\n    }\n\n    if(printed_json != NULL) free(printed_json);\n\n    if(minify)\n    {\n        copied = (unsigned char*)malloc(size);\n        if(copied == NULL) return 0;\n\n        memcpy(copied, data, size);\n\n        cJSON_Minify((char*)copied + offset);\n\n        free(copied);\n    }\n\n    cJSON_Delete(json);\n"
+          }
+        ],
+        "missing_information": [],
+        "id": "o-fec8bed78f881a73",
+        "change_ids": [
+          "g0002"
+        ],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

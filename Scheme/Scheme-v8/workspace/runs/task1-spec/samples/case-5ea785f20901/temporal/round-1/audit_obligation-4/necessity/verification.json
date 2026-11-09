@@ -1,0 +1,686 @@
+{
+  "decision": "keep",
+  "errors": [],
+  "answer": {
+    "candidate_id": "o-9805ca0fa3e65ab2",
+    "decision": "keep",
+    "effect": "blocked_target_coverage",
+    "reason": "The after-source destructor can release a saved comment left pending after a parse error. The old harness creates the parser with flags 0 and returns on a reported error before calling the destructor. This specific cleanup capability is absent from the before-source destructor.",
+    "finite_witness": "With the supported UCL_PARSER_SAVE_COMMENTS flag, input bytes \"#x\\n\\\"\\n\" save a comment, then produce an unexpected-newline error in a quoted key before the comment is attached. Calling ucl_parser_free would release the pending comment. The old harness cannot reach that setup or call.",
+    "scope_contract": {
+      "status": "established",
+      "reason": "The entry parses a string and manages the parser lifetime. Saving comments is a supported parser configuration, and the changed destructor handles a pending comment.",
+      "evidence": [
+        {
+          "evidence_id": "loc-2ae9391062260340630a727d",
+          "quote": "\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n"
+        },
+        {
+          "evidence_id": "loc-62e5eeed9d84043a626c8038",
+          "quote": "typedef enum ucl_parser_flags {\n\tUCL_PARSER_DEFAULT = 0,                   /**< No special flags */\n\tUCL_PARSER_KEY_LOWERCASE = (1 << 0),      /**< Convert all keys to lower case */\n\tUCL_PARSER_ZEROCOPY = (1 << 1),           /**< Parse input in zero-copy mode if possible */\n\tUCL_PARSER_NO_TIME = (1 << 2),            /**< Do not parse time and treat time values as strings */\n\tUCL_PARSER_NO_IMPLICIT_ARRAYS = (1 << 3), /** Create explicit arrays instead of implicit ones */\n\tUCL_PARSER_SAVE_COMMENTS = (1 << 4),      /** Save comments in the parser context */\n\tUCL_PARSER_DISABLE_MACRO = (1 << 5),      /** Treat macros as comments */\n\tUCL_PARSER_NO_FILEVARS = (1 << 6)         /** Do not set file vars */\n} ucl_parser_flags_t;\n"
+        },
+        {
+          "evidence_id": "loc-44e1ac6708c5eaa14aeef6d9",
+          "quote": "\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n"
+        }
+      ]
+    },
+    "feasible_trigger": {
+      "status": "established",
+      "reason": "The finite byte string saves a hash comment with the supported flag, then a newline inside a quoted key records an error before the pending comment is attached. The harness's fixed flags prevent this supported setup.",
+      "evidence": [
+        {
+          "evidence_id": "loc-dd9825d15f42cad24139944e",
+          "quote": "static void\nucl_save_comment(struct ucl_parser *parser, const char *begin, size_t len)\n{\n\tucl_object_t *nobj;\n\n\tif (len > 0 && begin != NULL) {\n\t\tnobj = ucl_object_fromstring_common(begin, len, 0);\n\n\t\tif (parser->last_comment) {\n\t\t\t/* We need to append data to an existing object */\n\t\t\tDL_APPEND(parser->last_comment, nobj);\n\t\t}\n\t\telse {\n\t\t\tparser->last_comment = nobj;\n\t\t}\n"
+        },
+        {
+          "evidence_id": "loc-57f604aa427e01f43810e9eb",
+          "quote": "\tif (chunk->remain > 0 && *p == '#') {\n\t\tif (parser->state != UCL_STATE_SCOMMENT &&\n\t\t\tparser->state != UCL_STATE_MCOMMENT) {\n\t\t\tbeg = p;\n\n\t\t\twhile (p < chunk->end) {\n\t\t\t\tif (*p == '\\n') {\n\t\t\t\t\tif (parser->flags & UCL_PARSER_SAVE_COMMENTS) {\n\t\t\t\t\t\tucl_save_comment(parser, beg, p - beg);\n\t\t\t\t\t\tbeg = NULL;\n\t\t\t\t\t}\n\n\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\n\t\t\t\t\tgoto start;\n"
+        },
+        {
+          "evidence_id": "loc-85ca5a12f9030d7246a2facc",
+          "quote": "\twhile (p < chunk->end) {\n\t\tc = *p;\n\t\tif (c < 0x1F) {\n\t\t\t/* Unmasked control character */\n\t\t\tif (c == '\\n') {\n\t\t\t\tucl_set_err(parser, UCL_ESYNTAX, \"unexpected newline\",\n\t\t\t\t\t\t\t&parser->err);\n\t\t\t}\n\t\t\telse {\n\t\t\t\tucl_set_err(parser, UCL_ESYNTAX, \"unexpected control character\",\n\t\t\t\t\t\t\t&parser->err);\n\t\t\t}\n\t\t\treturn false;\n"
+        },
+        {
+          "evidence_id": "loc-c286e1104ddb5eb638792664",
+          "quote": "\t\t\telse if (*p == '\"') {\n\t\t\t\t/* JSON style key */\n\t\t\t\tc = p + 1;\n\t\t\t\tgot_quote = true;\n\t\t\t\t*got_content = true;\n\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t}\n"
+        },
+        {
+          "evidence_id": "loc-675dc0dc360580246500b497",
+          "quote": "\t\t\tgot_content = false;\n\n\t\t\tif (!ucl_parse_key(parser, chunk, &next_key, &end_of_object, &got_content)) {\n\t\t\t\tparser->prev_state = parser->state;\n\t\t\t\tparser->state = UCL_STATE_ERROR;\n\t\t\t\treturn false;\n"
+        },
+        {
+          "evidence_id": "loc-1652c547028ca32cb2d1ee52",
+          "quote": "\tparser->flags = flags;\n\tparser->includepaths = NULL;\n\n\t/*\n\t * Only the depth limit is on by default: it is the one that protects\n\t * against stack growth in the recursive walks over the resulting tree,\n\t * and 1024 levels is far beyond any legitimate configuration. The\n\t * remaining budgets would break large but perfectly valid inputs (maps,\n\t * language models, big JSON replies), so callers that deal with\n\t * untrusted data opt into them explicitly via ucl_parser_set_limits().\n\t */\n\tparser->limits.max_depth = UCL_MAX_NESTING;\n\n\tif (flags & UCL_PARSER_SAVE_COMMENTS) {\n\t\tparser->comments = ucl_object_typed_new(UCL_OBJECT);\n\t}\n"
+        },
+        {
+          "evidence_id": "loc-dd498dad09b3fb504ff77c14",
+          "quote": "\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n"
+        }
+      ]
+    },
+    "observable_consequence": {
+      "status": "established",
+      "reason": "The changed destructor releases pending last_comment. The harness cannot exercise that cleanup on a reported error because it returns first.",
+      "evidence": [
+        {
+          "evidence_id": "loc-2ae9391062260340630a727d",
+          "quote": "\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n"
+        },
+        {
+          "evidence_id": "loc-58a26e21d51991e9437254f6",
+          "quote": "const char *\nucl_parser_get_error(struct ucl_parser *parser)\n{\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tif (parser->err == NULL) {\n\t\treturn NULL;\n\t}\n\n\treturn utstring_body(parser->err);\n}\n"
+        },
+        {
+          "evidence_id": "loc-7f63912dea891ffbd7edd961",
+          "quote": "\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n"
+        }
+      ]
+    },
+    "alternatives_ruled_out": {
+      "status": "established",
+      "reason": "Natural input cannot set the parser's flags; zero flags do not enable comment saving. The complete harness has no other parser setup or destructor call on its error path. Terminal attachment is bypassed by the key error.",
+      "evidence": [
+        {
+          "evidence_id": "loc-df361fc32fc8e52edc703539",
+          "quote": "\tmemset(parser, 0, sizeof(struct ucl_parser));\n\n\tUPRM_SAFE(ucl_parser_register_macro, parser, \"include\", ucl_include_handler, e0);\n\tUPRM_SAFE(ucl_parser_register_macro, parser, \"try_include\", ucl_try_include_handler, e0);\n\tUPRM_SAFE(ucl_parser_register_macro, parser, \"includes\", ucl_includes_handler, e0);\n\tUPRM_SAFE(ucl_parser_register_macro, parser, \"priority\", ucl_priority_handler, e0);\n\tUPRM_SAFE(ucl_parser_register_macro, parser, \"load\", ucl_load_handler, e0);\n\tUPRM_SAFE(ucl_parser_register_context_macro, parser, \"inherit\", ucl_inherit_handler, e0);\n\n\tparser->flags = flags;\n\tparser->includepaths = NULL;\n\n\t/*\n\t * Only the depth limit is on by default: it is the one that protects\n\t * against stack growth in the recursive walks over the resulting tree,\n\t * and 1024 levels is far beyond any legitimate configuration. The\n\t * remaining budgets would break large but perfectly valid inputs (maps,\n\t * language models, big JSON replies), so callers that deal with\n\t * untrusted data opt into them explicitly via ucl_parser_set_limits().\n\t */\n\tparser->limits.max_depth = UCL_MAX_NESTING;\n\n\tif (flags & UCL_PARSER_SAVE_COMMENTS) {\n\t\tparser->comments = ucl_object_typed_new(UCL_OBJECT);\n\t}\n"
+        },
+        {
+          "evidence_id": "loc-79f3f9340bd227cca938c932",
+          "quote": "static void\nucl_attach_comment(struct ucl_parser *parser, ucl_object_t *obj, bool before)\n{\n\tif (parser->last_comment) {\n\t\tucl_object_insert_key(parser->comments, parser->last_comment,\n\t\t\t\t\t\t\t  (const char *) &obj, sizeof(void *), true);\n\n\t\tif (before) {\n\t\t\tparser->last_comment->flags |= UCL_OBJECT_INHERITED;\n\t\t}\n\n\t\tparser->last_comment = NULL;\n\t}\n}\n"
+        },
+        {
+          "evidence_id": "loc-b55aed18545aa151433b9183",
+          "quote": "\t\t\tgot_content = false;\n\n\t\t\tif (!ucl_parse_key(parser, chunk, &next_key, &end_of_object, &got_content)) {\n\t\t\t\tparser->prev_state = parser->state;\n\t\t\t\tparser->state = UCL_STATE_ERROR;\n\t\t\t\treturn false;\n"
+        },
+        {
+          "evidence_id": "loc-760c8fa17b5ceaf69a38215d",
+          "quote": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\t// If size is 0 we need a null-terminated string.\n\t// We dont null-terminate the string and by the design\n\t// of the API passing 0 as size with non null-terminated string\n\t// gives undefined behavior. \t\n\tif(size==0){\n\t\treturn 0;\n\t}\n\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n}\n"
+        }
+      ]
+    },
+    "identity_preserved": {
+      "status": "established",
+      "reason": "Both sides assess the same operation and condition: destructor cleanup of a pending saved comment after a reported parse error. The before destructor lacks that cleanup; the after destructor adds it.",
+      "evidence": [
+        {
+          "evidence_id": "loc-ea586abc2d10ce3a0b0c9d63",
+          "quote": "\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n"
+        },
+        {
+          "evidence_id": "loc-30c3553b30f8de2bb9aaba1c",
+          "quote": "\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n"
+        },
+        {
+          "evidence_id": "loc-016835376c0dbbfc8993365d",
+          "quote": "\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n"
+        }
+      ]
+    },
+    "source_evidence": [
+      {
+        "evidence_id": "loc-2ae9391062260340630a727d",
+        "quote": "\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n"
+      },
+      {
+        "evidence_id": "loc-ea586abc2d10ce3a0b0c9d63",
+        "quote": "\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n"
+      },
+      {
+        "evidence_id": "loc-797d1ffadce05d697ac6821d",
+        "quote": "\tif (chunk->remain > 0 && *p == '#') {\n\t\tif (parser->state != UCL_STATE_SCOMMENT &&\n\t\t\tparser->state != UCL_STATE_MCOMMENT) {\n\t\t\tbeg = p;\n\n\t\t\twhile (p < chunk->end) {\n\t\t\t\tif (*p == '\\n') {\n\t\t\t\t\tif (parser->flags & UCL_PARSER_SAVE_COMMENTS) {\n\t\t\t\t\t\tucl_save_comment(parser, beg, p - beg);\n\t\t\t\t\t\tbeg = NULL;\n\t\t\t\t\t}\n\n\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\n\t\t\t\t\tgoto start;\n"
+      },
+      {
+        "evidence_id": "loc-6122081a5a3b0257caf4ed8d",
+        "quote": "\twhile (p < chunk->end) {\n\t\tc = *p;\n\t\tif (c < 0x1F) {\n\t\t\t/* Unmasked control character */\n\t\t\tif (c == '\\n') {\n\t\t\t\tucl_set_err(parser, UCL_ESYNTAX, \"unexpected newline\",\n\t\t\t\t\t\t\t&parser->err);\n\t\t\t}\n\t\t\telse {\n\t\t\t\tucl_set_err(parser, UCL_ESYNTAX, \"unexpected control character\",\n\t\t\t\t\t\t\t&parser->err);\n\t\t\t}\n\t\t\treturn false;\n"
+      }
+    ],
+    "harness_evidence": [
+      {
+        "evidence_id": "loc-760c8fa17b5ceaf69a38215d",
+        "quote": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\t// If size is 0 we need a null-terminated string.\n\t// We dont null-terminate the string and by the design\n\t// of the API passing 0 as size with non null-terminated string\n\t// gives undefined behavior. \t\n\tif(size==0){\n\t\treturn 0;\n\t}\n\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n}\n"
+      }
+    ],
+    "missing_information": [],
+    "requested_symbols": [],
+    "requested_paths": [],
+    "obligation_class": "target_coverage",
+    "scope_basis": "target_state_contract",
+    "trigger_basis": "supported_behavior_blocked_by_target",
+    "coverage_witness": {
+      "supported_behavior": "ucl_parser_free releases a pending saved comment after a reported parse error.",
+      "required_setup": "Create the parser with UCL_PARSER_SAVE_COMMENTS, parse bytes \"#x\\n\\\"\\n\", then call ucl_parser_free after the reported error.",
+      "actual_target_setup": "The harness calls ucl_parser_new(0) and returns when ucl_parser_get_error is non-NULL.",
+      "blocked_behavior": "The destructor's pending-last_comment release cannot be reached under that condition.",
+      "equivalent_routes": "None in the complete fixed entry: input bytes cannot enable the constructor flag, and the error branch skips the only destructor call."
+    }
+  },
+  "citation_errors": [],
+  "citations": [
+    {
+      "pointer": "/scope_contract/evidence/0",
+      "evidence_id": "loc-2ae9391062260340630a727d",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-672fb3fb3dce0fc1c0d2",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 786,
+        "end_line": 795,
+        "unit_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a",
+        "quote_sha256": "25b4b9f29042b63596e31af8b44d2680253858e198873a6b6e5f36a37ebd1c0b"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/1",
+      "evidence_id": "loc-62e5eeed9d84043a626c8038",
+      "kind": "after_source",
+      "path": "input/source/include/ucl.h",
+      "text": "typedef enum ucl_parser_flags {\n\tUCL_PARSER_DEFAULT = 0,                   /**< No special flags */\n\tUCL_PARSER_KEY_LOWERCASE = (1 << 0),      /**< Convert all keys to lower case */\n\tUCL_PARSER_ZEROCOPY = (1 << 1),           /**< Parse input in zero-copy mode if possible */\n\tUCL_PARSER_NO_TIME = (1 << 2),            /**< Do not parse time and treat time values as strings */\n\tUCL_PARSER_NO_IMPLICIT_ARRAYS = (1 << 3), /** Create explicit arrays instead of implicit ones */\n\tUCL_PARSER_SAVE_COMMENTS = (1 << 4),      /** Save comments in the parser context */\n\tUCL_PARSER_DISABLE_MACRO = (1 << 5),      /** Treat macros as comments */\n\tUCL_PARSER_NO_FILEVARS = (1 << 6)         /** Do not set file vars */\n} ucl_parser_flags_t;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "Defines the supported save-comments configuration.",
+      "location": {
+        "unit_id": "u-29e9995e97035c2b699c",
+        "version": "after",
+        "path": "input/source/include/ucl.h",
+        "start_line": 166,
+        "end_line": 175,
+        "unit_sha256": "0f3c7952654658575a6784190f04e3216cfef6b4a3ec0319cbdf998664efd7ca",
+        "quote_sha256": "0f3c7952654658575a6784190f04e3216cfef6b4a3ec0319cbdf998664efd7ca"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/2",
+      "evidence_id": "loc-44e1ac6708c5eaa14aeef6d9",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+      "text": "\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Shows this entry's parser creation, parse, error check, and destructor call.",
+      "location": {
+        "unit_id": "u-e361eddd782de83c425d",
+        "version": "harness",
+        "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+        "start_line": 14,
+        "end_line": 23,
+        "unit_sha256": "ec9232480c806b16dfbf27c029bfca494c9a582f2657975b69ecdf3a326b7f05",
+        "quote_sha256": "f4ec9fe4b310ab8e69e76cc5bdabccc1285b2691326c444c7b0577e805ff79f3"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/0",
+      "evidence_id": "loc-dd9825d15f42cad24139944e",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "static void\nucl_save_comment(struct ucl_parser *parser, const char *begin, size_t len)\n{\n\tucl_object_t *nobj;\n\n\tif (len > 0 && begin != NULL) {\n\t\tnobj = ucl_object_fromstring_common(begin, len, 0);\n\n\t\tif (parser->last_comment) {\n\t\t\t/* We need to append data to an existing object */\n\t\t\tDL_APPEND(parser->last_comment, nobj);\n\t\t}\n\t\telse {\n\t\t\tparser->last_comment = nobj;\n\t\t}\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Saving a comment assigns last_comment.",
+      "location": {
+        "unit_id": "u-6b7800ed7cfb9f8ac17d",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 116,
+        "end_line": 130,
+        "unit_sha256": "c417f47ba42a998958a853f8bee1008b598e217c905edbfd6de7a30fade591cb",
+        "quote_sha256": "6c252518fa7fd31c70f008923832403524c27291b5c80860c9c974685e31e319"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/1",
+      "evidence_id": "loc-57f604aa427e01f43810e9eb",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\tif (chunk->remain > 0 && *p == '#') {\n\t\tif (parser->state != UCL_STATE_SCOMMENT &&\n\t\t\tparser->state != UCL_STATE_MCOMMENT) {\n\t\t\tbeg = p;\n\n\t\t\twhile (p < chunk->end) {\n\t\t\t\tif (*p == '\\n') {\n\t\t\t\t\tif (parser->flags & UCL_PARSER_SAVE_COMMENTS) {\n\t\t\t\t\t\tucl_save_comment(parser, beg, p - beg);\n\t\t\t\t\t\tbeg = NULL;\n\t\t\t\t\t}\n\n\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\n\t\t\t\t\tgoto start;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "A hash comment followed by newline is saved when the flag is set.",
+      "location": {
+        "unit_id": "u-95ea95e5d31c96fc5bcb",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 165,
+        "end_line": 179,
+        "unit_sha256": "f47339e417df1df97ee7dcfd7e8eacb2b2984debcbd2e709d7c14b340859b88b",
+        "quote_sha256": "e300b11d6a430927da45f1d6242fc3db7e486ce9c4b38a6012f67dcf2d68067b"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/2",
+      "evidence_id": "loc-85ca5a12f9030d7246a2facc",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\twhile (p < chunk->end) {\n\t\tc = *p;\n\t\tif (c < 0x1F) {\n\t\t\t/* Unmasked control character */\n\t\t\tif (c == '\\n') {\n\t\t\t\tucl_set_err(parser, UCL_ESYNTAX, \"unexpected newline\",\n\t\t\t\t\t\t\t&parser->err);\n\t\t\t}\n\t\t\telse {\n\t\t\t\tucl_set_err(parser, UCL_ESYNTAX, \"unexpected control character\",\n\t\t\t\t\t\t\t&parser->err);\n\t\t\t}\n\t\t\treturn false;\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "A newline inside a quoted key records a syntax error.",
+      "location": {
+        "unit_id": "u-6b7800ed7cfb9f8ac17d",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 1224,
+        "end_line": 1236,
+        "unit_sha256": "c417f47ba42a998958a853f8bee1008b598e217c905edbfd6de7a30fade591cb",
+        "quote_sha256": "462053cacbffd13ced2e91146fcbc0aed0aac95e938c19f40b075abee9cc3d72"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/3",
+      "evidence_id": "loc-c286e1104ddb5eb638792664",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\t\t\telse if (*p == '\"') {\n\t\t\t\t/* JSON style key */\n\t\t\t\tc = p + 1;\n\t\t\t\tgot_quote = true;\n\t\t\t\t*got_content = true;\n\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t}\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The quote starts quoted-key parsing.",
+      "location": {
+        "unit_id": "u-6b7800ed7cfb9f8ac17d",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 1593,
+        "end_line": 1599,
+        "unit_sha256": "c417f47ba42a998958a853f8bee1008b598e217c905edbfd6de7a30fade591cb",
+        "quote_sha256": "b1e9eab17fc5b832c746df2f3796a4a6439da8eb13a214c69040418d76598a1a"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/4",
+      "evidence_id": "loc-675dc0dc360580246500b497",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\t\t\tgot_content = false;\n\n\t\t\tif (!ucl_parse_key(parser, chunk, &next_key, &end_of_object, &got_content)) {\n\t\t\t\tparser->prev_state = parser->state;\n\t\t\t\tparser->state = UCL_STATE_ERROR;\n\t\t\t\treturn false;\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The key parse error returns before terminal comment attachment.",
+      "location": {
+        "unit_id": "u-d68c375c2b8c50c4dc7a",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 2751,
+        "end_line": 2756,
+        "unit_sha256": "127ecfe418bf5642e0f7266f55ef4d42bdfc92c1671b8f07b75ca4e9acfa57de",
+        "quote_sha256": "6b06c28b951a25af7174e4585cc4c2d75ac0f4bb856ad33c82f23e7fbbdea81e"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/5",
+      "evidence_id": "loc-1652c547028ca32cb2d1ee52",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\tparser->flags = flags;\n\tparser->includepaths = NULL;\n\n\t/*\n\t * Only the depth limit is on by default: it is the one that protects\n\t * against stack growth in the recursive walks over the resulting tree,\n\t * and 1024 levels is far beyond any legitimate configuration. The\n\t * remaining budgets would break large but perfectly valid inputs (maps,\n\t * language models, big JSON replies), so callers that deal with\n\t * untrusted data opt into them explicitly via ucl_parser_set_limits().\n\t */\n\tparser->limits.max_depth = UCL_MAX_NESTING;\n\n\tif (flags & UCL_PARSER_SAVE_COMMENTS) {\n\t\tparser->comments = ucl_object_typed_new(UCL_OBJECT);\n\t}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "Parser flags determine whether comment saving is enabled.",
+      "location": {
+        "unit_id": "u-042a323ff22f8a79fa01",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 3028,
+        "end_line": 3043,
+        "unit_sha256": "7cfcabd197903de96b8823bfb4178d7311cfbbacd5f6a689adecdbe109c8f4f4",
+        "quote_sha256": "b5005c817625cc9125dd0184f8d4ad7a781cc8fba1968a57dcbb3ca91a65dfcf"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/6",
+      "evidence_id": "loc-dd498dad09b3fb504ff77c14",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+      "text": "\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-e361eddd782de83c425d",
+        "version": "harness",
+        "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+        "start_line": 14,
+        "end_line": 20,
+        "unit_sha256": "ec9232480c806b16dfbf27c029bfca494c9a582f2657975b69ecdf3a326b7f05",
+        "quote_sha256": "b96ce47bc2d2a72909b4ebd77efcff31d051f45a573fab13658c367f4ec95b7b"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/0",
+      "evidence_id": "loc-2ae9391062260340630a727d",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-672fb3fb3dce0fc1c0d2",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 786,
+        "end_line": 795,
+        "unit_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a",
+        "quote_sha256": "25b4b9f29042b63596e31af8b44d2680253858e198873a6b6e5f36a37ebd1c0b"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/1",
+      "evidence_id": "loc-58a26e21d51991e9437254f6",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "const char *\nucl_parser_get_error(struct ucl_parser *parser)\n{\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tif (parser->err == NULL) {\n\t\treturn NULL;\n\t}\n\n\treturn utstring_body(parser->err);\n}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "Exposes the recorded error to the harness.",
+      "location": {
+        "unit_id": "u-afbe55a23b87f08571ff",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 798,
+        "end_line": 810,
+        "unit_sha256": "187275f50892fc315ffc29130465222974bfbc0d221ef23ac22752bcd0f019be",
+        "quote_sha256": "187275f50892fc315ffc29130465222974bfbc0d221ef23ac22752bcd0f019be"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/2",
+      "evidence_id": "loc-7f63912dea891ffbd7edd961",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+      "text": "\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-e361eddd782de83c425d",
+        "version": "harness",
+        "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+        "start_line": 19,
+        "end_line": 23,
+        "unit_sha256": "ec9232480c806b16dfbf27c029bfca494c9a582f2657975b69ecdf3a326b7f05",
+        "quote_sha256": "cdea63571a4a7ebc6154d801d7249891a3e49d358a5e79fc686d53a2371ad0f6"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/0",
+      "evidence_id": "loc-df361fc32fc8e52edc703539",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\tmemset(parser, 0, sizeof(struct ucl_parser));\n\n\tUPRM_SAFE(ucl_parser_register_macro, parser, \"include\", ucl_include_handler, e0);\n\tUPRM_SAFE(ucl_parser_register_macro, parser, \"try_include\", ucl_try_include_handler, e0);\n\tUPRM_SAFE(ucl_parser_register_macro, parser, \"includes\", ucl_includes_handler, e0);\n\tUPRM_SAFE(ucl_parser_register_macro, parser, \"priority\", ucl_priority_handler, e0);\n\tUPRM_SAFE(ucl_parser_register_macro, parser, \"load\", ucl_load_handler, e0);\n\tUPRM_SAFE(ucl_parser_register_context_macro, parser, \"inherit\", ucl_inherit_handler, e0);\n\n\tparser->flags = flags;\n\tparser->includepaths = NULL;\n\n\t/*\n\t * Only the depth limit is on by default: it is the one that protects\n\t * against stack growth in the recursive walks over the resulting tree,\n\t * and 1024 levels is far beyond any legitimate configuration. The\n\t * remaining budgets would break large but perfectly valid inputs (maps,\n\t * language models, big JSON replies), so callers that deal with\n\t * untrusted data opt into them explicitly via ucl_parser_set_limits().\n\t */\n\tparser->limits.max_depth = UCL_MAX_NESTING;\n\n\tif (flags & UCL_PARSER_SAVE_COMMENTS) {\n\t\tparser->comments = ucl_object_typed_new(UCL_OBJECT);\n\t}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "Shows flag initialization and the condition for saving comments.",
+      "location": {
+        "unit_id": "u-042a323ff22f8a79fa01",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 3019,
+        "end_line": 3043,
+        "unit_sha256": "7cfcabd197903de96b8823bfb4178d7311cfbbacd5f6a689adecdbe109c8f4f4",
+        "quote_sha256": "95512ad843a48635e4c2c4b81371797161da25ec1940c97ae0732999cbc6d9b4"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/1",
+      "evidence_id": "loc-79f3f9340bd227cca938c932",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "static void\nucl_attach_comment(struct ucl_parser *parser, ucl_object_t *obj, bool before)\n{\n\tif (parser->last_comment) {\n\t\tucl_object_insert_key(parser->comments, parser->last_comment,\n\t\t\t\t\t\t\t  (const char *) &obj, sizeof(void *), true);\n\n\t\tif (before) {\n\t\t\tparser->last_comment->flags |= UCL_OBJECT_INHERITED;\n\t\t}\n\n\t\tparser->last_comment = NULL;\n\t}\n}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "Attachment would clear last_comment, but requires an attachment call.",
+      "location": {
+        "unit_id": "u-a734243937954c0ed8d1",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 134,
+        "end_line": 147,
+        "unit_sha256": "28c5ed2f5c1f6f23da7af52fb3768385471fdfc721afd8509b2ff43af5492234",
+        "quote_sha256": "28c5ed2f5c1f6f23da7af52fb3768385471fdfc721afd8509b2ff43af5492234"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/2",
+      "evidence_id": "loc-b55aed18545aa151433b9183",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\t\t\tgot_content = false;\n\n\t\t\tif (!ucl_parse_key(parser, chunk, &next_key, &end_of_object, &got_content)) {\n\t\t\t\tparser->prev_state = parser->state;\n\t\t\t\tparser->state = UCL_STATE_ERROR;\n\t\t\t\treturn false;\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The error returns before later attachment.",
+      "location": {
+        "unit_id": "u-d68c375c2b8c50c4dc7a",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 2751,
+        "end_line": 2756,
+        "unit_sha256": "127ecfe418bf5642e0f7266f55ef4d42bdfc92c1671b8f07b75ca4e9acfa57de",
+        "quote_sha256": "6b06c28b951a25af7174e4585cc4c2d75ac0f4bb856ad33c82f23e7fbbdea81e"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/3",
+      "evidence_id": "loc-760c8fa17b5ceaf69a38215d",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+      "text": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\t// If size is 0 we need a null-terminated string.\n\t// We dont null-terminate the string and by the design\n\t// of the API passing 0 as size with non null-terminated string\n\t// gives undefined behavior. \t\n\tif(size==0){\n\t\treturn 0;\n\t}\n\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-e361eddd782de83c425d",
+        "version": "harness",
+        "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+        "start_line": 6,
+        "end_line": 25,
+        "unit_sha256": "ec9232480c806b16dfbf27c029bfca494c9a582f2657975b69ecdf3a326b7f05",
+        "quote_sha256": "dc6feedb2349706a821c5bc2d8ef009057e56b9336121b899f2b3fc437238c9e"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/0",
+      "evidence_id": "loc-ea586abc2d10ce3a0b0c9d63",
+      "kind": "before_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-3aba805b0d21de46ddd2",
+        "version": "before",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 778,
+        "end_line": 791,
+        "unit_sha256": "9a3bb3b8e3ac2f3999d7522ba4d29676aa5582c13265c4fc20361307969227eb",
+        "quote_sha256": "cc60f212444c03056bb7c1f783b7a394535a19edeb963b7c3d202ae7312a10cb"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/1",
+      "evidence_id": "loc-30c3553b30f8de2bb9aaba1c",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-672fb3fb3dce0fc1c0d2",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 778,
+        "end_line": 795,
+        "unit_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a",
+        "quote_sha256": "1c253e791d2e7e988b56e557aade7bb0b4a64b9b28f6d39f00e8a270294b6b64"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/2",
+      "evidence_id": "loc-016835376c0dbbfc8993365d",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+      "text": "\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The same fixed harness is assessed on both source versions.",
+      "location": {
+        "unit_id": "u-e361eddd782de83c425d",
+        "version": "harness",
+        "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+        "start_line": 14,
+        "end_line": 23,
+        "unit_sha256": "ec9232480c806b16dfbf27c029bfca494c9a582f2657975b69ecdf3a326b7f05",
+        "quote_sha256": "f4ec9fe4b310ab8e69e76cc5bdabccc1285b2691326c444c7b0577e805ff79f3"
+      }
+    },
+    {
+      "pointer": "/source_evidence/0",
+      "evidence_id": "loc-2ae9391062260340630a727d",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-672fb3fb3dce0fc1c0d2",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 786,
+        "end_line": 795,
+        "unit_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a",
+        "quote_sha256": "25b4b9f29042b63596e31af8b44d2680253858e198873a6b6e5f36a37ebd1c0b"
+      }
+    },
+    {
+      "pointer": "/source_evidence/1",
+      "evidence_id": "loc-ea586abc2d10ce3a0b0c9d63",
+      "kind": "before_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-3aba805b0d21de46ddd2",
+        "version": "before",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 778,
+        "end_line": 791,
+        "unit_sha256": "9a3bb3b8e3ac2f3999d7522ba4d29676aa5582c13265c4fc20361307969227eb",
+        "quote_sha256": "cc60f212444c03056bb7c1f783b7a394535a19edeb963b7c3d202ae7312a10cb"
+      }
+    },
+    {
+      "pointer": "/source_evidence/2",
+      "evidence_id": "loc-797d1ffadce05d697ac6821d",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\tif (chunk->remain > 0 && *p == '#') {\n\t\tif (parser->state != UCL_STATE_SCOMMENT &&\n\t\t\tparser->state != UCL_STATE_MCOMMENT) {\n\t\t\tbeg = p;\n\n\t\t\twhile (p < chunk->end) {\n\t\t\t\tif (*p == '\\n') {\n\t\t\t\t\tif (parser->flags & UCL_PARSER_SAVE_COMMENTS) {\n\t\t\t\t\t\tucl_save_comment(parser, beg, p - beg);\n\t\t\t\t\t\tbeg = NULL;\n\t\t\t\t\t}\n\n\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\n\t\t\t\t\tgoto start;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "Establishes comment saving under the supported flag.",
+      "location": {
+        "unit_id": "u-95ea95e5d31c96fc5bcb",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 165,
+        "end_line": 179,
+        "unit_sha256": "f47339e417df1df97ee7dcfd7e8eacb2b2984debcbd2e709d7c14b340859b88b",
+        "quote_sha256": "e300b11d6a430927da45f1d6242fc3db7e486ce9c4b38a6012f67dcf2d68067b"
+      }
+    },
+    {
+      "pointer": "/source_evidence/3",
+      "evidence_id": "loc-6122081a5a3b0257caf4ed8d",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\twhile (p < chunk->end) {\n\t\tc = *p;\n\t\tif (c < 0x1F) {\n\t\t\t/* Unmasked control character */\n\t\t\tif (c == '\\n') {\n\t\t\t\tucl_set_err(parser, UCL_ESYNTAX, \"unexpected newline\",\n\t\t\t\t\t\t\t&parser->err);\n\t\t\t}\n\t\t\telse {\n\t\t\t\tucl_set_err(parser, UCL_ESYNTAX, \"unexpected control character\",\n\t\t\t\t\t\t\t&parser->err);\n\t\t\t}\n\t\t\treturn false;\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Establishes the finite error trigger.",
+      "location": {
+        "unit_id": "u-6b7800ed7cfb9f8ac17d",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 1224,
+        "end_line": 1236,
+        "unit_sha256": "c417f47ba42a998958a853f8bee1008b598e217c905edbfd6de7a30fade591cb",
+        "quote_sha256": "462053cacbffd13ced2e91146fcbc0aed0aac95e938c19f40b075abee9cc3d72"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/0",
+      "evidence_id": "loc-760c8fa17b5ceaf69a38215d",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+      "text": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\t// If size is 0 we need a null-terminated string.\n\t// We dont null-terminate the string and by the design\n\t// of the API passing 0 as size with non null-terminated string\n\t// gives undefined behavior. \t\n\tif(size==0){\n\t\treturn 0;\n\t}\n\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-e361eddd782de83c425d",
+        "version": "harness",
+        "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+        "start_line": 6,
+        "end_line": 25,
+        "unit_sha256": "ec9232480c806b16dfbf27c029bfca494c9a582f2657975b69ecdf3a326b7f05",
+        "quote_sha256": "dc6feedb2349706a821c5bc2d8ef009057e56b9336121b899f2b3fc437238c9e"
+      }
+    }
+  ],
+  "obligation_class": "target_coverage"
+}

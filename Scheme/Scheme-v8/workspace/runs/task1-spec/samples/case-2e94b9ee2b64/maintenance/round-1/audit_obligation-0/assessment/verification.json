@@ -1,0 +1,108 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0005",
+          "status": "blocked",
+          "reason": "The new dump depth guard supports clean failure for constructed over-depth values, but the entry only dumps values returned by json_loadb. Parsing rejects the extra depth before either dump call.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "unknown",
+          "reason": "The supplied wrapper delegates the build to test/ossfuzz/ossfuzz.sh; its contents and a build result are not supplied. Build status is not decisive to the established state blocker.",
+          "errors": []
+        },
+        "input": {
+          "status": "blocked",
+          "reason": "The entry accepts command bytes and JSON text, but mandatory json_loadb parsing cannot produce the constructed over-depth value needed by the dump guard.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "pass",
+          "reason": "On the relevant route, loading closes its lexer, each dump wrapper closes its temporary state, and the entry frees string output and decrements the loaded value.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "blocked",
+          "reason": "A parse failure returns from the entry before either dump mode; both modes otherwise use the same parsed object.",
+          "errors": []
+        }
+      },
+      "errors": [
+        "missing_duplicate_or_extra_change_assessment",
+        "incomplete_input_scope",
+        "invalid_diff_coverage_ledger",
+        "incomplete_diff_group_selection"
+      ],
+      "missing_information": [],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "kind": "state",
+        "necessary": true,
+        "established": true,
+        "requirement": "The JSON dump operation must be able to receive a supported, over-depth json_t so its clean depth-limit failure can be exercised.",
+        "target_route": "A finite command prefix selects a dump mode and supplies JSON text. The entry passes the text to json_loadb, returns if loading fails, and passes only the loaded value to json_dumps or json_dump_callback.",
+        "failure_condition": "A constructed nested value can reach do_dump at depth JSON_PARSER_MAX_DEPTH and fail cleanly. JSON text yielding that child requires parse_value beyond JSON_PARSER_MAX_DEPTH, so json_loadb returns NULL before dumping.",
+        "alternative_paths": "JSON_DECODE_ANY changes the permitted root type and JSON_DISABLE_EOF_CHECK changes trailing-input handling; neither bypasses parse_value's depth check. Both dump modes use the same loaded value, and the complete entry has no later construction or mutation route.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-ca80cc13b4000e052f745471",
+            "quote": "static int do_dump(const json_t *json, size_t flags, int depth, hashtable_t *parents,\n                   json_dump_callback_t dump, void *data) {\n    int embed = flags & JSON_EMBED;\n\n    flags &= ~JSON_EMBED;\n\n    if (!json)\n        return -1;\n\n    if (depth >= JSON_PARSER_MAX_DEPTH)\n        return -1;\n"
+          },
+          {
+            "evidence_id": "loc-26417dec48559012321d811a",
+            "quote": "            for (i = 0; i < n - 1; ++i) {\n                if (do_dump(json_array_get(json, i), flags, depth + 1, parents, dump,\n                            data))\n                    return -1;\n\n                if (dump(\",\", 1, data) || dump_indent(flags, depth + 1, 1, dump, data))\n                    return -1;\n            }\n\n            if (do_dump(json_array_get(json, i), flags, depth + 1, parents, dump, data))\n                return -1;\n"
+          },
+          {
+            "evidence_id": "loc-72ef26561cfade5f71573c4c",
+            "quote": "static void max_depth() {\n    json_t *json;\n    char *result;\n\n    /* A structure nested exactly to the limit must still serialize. */\n    json = build_nested_array(JSON_PARSER_MAX_DEPTH);\n    result = json_dumps(json, 0);\n    if (!result)\n        fail(\"json_dumps failed for a structure within the depth limit\");\n    free(result);\n    json_decref(json);\n\n    /* A structure nested deeper than the limit must fail cleanly rather\n       than overflow the stack. */\n    json = build_nested_array(JSON_PARSER_MAX_DEPTH + 100);\n    if (json_dumps(json, 0) != NULL)\n        fail(\"json_dumps didn't fail for a too deeply nested structure\");\n    json_decref(json);\n}\n"
+          },
+          {
+            "evidence_id": "loc-c5dc8ea976759beea6862567",
+            "quote": "static json_t *parse_value(lex_t *lex, size_t flags, json_error_t *error) {\n    json_t *json;\n\n    lex->depth++;\n    if (lex->depth > JSON_PARSER_MAX_DEPTH) {\n        error_set(error, lex, json_error_stack_overflow, \"maximum parsing depth reached\");\n        return NULL;\n    }\n"
+          },
+          {
+            "evidence_id": "loc-fee6378cf4a87d4607e30edf",
+            "quote": "static json_t *parse_json(lex_t *lex, size_t flags, json_error_t *error) {\n    json_t *result;\n\n    lex->depth = 0;\n\n    lex_scan(lex, error);\n    if (!(flags & JSON_DECODE_ANY)) {\n        if (lex->token != '[' && lex->token != '{') {\n            error_set(error, lex, json_error_invalid_syntax, \"'[' or '{' expected\");\n            return NULL;\n        }\n    }\n\n    result = parse_value(lex, flags, error);\n    if (!result)\n        return NULL;\n\n    if (!(flags & JSON_DISABLE_EOF_CHECK)) {\n        lex_scan(lex, error);\n        if (lex->token != TOKEN_EOF) {\n            error_set(error, lex, json_error_end_of_input_expected,\n                      \"end of file expected\");\n            json_decref(result);\n            return NULL;\n        }\n    }\n"
+          },
+          {
+            "evidence_id": "loc-42ef766cb1db1857ac432f78",
+            "quote": "int json_dump_callback(const json_t *json, json_dump_callback_t callback, void *data,\n                       size_t flags) {\n    int res;\n    hashtable_t parents_set;\n\n    if (!(flags & JSON_ENCODE_ANY)) {\n        if (!json_is_array(json) && !json_is_object(json))\n            return -1;\n    }\n\n    if (hashtable_init(&parents_set))\n        return -1;\n    res = do_dump(json, flags, 0, &parents_set, callback, data);\n    hashtable_close(&parents_set);\n\n    return res;\n}\n"
+          },
+          {
+            "evidence_id": "loc-4455d50bade6a27dfd016ca0",
+            "quote": "char *json_dumps(const json_t *json, size_t flags) {\n    strbuffer_t strbuff;\n    char *result;\n\n    if (strbuffer_init(&strbuff))\n        return NULL;\n\n    if (json_dump_callback(json, dump_to_strbuffer, (void *)&strbuff, flags))\n        result = NULL;\n    else {\n        char *new_result;\n        result = strbuffer_steal_value(&strbuff);\n        // technically the resizing is not needed.\n        new_result = jsonp_realloc(result, strbuff.size, strbuff.length + 1);\n        if (new_result) { // when realloc fails we just use the original pointer\n            result = new_result;\n        }\n    }\n\n    strbuffer_close(&strbuff);\n    return result;\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-23165fa5f250a472dbdcd18b",
+            "quote": "  if (size < NUM_COMMAND_BYTES)\n  {\n    return 0;\n  }\n\n  // Use the first sizeof(size_t) bytes as load flags.\n  size_t load_flags = *(const size_t*)data;\n  data += sizeof(size_t);\n\n"
+          },
+          {
+            "evidence_id": "loc-f42a3fd3121307b9283a8f66",
+            "quote": "  // Use the next byte as the dump mode.\n  dump_mode = data[0];\n  data++;\n\n  FUZZ_DEBUG(\"dump_mode: 0x%x\", (unsigned int)dump_mode);\n\n  // Remove the command bytes from the size total.\n  size -= NUM_COMMAND_BYTES;\n\n  // Attempt to load the remainder of the data with the given load flags.\n  const char* text = reinterpret_cast<const char *>(data);\n  json_t* jobj = json_loadb(text, size, load_flags, &error);\n\n  if (jobj == NULL)\n  {\n    return 0;\n  }\n\n  if (dump_mode & FUZZ_DUMP_STRING)\n  {\n    // Dump as a string. Remove indents so that we don't run out of memory.\n    char *out = json_dumps(jobj, dump_flags & ~JSON_MAX_INDENT);\n    if (out != NULL)\n    {\n      free(out);\n    }\n  }\n  else\n  {\n    // Default is callback mode.\n    //\n    // Attempt to dump the loaded json object with the given dump flags.\n    uint64_t counter = 0;\n\n    json_dump_callback(jobj, json_dump_counter, &counter, dump_flags);\n    FUZZ_DEBUG(\"Counter function counted %\" PRIu64 \" bytes.\", counter);\n  }\n\n  if (jobj)\n  {\n    json_decref(jobj);\n  }\n"
+          }
+        ],
+        "missing_information": [],
+        "id": "o-c25064af3482c97a",
+        "change_ids": [
+          "g0005"
+        ],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

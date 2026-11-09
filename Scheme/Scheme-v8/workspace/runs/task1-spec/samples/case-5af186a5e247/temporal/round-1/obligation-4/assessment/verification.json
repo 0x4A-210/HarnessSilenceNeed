@@ -1,0 +1,69 @@
+{
+  "checked": {
+    "status": "unknown",
+    "gap": null,
+    "introduced_by_this_change": null,
+    "claims": [
+      {
+        "claim_id": "o-e8c9b676c409c04c",
+        "status": "not_necessary",
+        "necessary": "no",
+        "before": {
+          "requirement": "Preserve double pipe spoiler delimiters inside a table cell while using single pipes as cell boundaries.",
+          "applicability": "not_applicable",
+          "harness_status": "not_applicable",
+          "reason": "The before collector creates single character pipe marks for table parsing, and the before table pass treats pipe marks as cell boundaries. The spoiler behavior in the frozen tuple was not supported.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-e8138678f4de3ac5f44a0ff0",
+              "quote": "            /* A potential table cell boundary or wiki link label delimiter. */\n            if((table_mode || ctx->parser.flags & MD_FLAG_WIKILINKS) && ch == _T('|')) {\n                ADD_MARK(ch, off, off+1, 0);\n                off++;\n                continue;\n            }\n"
+            },
+            {
+              "evidence_id": "loc-6c417ca42fe58f7c293fec5d",
+              "quote": "    if(table_mode) {\n        /* (2) Analyze table cell boundaries. */\n        MD_ASSERT(n_lines == 1);\n        ctx->n_table_cell_boundaries = 0;\n        md_analyze_marks(ctx, lines, n_lines, 0, ctx->n_marks, _T(\"|\"), 0);\n        return ret;\n"
+            },
+            {
+              "evidence_id": "loc-26b919a6bfba4aef910f8ec4",
+              "quote": "    int i;\n\n    md_analyze_marks(ctx, lines, n_lines, mark_beg, mark_end, _T(\"&\"), 0);\n    md_analyze_marks(ctx, lines, n_lines, mark_beg, mark_end, _T(\"*_~$\"), 0);\n\n    if((ctx->parser.flags & MD_FLAG_PERMISSIVEAUTOLINKS) != 0) {\n        /* These have to be processed last, as they may be greedy and expand\n         * from their original mark. Also their implementation must be careful\n         * not to cross any (previously) resolved marks when doing so. */\n        md_analyze_marks(ctx, lines, n_lines, mark_beg, mark_end, _T(\"@:.\"), MD_ANALYZE_NOSKIP_EMPH);\n    }\n\n    for(i = 0; i < (int) SIZEOF_ARRAY(ctx->opener_stacks); i++)\n        ctx->opener_stacks[i].top = -1;\n}\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "With table and spoiler parsing enabled, preserve double pipe spoiler delimiters within a table cell and use single pipes as cell boundaries.",
+          "applicability": "required",
+          "harness_status": "sat",
+          "reason": "The collector makes adjacent pipes one two character spoiler mark. The table pass selects only unresolved one character pipes as boundaries; each cell is then processed through the normal inline path, which resolves spoiler marks. The old harness can supply the flag combination and table text through md_html.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-bdf1a4a5abb1e7998c004395",
+              "quote": "            /* A potential spoiler delimiter: || ... ||\n             * Checked before the single-| handler so a double pipe is consumed\n             * as one mark and does not become two cell boundaries. */\n            if(ch == _T('|') && (ctx->parser.flags & MD_FLAG_SPOILERS)) {\n                if(off + 1 < line->end && CH(off+1) == _T('|')) {\n                    ADD_MARK(ch, off, off+2, MD_MARK_POTENTIAL_OPENER | MD_MARK_POTENTIAL_CLOSER);\n                    off += 2;\n                    continue;\n                }\n            }\n\n            /* A potential table cell boundary or wiki link label delimiter. */\n            if((table_mode || ctx->parser.flags & MD_FLAG_WIKILINKS) && ch == _T('|')) {\n                ADD_MARK(ch, off, off+1, 0);\n                off++;\n                continue;\n            }\n"
+            },
+            {
+              "evidence_id": "loc-ac054c13ac8c48444b2ee7ac",
+              "quote": "    if(table_mode) {\n        /* (2) Analyze table cell boundaries. */\n        MD_ASSERT(n_lines == 1);\n        ctx->n_table_cell_boundaries = 0;\n        for(i = 0; i < ctx->n_marks; i++) {\n            MD_MARK* mark = &ctx->marks[i];\n            if(!(mark->flags & MD_MARK_RESOLVED) &&\n               mark->ch == '|' && mark->end - mark->beg == 1)\n                md_analyze_table_cell_boundary(ctx, i);\n        }\n        return ret;\n"
+            },
+            {
+              "evidence_id": "loc-f2d8d2328ecf12111a8ef5f2",
+              "quote": "    if(ctx->parser.flags & MD_FLAG_SPOILERS) {\n        for(i = mark_beg; i < mark_end; i++) {\n            MD_MARK* mark = &ctx->marks[i];\n            if(mark->flags & MD_MARK_RESOLVED)\n                continue;\n            if(mark->ch == '|' && mark->end - mark->beg == 2)\n                md_analyze_pipe(ctx, i);\n        }\n    }\n"
+            },
+            {
+              "evidence_id": "loc-dc0f6e2a1ce8181223ef6e2f",
+              "quote": "                case '|':\n                    if(mark->end - mark->beg == 2) {\n                        if(mark->flags & MD_MARK_OPENER)\n                            MD_ENTER_SPAN(MD_SPAN_SPOILER, NULL);\n                        else\n                            MD_LEAVE_SPAN(MD_SPAN_SPOILER, NULL);\n                    }\n                    break;\n"
+            },
+            {
+              "evidence_id": "loc-fe3cdb493bd6226cb425bce6",
+              "quote": "    MD_PARSER parser = {\n        0,\n        parser_flags,\n        enter_block_callback,\n        leave_block_callback,\n        enter_span_callback,\n        leave_span_callback,\n        text_callback,\n        debug_log_callback,\n        NULL\n    };\n\n    /* Build map of characters which need escaping. */\n    for(i = 0; i < 256; i++) {\n        unsigned char ch = (unsigned char) i;\n\n        if(strchr(\"\\\"&<>\", ch) != NULL)\n            render.escape_map[i] |= NEED_HTML_ESC_FLAG;\n\n        if(!ISALNUM(ch)  &&  strchr(\"~-_.+!*(),%#@?=;:/,+$\", ch) == NULL)\n            render.escape_map[i] |= NEED_URL_ESC_FLAG;\n    }\n\n    /* Consider skipping UTF-8 byte order mark (BOM). */\n    if(renderer_flags & MD_HTML_FLAG_SKIP_UTF8_BOM  &&  sizeof(MD_CHAR) == 1) {\n        static const MD_CHAR bom[3] = { (char)0xef, (char)0xbb, (char)0xbf };\n        if(input_size >= sizeof(bom)  &&  memcmp(input, bom, sizeof(bom)) == 0) {\n            input += sizeof(bom);\n            input_size -= sizeof(bom);\n        }\n    }\n\n    return md_parse(input, input_size, &parser, (void*) &render);\n"
+            }
+          ]
+        },
+        "same_blocker": "not_applicable",
+        "reason": "The same table cell spoiler tuple is unavailable before and reachable with the unchanged harness after. Coverage is limited to the supplied focus candidate; this does not establish coverage of every selected change group.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": []
+  },
+  "citation_errors": []
+}

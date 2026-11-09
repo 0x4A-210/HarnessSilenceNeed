@@ -1,0 +1,131 @@
+diff --git a/lib/lz4.c b/lib/lz4.c
+index ee915ca78b17f57bbf1712b47f93af1e7962cbad..c29d1b5cdb90fb5d6165583d78fb9af8ea8ad373 100644
+--- a/lib/lz4.c
++++ b/lib/lz4.c
+@@ -889,6 +889,10 @@ LZ4_getPosition(const BYTE* p,
+     return LZ4_getPositionOnHash(h, tableBase, tableType);
+ }
+ 
++/* beyond this input size (1 KB by default),
++ * clearing the table is faster than rejecting its stale entries */
++#define LZ4_CLEAR_TABLE_THRESHOLD (LZ4_HASHTABLESIZE / 16)
++
+ LZ4_FORCE_INLINE void
+ LZ4_prepareTable(LZ4_stream_t_internal* const cctx,
+            const int inputSize,
+@@ -899,13 +903,11 @@ LZ4_prepareTable(LZ4_stream_t_internal* const cctx,
+      */
+     if ((tableType_t)cctx->tableType != clearedTable) {
+         assert(inputSize >= 0);
+-        /* beyond LZ4_HASHTABLESIZE / 16 (1 KB by default),
+-         * clearing the table is faster than rejecting its stale entries */
+         if ((tableType_t)cctx->tableType != tableType
+           || ((tableType == byU16) && cctx->currentOffset + (unsigned)inputSize >= 0xFFFFU)
+           || ((tableType == byU32) && cctx->currentOffset > 1 GB)
+           || tableType == byPtr
+-          || inputSize >= LZ4_HASHTABLESIZE / 16)
++          || inputSize >= LZ4_CLEAR_TABLE_THRESHOLD)
+         {
+             DEBUGLOG(4, "LZ4_prepareTable: Resetting table in %p", (void*)cctx);
+             MEM_INIT(cctx->hashTable, 0, LZ4_HASHTABLESIZE);
+@@ -1726,6 +1728,10 @@ int LZ4_compress_fast_continue (LZ4_stream_t* LZ4_stream,
+ 
+     DEBUGLOG(5, "LZ4_compress_fast_continue (inputSize=%i, dictSize=%u)", inputSize, streamPtr->dictSize);
+ 
++    /* new stream (no history) : clear the table beyond LZ4_CLEAR_TABLE_THRESHOLD */
++    if ((streamPtr->dictSize == 0) && (streamPtr->dictCtx == NULL) && (inputSize >= LZ4_CLEAR_TABLE_THRESHOLD))
++        LZ4_prepareTable(streamPtr, inputSize, byU32);
++
+     LZ4_renormDictT(streamPtr, inputSize);   /* fix index overflow */
+     if (acceleration < 1) acceleration = LZ4_ACCELERATION_DEFAULT;
+     if (acceleration > LZ4_ACCELERATION_MAX) acceleration = LZ4_ACCELERATION_MAX;
+diff --git a/tests/fuzzer.c b/tests/fuzzer.c
+index 6f913a61f27b1d4e63a337904099de9fffc8312c..9ffd3edc8dbf44c42159a25d76ab5feb84fa8b02 100644
+--- a/tests/fuzzer.c
++++ b/tests/fuzzer.c
+@@ -333,6 +333,7 @@ static int FUZ_test(U32 seed, U32 nbCycles, const U32 startCycle, const double c
+     void* const stateLZ4   = malloc((size_t)LZ4_sizeofState());
+     void* const stateLZ4HC = malloc((size_t)LZ4_sizeofStateHC());
+     LZ4_stream_t LZ4dictBody;
++    LZ4_stream_t* const reusedStream = LZ4_createStream();   /* keeps a history across cycles */
+     LZ4_streamHC_t* const LZ4dictHC = LZ4_createStreamHC();
+     U32 coreRandState = seed;
+     clock_t const clockStart = clock();
+@@ -360,7 +361,7 @@ static int FUZ_test(U32 seed, U32 nbCycles, const U32 startCycle, const double c
+ 
+ 
+     /* init */
+-    if(!CNBuffer || !compressedBuffer || !decodedBuffer || !LZ4dictHC) {
++    if(!CNBuffer || !compressedBuffer || !decodedBuffer || !LZ4dictHC || !reusedStream) {
+         DISPLAY("Not enough memory to start fuzzer tests");
+         exit(1);
+     }
+@@ -513,6 +514,23 @@ static int FUZ_test(U32 seed, U32 nbCycles, const U32 startCycle, const double c
+                 r, extStateSize);
+         }
+ 
++        /* new stream on a used state : same output as a new stream, if its first block is large enough */
++        if (blockSize > 0) {
++            FUZ_DISPLAYTEST("test LZ4_compress_fast_continue() after LZ4_resetStream_fast()");
++            LZ4_resetStream_fast(reusedStream);
++            ret = LZ4_compress_fast_continue(reusedStream, block, compressedBuffer, blockSize, (int)compressedBufferSize, 1);
++            FUZ_CHECKTEST(ret <= 0, "LZ4_compress_fast_continue() failed");
++            if (blockSize >= (int)(64 KB)) {   /* beyond the table clearing threshold, whatever LZ4_MEMORY_USAGE */
++                U32 const reusedCrc = XXH32(compressedBuffer, (size_t)ret, 0);
++                LZ4_stream_t newStream;
++                int r;
++                LZ4_initStream(&newStream, sizeof(newStream));
++                r = LZ4_compress_fast_continue(&newStream, block, compressedBuffer, blockSize, (int)compressedBufferSize, 1);
++                FUZ_CHECKTEST(r != ret || XXH32(compressedBuffer, (size_t)r, 0) != reusedCrc,
++                    "LZ4_compress_fast_continue() after LZ4_resetStream_fast() : output differs from a new stream (%i vs %i bytes)",
++                    ret, r);
++        }   }
++
+         /* Test compression */
+         FUZ_DISPLAYTEST("test LZ4_compress_default()");
+         compressedSize = LZ4_compress_default(block, compressedBuffer, blockSize, (int)compressedBufferSize);
+@@ -1094,6 +1112,7 @@ static int FUZ_test(U32 seed, U32 nbCycles, const U32 startCycle, const double c
+     free(decodedBuffer);
+     FUZ_freeLowAddr(lowAddrBuffer, labSize);
+     LZ4_freeStreamHC(LZ4dictHC);
++    LZ4_freeStream(reusedStream);
+     free(stateLZ4);
+     free(stateLZ4HC);
+     return result;
+@@ -1299,6 +1318,36 @@ static void FUZ_unitTests(int compressionLevel)
+             FUZ_CHECKTEST(crcOrig!=crcNew, "LZ4_decompress_safe() decompression corruption");
+         }
+ 
++        DISPLAYLEVEL(3, "LZ4_resetStream_fast() : a large first block gives the same output as a new stream : ");
++        {   int const blockSize = 64 KB;   /* beyond the table clearing threshold, whatever LZ4_MEMORY_USAGE */
++            char* const block = (char*)malloc((size_t)blockSize);
++            int refSize, r;
++            U32 refCrc;
++            FUZ_CHECKTEST(block == NULL, "allocation failure");
++            memcpy(block, testInput + 64 KB, (size_t)blockSize);
++            /* the first 4 bytes reappear, with a different 5th byte :
++             * a match only found when starting from a cleared table */
++            memcpy(block, "ABCDx", 5);
++            memcpy(block + 16, "ABCDy", 5);
++
++            LZ4_initStream(&streamingState, sizeof(streamingState));
++            refSize = LZ4_compress_fast_continue(&streamingState, block, testCompressed, blockSize, testCompressedSize, 1);
++            FUZ_CHECKTEST(refSize <= 0, "LZ4_compress_fast_continue() failed");
++            refCrc = XXH32(testCompressed, (size_t)refSize, 0);
++
++            LZ4_resetStream_fast(&streamingState);   /* the state now has a history */
++            r = LZ4_compress_fast_continue(&streamingState, block, testCompressed, blockSize, testCompressedSize, 1);
++            FUZ_CHECKTEST(r != refSize || XXH32(testCompressed, (size_t)r, 0) != refCrc,
++                          "output differs from a new stream (%i vs %i bytes)", r, refSize);
++
++            LZ4_saveDict(&streamingState, testVerify, 0);   /* drop history, without reset */
++            r = LZ4_compress_fast_continue(&streamingState, block, testCompressed, blockSize, testCompressedSize, 1);
++            FUZ_CHECKTEST(r != refSize || XXH32(testCompressed, (size_t)r, 0) != refCrc,
++                          "after LZ4_saveDict(,,0) : output differs from a new stream (%i vs %i bytes)", r, refSize);
++            free(block);
++        }
++        DISPLAYLEVEL(3, "OK \n");
++
+         /* early saveDict */
+         DISPLAYLEVEL(3, "saveDict (right after init) : ");
+         {   LZ4_stream_t* const ctx = LZ4_initStream(&streamingState, sizeof(streamingState));

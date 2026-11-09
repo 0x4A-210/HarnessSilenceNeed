@@ -1,0 +1,312 @@
+diff --git a/src/backend/bootstrap/bootstrap.c b/src/backend/bootstrap/bootstrap.c
+index 2e2f76a4716dc6ca5f7b46e770239a02f55b1233..3416802811bc8a5ba5d21a5f6dd351dc5392b762 100644
+--- a/src/backend/bootstrap/bootstrap.c
++++ b/src/backend/bootstrap/bootstrap.c
+@@ -178,8 +178,8 @@ static IndexList *ILHead = NULL;
+ /*
+  * In shared memory checker mode, all we really want to do is create shared
+  * memory and semaphores (just to prove we can do it with the current GUC
+- * settings).  Since, in fact, that was already done by BaseInit(),
+- * we have nothing more to do here.
++ * settings).  Since, in fact, that was already done by
++ * CreateSharedMemoryAndSemaphores(), we have nothing more to do here.
+  */
+ static void
+ CheckerModeMain(void)
+@@ -324,7 +324,7 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
+ 
+ 	InitializeMaxBackends();
+ 
+-	BaseInit();
++	CreateSharedMemoryAndSemaphores();
+ 
+ 	/*
+ 	 * XXX: It might make sense to move this into its own function at some
+@@ -338,6 +338,13 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
+ 		abort();
+ 	}
+ 
++	/*
++	 * Do backend-like initialization for bootstrap mode
++	 */
++	InitProcess();
++
++	BaseInit();
++
+ 	bootstrap_signals();
+ 	BootStrapXLOG();
+ 
+@@ -348,11 +355,6 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
+ 	if (pg_link_canary_is_frontend())
+ 		elog(ERROR, "backend is incorrectly linked to frontend functions");
+ 
+-	/*
+-	 * Do backend-like initialization for bootstrap mode
+-	 */
+-	InitProcess();
+-
+ 	InitPostgres(NULL, InvalidOid, NULL, InvalidOid, NULL, false);
+ 
+ 	/* Initialize stuff for bootstrap-file processing */
+diff --git a/src/backend/postmaster/autovacuum.c b/src/backend/postmaster/autovacuum.c
+index 912ef9cb54cf259fbbf5e39dc6cc8029b7e45c6f..59d348b062f2c5639268f8db44f1be81c81cb221 100644
+--- a/src/backend/postmaster/autovacuum.c
++++ b/src/backend/postmaster/autovacuum.c
+@@ -469,9 +469,6 @@ AutoVacLauncherMain(int argc, char *argv[])
+ 	pqsignal(SIGFPE, FloatExceptionHandler);
+ 	pqsignal(SIGCHLD, SIG_DFL);
+ 
+-	/* Early initialization */
+-	BaseInit();
+-
+ 	/*
+ 	 * Create a per-backend PGPROC struct in shared memory, except in the
+ 	 * EXEC_BACKEND case where this was done in SubPostmasterMain. We must do
+@@ -482,6 +479,9 @@ AutoVacLauncherMain(int argc, char *argv[])
+ 	InitProcess();
+ #endif
+ 
++	/* Early initialization */
++	BaseInit();
++
+ 	InitPostgres(NULL, InvalidOid, NULL, InvalidOid, NULL, false);
+ 
+ 	SetProcessingMode(NormalProcessing);
+@@ -1547,9 +1547,6 @@ AutoVacWorkerMain(int argc, char *argv[])
+ 	pqsignal(SIGFPE, FloatExceptionHandler);
+ 	pqsignal(SIGCHLD, SIG_DFL);
+ 
+-	/* Early initialization */
+-	BaseInit();
+-
+ 	/*
+ 	 * Create a per-backend PGPROC struct in shared memory, except in the
+ 	 * EXEC_BACKEND case where this was done in SubPostmasterMain. We must do
+@@ -1560,6 +1557,9 @@ AutoVacWorkerMain(int argc, char *argv[])
+ 	InitProcess();
+ #endif
+ 
++	/* Early initialization */
++	BaseInit();
++
+ 	/*
+ 	 * If an exception is encountered, processing resumes here.
+ 	 *
+diff --git a/src/backend/postmaster/auxprocess.c b/src/backend/postmaster/auxprocess.c
+index 196ee647cfe33de8ee9f04159a1d97ed77b824c8..16d87e91402c5173c40d7d6b3bf4803b19880bc5 100644
+--- a/src/backend/postmaster/auxprocess.c
++++ b/src/backend/postmaster/auxprocess.c
+@@ -90,8 +90,6 @@ AuxiliaryProcessMain(AuxProcType auxtype)
+ 	SetProcessingMode(BootstrapProcessing);
+ 	IgnoreSystemIndexes = true;
+ 
+-	BaseInit();
+-
+ 	/*
+ 	 * As an auxiliary process, we aren't going to do the full InitPostgres
+ 	 * pushups, but there are a couple of things that need to get lit up even
+@@ -106,6 +104,8 @@ AuxiliaryProcessMain(AuxProcType auxtype)
+ 	InitAuxiliaryProcess();
+ #endif
+ 
++	BaseInit();
++
+ 	/*
+ 	 * Assign the ProcSignalSlot for an auxiliary process.  Since it doesn't
+ 	 * have a BackendId, the slot is statically allocated based on the
+@@ -118,9 +118,6 @@ AuxiliaryProcessMain(AuxProcType auxtype)
+ 	 */
+ 	ProcSignalInit(MaxBackends + MyAuxProcType + 1);
+ 
+-	/* finish setting up bufmgr.c */
+-	InitBufferPoolBackend();
+-
+ 	/*
+ 	 * Auxiliary processes don't run transactions, but they may need a
+ 	 * resource owner anyway to manage buffer pins acquired outside
+diff --git a/src/backend/postmaster/bgworker.c b/src/backend/postmaster/bgworker.c
+index c40410d73ea8387f7e61a27ddc70d231f2bd397c..11c4ceddbf6fca8dedeb9c517544690bff219fc3 100644
+--- a/src/backend/postmaster/bgworker.c
++++ b/src/backend/postmaster/bgworker.c
+@@ -837,14 +837,6 @@ StartBackgroundWorker(void)
+ 	 */
+ 	if (worker->bgw_flags & BGWORKER_SHMEM_ACCESS)
+ 	{
+-		/*
+-		 * Early initialization.  Some of this could be useful even for
+-		 * background workers that aren't using shared memory, but they can
+-		 * call the individual startup routines for those subsystems if
+-		 * needed.
+-		 */
+-		BaseInit();
+-
+ 		/*
+ 		 * Create a per-backend PGPROC struct in shared memory, except in the
+ 		 * EXEC_BACKEND case where this was done in SubPostmasterMain. We must
+@@ -854,6 +846,14 @@ StartBackgroundWorker(void)
+ #ifndef EXEC_BACKEND
+ 		InitProcess();
+ #endif
++
++		/*
++		 * Early initialization.  Some of this could be useful even for
++		 * background workers that aren't using shared memory, but they can
++		 * call the individual startup routines for those subsystems if
++		 * needed.
++		 */
++		BaseInit();
+ 	}
+ 
+ 	/*
+diff --git a/src/backend/storage/buffer/bufmgr.c b/src/backend/storage/buffer/bufmgr.c
+index 77685bdde2864f413dc4dd564216ecc6fe7c00a3..3b485de067f1b072e6c7ee1d28cc946afba70124 100644
+--- a/src/backend/storage/buffer/bufmgr.c
++++ b/src/backend/storage/buffer/bufmgr.c
+@@ -2582,11 +2582,6 @@ AtEOXact_Buffers(bool isCommit)
+  * This is called during backend startup (whether standalone or under the
+  * postmaster).  It sets up for this backend's access to the already-existing
+  * buffer pool.
+- *
+- * NB: this is called before InitProcess(), so we do not have a PGPROC and
+- * cannot do LWLockAcquire; hence we can't actually access stuff in
+- * shared memory yet.  We are only initializing local data here.
+- * (See also InitBufferPoolBackend)
+  */
+ void
+ InitBufferPoolAccess(void)
+@@ -2600,20 +2595,12 @@ InitBufferPoolAccess(void)
+ 
+ 	PrivateRefCountHash = hash_create("PrivateRefCount", 100, &hash_ctl,
+ 									  HASH_ELEM | HASH_BLOBS);
+-}
+ 
+-/*
+- * InitBufferPoolBackend --- second-stage initialization of a new backend
+- *
+- * This is called after we have acquired a PGPROC and so can safely get
+- * LWLocks.  We don't currently need to do anything at this stage ...
+- * except register a shmem-exit callback.  AtProcExit_Buffers needs LWLock
+- * access, and thereby has to be called at the corresponding phase of
+- * backend shutdown.
+- */
+-void
+-InitBufferPoolBackend(void)
+-{
++	/*
++	 * AtProcExit_Buffers needs LWLock access, and thereby has to be called at
++	 * the corresponding phase of backend shutdown.
++	 */
++	Assert(MyProc != NULL);
+ 	on_shmem_exit(AtProcExit_Buffers, 0);
+ }
+ 
+diff --git a/src/backend/tcop/postgres.c b/src/backend/tcop/postgres.c
+index 530caa520b825ac65c4d5e675085d9daeac4346c..58b5960e27da5336885ce4032e9d7e62b0095f34 100644
+--- a/src/backend/tcop/postgres.c
++++ b/src/backend/tcop/postgres.c
+@@ -4050,10 +4050,9 @@ PostgresMain(int argc, char *argv[],
+ 
+ 		/* Initialize MaxBackends (if under postmaster, was done already) */
+ 		InitializeMaxBackends();
+-	}
+ 
+-	/* Early initialization */
+-	BaseInit();
++		CreateSharedMemoryAndSemaphores();
++	}
+ 
+ 	/*
+ 	 * Create a per-backend PGPROC struct in shared memory, except in the
+@@ -4068,6 +4067,9 @@ PostgresMain(int argc, char *argv[],
+ 	InitProcess();
+ #endif
+ 
++	/* Early initialization */
++	BaseInit();
++
+ 	/* We need to allow SIGINT, etc during the initial transaction */
+ 	PG_SETMASK(&UnBlockSig);
+ 
+diff --git a/src/backend/utils/init/postinit.c b/src/backend/utils/init/postinit.c
+index 51d1bbef301ae66b90ccfcfa83d4a4a83659ba8f..420b246fb13f9ba6e255aa57d096deeb75ae54e1 100644
+--- a/src/backend/utils/init/postinit.c
++++ b/src/backend/utils/init/postinit.c
+@@ -67,7 +67,6 @@ static HeapTuple GetDatabaseTuple(const char *dbname);
+ static HeapTuple GetDatabaseTupleByOid(Oid dboid);
+ static void PerformAuthentication(Port *port);
+ static void CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connections);
+-static void InitCommunication(void);
+ static void ShutdownPostgres(int code, Datum arg);
+ static void StatementTimeoutHandler(void);
+ static void LockTimeoutHandler(void);
+@@ -417,31 +416,6 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
+ }
+ 
+ 
+-
+-/* --------------------------------
+- *		InitCommunication
+- *
+- *		This routine initializes stuff needed for ipc, locking, etc.
+- *		it should be called something more informative.
+- * --------------------------------
+- */
+-static void
+-InitCommunication(void)
+-{
+-	/*
+-	 * initialize shared memory and semaphores appropriately.
+-	 */
+-	if (!IsUnderPostmaster)		/* postmaster already did this */
+-	{
+-		/*
+-		 * We're running a postgres bootstrap process or a standalone backend,
+-		 * so we need to set up shmem.
+-		 */
+-		CreateSharedMemoryAndSemaphores();
+-	}
+-}
+-
+-
+ /*
+  * pg_split_opts -- split a string of options and append it to an argv array
+  *
+@@ -536,11 +510,11 @@ InitializeMaxBackends(void)
+ void
+ BaseInit(void)
+ {
++	Assert(MyProc != NULL);
++
+ 	/*
+-	 * Attach to shared memory and semaphores, and initialize our
+-	 * input/output/debugging file descriptors.
++	 * Initialize our input/output/debugging file descriptors.
+ 	 */
+-	InitCommunication();
+ 	DebugFileOpen();
+ 
+ 	/* Do local initialization of file, storage and buffer managers */
+@@ -624,11 +598,6 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
+ 		RegisterTimeout(CLIENT_CONNECTION_CHECK_TIMEOUT, ClientCheckTimeoutHandler);
+ 	}
+ 
+-	/*
+-	 * bufmgr needs another initialization call too
+-	 */
+-	InitBufferPoolBackend();
+-
+ 	/*
+ 	 * Initialize local process's access to XLOG.
+ 	 */
+diff --git a/src/include/storage/bufmgr.h b/src/include/storage/bufmgr.h
+index aa64fb42ec45d78bf21af2d48cd154fc6b209dd3..cfce23ecbc8c65e91e953430401c0e5eb26fc7d3 100644
+--- a/src/include/storage/bufmgr.h
++++ b/src/include/storage/bufmgr.h
+@@ -194,7 +194,6 @@ extern Buffer ReleaseAndReadBuffer(Buffer buffer, Relation relation,
+ 
+ extern void InitBufferPool(void);
+ extern void InitBufferPoolAccess(void);
+-extern void InitBufferPoolBackend(void);
+ extern void AtEOXact_Buffers(bool isCommit);
+ extern void PrintBufferLeakWarning(Buffer buffer);
+ extern void CheckPointBuffers(int flags);

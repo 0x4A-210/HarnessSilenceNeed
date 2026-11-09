@@ -1,0 +1,594 @@
+{
+  "decision": "keep",
+  "errors": [],
+  "answer": {
+    "candidate_id": "o-70cf4612d8a9cb8d",
+    "decision": "keep",
+    "effect": "blocked_target_coverage",
+    "reason": "The A parser supports writing a sixth IPv4 address and TTL pair when given six output slots, but the old entry always supplies five. A valid six-answer reply reaches the parser; the sixth host address is produced, while the sixth TTL pair is blocked. The same limitation exists before and after the change.",
+    "finite_witness": "A 115-byte DNS reply: header 12 34 81 80 00 01 00 06 00 00 00 00; question 01 61 00 00 01 00 01; then six A/IN answers, each c0 0c 00 01 00 01 00 00 00 3c 00 04 0a 00 00 XX, with XX equal to 01 through 06. The target calls ares_parse_a_reply with info[5] and count=5.",
+    "scope_contract": {
+      "status": "established",
+      "reason": "IPv4 address and TTL output is part of the called A parser's public contract, and the entry supplies that output array.",
+      "evidence": [
+        {
+          "evidence_id": "loc-44a42537279b5278d462cfd2",
+          "quote": "/*\n** Parse the buffer, starting at *abuf and of length alen bytes, previously\n** obtained from an ares_search call.  Put the results in *host, if nonnull.\n** Also, if addrttls is nonnull, put up to *naddrttls IPv4 addresses along with\n** their TTLs in that array, and set *naddrttls to the number of addresses\n** so written.\n*/\n\nCARES_EXTERN int ares_parse_a_reply(const unsigned char *abuf,\n                                    int alen,\n                                    struct hostent **host,\n                                    struct ares_addrttl *addrttls,\n                                    int *naddrttls);\n"
+        },
+        {
+          "evidence_id": "loc-4aa69dda77d014f33ebb7814",
+          "quote": "  struct hostent *host = NULL;\n  struct ares_addrttl info[5];\n  int count = 5;\n  ares_parse_a_reply(data, size, &host, info, &count);\n  if (host) ares_free_hostent(host);\n"
+        }
+      ]
+    },
+    "feasible_trigger": {
+      "status": "established",
+      "reason": "A finite reply with one question and six matching A/IN answers satisfies the delegated parser's answer loop. With six caller slots, the A parser can enumerate all six; the actual entry fixes capacity at five.",
+      "evidence": [
+        {
+          "evidence_id": "loc-f1cda81ec863b684dfe9a7b0",
+          "quote": "  /* Fetch the question and answer count from the header. */\n  qdcount = DNS_HEADER_QDCOUNT(abuf);\n  ancount = DNS_HEADER_ANCOUNT(abuf);\n  if (qdcount != 1)\n    return ARES_EBADRESP;\n\n\n  /* Expand the name from the question, and skip past the question. */\n  aptr = abuf + HFIXEDSZ;\n  status = ares__expand_name_for_response(aptr, abuf, alen, question_hostname, &len);\n  if (status != ARES_SUCCESS)\n    return status;\n  if (aptr + len + QFIXEDSZ > abuf + alen)\n    {\n      return ARES_EBADRESP;\n    }\n\n  hostname = *question_hostname;\n\n  aptr += len + QFIXEDSZ;\n\n  /* Examine each answer resource record (RR) in turn. */\n  for (i = 0; i < (int)ancount; i++)\n    {\n      /* Decode the RR up to the data field. */\n      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len);\n      if (status != ARES_SUCCESS)\n        {\n          rr_name = NULL;\n          goto failed_stat;\n        }\n\n      aptr += len;\n      if (aptr + RRFIXEDSZ > abuf + alen)\n        {\n          status = ARES_EBADRESP;\n          goto failed_stat;\n        }\n      rr_type = DNS_RR_TYPE(aptr);\n      rr_class = DNS_RR_CLASS(aptr);\n      rr_len = DNS_RR_LEN(aptr);\n      rr_ttl = DNS_RR_TTL(aptr);\n      aptr += RRFIXEDSZ;\n      if (aptr + rr_len > abuf + alen)\n        {\n          status = ARES_EBADRESP;\n          goto failed_stat;\n        }\n\n      if (rr_class == C_IN && rr_type == T_A\n          && rr_len == sizeof(struct in_addr)\n          && strcasecmp(rr_name, hostname) == 0)\n        {\n          got_a = 1;\n          if (aptr + sizeof(struct in_addr) > abuf + alen)\n          {  /* LCOV_EXCL_START: already checked above */\n            status = ARES_EBADRESP;\n            goto failed_stat;\n          }  /* LCOV_EXCL_STOP */\n\n          node = ares__append_addrinfo_node(&nodes);\n          if (!node)\n            {\n              status = ARES_ENOMEM;\n              goto failed_stat;\n            }\n\n          sin = ares_malloc(sizeof(struct sockaddr_in));\n          if (!sin)\n            {\n              status = ARES_ENOMEM;\n              goto failed_stat;\n            }\n          memset(sin, 0, sizeof(struct sockaddr_in));\n          memcpy(&sin->sin_addr.s_addr, aptr, sizeof(struct in_addr));\n          sin->sin_family = AF_INET;\n\n          node->ai_addr = (struct sockaddr *)sin;\n          node->ai_family = AF_INET;\n          node->ai_addrlen = sizeof(struct sockaddr_in);\n\n          node->ai_ttl = rr_ttl;\n\n          status = ARES_SUCCESS;\n"
+        },
+        {
+          "evidence_id": "loc-d1b0192fcf184545170a5320",
+          "quote": "      i = 0;\n      next = ai.nodes;\n      while (next)\n        {\n          if (next->ai_family == AF_INET)\n            {\n              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n"
+        },
+        {
+          "evidence_id": "loc-5ac68f5cd4c3553fb4823454",
+          "quote": "  struct hostent *host = NULL;\n  struct ares_addrttl info[5];\n  int count = 5;\n  ares_parse_a_reply(data, size, &host, info, &count);\n"
+        }
+      ]
+    },
+    "observable_consequence": {
+      "status": "established",
+      "reason": "For the sixth A node, index 5 fails the i < *naddrttls guard, so the target cannot write its sixth address and TTL pair into the caller array.",
+      "evidence": [
+        {
+          "evidence_id": "loc-2ad89e3041d0b00888bf14c0",
+          "quote": "      i = 0;\n      next = ai.nodes;\n      while (next)\n        {\n          if (next->ai_family == AF_INET)\n            {\n              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n            }\n          next = next->ai_next;\n"
+        },
+        {
+          "evidence_id": "loc-2204a2005793c941e43dc119",
+          "quote": "  struct hostent *host = NULL;\n  struct ares_addrttl info[5];\n  int count = 5;\n  ares_parse_a_reply(data, size, &host, info, &count);\n"
+        }
+      ]
+    },
+    "alternatives_ruled_out": {
+      "status": "established",
+      "reason": "The complete entry has only one A-parser call and no other IPv4 TTL output route. The sixth address can appear in the host result, but that result does not supply the sixth TTL pair.",
+      "evidence": [
+        {
+          "evidence_id": "loc-3f43391e853650fc37df7c29",
+          "quote": "int LLVMFuzzerTestOneInput(const unsigned char *data,\n                           unsigned long size) {\n  // Feed the data into each of the ares_parse_*_reply functions.\n  struct hostent *host = NULL;\n  struct ares_addrttl info[5];\n  int count = 5;\n  ares_parse_a_reply(data, size, &host, info, &count);\n  if (host) ares_free_hostent(host);\n\n  host = NULL;\n  struct ares_addr6ttl info6[5];\n  count = 5;\n  ares_parse_aaaa_reply(data, size, &host, info6, &count);\n  if (host) ares_free_hostent(host);\n\n  host = NULL;\n  unsigned char addrv4[4] = {0x10, 0x20, 0x30, 0x40};\n  ares_parse_ptr_reply(data, size, addrv4, sizeof(addrv4), AF_INET, &host);\n  if (host) ares_free_hostent(host);\n\n  host = NULL;\n  ares_parse_ns_reply(data, size, &host);\n  if (host) ares_free_hostent(host);\n\n  struct ares_srv_reply* srv = NULL;\n  ares_parse_srv_reply(data, size, &srv);\n  if (srv) ares_free_data(srv);\n\n  struct ares_mx_reply* mx = NULL;\n  ares_parse_mx_reply(data, size, &mx);\n  if (mx) ares_free_data(mx);\n\n  struct ares_txt_reply* txt = NULL;\n  ares_parse_txt_reply(data, size, &txt);\n  if (txt) ares_free_data(txt);\n\n  struct ares_soa_reply* soa = NULL;\n  ares_parse_soa_reply(data, size, &soa);\n  if (soa) ares_free_data(soa);\n\n  struct ares_naptr_reply* naptr = NULL;\n  ares_parse_naptr_reply(data, size, &naptr);\n  if (naptr) ares_free_data(naptr);\n\n  return 0;\n}\n"
+        },
+        {
+          "evidence_id": "loc-b8e5a80bd9bb2d36af01dccc",
+          "quote": "              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n            }\n          next = next->ai_next;\n        }\n      if (i == 0)\n        {\n          ares_free(addrs);\n        }\n    }\n\n  if (host)\n    {\n      *host = hostent;\n    }\n  else\n    {\n      ares_free_hostent(hostent);\n    }\n\n  if (naddrttls)\n    {\n      *naddrttls = naddrs;\n"
+        }
+      ]
+    },
+    "identity_preserved": {
+      "status": "established",
+      "reason": "The same sixth IPv4 address and TTL pair, six-answer condition, and five-slot blocker apply to the unchanged A parser and the same old entry on both sides. The gap is preexisting; the changed source list retains the parser.",
+      "evidence": [
+        {
+          "evidence_id": "loc-ca83e432b24d897f23e7784f",
+          "quote": "      i = 0;\n      next = ai.nodes;\n      while (next)\n        {\n          if (next->ai_family == AF_INET)\n            {\n              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n            }\n          next = next->ai_next;\n"
+        },
+        {
+          "evidence_id": "loc-2ad89e3041d0b00888bf14c0",
+          "quote": "      i = 0;\n      next = ai.nodes;\n      while (next)\n        {\n          if (next->ai_family == AF_INET)\n            {\n              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n            }\n          next = next->ai_next;\n"
+        },
+        {
+          "evidence_id": "loc-3d1b399765a00bc5dea06df2",
+          "quote": "  struct hostent *host = NULL;\n  struct ares_addrttl info[5];\n  int count = 5;\n  ares_parse_a_reply(data, size, &host, info, &count);\n  if (host) ares_free_hostent(host);\n"
+        },
+        {
+          "evidence_id": "loc-ff2aae1f879af48bd7257c76",
+          "quote": "  ares_parse_a_reply.c\t\t\t\\\n  ares_parse_aaaa_reply.c\t\t\\\n"
+        }
+      ]
+    },
+    "source_evidence": [
+      {
+        "evidence_id": "loc-662325f0abf056e9512f6a1c",
+        "quote": "/*\n** Parse the buffer, starting at *abuf and of length alen bytes, previously\n** obtained from an ares_search call.  Put the results in *host, if nonnull.\n** Also, if addrttls is nonnull, put up to *naddrttls IPv4 addresses along with\n** their TTLs in that array, and set *naddrttls to the number of addresses\n** so written.\n*/\n\nCARES_EXTERN int ares_parse_a_reply(const unsigned char *abuf,\n                                    int alen,\n                                    struct hostent **host,\n                                    struct ares_addrttl *addrttls,\n                                    int *naddrttls);\n"
+      },
+      {
+        "evidence_id": "loc-44a42537279b5278d462cfd2",
+        "quote": "/*\n** Parse the buffer, starting at *abuf and of length alen bytes, previously\n** obtained from an ares_search call.  Put the results in *host, if nonnull.\n** Also, if addrttls is nonnull, put up to *naddrttls IPv4 addresses along with\n** their TTLs in that array, and set *naddrttls to the number of addresses\n** so written.\n*/\n\nCARES_EXTERN int ares_parse_a_reply(const unsigned char *abuf,\n                                    int alen,\n                                    struct hostent **host,\n                                    struct ares_addrttl *addrttls,\n                                    int *naddrttls);\n"
+      },
+      {
+        "evidence_id": "loc-ca83e432b24d897f23e7784f",
+        "quote": "      i = 0;\n      next = ai.nodes;\n      while (next)\n        {\n          if (next->ai_family == AF_INET)\n            {\n              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n            }\n          next = next->ai_next;\n"
+      },
+      {
+        "evidence_id": "loc-2ad89e3041d0b00888bf14c0",
+        "quote": "      i = 0;\n      next = ai.nodes;\n      while (next)\n        {\n          if (next->ai_family == AF_INET)\n            {\n              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n            }\n          next = next->ai_next;\n"
+      },
+      {
+        "evidence_id": "loc-8b73199d2449359664306fa3",
+        "quote": "  /* Examine each answer resource record (RR) in turn. */\n  for (i = 0; i < (int)ancount; i++)\n    {\n      /* Decode the RR up to the data field. */\n      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len);\n      if (status != ARES_SUCCESS)\n        {\n          rr_name = NULL;\n          goto failed_stat;\n        }\n\n      aptr += len;\n      if (aptr + RRFIXEDSZ > abuf + alen)\n        {\n          status = ARES_EBADRESP;\n          goto failed_stat;\n        }\n      rr_type = DNS_RR_TYPE(aptr);\n      rr_class = DNS_RR_CLASS(aptr);\n      rr_len = DNS_RR_LEN(aptr);\n      rr_ttl = DNS_RR_TTL(aptr);\n      aptr += RRFIXEDSZ;\n      if (aptr + rr_len > abuf + alen)\n        {\n          status = ARES_EBADRESP;\n          goto failed_stat;\n        }\n\n      if (rr_class == C_IN && rr_type == T_A\n          && rr_len == sizeof(struct in_addr)\n          && strcasecmp(rr_name, hostname) == 0)\n        {\n          got_a = 1;\n          if (aptr + sizeof(struct in_addr) > abuf + alen)\n          {  /* LCOV_EXCL_START: already checked above */\n            status = ARES_EBADRESP;\n            goto failed_stat;\n          }  /* LCOV_EXCL_STOP */\n\n          node = ares__append_addrinfo_node(&nodes);\n          if (!node)\n            {\n              status = ARES_ENOMEM;\n              goto failed_stat;\n            }\n\n          sin = ares_malloc(sizeof(struct sockaddr_in));\n          if (!sin)\n            {\n              status = ARES_ENOMEM;\n              goto failed_stat;\n            }\n          memset(sin, 0, sizeof(struct sockaddr_in));\n          memcpy(&sin->sin_addr.s_addr, aptr, sizeof(struct in_addr));\n          sin->sin_family = AF_INET;\n\n          node->ai_addr = (struct sockaddr *)sin;\n          node->ai_family = AF_INET;\n          node->ai_addrlen = sizeof(struct sockaddr_in);\n\n          node->ai_ttl = rr_ttl;\n\n          status = ARES_SUCCESS;\n"
+      },
+      {
+        "evidence_id": "loc-9b1d8c04efbece1cf56b967e",
+        "quote": "  /* Examine each answer resource record (RR) in turn. */\n  for (i = 0; i < (int)ancount; i++)\n    {\n      /* Decode the RR up to the data field. */\n      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len);\n      if (status != ARES_SUCCESS)\n        {\n          rr_name = NULL;\n          goto failed_stat;\n        }\n\n      aptr += len;\n      if (aptr + RRFIXEDSZ > abuf + alen)\n        {\n          status = ARES_EBADRESP;\n          goto failed_stat;\n        }\n      rr_type = DNS_RR_TYPE(aptr);\n      rr_class = DNS_RR_CLASS(aptr);\n      rr_len = DNS_RR_LEN(aptr);\n      rr_ttl = DNS_RR_TTL(aptr);\n      aptr += RRFIXEDSZ;\n      if (aptr + rr_len > abuf + alen)\n        {\n          status = ARES_EBADRESP;\n          goto failed_stat;\n        }\n\n      if (rr_class == C_IN && rr_type == T_A\n          && rr_len == sizeof(struct in_addr)\n          && strcasecmp(rr_name, hostname) == 0)\n        {\n          got_a = 1;\n          if (aptr + sizeof(struct in_addr) > abuf + alen)\n          {  /* LCOV_EXCL_START: already checked above */\n            status = ARES_EBADRESP;\n            goto failed_stat;\n          }  /* LCOV_EXCL_STOP */\n\n          node = ares__append_addrinfo_node(&nodes);\n          if (!node)\n            {\n              status = ARES_ENOMEM;\n              goto failed_stat;\n            }\n\n          sin = ares_malloc(sizeof(struct sockaddr_in));\n          if (!sin)\n            {\n              status = ARES_ENOMEM;\n              goto failed_stat;\n            }\n          memset(sin, 0, sizeof(struct sockaddr_in));\n          memcpy(&sin->sin_addr.s_addr, aptr, sizeof(struct in_addr));\n          sin->sin_family = AF_INET;\n\n          node->ai_addr = (struct sockaddr *)sin;\n          node->ai_family = AF_INET;\n          node->ai_addrlen = sizeof(struct sockaddr_in);\n\n          node->ai_ttl = rr_ttl;\n\n          status = ARES_SUCCESS;\n"
+      },
+      {
+        "evidence_id": "loc-32329e51235c505ae6c07308",
+        "quote": "  ares_parse_a_reply.c\t\t\t\\\n  ares_parse_aaaa_reply.c\t\t\\\n"
+      }
+    ],
+    "harness_evidence": [
+      {
+        "evidence_id": "loc-3f43391e853650fc37df7c29",
+        "quote": "int LLVMFuzzerTestOneInput(const unsigned char *data,\n                           unsigned long size) {\n  // Feed the data into each of the ares_parse_*_reply functions.\n  struct hostent *host = NULL;\n  struct ares_addrttl info[5];\n  int count = 5;\n  ares_parse_a_reply(data, size, &host, info, &count);\n  if (host) ares_free_hostent(host);\n\n  host = NULL;\n  struct ares_addr6ttl info6[5];\n  count = 5;\n  ares_parse_aaaa_reply(data, size, &host, info6, &count);\n  if (host) ares_free_hostent(host);\n\n  host = NULL;\n  unsigned char addrv4[4] = {0x10, 0x20, 0x30, 0x40};\n  ares_parse_ptr_reply(data, size, addrv4, sizeof(addrv4), AF_INET, &host);\n  if (host) ares_free_hostent(host);\n\n  host = NULL;\n  ares_parse_ns_reply(data, size, &host);\n  if (host) ares_free_hostent(host);\n\n  struct ares_srv_reply* srv = NULL;\n  ares_parse_srv_reply(data, size, &srv);\n  if (srv) ares_free_data(srv);\n\n  struct ares_mx_reply* mx = NULL;\n  ares_parse_mx_reply(data, size, &mx);\n  if (mx) ares_free_data(mx);\n\n  struct ares_txt_reply* txt = NULL;\n  ares_parse_txt_reply(data, size, &txt);\n  if (txt) ares_free_data(txt);\n\n  struct ares_soa_reply* soa = NULL;\n  ares_parse_soa_reply(data, size, &soa);\n  if (soa) ares_free_data(soa);\n\n  struct ares_naptr_reply* naptr = NULL;\n  ares_parse_naptr_reply(data, size, &naptr);\n  if (naptr) ares_free_data(naptr);\n\n  return 0;\n}\n"
+      },
+      {
+        "evidence_id": "loc-c3fb13bc18ae6dfbcc783f1f",
+        "quote": "# Build the fuzzers.\n$CC $CFLAGS -I. -c $SRC/c-ares/test/ares-test-fuzz.c -o $WORK/ares-test-fuzz.o\n$CXX $CXXFLAGS -std=c++11 $WORK/ares-test-fuzz.o \\\n    -o $OUT/ares_parse_reply_fuzzer \\\n    $LIB_FUZZING_ENGINE $SRC/c-ares/.libs/libcares.a\n"
+      }
+    ],
+    "missing_information": [],
+    "requested_symbols": [],
+    "requested_paths": [],
+    "obligation_class": "target_coverage",
+    "scope_basis": "target_api_or_format_contract",
+    "trigger_basis": "supported_behavior_blocked_by_target",
+    "coverage_witness": {
+      "supported_behavior": "ares_parse_a_reply writes the sixth IPv4 address and TTL pair from six matching A answers when given at least six output slots.",
+      "required_setup": "A valid six-answer DNS reply and an ares_addrttl array with capacity at least six.",
+      "actual_target_setup": "The entry always passes info[5] with count=5.",
+      "blocked_behavior": "Writing the sixth address and TTL pair to the caller's output array.",
+      "equivalent_routes": "None in the complete entry; the host result can contain the sixth address but provides no corresponding TTL pair."
+    }
+  },
+  "citation_errors": [],
+  "citations": [
+    {
+      "pointer": "/scope_contract/evidence/0",
+      "evidence_id": "loc-44a42537279b5278d462cfd2",
+      "kind": "after_source",
+      "path": "input/source/include/ares.h",
+      "text": "/*\n** Parse the buffer, starting at *abuf and of length alen bytes, previously\n** obtained from an ares_search call.  Put the results in *host, if nonnull.\n** Also, if addrttls is nonnull, put up to *naddrttls IPv4 addresses along with\n** their TTLs in that array, and set *naddrttls to the number of addresses\n** so written.\n*/\n\nCARES_EXTERN int ares_parse_a_reply(const unsigned char *abuf,\n                                    int alen,\n                                    struct hostent **host,\n                                    struct ares_addrttl *addrttls,\n                                    int *naddrttls);\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-2203330e5f2e804ad18d",
+        "version": "after",
+        "path": "input/source/include/ares.h",
+        "start_line": 620,
+        "end_line": 632,
+        "unit_sha256": "0612ace76382844fb61aea1f5f2ade0cc17838c04f88bc3efba466d8395303aa",
+        "quote_sha256": "f908a4924da08cc63198a2f8e3f5d77a7ba43b1bbbfdeed70b1dd01a293b8daa"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/1",
+      "evidence_id": "loc-4aa69dda77d014f33ebb7814",
+      "kind": "harness",
+      "path": "input/harness/test/ares-test-fuzz.c",
+      "text": "  struct hostent *host = NULL;\n  struct ares_addrttl info[5];\n  int count = 5;\n  ares_parse_a_reply(data, size, &host, info, &count);\n  if (host) ares_free_hostent(host);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The target invokes the A parser with an IPv4 address and TTL output array.",
+      "location": {
+        "unit_id": "u-d95b6c4499b214b2f09e",
+        "version": "harness",
+        "path": "input/harness/test/ares-test-fuzz.c",
+        "start_line": 9,
+        "end_line": 13,
+        "unit_sha256": "745a92df22f2c64d2671914c798834bd9226c6f836c2d104116e2bb4b0db89ba",
+        "quote_sha256": "a5b6d461a051749c776cea7e63be0f9c427665bd0f8e5cf28394681025a16088"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/0",
+      "evidence_id": "loc-f1cda81ec863b684dfe9a7b0",
+      "kind": "after_source",
+      "path": "input/source/src/lib/ares__parse_into_addrinfo.c",
+      "text": "  /* Fetch the question and answer count from the header. */\n  qdcount = DNS_HEADER_QDCOUNT(abuf);\n  ancount = DNS_HEADER_ANCOUNT(abuf);\n  if (qdcount != 1)\n    return ARES_EBADRESP;\n\n\n  /* Expand the name from the question, and skip past the question. */\n  aptr = abuf + HFIXEDSZ;\n  status = ares__expand_name_for_response(aptr, abuf, alen, question_hostname, &len);\n  if (status != ARES_SUCCESS)\n    return status;\n  if (aptr + len + QFIXEDSZ > abuf + alen)\n    {\n      return ARES_EBADRESP;\n    }\n\n  hostname = *question_hostname;\n\n  aptr += len + QFIXEDSZ;\n\n  /* Examine each answer resource record (RR) in turn. */\n  for (i = 0; i < (int)ancount; i++)\n    {\n      /* Decode the RR up to the data field. */\n      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len);\n      if (status != ARES_SUCCESS)\n        {\n          rr_name = NULL;\n          goto failed_stat;\n        }\n\n      aptr += len;\n      if (aptr + RRFIXEDSZ > abuf + alen)\n        {\n          status = ARES_EBADRESP;\n          goto failed_stat;\n        }\n      rr_type = DNS_RR_TYPE(aptr);\n      rr_class = DNS_RR_CLASS(aptr);\n      rr_len = DNS_RR_LEN(aptr);\n      rr_ttl = DNS_RR_TTL(aptr);\n      aptr += RRFIXEDSZ;\n      if (aptr + rr_len > abuf + alen)\n        {\n          status = ARES_EBADRESP;\n          goto failed_stat;\n        }\n\n      if (rr_class == C_IN && rr_type == T_A\n          && rr_len == sizeof(struct in_addr)\n          && strcasecmp(rr_name, hostname) == 0)\n        {\n          got_a = 1;\n          if (aptr + sizeof(struct in_addr) > abuf + alen)\n          {  /* LCOV_EXCL_START: already checked above */\n            status = ARES_EBADRESP;\n            goto failed_stat;\n          }  /* LCOV_EXCL_STOP */\n\n          node = ares__append_addrinfo_node(&nodes);\n          if (!node)\n            {\n              status = ARES_ENOMEM;\n              goto failed_stat;\n            }\n\n          sin = ares_malloc(sizeof(struct sockaddr_in));\n          if (!sin)\n            {\n              status = ARES_ENOMEM;\n              goto failed_stat;\n            }\n          memset(sin, 0, sizeof(struct sockaddr_in));\n          memcpy(&sin->sin_addr.s_addr, aptr, sizeof(struct in_addr));\n          sin->sin_family = AF_INET;\n\n          node->ai_addr = (struct sockaddr *)sin;\n          node->ai_family = AF_INET;\n          node->ai_addrlen = sizeof(struct sockaddr_in);\n\n          node->ai_ttl = rr_ttl;\n\n          status = ARES_SUCCESS;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "The delegated parser accepts one question and appends each matching A/IN answer.",
+      "location": {
+        "unit_id": "u-be9fae4dc3a2d7bf94ac",
+        "version": "after",
+        "path": "input/source/src/lib/ares__parse_into_addrinfo.c",
+        "start_line": 70,
+        "end_line": 153,
+        "unit_sha256": "01bee8a35ed57d40d88179e77ed23cf2870c877c4ce09d248a66b1e898f47a6d",
+        "quote_sha256": "664819bd506f1eb04648289b7be819c1f62ec33b0afc83ad31f9bcbb0e3910f3"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/1",
+      "evidence_id": "loc-d1b0192fcf184545170a5320",
+      "kind": "after_source",
+      "path": "input/source/src/lib/ares_parse_a_reply.c",
+      "text": "      i = 0;\n      next = ai.nodes;\n      while (next)\n        {\n          if (next->ai_family == AF_INET)\n            {\n              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-008ed8844f9eb724b1c8",
+        "version": "after",
+        "path": "input/source/src/lib/ares_parse_a_reply.c",
+        "start_line": 158,
+        "end_line": 179,
+        "unit_sha256": "8a18d418a809bd7c51dab00a451ade5e79cc6734974f3c04155ba86a53d0bd0a",
+        "quote_sha256": "004e703fd1ec826225c988169f623ff756a274017764e963b159bff56e9ac0c1"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/2",
+      "evidence_id": "loc-5ac68f5cd4c3553fb4823454",
+      "kind": "harness",
+      "path": "input/harness/test/ares-test-fuzz.c",
+      "text": "  struct hostent *host = NULL;\n  struct ares_addrttl info[5];\n  int count = 5;\n  ares_parse_a_reply(data, size, &host, info, &count);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The actual call supplies only five output slots.",
+      "location": {
+        "unit_id": "u-d95b6c4499b214b2f09e",
+        "version": "harness",
+        "path": "input/harness/test/ares-test-fuzz.c",
+        "start_line": 9,
+        "end_line": 12,
+        "unit_sha256": "745a92df22f2c64d2671914c798834bd9226c6f836c2d104116e2bb4b0db89ba",
+        "quote_sha256": "c0e81db34c422c01c075ad1e6c5d4632f6cdc73b06eceac4cba1494c51f0db87"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/0",
+      "evidence_id": "loc-2ad89e3041d0b00888bf14c0",
+      "kind": "after_source",
+      "path": "input/source/src/lib/ares_parse_a_reply.c",
+      "text": "      i = 0;\n      next = ai.nodes;\n      while (next)\n        {\n          if (next->ai_family == AF_INET)\n            {\n              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n            }\n          next = next->ai_next;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-008ed8844f9eb724b1c8",
+        "version": "after",
+        "path": "input/source/src/lib/ares_parse_a_reply.c",
+        "start_line": 158,
+        "end_line": 181,
+        "unit_sha256": "8a18d418a809bd7c51dab00a451ade5e79cc6734974f3c04155ba86a53d0bd0a",
+        "quote_sha256": "09ea9a38bd3cd4e35b8da535baf2a445cde7ca7aa392e837e0c9e65cdbdf3480"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/1",
+      "evidence_id": "loc-2204a2005793c941e43dc119",
+      "kind": "harness",
+      "path": "input/harness/test/ares-test-fuzz.c",
+      "text": "  struct hostent *host = NULL;\n  struct ares_addrttl info[5];\n  int count = 5;\n  ares_parse_a_reply(data, size, &host, info, &count);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The caller sets the guard's capacity to five.",
+      "location": {
+        "unit_id": "u-d95b6c4499b214b2f09e",
+        "version": "harness",
+        "path": "input/harness/test/ares-test-fuzz.c",
+        "start_line": 9,
+        "end_line": 12,
+        "unit_sha256": "745a92df22f2c64d2671914c798834bd9226c6f836c2d104116e2bb4b0db89ba",
+        "quote_sha256": "c0e81db34c422c01c075ad1e6c5d4632f6cdc73b06eceac4cba1494c51f0db87"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/0",
+      "evidence_id": "loc-3f43391e853650fc37df7c29",
+      "kind": "harness",
+      "path": "input/harness/test/ares-test-fuzz.c",
+      "text": "int LLVMFuzzerTestOneInput(const unsigned char *data,\n                           unsigned long size) {\n  // Feed the data into each of the ares_parse_*_reply functions.\n  struct hostent *host = NULL;\n  struct ares_addrttl info[5];\n  int count = 5;\n  ares_parse_a_reply(data, size, &host, info, &count);\n  if (host) ares_free_hostent(host);\n\n  host = NULL;\n  struct ares_addr6ttl info6[5];\n  count = 5;\n  ares_parse_aaaa_reply(data, size, &host, info6, &count);\n  if (host) ares_free_hostent(host);\n\n  host = NULL;\n  unsigned char addrv4[4] = {0x10, 0x20, 0x30, 0x40};\n  ares_parse_ptr_reply(data, size, addrv4, sizeof(addrv4), AF_INET, &host);\n  if (host) ares_free_hostent(host);\n\n  host = NULL;\n  ares_parse_ns_reply(data, size, &host);\n  if (host) ares_free_hostent(host);\n\n  struct ares_srv_reply* srv = NULL;\n  ares_parse_srv_reply(data, size, &srv);\n  if (srv) ares_free_data(srv);\n\n  struct ares_mx_reply* mx = NULL;\n  ares_parse_mx_reply(data, size, &mx);\n  if (mx) ares_free_data(mx);\n\n  struct ares_txt_reply* txt = NULL;\n  ares_parse_txt_reply(data, size, &txt);\n  if (txt) ares_free_data(txt);\n\n  struct ares_soa_reply* soa = NULL;\n  ares_parse_soa_reply(data, size, &soa);\n  if (soa) ares_free_data(soa);\n\n  struct ares_naptr_reply* naptr = NULL;\n  ares_parse_naptr_reply(data, size, &naptr);\n  if (naptr) ares_free_data(naptr);\n\n  return 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-d95b6c4499b214b2f09e",
+        "version": "harness",
+        "path": "input/harness/test/ares-test-fuzz.c",
+        "start_line": 6,
+        "end_line": 51,
+        "unit_sha256": "745a92df22f2c64d2671914c798834bd9226c6f836c2d104116e2bb4b0db89ba",
+        "quote_sha256": "07a26eff87025a3767a485735a9ff08d31aa891ed58c52f055f20595ea5a3133"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/1",
+      "evidence_id": "loc-b8e5a80bd9bb2d36af01dccc",
+      "kind": "after_source",
+      "path": "input/source/src/lib/ares_parse_a_reply.c",
+      "text": "              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n            }\n          next = next->ai_next;\n        }\n      if (i == 0)\n        {\n          ares_free(addrs);\n        }\n    }\n\n  if (host)\n    {\n      *host = hostent;\n    }\n  else\n    {\n      ares_free_hostent(hostent);\n    }\n\n  if (naddrttls)\n    {\n      *naddrttls = naddrs;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "The parser copies the host address independently of the capacity-guarded TTL output.",
+      "location": {
+        "unit_id": "u-008ed8844f9eb724b1c8",
+        "version": "after",
+        "path": "input/source/src/lib/ares_parse_a_reply.c",
+        "start_line": 164,
+        "end_line": 200,
+        "unit_sha256": "8a18d418a809bd7c51dab00a451ade5e79cc6734974f3c04155ba86a53d0bd0a",
+        "quote_sha256": "3c727e9f15c748a5fd9dba83ccf21f7fb8cc0e8a1d5acf37d675297126ada930"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/0",
+      "evidence_id": "loc-ca83e432b24d897f23e7784f",
+      "kind": "before_source",
+      "path": "input/source/src/lib/ares_parse_a_reply.c",
+      "text": "      i = 0;\n      next = ai.nodes;\n      while (next)\n        {\n          if (next->ai_family == AF_INET)\n            {\n              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n            }\n          next = next->ai_next;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-328b5c982095b0c3666e",
+        "version": "before",
+        "path": "input/source/src/lib/ares_parse_a_reply.c",
+        "start_line": 158,
+        "end_line": 181,
+        "unit_sha256": "8a18d418a809bd7c51dab00a451ade5e79cc6734974f3c04155ba86a53d0bd0a",
+        "quote_sha256": "09ea9a38bd3cd4e35b8da535baf2a445cde7ca7aa392e837e0c9e65cdbdf3480"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/1",
+      "evidence_id": "loc-2ad89e3041d0b00888bf14c0",
+      "kind": "after_source",
+      "path": "input/source/src/lib/ares_parse_a_reply.c",
+      "text": "      i = 0;\n      next = ai.nodes;\n      while (next)\n        {\n          if (next->ai_family == AF_INET)\n            {\n              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n            }\n          next = next->ai_next;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-008ed8844f9eb724b1c8",
+        "version": "after",
+        "path": "input/source/src/lib/ares_parse_a_reply.c",
+        "start_line": 158,
+        "end_line": 181,
+        "unit_sha256": "8a18d418a809bd7c51dab00a451ade5e79cc6734974f3c04155ba86a53d0bd0a",
+        "quote_sha256": "09ea9a38bd3cd4e35b8da535baf2a445cde7ca7aa392e837e0c9e65cdbdf3480"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/2",
+      "evidence_id": "loc-3d1b399765a00bc5dea06df2",
+      "kind": "harness",
+      "path": "input/harness/test/ares-test-fuzz.c",
+      "text": "  struct hostent *host = NULL;\n  struct ares_addrttl info[5];\n  int count = 5;\n  ares_parse_a_reply(data, size, &host, info, &count);\n  if (host) ares_free_hostent(host);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The fixed old entry supplies five slots for both assessments.",
+      "location": {
+        "unit_id": "u-d95b6c4499b214b2f09e",
+        "version": "harness",
+        "path": "input/harness/test/ares-test-fuzz.c",
+        "start_line": 9,
+        "end_line": 13,
+        "unit_sha256": "745a92df22f2c64d2671914c798834bd9226c6f836c2d104116e2bb4b0db89ba",
+        "quote_sha256": "a5b6d461a051749c776cea7e63be0f9c427665bd0f8e5cf28394681025a16088"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/3",
+      "evidence_id": "loc-ff2aae1f879af48bd7257c76",
+      "kind": "after_source",
+      "path": "input/source/src/lib/Makefile.inc",
+      "text": "  ares_parse_a_reply.c\t\t\t\\\n  ares_parse_aaaa_reply.c\t\t\\\n",
+      "change_ids": [
+        "g0118"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The changed library source list retains the A parser.",
+      "location": {
+        "unit_id": "u-26b2d1f249375e7a7f87",
+        "version": "after",
+        "path": "input/source/src/lib/Makefile.inc",
+        "start_line": 32,
+        "end_line": 33,
+        "unit_sha256": "d429bcff43c78d5ff1283acde37060bc5e48659c198e281e02f6a942b0d3d8c4",
+        "quote_sha256": "141f197b6ec380fb1b3197f077b287539c7d80f45af02a190e8e3391b15ec570"
+      }
+    },
+    {
+      "pointer": "/source_evidence/0",
+      "evidence_id": "loc-662325f0abf056e9512f6a1c",
+      "kind": "before_source",
+      "path": "input/source/include/ares.h",
+      "text": "/*\n** Parse the buffer, starting at *abuf and of length alen bytes, previously\n** obtained from an ares_search call.  Put the results in *host, if nonnull.\n** Also, if addrttls is nonnull, put up to *naddrttls IPv4 addresses along with\n** their TTLs in that array, and set *naddrttls to the number of addresses\n** so written.\n*/\n\nCARES_EXTERN int ares_parse_a_reply(const unsigned char *abuf,\n                                    int alen,\n                                    struct hostent **host,\n                                    struct ares_addrttl *addrttls,\n                                    int *naddrttls);\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-b5e52e96ee22c2bb6c47",
+        "version": "before",
+        "path": "input/source/include/ares.h",
+        "start_line": 620,
+        "end_line": 632,
+        "unit_sha256": "0612ace76382844fb61aea1f5f2ade0cc17838c04f88bc3efba466d8395303aa",
+        "quote_sha256": "f908a4924da08cc63198a2f8e3f5d77a7ba43b1bbbfdeed70b1dd01a293b8daa"
+      }
+    },
+    {
+      "pointer": "/source_evidence/1",
+      "evidence_id": "loc-44a42537279b5278d462cfd2",
+      "kind": "after_source",
+      "path": "input/source/include/ares.h",
+      "text": "/*\n** Parse the buffer, starting at *abuf and of length alen bytes, previously\n** obtained from an ares_search call.  Put the results in *host, if nonnull.\n** Also, if addrttls is nonnull, put up to *naddrttls IPv4 addresses along with\n** their TTLs in that array, and set *naddrttls to the number of addresses\n** so written.\n*/\n\nCARES_EXTERN int ares_parse_a_reply(const unsigned char *abuf,\n                                    int alen,\n                                    struct hostent **host,\n                                    struct ares_addrttl *addrttls,\n                                    int *naddrttls);\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-2203330e5f2e804ad18d",
+        "version": "after",
+        "path": "input/source/include/ares.h",
+        "start_line": 620,
+        "end_line": 632,
+        "unit_sha256": "0612ace76382844fb61aea1f5f2ade0cc17838c04f88bc3efba466d8395303aa",
+        "quote_sha256": "f908a4924da08cc63198a2f8e3f5d77a7ba43b1bbbfdeed70b1dd01a293b8daa"
+      }
+    },
+    {
+      "pointer": "/source_evidence/2",
+      "evidence_id": "loc-ca83e432b24d897f23e7784f",
+      "kind": "before_source",
+      "path": "input/source/src/lib/ares_parse_a_reply.c",
+      "text": "      i = 0;\n      next = ai.nodes;\n      while (next)\n        {\n          if (next->ai_family == AF_INET)\n            {\n              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n            }\n          next = next->ai_next;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-328b5c982095b0c3666e",
+        "version": "before",
+        "path": "input/source/src/lib/ares_parse_a_reply.c",
+        "start_line": 158,
+        "end_line": 181,
+        "unit_sha256": "8a18d418a809bd7c51dab00a451ade5e79cc6734974f3c04155ba86a53d0bd0a",
+        "quote_sha256": "09ea9a38bd3cd4e35b8da535baf2a445cde7ca7aa392e837e0c9e65cdbdf3480"
+      }
+    },
+    {
+      "pointer": "/source_evidence/3",
+      "evidence_id": "loc-2ad89e3041d0b00888bf14c0",
+      "kind": "after_source",
+      "path": "input/source/src/lib/ares_parse_a_reply.c",
+      "text": "      i = 0;\n      next = ai.nodes;\n      while (next)\n        {\n          if (next->ai_family == AF_INET)\n            {\n              hostent->h_addr_list[i] = (char *)&addrs[i];\n              memcpy(hostent->h_addr_list[i],\n                     &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                     sizeof(struct in_addr));\n              if (naddrttls && i < *naddrttls)\n                {\n                  if (next->ai_ttl > cname_ttl)\n                    addrttls[i].ttl = cname_ttl;\n                  else\n                    addrttls[i].ttl = next->ai_ttl;\n\n                  memcpy(&addrttls[i].ipaddr,\n                         &(CARES_INADDR_CAST(struct sockaddr_in *, next->ai_addr)->sin_addr),\n                         sizeof(struct in_addr));\n                }\n              ++i;\n            }\n          next = next->ai_next;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-008ed8844f9eb724b1c8",
+        "version": "after",
+        "path": "input/source/src/lib/ares_parse_a_reply.c",
+        "start_line": 158,
+        "end_line": 181,
+        "unit_sha256": "8a18d418a809bd7c51dab00a451ade5e79cc6734974f3c04155ba86a53d0bd0a",
+        "quote_sha256": "09ea9a38bd3cd4e35b8da535baf2a445cde7ca7aa392e837e0c9e65cdbdf3480"
+      }
+    },
+    {
+      "pointer": "/source_evidence/4",
+      "evidence_id": "loc-8b73199d2449359664306fa3",
+      "kind": "before_source",
+      "path": "input/source/src/lib/ares__parse_into_addrinfo.c",
+      "text": "  /* Examine each answer resource record (RR) in turn. */\n  for (i = 0; i < (int)ancount; i++)\n    {\n      /* Decode the RR up to the data field. */\n      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len);\n      if (status != ARES_SUCCESS)\n        {\n          rr_name = NULL;\n          goto failed_stat;\n        }\n\n      aptr += len;\n      if (aptr + RRFIXEDSZ > abuf + alen)\n        {\n          status = ARES_EBADRESP;\n          goto failed_stat;\n        }\n      rr_type = DNS_RR_TYPE(aptr);\n      rr_class = DNS_RR_CLASS(aptr);\n      rr_len = DNS_RR_LEN(aptr);\n      rr_ttl = DNS_RR_TTL(aptr);\n      aptr += RRFIXEDSZ;\n      if (aptr + rr_len > abuf + alen)\n        {\n          status = ARES_EBADRESP;\n          goto failed_stat;\n        }\n\n      if (rr_class == C_IN && rr_type == T_A\n          && rr_len == sizeof(struct in_addr)\n          && strcasecmp(rr_name, hostname) == 0)\n        {\n          got_a = 1;\n          if (aptr + sizeof(struct in_addr) > abuf + alen)\n          {  /* LCOV_EXCL_START: already checked above */\n            status = ARES_EBADRESP;\n            goto failed_stat;\n          }  /* LCOV_EXCL_STOP */\n\n          node = ares__append_addrinfo_node(&nodes);\n          if (!node)\n            {\n              status = ARES_ENOMEM;\n              goto failed_stat;\n            }\n\n          sin = ares_malloc(sizeof(struct sockaddr_in));\n          if (!sin)\n            {\n              status = ARES_ENOMEM;\n              goto failed_stat;\n            }\n          memset(sin, 0, sizeof(struct sockaddr_in));\n          memcpy(&sin->sin_addr.s_addr, aptr, sizeof(struct in_addr));\n          sin->sin_family = AF_INET;\n\n          node->ai_addr = (struct sockaddr *)sin;\n          node->ai_family = AF_INET;\n          node->ai_addrlen = sizeof(struct sockaddr_in);\n\n          node->ai_ttl = rr_ttl;\n\n          status = ARES_SUCCESS;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "The before-version delegated parser appends matching A answers.",
+      "location": {
+        "unit_id": "u-46f1313e545a5a26ded7",
+        "version": "before",
+        "path": "input/source/src/lib/ares__parse_into_addrinfo.c",
+        "start_line": 91,
+        "end_line": 153,
+        "unit_sha256": "01bee8a35ed57d40d88179e77ed23cf2870c877c4ce09d248a66b1e898f47a6d",
+        "quote_sha256": "25be3a8d28236ea9c2e58f7ca20b24485cd6d772d59130336190e9523f53026c"
+      }
+    },
+    {
+      "pointer": "/source_evidence/5",
+      "evidence_id": "loc-9b1d8c04efbece1cf56b967e",
+      "kind": "after_source",
+      "path": "input/source/src/lib/ares__parse_into_addrinfo.c",
+      "text": "  /* Examine each answer resource record (RR) in turn. */\n  for (i = 0; i < (int)ancount; i++)\n    {\n      /* Decode the RR up to the data field. */\n      status = ares__expand_name_for_response(aptr, abuf, alen, &rr_name, &len);\n      if (status != ARES_SUCCESS)\n        {\n          rr_name = NULL;\n          goto failed_stat;\n        }\n\n      aptr += len;\n      if (aptr + RRFIXEDSZ > abuf + alen)\n        {\n          status = ARES_EBADRESP;\n          goto failed_stat;\n        }\n      rr_type = DNS_RR_TYPE(aptr);\n      rr_class = DNS_RR_CLASS(aptr);\n      rr_len = DNS_RR_LEN(aptr);\n      rr_ttl = DNS_RR_TTL(aptr);\n      aptr += RRFIXEDSZ;\n      if (aptr + rr_len > abuf + alen)\n        {\n          status = ARES_EBADRESP;\n          goto failed_stat;\n        }\n\n      if (rr_class == C_IN && rr_type == T_A\n          && rr_len == sizeof(struct in_addr)\n          && strcasecmp(rr_name, hostname) == 0)\n        {\n          got_a = 1;\n          if (aptr + sizeof(struct in_addr) > abuf + alen)\n          {  /* LCOV_EXCL_START: already checked above */\n            status = ARES_EBADRESP;\n            goto failed_stat;\n          }  /* LCOV_EXCL_STOP */\n\n          node = ares__append_addrinfo_node(&nodes);\n          if (!node)\n            {\n              status = ARES_ENOMEM;\n              goto failed_stat;\n            }\n\n          sin = ares_malloc(sizeof(struct sockaddr_in));\n          if (!sin)\n            {\n              status = ARES_ENOMEM;\n              goto failed_stat;\n            }\n          memset(sin, 0, sizeof(struct sockaddr_in));\n          memcpy(&sin->sin_addr.s_addr, aptr, sizeof(struct in_addr));\n          sin->sin_family = AF_INET;\n\n          node->ai_addr = (struct sockaddr *)sin;\n          node->ai_family = AF_INET;\n          node->ai_addrlen = sizeof(struct sockaddr_in);\n\n          node->ai_ttl = rr_ttl;\n\n          status = ARES_SUCCESS;\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "The after-version delegated parser appends matching A answers.",
+      "location": {
+        "unit_id": "u-be9fae4dc3a2d7bf94ac",
+        "version": "after",
+        "path": "input/source/src/lib/ares__parse_into_addrinfo.c",
+        "start_line": 91,
+        "end_line": 153,
+        "unit_sha256": "01bee8a35ed57d40d88179e77ed23cf2870c877c4ce09d248a66b1e898f47a6d",
+        "quote_sha256": "25be3a8d28236ea9c2e58f7ca20b24485cd6d772d59130336190e9523f53026c"
+      }
+    },
+    {
+      "pointer": "/source_evidence/6",
+      "evidence_id": "loc-32329e51235c505ae6c07308",
+      "kind": "after_source",
+      "path": "input/source/src/lib/Makefile.inc",
+      "text": "  ares_parse_a_reply.c\t\t\t\\\n  ares_parse_aaaa_reply.c\t\t\\\n",
+      "change_ids": [
+        "g0118"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The changed source list retains the A parser.",
+      "location": {
+        "unit_id": "u-26b2d1f249375e7a7f87",
+        "version": "after",
+        "path": "input/source/src/lib/Makefile.inc",
+        "start_line": 32,
+        "end_line": 33,
+        "unit_sha256": "d429bcff43c78d5ff1283acde37060bc5e48659c198e281e02f6a942b0d3d8c4",
+        "quote_sha256": "141f197b6ec380fb1b3197f077b287539c7d80f45af02a190e8e3391b15ec570"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/0",
+      "evidence_id": "loc-3f43391e853650fc37df7c29",
+      "kind": "harness",
+      "path": "input/harness/test/ares-test-fuzz.c",
+      "text": "int LLVMFuzzerTestOneInput(const unsigned char *data,\n                           unsigned long size) {\n  // Feed the data into each of the ares_parse_*_reply functions.\n  struct hostent *host = NULL;\n  struct ares_addrttl info[5];\n  int count = 5;\n  ares_parse_a_reply(data, size, &host, info, &count);\n  if (host) ares_free_hostent(host);\n\n  host = NULL;\n  struct ares_addr6ttl info6[5];\n  count = 5;\n  ares_parse_aaaa_reply(data, size, &host, info6, &count);\n  if (host) ares_free_hostent(host);\n\n  host = NULL;\n  unsigned char addrv4[4] = {0x10, 0x20, 0x30, 0x40};\n  ares_parse_ptr_reply(data, size, addrv4, sizeof(addrv4), AF_INET, &host);\n  if (host) ares_free_hostent(host);\n\n  host = NULL;\n  ares_parse_ns_reply(data, size, &host);\n  if (host) ares_free_hostent(host);\n\n  struct ares_srv_reply* srv = NULL;\n  ares_parse_srv_reply(data, size, &srv);\n  if (srv) ares_free_data(srv);\n\n  struct ares_mx_reply* mx = NULL;\n  ares_parse_mx_reply(data, size, &mx);\n  if (mx) ares_free_data(mx);\n\n  struct ares_txt_reply* txt = NULL;\n  ares_parse_txt_reply(data, size, &txt);\n  if (txt) ares_free_data(txt);\n\n  struct ares_soa_reply* soa = NULL;\n  ares_parse_soa_reply(data, size, &soa);\n  if (soa) ares_free_data(soa);\n\n  struct ares_naptr_reply* naptr = NULL;\n  ares_parse_naptr_reply(data, size, &naptr);\n  if (naptr) ares_free_data(naptr);\n\n  return 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-d95b6c4499b214b2f09e",
+        "version": "harness",
+        "path": "input/harness/test/ares-test-fuzz.c",
+        "start_line": 6,
+        "end_line": 51,
+        "unit_sha256": "745a92df22f2c64d2671914c798834bd9226c6f836c2d104116e2bb4b0db89ba",
+        "quote_sha256": "07a26eff87025a3767a485735a9ff08d31aa891ed58c52f055f20595ea5a3133"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/1",
+      "evidence_id": "loc-c3fb13bc18ae6dfbcc783f1f",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/build.sh",
+      "text": "# Build the fuzzers.\n$CC $CFLAGS -I. -c $SRC/c-ares/test/ares-test-fuzz.c -o $WORK/ares-test-fuzz.o\n$CXX $CXXFLAGS -std=c++11 $WORK/ares-test-fuzz.o \\\n    -o $OUT/ares_parse_reply_fuzzer \\\n    $LIB_FUZZING_ENGINE $SRC/c-ares/.libs/libcares.a\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The build recipe compiles the supplied entry into ares_parse_reply_fuzzer.",
+      "location": {
+        "unit_id": "u-5e8f90080c12eb32a994",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/build.sh",
+        "start_line": 30,
+        "end_line": 34,
+        "unit_sha256": "81e427e80388fb461fafbe9a413f6e84e93589fa96e7a3a50cadc89f247268ba",
+        "quote_sha256": "28bdec1c53aac9da04d414ec81823330b277c1da4adf959f63837ca2f9141529"
+      }
+    }
+  ],
+  "obligation_class": "target_coverage"
+}

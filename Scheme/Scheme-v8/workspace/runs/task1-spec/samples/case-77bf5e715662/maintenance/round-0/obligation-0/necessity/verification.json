@@ -1,0 +1,673 @@
+{
+  "decision": "uncertain",
+  "errors": [],
+  "answer": {
+    "candidate_id": "o-438ed8ac24df73b8",
+    "decision": "uncertain",
+    "effect": "unclear",
+    "reason": "The supplied code supports the proposed blockage when the input-derived SipHash value is nonzero. The packet does not establish a concrete finite valid XML input with that value, so the required trigger remains unproved.",
+    "finite_witness": "",
+    "scope_contract": {
+      "status": "established",
+      "reason": "Salt configuration governs hashing during the target's XML_Parse calls. The changed contract supports a 16-byte salt, and the target configures a salt before parsing.",
+      "evidence": [
+        {
+          "evidence_id": "loc-957ceb3e692a17d5d11136f5",
+          "quote": "       #47 #1183  CVE-2026-41080 -- The existing hash flooding protection\n                    (based on SipHash) only used 4 to 8 bytes of entropy for\n                    a salt, when 16 bytes of salt are supported by the\n                    implementation of SipHash used by Expat. Now full 16 bytes\n                    of entropy are used to improve protection against hash\n                    flooding attacks.\n                      Existing API function XML_SetHashSalt is now deprecated\n                    because of its limitations, and its use should be\n                    considered a vulnerability. Please either use the new API\n                    function XML_SetHashSalt16Bytes (with known-high-quality\n                    entropy input only!) instead, or leave the derivation of\n                    a 16-bytes hash salt from high quality entropy to Expat's\n                    internal machinery (by *not* calling either of the two\n                    XML_SetHashSalt* functions).\n"
+        },
+        {
+          "evidence_id": "loc-f3f81c6dcbb589a5db98a5c8",
+          "quote": "        Sets the hash salt to use for internal hash calculations. Helps in preventing DoS\n        attacks based on predicting hash function behavior. In order to have an effect\n        this must be called before parsing has started. Returns <code>XML_TRUE</code> if\n        successful, <code>XML_FALSE</code> when called after <code>XML_Parse</code> or\n        <code>XML_ParseBuffer</code> or when <code>parser</code> is <code>NULL</code>.\n        <p>\n          <b>Note:</b> Setting a salt that is <em>not</em> from a source of high quality\n          entropy (like <code>getentropy(3)</code>) will make the parser vulnerable to\n          hash flooding attacks.\n        </p>\n\n        <p>\n          <b>Note:</b> This call is optional, as the parser will auto-generate a new\n          random salt value internally if no value has been set by the start of parsing.\n"
+        },
+        {
+          "evidence_id": "loc-f231b7bd94bb091c087543dc",
+          "quote": "static void\nParseOneInput(XML_Parser p, const uint8_t *data, size_t size) {\n  // Set the hash salt using siphash to generate a deterministic hash.\n  struct sipkey *key = sip_keyof(hash_key);\n  XML_SetHashSalt(p, (unsigned long)siphash24(data, size, key));\n  (void)sip24_valid;\n\n  XML_SetUserData(p, p);\n  XML_SetElementHandler(p, start, end);\n  XML_SetCharacterDataHandler(p, may_stop_character_handler);\n  assert(size <= INT_MAX);\n  XML_Parse(p, (const XML_Char *)data, (int)size, 0);\n"
+        }
+      ]
+    },
+    "feasible_trigger": {
+      "status": "unknown",
+      "reason": "The helper derives its salt from the input, but the supplied SipHash excerpt does not establish that any specified finite valid XML input yields a nonzero value.",
+      "evidence": [
+        {
+          "evidence_id": "loc-b823d5069f69d7210b1142ef",
+          "quote": "// 16-byte deterministic hash key.\nstatic unsigned char hash_key[16] = \"FUZZING IS FUN!\";\n"
+        },
+        {
+          "evidence_id": "loc-f231b7bd94bb091c087543dc",
+          "quote": "static void\nParseOneInput(XML_Parser p, const uint8_t *data, size_t size) {\n  // Set the hash salt using siphash to generate a deterministic hash.\n  struct sipkey *key = sip_keyof(hash_key);\n  XML_SetHashSalt(p, (unsigned long)siphash24(data, size, key));\n  (void)sip24_valid;\n\n  XML_SetUserData(p, p);\n  XML_SetElementHandler(p, start, end);\n  XML_SetCharacterDataHandler(p, may_stop_character_handler);\n  assert(size <= INT_MAX);\n  XML_Parse(p, (const XML_Char *)data, (int)size, 0);\n"
+        },
+        {
+          "evidence_id": "loc-e4b94b75f3bcd6e322ce1117",
+          "quote": "static uint64_t\nsiphash24(const void *src, size_t len, const struct sipkey *key) {\n  struct siphash state = SIPHASH_INITIALIZER;\n  return sip24_final(sip24_update(sip24_init(&state, key), src, len));\n} /* siphash24() */\n"
+        }
+      ]
+    },
+    "observable_consequence": {
+      "status": "established",
+      "reason": "Conditional on a nonzero derived salt, the old setter stores only an unsigned-long value, marks the salt set, and prevents automatic generation. Internal hashing copies that limited key.",
+      "evidence": [
+        {
+          "evidence_id": "loc-2fa3e24349f9396b6d4e8570",
+          "quote": "  /* block after XML_Parse()/XML_ParseBuffer() has been called */\n  if (parserBusy(rootParser))\n    return 0;\n\n  rootParser->m_hash_secret_salt_128.k[0] = 0;\n  rootParser->m_hash_secret_salt_128.k[1] = hash_salt;\n\n  if (hash_salt != 0) { // to remain backwards compatible\n    rootParser->m_hash_secret_salt_set = XML_TRUE;\n\n    if (sizeof(unsigned long) == 4)\n      ENTROPY_DEBUG(\"explicit(4)\", rootParser->m_hash_secret_salt_128);\n    else\n      ENTROPY_DEBUG(\"explicit(8)\", rootParser->m_hash_secret_salt_128);\n  }\n"
+        },
+        {
+          "evidence_id": "loc-c35ab4120d04429b5ff8ed7d",
+          "quote": "static XML_Bool /* only valid for root parser */\nstartParsing(XML_Parser parser) {\n  /* hash functions must be initialized before setContext() is called */\n  if (parser->m_hash_secret_salt_set != XML_TRUE) {\n    parser->m_hash_secret_salt_128 = generate_hash_secret_salt();\n    parser->m_hash_secret_salt_set = XML_TRUE;\n  }\n"
+        },
+        {
+          "evidence_id": "loc-1f2890e3b866a54261f0ba2e",
+          "quote": "static void\ncopy_salt_to_sipkey(XML_Parser parser, struct sipkey *key) {\n  const XML_Parser rootParser = getRootParserOf(parser, NULL);\n  assert(! rootParser->m_parentParser);\n\n  *key = rootParser->m_hash_secret_salt_128;\n}\n"
+        },
+        {
+          "evidence_id": "loc-f231b7bd94bb091c087543dc",
+          "quote": "static void\nParseOneInput(XML_Parser p, const uint8_t *data, size_t size) {\n  // Set the hash salt using siphash to generate a deterministic hash.\n  struct sipkey *key = sip_keyof(hash_key);\n  XML_SetHashSalt(p, (unsigned long)siphash24(data, size, key));\n  (void)sip24_valid;\n\n  XML_SetUserData(p, p);\n  XML_SetElementHandler(p, start, end);\n  XML_SetCharacterDataHandler(p, may_stop_character_handler);\n  assert(size <= INT_MAX);\n  XML_Parse(p, (const XML_Char *)data, (int)size, 0);\n"
+        }
+      ]
+    },
+    "alternatives_ruled_out": {
+      "status": "established",
+      "reason": "For the frozen nonzero-salt condition, every parser route uses the same helper; none calls the 16-byte setter. A zero derived value can enable automatic generation, but falls outside that condition.",
+      "evidence": [
+        {
+          "evidence_id": "loc-5fcee9b4c5e55af5810ed475",
+          "quote": "static void\nParseOneInput(XML_Parser p, const uint8_t *data, size_t size) {\n  // Set the hash salt using siphash to generate a deterministic hash.\n  struct sipkey *key = sip_keyof(hash_key);\n  XML_SetHashSalt(p, (unsigned long)siphash24(data, size, key));\n  (void)sip24_valid;\n\n  XML_SetUserData(p, p);\n  XML_SetElementHandler(p, start, end);\n  XML_SetCharacterDataHandler(p, may_stop_character_handler);\n  assert(size <= INT_MAX);\n  XML_Parse(p, (const XML_Char *)data, (int)size, 0);\n  if (XML_Parse(p, (const XML_Char *)data, (int)size, 1) == XML_STATUS_ERROR) {\n    XML_ErrorString(XML_GetErrorCode(p));\n  }\n  XML_GetCurrentLineNumber(p);\n  if (size % 2) {\n    XML_ParserReset(p, NULL);\n  }\n}\n\nint\nLLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n  XML_Parser parentParser = XML_ParserCreate(xstr(ENCODING_FOR_FUZZING));\n  assert(parentParser);\n  ParseOneInput(parentParser, data, size);\n  // not freed yet, but used later and freed then\n\n  XML_Parser namespaceParser = XML_ParserCreateNS(NULL, '!');\n  assert(namespaceParser);\n  ParseOneInput(namespaceParser, data, size);\n  XML_ParserFree(namespaceParser);\n\n  XML_Parser externalEntityParser\n      = XML_ExternalEntityParserCreate(parentParser, \"e1\", NULL);\n  if (externalEntityParser != NULL) {\n    ParseOneInput(externalEntityParser, data, size);\n    XML_ParserFree(externalEntityParser);\n  }\n\n  XML_Parser externalDtdParser\n      = XML_ExternalEntityParserCreate(parentParser, NULL, NULL);\n  if (externalDtdParser != NULL) {\n    ParseOneInput(externalDtdParser, data, size);\n    XML_ParserFree(externalDtdParser);\n  }\n\n  // finally frees this parser which served as parent\n  XML_ParserFree(parentParser);\n  return 0;\n}\n"
+        },
+        {
+          "evidence_id": "loc-c7618b94c9f027ebfa9f3c93",
+          "quote": "XML_Bool XMLCALL\nXML_SetHashSalt16Bytes(XML_Parser parser, const uint8_t entropy[16]) {\n  if (parser == NULL)\n    return XML_FALSE;\n\n  if (entropy == NULL)\n    return XML_FALSE;\n\n  const XML_Parser rootParser = getRootParserOf(parser, NULL);\n  assert(! rootParser->m_parentParser);\n\n  /* block after XML_Parse()/XML_ParseBuffer() has been called */\n  if (parserBusy(rootParser))\n    return XML_FALSE;\n\n  sip_tokey(&(rootParser->m_hash_secret_salt_128), entropy);\n\n  rootParser->m_hash_secret_salt_set = XML_TRUE;\n\n  ENTROPY_DEBUG(\"explicit(16)\", rootParser->m_hash_secret_salt_128);\n\n  return XML_TRUE;\n}\n"
+        },
+        {
+          "evidence_id": "loc-aaeebf738ce59eddd64cb607",
+          "quote": "  oldns_triplets = parser->m_ns_triplets;\n  /* Note that the new parser shares the same hash secret as the old\n     parser, so that dtdCopy and copyEntityTable can lookup values\n     from hash tables associated with either parser without us having\n     to worry which hash secrets each table has.\n  */\n  oldhash_secret_salt_128 = parser->m_hash_secret_salt_128;\n  oldhash_secret_salt_set = parser->m_hash_secret_salt_set;\n  oldReparseDeferralEnabled = parser->m_reparseDeferralEnabled;\n"
+        },
+        {
+          "evidence_id": "loc-c8a0fa312c6fa300569a6977",
+          "quote": "  parser->m_defaultExpandInternalEntities = oldDefaultExpandInternalEntities;\n  parser->m_ns_triplets = oldns_triplets;\n  parser->m_hash_secret_salt_128 = oldhash_secret_salt_128;\n  parser->m_hash_secret_salt_set = oldhash_secret_salt_set;\n  parser->m_reparseDeferralEnabled = oldReparseDeferralEnabled;\n  parser->m_parentParser = oldParser;\n"
+        }
+      ]
+    },
+    "identity_preserved": {
+      "status": "established",
+      "reason": "The assessment consistently concerns full 16-byte parser hashing for valid XML inputs whose helper-derived salt is nonzero.",
+      "evidence": [
+        {
+          "evidence_id": "loc-957ceb3e692a17d5d11136f5",
+          "quote": "       #47 #1183  CVE-2026-41080 -- The existing hash flooding protection\n                    (based on SipHash) only used 4 to 8 bytes of entropy for\n                    a salt, when 16 bytes of salt are supported by the\n                    implementation of SipHash used by Expat. Now full 16 bytes\n                    of entropy are used to improve protection against hash\n                    flooding attacks.\n                      Existing API function XML_SetHashSalt is now deprecated\n                    because of its limitations, and its use should be\n                    considered a vulnerability. Please either use the new API\n                    function XML_SetHashSalt16Bytes (with known-high-quality\n                    entropy input only!) instead, or leave the derivation of\n                    a 16-bytes hash salt from high quality entropy to Expat's\n                    internal machinery (by *not* calling either of the two\n                    XML_SetHashSalt* functions).\n"
+        },
+        {
+          "evidence_id": "loc-4a81dd0e01f1f1d2128a016e",
+          "quote": "int XMLCALL\nXML_SetHashSalt(XML_Parser parser, unsigned long hash_salt) {\n  if (parser == NULL)\n    return 0;\n\n  const XML_Parser rootParser = getRootParserOf(parser, NULL);\n  assert(! rootParser->m_parentParser);\n\n  /* block after XML_Parse()/XML_ParseBuffer() has been called */\n  if (parserBusy(rootParser))\n    return 0;\n\n  rootParser->m_hash_secret_salt_128.k[0] = 0;\n  rootParser->m_hash_secret_salt_128.k[1] = hash_salt;\n\n  if (hash_salt != 0) { // to remain backwards compatible\n    rootParser->m_hash_secret_salt_set = XML_TRUE;\n\n    if (sizeof(unsigned long) == 4)\n      ENTROPY_DEBUG(\"explicit(4)\", rootParser->m_hash_secret_salt_128);\n    else\n      ENTROPY_DEBUG(\"explicit(8)\", rootParser->m_hash_secret_salt_128);\n  }\n\n  return 1;\n"
+        },
+        {
+          "evidence_id": "loc-f231b7bd94bb091c087543dc",
+          "quote": "static void\nParseOneInput(XML_Parser p, const uint8_t *data, size_t size) {\n  // Set the hash salt using siphash to generate a deterministic hash.\n  struct sipkey *key = sip_keyof(hash_key);\n  XML_SetHashSalt(p, (unsigned long)siphash24(data, size, key));\n  (void)sip24_valid;\n\n  XML_SetUserData(p, p);\n  XML_SetElementHandler(p, start, end);\n  XML_SetCharacterDataHandler(p, may_stop_character_handler);\n  assert(size <= INT_MAX);\n  XML_Parse(p, (const XML_Char *)data, (int)size, 0);\n"
+        }
+      ]
+    },
+    "source_evidence": [
+      {
+        "evidence_id": "loc-957ceb3e692a17d5d11136f5",
+        "quote": "       #47 #1183  CVE-2026-41080 -- The existing hash flooding protection\n                    (based on SipHash) only used 4 to 8 bytes of entropy for\n                    a salt, when 16 bytes of salt are supported by the\n                    implementation of SipHash used by Expat. Now full 16 bytes\n                    of entropy are used to improve protection against hash\n                    flooding attacks.\n                      Existing API function XML_SetHashSalt is now deprecated\n                    because of its limitations, and its use should be\n                    considered a vulnerability. Please either use the new API\n                    function XML_SetHashSalt16Bytes (with known-high-quality\n                    entropy input only!) instead, or leave the derivation of\n                    a 16-bytes hash salt from high quality entropy to Expat's\n                    internal machinery (by *not* calling either of the two\n                    XML_SetHashSalt* functions).\n"
+      },
+      {
+        "evidence_id": "loc-4a81dd0e01f1f1d2128a016e",
+        "quote": "int XMLCALL\nXML_SetHashSalt(XML_Parser parser, unsigned long hash_salt) {\n  if (parser == NULL)\n    return 0;\n\n  const XML_Parser rootParser = getRootParserOf(parser, NULL);\n  assert(! rootParser->m_parentParser);\n\n  /* block after XML_Parse()/XML_ParseBuffer() has been called */\n  if (parserBusy(rootParser))\n    return 0;\n\n  rootParser->m_hash_secret_salt_128.k[0] = 0;\n  rootParser->m_hash_secret_salt_128.k[1] = hash_salt;\n\n  if (hash_salt != 0) { // to remain backwards compatible\n    rootParser->m_hash_secret_salt_set = XML_TRUE;\n\n    if (sizeof(unsigned long) == 4)\n      ENTROPY_DEBUG(\"explicit(4)\", rootParser->m_hash_secret_salt_128);\n    else\n      ENTROPY_DEBUG(\"explicit(8)\", rootParser->m_hash_secret_salt_128);\n  }\n\n  return 1;\n"
+      },
+      {
+        "evidence_id": "loc-e00e3b25691f6551be2ff233",
+        "quote": "static XML_Bool /* only valid for root parser */\nstartParsing(XML_Parser parser) {\n  /* hash functions must be initialized before setContext() is called */\n  if (parser->m_hash_secret_salt_set != XML_TRUE) {\n    parser->m_hash_secret_salt_128 = generate_hash_secret_salt();\n    parser->m_hash_secret_salt_set = XML_TRUE;\n  }\n"
+      },
+      {
+        "evidence_id": "loc-4887c98813aa0ecd376155a5",
+        "quote": "static void\ncopy_salt_to_sipkey(XML_Parser parser, struct sipkey *key) {\n  const XML_Parser rootParser = getRootParserOf(parser, NULL);\n  assert(! rootParser->m_parentParser);\n\n  *key = rootParser->m_hash_secret_salt_128;\n}\n"
+      }
+    ],
+    "harness_evidence": [
+      {
+        "evidence_id": "loc-b823d5069f69d7210b1142ef",
+        "quote": "// 16-byte deterministic hash key.\nstatic unsigned char hash_key[16] = \"FUZZING IS FUN!\";\n"
+      },
+      {
+        "evidence_id": "loc-5fcee9b4c5e55af5810ed475",
+        "quote": "static void\nParseOneInput(XML_Parser p, const uint8_t *data, size_t size) {\n  // Set the hash salt using siphash to generate a deterministic hash.\n  struct sipkey *key = sip_keyof(hash_key);\n  XML_SetHashSalt(p, (unsigned long)siphash24(data, size, key));\n  (void)sip24_valid;\n\n  XML_SetUserData(p, p);\n  XML_SetElementHandler(p, start, end);\n  XML_SetCharacterDataHandler(p, may_stop_character_handler);\n  assert(size <= INT_MAX);\n  XML_Parse(p, (const XML_Char *)data, (int)size, 0);\n  if (XML_Parse(p, (const XML_Char *)data, (int)size, 1) == XML_STATUS_ERROR) {\n    XML_ErrorString(XML_GetErrorCode(p));\n  }\n  XML_GetCurrentLineNumber(p);\n  if (size % 2) {\n    XML_ParserReset(p, NULL);\n  }\n}\n\nint\nLLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n  XML_Parser parentParser = XML_ParserCreate(xstr(ENCODING_FOR_FUZZING));\n  assert(parentParser);\n  ParseOneInput(parentParser, data, size);\n  // not freed yet, but used later and freed then\n\n  XML_Parser namespaceParser = XML_ParserCreateNS(NULL, '!');\n  assert(namespaceParser);\n  ParseOneInput(namespaceParser, data, size);\n  XML_ParserFree(namespaceParser);\n\n  XML_Parser externalEntityParser\n      = XML_ExternalEntityParserCreate(parentParser, \"e1\", NULL);\n  if (externalEntityParser != NULL) {\n    ParseOneInput(externalEntityParser, data, size);\n    XML_ParserFree(externalEntityParser);\n  }\n\n  XML_Parser externalDtdParser\n      = XML_ExternalEntityParserCreate(parentParser, NULL, NULL);\n  if (externalDtdParser != NULL) {\n    ParseOneInput(externalDtdParser, data, size);\n    XML_ParserFree(externalDtdParser);\n  }\n\n  // finally frees this parser which served as parent\n  XML_ParserFree(parentParser);\n  return 0;\n}\n"
+      },
+      {
+        "evidence_id": "loc-04ad2867d3d01ef89a266d61",
+        "quote": "cmake .. -DEXPAT_BUILD_TESTS=OFF -DEXPAT_BUILD_TOOLS=OFF -DEXPAT_BUILD_EXAMPLES=OFF -DEXPAT_BUILD_DOCS=OFF \\\n  -DEXPAT_SHARED_LIBS=OFF -DCMAKE_C_COMPILER=$CC -DCMAKE_C_FLAGS=\"$CFLAGS\" -DCMAKE_CXX_COMPILER=$CXX >/dev/null\nmake -j2 expat\nLIB=$(find . -name 'libexpat*.a' | head -1)\nfor f in ../fuzz/xml_parse_fuzzer.c ../fuzz/xml_parsebuffer_fuzzer.c; do\n  [ -f $f ] || continue\n  b=$(basename $f .c)\n  $CC $CFLAGS -DENCODING_FOR_FUZZING=UTF-8 -I../lib -I. -c $f -o $b.o && \\\n  $CXX $CXXFLAGS $b.o -o $OUT/${b}_UTF-8 $LIB_FUZZING_ENGINE $LIB\n"
+      }
+    ],
+    "missing_information": [
+      "A source-backed nonzero siphash24 result for a specific finite valid XML input under the harness's hash_key."
+    ],
+    "requested_symbols": [
+      "sip_tokey",
+      "sip24_init",
+      "sip24_update",
+      "sip24_final"
+    ],
+    "requested_paths": [
+      "expat/lib/siphash.h"
+    ],
+    "obligation_class": "target_coverage",
+    "scope_basis": "target_state_contract",
+    "trigger_basis": "supported_behavior_blocked_by_target",
+    "coverage_witness": {
+      "supported_behavior": "XML parsing with a full 16-byte hash salt supplied through XML_SetHashSalt16Bytes or generated automatically.",
+      "required_setup": "Before parsing, configure a high-quality 16-byte salt or leave the salt unset for automatic generation.",
+      "actual_target_setup": "ParseOneInput derives an unsigned-long salt from the input and calls XML_SetHashSalt before XML_Parse.",
+      "blocked_behavior": "If that derived value is nonzero, parsing cannot use a full 16-byte salt on that input.",
+      "equivalent_routes": "All root and child parser routes use ParseOneInput. A zero derived value may enable automatic generation, but does not cover the frozen nonzero condition."
+    }
+  },
+  "citation_errors": [],
+  "citations": [
+    {
+      "pointer": "/scope_contract/evidence/0",
+      "evidence_id": "loc-957ceb3e692a17d5d11136f5",
+      "kind": "diff",
+      "path": "expat/Changes",
+      "text": "       #47 #1183  CVE-2026-41080 -- The existing hash flooding protection\n                    (based on SipHash) only used 4 to 8 bytes of entropy for\n                    a salt, when 16 bytes of salt are supported by the\n                    implementation of SipHash used by Expat. Now full 16 bytes\n                    of entropy are used to improve protection against hash\n                    flooding attacks.\n                      Existing API function XML_SetHashSalt is now deprecated\n                    because of its limitations, and its use should be\n                    considered a vulnerability. Please either use the new API\n                    function XML_SetHashSalt16Bytes (with known-high-quality\n                    entropy input only!) instead, or leave the derivation of\n                    a 16-bytes hash salt from high quality entropy to Expat's\n                    internal machinery (by *not* calling either of the two\n                    XML_SetHashSalt* functions).\n",
+      "change_ids": [
+        "g0004"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-8ee0e6204b87a8843a3f",
+        "version": "diff",
+        "path": "expat/Changes",
+        "start_line": 3,
+        "end_line": 16,
+        "unit_sha256": "ddd54c82c48a32238afb2af1c853287e11d51cc776547e5b8cb0fbe2cc6e7639",
+        "quote_sha256": "2ee3b087ea7432a180c3009b41919b77e149d5ad70a16cc4c6f50678e4c54fdf"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/1",
+      "evidence_id": "loc-f3f81c6dcbb589a5db98a5c8",
+      "kind": "diff",
+      "path": "expat/doc/reference.html",
+      "text": "        Sets the hash salt to use for internal hash calculations. Helps in preventing DoS\n        attacks based on predicting hash function behavior. In order to have an effect\n        this must be called before parsing has started. Returns <code>XML_TRUE</code> if\n        successful, <code>XML_FALSE</code> when called after <code>XML_Parse</code> or\n        <code>XML_ParseBuffer</code> or when <code>parser</code> is <code>NULL</code>.\n        <p>\n          <b>Note:</b> Setting a salt that is <em>not</em> from a source of high quality\n          entropy (like <code>getentropy(3)</code>) will make the parser vulnerable to\n          hash flooding attacks.\n        </p>\n\n        <p>\n          <b>Note:</b> This call is optional, as the parser will auto-generate a new\n          random salt value internally if no value has been set by the start of parsing.\n",
+      "change_ids": [
+        "g0007"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-90c6f34cf5b46b43604e",
+        "version": "diff",
+        "path": "expat/doc/reference.html",
+        "start_line": 13,
+        "end_line": 26,
+        "unit_sha256": "34dbf9bf5da6b4344f9a7c0f9369b3efb4c5046da39ca698f999350ee4aecd14",
+        "quote_sha256": "191bd49eeadbc9231cb24b78ae9cd00cc51b01d6bc692a900e13d6cde738f749"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/2",
+      "evidence_id": "loc-f231b7bd94bb091c087543dc",
+      "kind": "harness",
+      "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+      "text": "static void\nParseOneInput(XML_Parser p, const uint8_t *data, size_t size) {\n  // Set the hash salt using siphash to generate a deterministic hash.\n  struct sipkey *key = sip_keyof(hash_key);\n  XML_SetHashSalt(p, (unsigned long)siphash24(data, size, key));\n  (void)sip24_valid;\n\n  XML_SetUserData(p, p);\n  XML_SetElementHandler(p, start, end);\n  XML_SetCharacterDataHandler(p, may_stop_character_handler);\n  assert(size <= INT_MAX);\n  XML_Parse(p, (const XML_Char *)data, (int)size, 0);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-9e35d81905aa5d1c2acd",
+        "version": "harness",
+        "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+        "start_line": 59,
+        "end_line": 70,
+        "unit_sha256": "8d142202df7f157c821aeb131658b2d94c2236aff025fe028252bafee966d268",
+        "quote_sha256": "99e2bcf749eb488c3574ef75619821b13b41d8098691feb6e53c233e71b5185d"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/0",
+      "evidence_id": "loc-b823d5069f69d7210b1142ef",
+      "kind": "harness",
+      "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+      "text": "// 16-byte deterministic hash key.\nstatic unsigned char hash_key[16] = \"FUZZING IS FUN!\";\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-9e35d81905aa5d1c2acd",
+        "version": "harness",
+        "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+        "start_line": 36,
+        "end_line": 37,
+        "unit_sha256": "8d142202df7f157c821aeb131658b2d94c2236aff025fe028252bafee966d268",
+        "quote_sha256": "11aed001bea08fb57974558d2a3e88348b0eb8f23c5d571ebdada308f73b6ab6"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/1",
+      "evidence_id": "loc-f231b7bd94bb091c087543dc",
+      "kind": "harness",
+      "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+      "text": "static void\nParseOneInput(XML_Parser p, const uint8_t *data, size_t size) {\n  // Set the hash salt using siphash to generate a deterministic hash.\n  struct sipkey *key = sip_keyof(hash_key);\n  XML_SetHashSalt(p, (unsigned long)siphash24(data, size, key));\n  (void)sip24_valid;\n\n  XML_SetUserData(p, p);\n  XML_SetElementHandler(p, start, end);\n  XML_SetCharacterDataHandler(p, may_stop_character_handler);\n  assert(size <= INT_MAX);\n  XML_Parse(p, (const XML_Char *)data, (int)size, 0);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-9e35d81905aa5d1c2acd",
+        "version": "harness",
+        "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+        "start_line": 59,
+        "end_line": 70,
+        "unit_sha256": "8d142202df7f157c821aeb131658b2d94c2236aff025fe028252bafee966d268",
+        "quote_sha256": "99e2bcf749eb488c3574ef75619821b13b41d8098691feb6e53c233e71b5185d"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/2",
+      "evidence_id": "loc-e4b94b75f3bcd6e322ce1117",
+      "kind": "source",
+      "path": "input/source/expat/lib/siphash.h",
+      "text": "static uint64_t\nsiphash24(const void *src, size_t len, const struct sipkey *key) {\n  struct siphash state = SIPHASH_INITIALIZER;\n  return sip24_final(sip24_update(sip24_init(&state, key), src, len));\n} /* siphash24() */\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The supplied wrapper delegates the value calculation to SipHash routines whose bodies are not supplied.",
+      "location": {
+        "unit_id": "u-b436722b644eb1f3b1ef",
+        "version": "after",
+        "path": "input/source/expat/lib/siphash.h",
+        "start_line": 269,
+        "end_line": 273,
+        "unit_sha256": "e9afade7ee8c7222c48ebab37ef9382819a72278b9e8e7a6c872a65da58b5115",
+        "quote_sha256": "e9afade7ee8c7222c48ebab37ef9382819a72278b9e8e7a6c872a65da58b5115"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/0",
+      "evidence_id": "loc-2fa3e24349f9396b6d4e8570",
+      "kind": "source",
+      "path": "input/source/expat/lib/xmlparse.c",
+      "text": "  /* block after XML_Parse()/XML_ParseBuffer() has been called */\n  if (parserBusy(rootParser))\n    return 0;\n\n  rootParser->m_hash_secret_salt_128.k[0] = 0;\n  rootParser->m_hash_secret_salt_128.k[1] = hash_salt;\n\n  if (hash_salt != 0) { // to remain backwards compatible\n    rootParser->m_hash_secret_salt_set = XML_TRUE;\n\n    if (sizeof(unsigned long) == 4)\n      ENTROPY_DEBUG(\"explicit(4)\", rootParser->m_hash_secret_salt_128);\n    else\n      ENTROPY_DEBUG(\"explicit(8)\", rootParser->m_hash_secret_salt_128);\n  }\n",
+      "change_ids": [
+        "g0023"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-c62af8f8425201b0bb0a",
+        "version": "after",
+        "path": "input/source/expat/lib/xmlparse.c",
+        "start_line": 2221,
+        "end_line": 2235,
+        "unit_sha256": "3e7b9fb0c3acd22b760f15323edd886f0fc2f6d1ebe8339e22f5bbedeb9d83dd",
+        "quote_sha256": "426bf2a19832ada925643204b5aa0d360b97c2deded85394585e7f26b3b3dcee"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/1",
+      "evidence_id": "loc-c35ab4120d04429b5ff8ed7d",
+      "kind": "source",
+      "path": "input/source/expat/lib/xmlparse.c",
+      "text": "static XML_Bool /* only valid for root parser */\nstartParsing(XML_Parser parser) {\n  /* hash functions must be initialized before setContext() is called */\n  if (parser->m_hash_secret_salt_set != XML_TRUE) {\n    parser->m_hash_secret_salt_128 = generate_hash_secret_salt();\n    parser->m_hash_secret_salt_set = XML_TRUE;\n  }\n",
+      "change_ids": [
+        "g0017"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The set flag suppresses automatic generation.",
+      "location": {
+        "unit_id": "u-3f10ba2c02bbb09c286b",
+        "version": "after",
+        "path": "input/source/expat/lib/xmlparse.c",
+        "start_line": 1201,
+        "end_line": 1207,
+        "unit_sha256": "5086d560acdef968f959c607b2043defbaa70e7a66b1c4c2d51dbbf61b236afc",
+        "quote_sha256": "a5a9ee3ea7bb16bcfff3898348b6e415411c85d7c830db7185ed48f7c0ff1bce"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/2",
+      "evidence_id": "loc-1f2890e3b866a54261f0ba2e",
+      "kind": "source",
+      "path": "input/source/expat/lib/xmlparse.c",
+      "text": "static void\ncopy_salt_to_sipkey(XML_Parser parser, struct sipkey *key) {\n  const XML_Parser rootParser = getRootParserOf(parser, NULL);\n  assert(! rootParser->m_parentParser);\n\n  *key = rootParser->m_hash_secret_salt_128;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Internal hashing takes the root parser's salt.",
+      "location": {
+        "unit_id": "u-919293f767c6326f7528",
+        "version": "after",
+        "path": "input/source/expat/lib/xmlparse.c",
+        "start_line": 7765,
+        "end_line": 7771,
+        "unit_sha256": "3d0131f59edb7554d6fdd038b1887d19de5c4e750a36797c0d263d244a638f5c",
+        "quote_sha256": "3d0131f59edb7554d6fdd038b1887d19de5c4e750a36797c0d263d244a638f5c"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/3",
+      "evidence_id": "loc-f231b7bd94bb091c087543dc",
+      "kind": "harness",
+      "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+      "text": "static void\nParseOneInput(XML_Parser p, const uint8_t *data, size_t size) {\n  // Set the hash salt using siphash to generate a deterministic hash.\n  struct sipkey *key = sip_keyof(hash_key);\n  XML_SetHashSalt(p, (unsigned long)siphash24(data, size, key));\n  (void)sip24_valid;\n\n  XML_SetUserData(p, p);\n  XML_SetElementHandler(p, start, end);\n  XML_SetCharacterDataHandler(p, may_stop_character_handler);\n  assert(size <= INT_MAX);\n  XML_Parse(p, (const XML_Char *)data, (int)size, 0);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-9e35d81905aa5d1c2acd",
+        "version": "harness",
+        "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+        "start_line": 59,
+        "end_line": 70,
+        "unit_sha256": "8d142202df7f157c821aeb131658b2d94c2236aff025fe028252bafee966d268",
+        "quote_sha256": "99e2bcf749eb488c3574ef75619821b13b41d8098691feb6e53c233e71b5185d"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/0",
+      "evidence_id": "loc-5fcee9b4c5e55af5810ed475",
+      "kind": "harness",
+      "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+      "text": "static void\nParseOneInput(XML_Parser p, const uint8_t *data, size_t size) {\n  // Set the hash salt using siphash to generate a deterministic hash.\n  struct sipkey *key = sip_keyof(hash_key);\n  XML_SetHashSalt(p, (unsigned long)siphash24(data, size, key));\n  (void)sip24_valid;\n\n  XML_SetUserData(p, p);\n  XML_SetElementHandler(p, start, end);\n  XML_SetCharacterDataHandler(p, may_stop_character_handler);\n  assert(size <= INT_MAX);\n  XML_Parse(p, (const XML_Char *)data, (int)size, 0);\n  if (XML_Parse(p, (const XML_Char *)data, (int)size, 1) == XML_STATUS_ERROR) {\n    XML_ErrorString(XML_GetErrorCode(p));\n  }\n  XML_GetCurrentLineNumber(p);\n  if (size % 2) {\n    XML_ParserReset(p, NULL);\n  }\n}\n\nint\nLLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n  XML_Parser parentParser = XML_ParserCreate(xstr(ENCODING_FOR_FUZZING));\n  assert(parentParser);\n  ParseOneInput(parentParser, data, size);\n  // not freed yet, but used later and freed then\n\n  XML_Parser namespaceParser = XML_ParserCreateNS(NULL, '!');\n  assert(namespaceParser);\n  ParseOneInput(namespaceParser, data, size);\n  XML_ParserFree(namespaceParser);\n\n  XML_Parser externalEntityParser\n      = XML_ExternalEntityParserCreate(parentParser, \"e1\", NULL);\n  if (externalEntityParser != NULL) {\n    ParseOneInput(externalEntityParser, data, size);\n    XML_ParserFree(externalEntityParser);\n  }\n\n  XML_Parser externalDtdParser\n      = XML_ExternalEntityParserCreate(parentParser, NULL, NULL);\n  if (externalDtdParser != NULL) {\n    ParseOneInput(externalDtdParser, data, size);\n    XML_ParserFree(externalDtdParser);\n  }\n\n  // finally frees this parser which served as parent\n  XML_ParserFree(parentParser);\n  return 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-9e35d81905aa5d1c2acd",
+        "version": "harness",
+        "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+        "start_line": 59,
+        "end_line": 109,
+        "unit_sha256": "8d142202df7f157c821aeb131658b2d94c2236aff025fe028252bafee966d268",
+        "quote_sha256": "1770ae2762fbaaf16c2f12264d3796dd2c99babd15b240df8a387f4d3062a30c"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/1",
+      "evidence_id": "loc-c7618b94c9f027ebfa9f3c93",
+      "kind": "source",
+      "path": "input/source/expat/lib/xmlparse.c",
+      "text": "XML_Bool XMLCALL\nXML_SetHashSalt16Bytes(XML_Parser parser, const uint8_t entropy[16]) {\n  if (parser == NULL)\n    return XML_FALSE;\n\n  if (entropy == NULL)\n    return XML_FALSE;\n\n  const XML_Parser rootParser = getRootParserOf(parser, NULL);\n  assert(! rootParser->m_parentParser);\n\n  /* block after XML_Parse()/XML_ParseBuffer() has been called */\n  if (parserBusy(rootParser))\n    return XML_FALSE;\n\n  sip_tokey(&(rootParser->m_hash_secret_salt_128), entropy);\n\n  rootParser->m_hash_secret_salt_set = XML_TRUE;\n\n  ENTROPY_DEBUG(\"explicit(16)\", rootParser->m_hash_secret_salt_128);\n\n  return XML_TRUE;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-9a7623bb81ab812177a9",
+        "version": "after",
+        "path": "input/source/expat/lib/xmlparse.c",
+        "start_line": 2240,
+        "end_line": 2262,
+        "unit_sha256": "0678b7fabffc24e3829f25deba41a770306c03c532c163fbbecbf0cb3bd88798",
+        "quote_sha256": "0678b7fabffc24e3829f25deba41a770306c03c532c163fbbecbf0cb3bd88798"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/2",
+      "evidence_id": "loc-aaeebf738ce59eddd64cb607",
+      "kind": "source",
+      "path": "input/source/expat/lib/xmlparse.c",
+      "text": "  oldns_triplets = parser->m_ns_triplets;\n  /* Note that the new parser shares the same hash secret as the old\n     parser, so that dtdCopy and copyEntityTable can lookup values\n     from hash tables associated with either parser without us having\n     to worry which hash secrets each table has.\n  */\n  oldhash_secret_salt_128 = parser->m_hash_secret_salt_128;\n  oldhash_secret_salt_set = parser->m_hash_secret_salt_set;\n  oldReparseDeferralEnabled = parser->m_reparseDeferralEnabled;\n",
+      "change_ids": [
+        "g0019",
+        "g0020",
+        "g0021"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Child creation snapshots the parent's salt and set flag.",
+      "location": {
+        "unit_id": "u-e25359c288fb85e3be3c",
+        "version": "after",
+        "path": "input/source/expat/lib/xmlparse.c",
+        "start_line": 1705,
+        "end_line": 1713,
+        "unit_sha256": "451388c314c0f299c4f39a96a49fbb9e8d0195cd1251bfd71b193b146fc869dd",
+        "quote_sha256": "8bae746866449c78b493745c58b6b28a7ea69dd49f177f15dc43aa75f238d892"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/3",
+      "evidence_id": "loc-c8a0fa312c6fa300569a6977",
+      "kind": "source",
+      "path": "input/source/expat/lib/xmlparse.c",
+      "text": "  parser->m_defaultExpandInternalEntities = oldDefaultExpandInternalEntities;\n  parser->m_ns_triplets = oldns_triplets;\n  parser->m_hash_secret_salt_128 = oldhash_secret_salt_128;\n  parser->m_hash_secret_salt_set = oldhash_secret_salt_set;\n  parser->m_reparseDeferralEnabled = oldReparseDeferralEnabled;\n  parser->m_parentParser = oldParser;\n",
+      "change_ids": [
+        "g0019",
+        "g0020",
+        "g0021"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Child parsers inherit that salt and flag.",
+      "location": {
+        "unit_id": "u-e25359c288fb85e3be3c",
+        "version": "after",
+        "path": "input/source/expat/lib/xmlparse.c",
+        "start_line": 1765,
+        "end_line": 1770,
+        "unit_sha256": "451388c314c0f299c4f39a96a49fbb9e8d0195cd1251bfd71b193b146fc869dd",
+        "quote_sha256": "9c06372027113bef0fb5c3cf94e554940d7072756cd588f88a64d1413799c93b"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/0",
+      "evidence_id": "loc-957ceb3e692a17d5d11136f5",
+      "kind": "diff",
+      "path": "expat/Changes",
+      "text": "       #47 #1183  CVE-2026-41080 -- The existing hash flooding protection\n                    (based on SipHash) only used 4 to 8 bytes of entropy for\n                    a salt, when 16 bytes of salt are supported by the\n                    implementation of SipHash used by Expat. Now full 16 bytes\n                    of entropy are used to improve protection against hash\n                    flooding attacks.\n                      Existing API function XML_SetHashSalt is now deprecated\n                    because of its limitations, and its use should be\n                    considered a vulnerability. Please either use the new API\n                    function XML_SetHashSalt16Bytes (with known-high-quality\n                    entropy input only!) instead, or leave the derivation of\n                    a 16-bytes hash salt from high quality entropy to Expat's\n                    internal machinery (by *not* calling either of the two\n                    XML_SetHashSalt* functions).\n",
+      "change_ids": [
+        "g0004"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-8ee0e6204b87a8843a3f",
+        "version": "diff",
+        "path": "expat/Changes",
+        "start_line": 3,
+        "end_line": 16,
+        "unit_sha256": "ddd54c82c48a32238afb2af1c853287e11d51cc776547e5b8cb0fbe2cc6e7639",
+        "quote_sha256": "2ee3b087ea7432a180c3009b41919b77e149d5ad70a16cc4c6f50678e4c54fdf"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/1",
+      "evidence_id": "loc-4a81dd0e01f1f1d2128a016e",
+      "kind": "source",
+      "path": "input/source/expat/lib/xmlparse.c",
+      "text": "int XMLCALL\nXML_SetHashSalt(XML_Parser parser, unsigned long hash_salt) {\n  if (parser == NULL)\n    return 0;\n\n  const XML_Parser rootParser = getRootParserOf(parser, NULL);\n  assert(! rootParser->m_parentParser);\n\n  /* block after XML_Parse()/XML_ParseBuffer() has been called */\n  if (parserBusy(rootParser))\n    return 0;\n\n  rootParser->m_hash_secret_salt_128.k[0] = 0;\n  rootParser->m_hash_secret_salt_128.k[1] = hash_salt;\n\n  if (hash_salt != 0) { // to remain backwards compatible\n    rootParser->m_hash_secret_salt_set = XML_TRUE;\n\n    if (sizeof(unsigned long) == 4)\n      ENTROPY_DEBUG(\"explicit(4)\", rootParser->m_hash_secret_salt_128);\n    else\n      ENTROPY_DEBUG(\"explicit(8)\", rootParser->m_hash_secret_salt_128);\n  }\n\n  return 1;\n",
+      "change_ids": [
+        "g0023"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-c62af8f8425201b0bb0a",
+        "version": "after",
+        "path": "input/source/expat/lib/xmlparse.c",
+        "start_line": 2213,
+        "end_line": 2237,
+        "unit_sha256": "3e7b9fb0c3acd22b760f15323edd886f0fc2f6d1ebe8339e22f5bbedeb9d83dd",
+        "quote_sha256": "4d3bea64d1eaff4f3f4b03344d415311a7a51f388f1106739cb5167d1e493e9f"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/2",
+      "evidence_id": "loc-f231b7bd94bb091c087543dc",
+      "kind": "harness",
+      "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+      "text": "static void\nParseOneInput(XML_Parser p, const uint8_t *data, size_t size) {\n  // Set the hash salt using siphash to generate a deterministic hash.\n  struct sipkey *key = sip_keyof(hash_key);\n  XML_SetHashSalt(p, (unsigned long)siphash24(data, size, key));\n  (void)sip24_valid;\n\n  XML_SetUserData(p, p);\n  XML_SetElementHandler(p, start, end);\n  XML_SetCharacterDataHandler(p, may_stop_character_handler);\n  assert(size <= INT_MAX);\n  XML_Parse(p, (const XML_Char *)data, (int)size, 0);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-9e35d81905aa5d1c2acd",
+        "version": "harness",
+        "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+        "start_line": 59,
+        "end_line": 70,
+        "unit_sha256": "8d142202df7f157c821aeb131658b2d94c2236aff025fe028252bafee966d268",
+        "quote_sha256": "99e2bcf749eb488c3574ef75619821b13b41d8098691feb6e53c233e71b5185d"
+      }
+    },
+    {
+      "pointer": "/source_evidence/0",
+      "evidence_id": "loc-957ceb3e692a17d5d11136f5",
+      "kind": "diff",
+      "path": "expat/Changes",
+      "text": "       #47 #1183  CVE-2026-41080 -- The existing hash flooding protection\n                    (based on SipHash) only used 4 to 8 bytes of entropy for\n                    a salt, when 16 bytes of salt are supported by the\n                    implementation of SipHash used by Expat. Now full 16 bytes\n                    of entropy are used to improve protection against hash\n                    flooding attacks.\n                      Existing API function XML_SetHashSalt is now deprecated\n                    because of its limitations, and its use should be\n                    considered a vulnerability. Please either use the new API\n                    function XML_SetHashSalt16Bytes (with known-high-quality\n                    entropy input only!) instead, or leave the derivation of\n                    a 16-bytes hash salt from high quality entropy to Expat's\n                    internal machinery (by *not* calling either of the two\n                    XML_SetHashSalt* functions).\n",
+      "change_ids": [
+        "g0004"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-8ee0e6204b87a8843a3f",
+        "version": "diff",
+        "path": "expat/Changes",
+        "start_line": 3,
+        "end_line": 16,
+        "unit_sha256": "ddd54c82c48a32238afb2af1c853287e11d51cc776547e5b8cb0fbe2cc6e7639",
+        "quote_sha256": "2ee3b087ea7432a180c3009b41919b77e149d5ad70a16cc4c6f50678e4c54fdf"
+      }
+    },
+    {
+      "pointer": "/source_evidence/1",
+      "evidence_id": "loc-4a81dd0e01f1f1d2128a016e",
+      "kind": "source",
+      "path": "input/source/expat/lib/xmlparse.c",
+      "text": "int XMLCALL\nXML_SetHashSalt(XML_Parser parser, unsigned long hash_salt) {\n  if (parser == NULL)\n    return 0;\n\n  const XML_Parser rootParser = getRootParserOf(parser, NULL);\n  assert(! rootParser->m_parentParser);\n\n  /* block after XML_Parse()/XML_ParseBuffer() has been called */\n  if (parserBusy(rootParser))\n    return 0;\n\n  rootParser->m_hash_secret_salt_128.k[0] = 0;\n  rootParser->m_hash_secret_salt_128.k[1] = hash_salt;\n\n  if (hash_salt != 0) { // to remain backwards compatible\n    rootParser->m_hash_secret_salt_set = XML_TRUE;\n\n    if (sizeof(unsigned long) == 4)\n      ENTROPY_DEBUG(\"explicit(4)\", rootParser->m_hash_secret_salt_128);\n    else\n      ENTROPY_DEBUG(\"explicit(8)\", rootParser->m_hash_secret_salt_128);\n  }\n\n  return 1;\n",
+      "change_ids": [
+        "g0023"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-c62af8f8425201b0bb0a",
+        "version": "after",
+        "path": "input/source/expat/lib/xmlparse.c",
+        "start_line": 2213,
+        "end_line": 2237,
+        "unit_sha256": "3e7b9fb0c3acd22b760f15323edd886f0fc2f6d1ebe8339e22f5bbedeb9d83dd",
+        "quote_sha256": "4d3bea64d1eaff4f3f4b03344d415311a7a51f388f1106739cb5167d1e493e9f"
+      }
+    },
+    {
+      "pointer": "/source_evidence/2",
+      "evidence_id": "loc-e00e3b25691f6551be2ff233",
+      "kind": "source",
+      "path": "input/source/expat/lib/xmlparse.c",
+      "text": "static XML_Bool /* only valid for root parser */\nstartParsing(XML_Parser parser) {\n  /* hash functions must be initialized before setContext() is called */\n  if (parser->m_hash_secret_salt_set != XML_TRUE) {\n    parser->m_hash_secret_salt_128 = generate_hash_secret_salt();\n    parser->m_hash_secret_salt_set = XML_TRUE;\n  }\n",
+      "change_ids": [
+        "g0017"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Automatic generation depends on the salt-set flag.",
+      "location": {
+        "unit_id": "u-3f10ba2c02bbb09c286b",
+        "version": "after",
+        "path": "input/source/expat/lib/xmlparse.c",
+        "start_line": 1201,
+        "end_line": 1207,
+        "unit_sha256": "5086d560acdef968f959c607b2043defbaa70e7a66b1c4c2d51dbbf61b236afc",
+        "quote_sha256": "a5a9ee3ea7bb16bcfff3898348b6e415411c85d7c830db7185ed48f7c0ff1bce"
+      }
+    },
+    {
+      "pointer": "/source_evidence/3",
+      "evidence_id": "loc-4887c98813aa0ecd376155a5",
+      "kind": "source",
+      "path": "input/source/expat/lib/xmlparse.c",
+      "text": "static void\ncopy_salt_to_sipkey(XML_Parser parser, struct sipkey *key) {\n  const XML_Parser rootParser = getRootParserOf(parser, NULL);\n  assert(! rootParser->m_parentParser);\n\n  *key = rootParser->m_hash_secret_salt_128;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Internal hashing copies the configured root key.",
+      "location": {
+        "unit_id": "u-919293f767c6326f7528",
+        "version": "after",
+        "path": "input/source/expat/lib/xmlparse.c",
+        "start_line": 7765,
+        "end_line": 7771,
+        "unit_sha256": "3d0131f59edb7554d6fdd038b1887d19de5c4e750a36797c0d263d244a638f5c",
+        "quote_sha256": "3d0131f59edb7554d6fdd038b1887d19de5c4e750a36797c0d263d244a638f5c"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/0",
+      "evidence_id": "loc-b823d5069f69d7210b1142ef",
+      "kind": "harness",
+      "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+      "text": "// 16-byte deterministic hash key.\nstatic unsigned char hash_key[16] = \"FUZZING IS FUN!\";\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-9e35d81905aa5d1c2acd",
+        "version": "harness",
+        "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+        "start_line": 36,
+        "end_line": 37,
+        "unit_sha256": "8d142202df7f157c821aeb131658b2d94c2236aff025fe028252bafee966d268",
+        "quote_sha256": "11aed001bea08fb57974558d2a3e88348b0eb8f23c5d571ebdada308f73b6ab6"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/1",
+      "evidence_id": "loc-5fcee9b4c5e55af5810ed475",
+      "kind": "harness",
+      "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+      "text": "static void\nParseOneInput(XML_Parser p, const uint8_t *data, size_t size) {\n  // Set the hash salt using siphash to generate a deterministic hash.\n  struct sipkey *key = sip_keyof(hash_key);\n  XML_SetHashSalt(p, (unsigned long)siphash24(data, size, key));\n  (void)sip24_valid;\n\n  XML_SetUserData(p, p);\n  XML_SetElementHandler(p, start, end);\n  XML_SetCharacterDataHandler(p, may_stop_character_handler);\n  assert(size <= INT_MAX);\n  XML_Parse(p, (const XML_Char *)data, (int)size, 0);\n  if (XML_Parse(p, (const XML_Char *)data, (int)size, 1) == XML_STATUS_ERROR) {\n    XML_ErrorString(XML_GetErrorCode(p));\n  }\n  XML_GetCurrentLineNumber(p);\n  if (size % 2) {\n    XML_ParserReset(p, NULL);\n  }\n}\n\nint\nLLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n  XML_Parser parentParser = XML_ParserCreate(xstr(ENCODING_FOR_FUZZING));\n  assert(parentParser);\n  ParseOneInput(parentParser, data, size);\n  // not freed yet, but used later and freed then\n\n  XML_Parser namespaceParser = XML_ParserCreateNS(NULL, '!');\n  assert(namespaceParser);\n  ParseOneInput(namespaceParser, data, size);\n  XML_ParserFree(namespaceParser);\n\n  XML_Parser externalEntityParser\n      = XML_ExternalEntityParserCreate(parentParser, \"e1\", NULL);\n  if (externalEntityParser != NULL) {\n    ParseOneInput(externalEntityParser, data, size);\n    XML_ParserFree(externalEntityParser);\n  }\n\n  XML_Parser externalDtdParser\n      = XML_ExternalEntityParserCreate(parentParser, NULL, NULL);\n  if (externalDtdParser != NULL) {\n    ParseOneInput(externalDtdParser, data, size);\n    XML_ParserFree(externalDtdParser);\n  }\n\n  // finally frees this parser which served as parent\n  XML_ParserFree(parentParser);\n  return 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-9e35d81905aa5d1c2acd",
+        "version": "harness",
+        "path": "input/harness/expat/fuzz/xml_parse_fuzzer.c",
+        "start_line": 59,
+        "end_line": 109,
+        "unit_sha256": "8d142202df7f157c821aeb131658b2d94c2236aff025fe028252bafee966d268",
+        "quote_sha256": "1770ae2762fbaaf16c2f12264d3796dd2c99babd15b240df8a387f4d3062a30c"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/2",
+      "evidence_id": "loc-04ad2867d3d01ef89a266d61",
+      "kind": "harness",
+      "path": "input/harness/build/build.sh",
+      "text": "cmake .. -DEXPAT_BUILD_TESTS=OFF -DEXPAT_BUILD_TOOLS=OFF -DEXPAT_BUILD_EXAMPLES=OFF -DEXPAT_BUILD_DOCS=OFF \\\n  -DEXPAT_SHARED_LIBS=OFF -DCMAKE_C_COMPILER=$CC -DCMAKE_C_FLAGS=\"$CFLAGS\" -DCMAKE_CXX_COMPILER=$CXX >/dev/null\nmake -j2 expat\nLIB=$(find . -name 'libexpat*.a' | head -1)\nfor f in ../fuzz/xml_parse_fuzzer.c ../fuzz/xml_parsebuffer_fuzzer.c; do\n  [ -f $f ] || continue\n  b=$(basename $f .c)\n  $CC $CFLAGS -DENCODING_FOR_FUZZING=UTF-8 -I../lib -I. -c $f -o $b.o && \\\n  $CXX $CXXFLAGS $b.o -o $OUT/${b}_UTF-8 $LIB_FUZZING_ENGINE $LIB\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The recipe identifies the target's library build and UTF-8 harness compilation.",
+      "location": {
+        "unit_id": "u-b7d990ba0034895dc455",
+        "version": "harness",
+        "path": "input/harness/build/build.sh",
+        "start_line": 5,
+        "end_line": 13,
+        "unit_sha256": "2662c38e00316b1bd49662cdb1b6d4feafbb95502c9d77c4607d7eff4cc59d8c",
+        "quote_sha256": "1740a07433c212874352fd96eb6f7ab8120b50e0101e0922555871cc5465e41a"
+      }
+    }
+  ],
+  "obligation_class": "target_coverage"
+}

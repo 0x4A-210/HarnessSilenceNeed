@@ -1,0 +1,19 @@
+{
+  "unit_id": "u-5e13c8547385ac13298d",
+  "original_unit_id": "1c67103124ffa68c2f11",
+  "kind": "after_source",
+  "path": "input/source/src/backend/commands/extension.c",
+  "version": "after",
+  "name": "execute_sql_string",
+  "start": 708,
+  "end": 807,
+  "line_origin": "file",
+  "sha256": "7713f7bd5e2399818371e0394a2d03a9dfe4922dbf89eff20af77685302eb4fe",
+  "text": "static void\nexecute_sql_string(const char *sql)\n{\n\tList\t   *raw_parsetree_list;\n\tDestReceiver *dest;\n\tListCell   *lc1;\n\n\t/*\n\t * Parse the SQL string into a list of raw parse trees.\n\t */\n\traw_parsetree_list = pg_parse_query(sql);\n\n\t/* All output from SELECTs goes to the bit bucket */\n\tdest = CreateDestReceiver(DestNone);\n\n\t/*\n\t * Do parse analysis, rule rewrite, planning, and execution for each raw\n\t * parsetree.  We must fully execute each query before beginning parse\n\t * analysis on the next one, since there may be interdependencies.\n\t */\n\tforeach(lc1, raw_parsetree_list)\n\t{\n\t\tRawStmt    *parsetree = lfirst_node(RawStmt, lc1);\n\t\tMemoryContext per_parsetree_context,\n\t\t\t\t\toldcontext;\n\t\tList\t   *stmt_list;\n\t\tListCell   *lc2;\n\n\t\t/*\n\t\t * We do the work for each parsetree in a short-lived context, to\n\t\t * limit the memory used when there are many commands in the string.\n\t\t */\n\t\tper_parsetree_context =\n\t\t\tAllocSetContextCreate(CurrentMemoryContext,\n\t\t\t\t\t\t\t\t  \"execute_sql_string per-statement context\",\n\t\t\t\t\t\t\t\t  ALLOCSET_DEFAULT_SIZES);\n\t\toldcontext = MemoryContextSwitchTo(per_parsetree_context);\n\n\t\t/* Be sure parser can see any DDL done so far */\n\t\tCommandCounterIncrement();\n\n\t\tstmt_list = pg_analyze_and_rewrite(parsetree,\n\t\t\t\t\t\t\t\t\t\t   sql,\n\t\t\t\t\t\t\t\t\t\t   NULL,\n\t\t\t\t\t\t\t\t\t\t   0,\n\t\t\t\t\t\t\t\t\t\t   NULL);\n\t\tstmt_list = pg_plan_queries(stmt_list, sql, CURSOR_OPT_PARALLEL_OK, NULL);\n\n\t\tforeach(lc2, stmt_list)\n\t\t{\n\t\t\tPlannedStmt *stmt = lfirst_node(PlannedStmt, lc2);\n\n\t\t\tCommandCounterIncrement();\n\n\t\t\tPushActiveSnapshot(GetTransactionSnapshot());\n\n\t\t\tif (stmt->utilityStmt == NULL)\n\t\t\t{\n\t\t\t\tQueryDesc  *qdesc;\n\n\t\t\t\tqdesc = CreateQueryDesc(stmt,\n\t\t\t\t\t\t\t\t\t\tsql,\n\t\t\t\t\t\t\t\t\t\tGetActiveSnapshot(), NULL,\n\t\t\t\t\t\t\t\t\t\tdest, NULL, NULL, 0);\n\n\t\t\t\tExecutorStart(qdesc, 0);\n\t\t\t\tExecutorRun(qdesc, ForwardScanDirection, 0, true);\n\t\t\t\tExecutorFinish(qdesc);\n\t\t\t\tExecutorEnd(qdesc);\n\n\t\t\t\tFreeQueryDesc(qdesc);\n\t\t\t}\n\t\t\telse\n\t\t\t{\n\t\t\t\tif (IsA(stmt->utilityStmt, TransactionStmt))\n\t\t\t\t\tereport(ERROR,\n\t\t\t\t\t\t\t(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),\n\t\t\t\t\t\t\t errmsg(\"transaction control statements are not allowed within an extension script\")));\n\n\t\t\t\tProcessUtility(stmt,\n\t\t\t\t\t\t\t   sql,\n\t\t\t\t\t\t\t   false,\n\t\t\t\t\t\t\t   PROCESS_UTILITY_QUERY,\n\t\t\t\t\t\t\t   NULL,\n\t\t\t\t\t\t\t   NULL,\n\t\t\t\t\t\t\t   dest,\n\t\t\t\t\t\t\t   NULL);\n\t\t\t}\n\n\t\t\tPopActiveSnapshot();\n\t\t}\n\n\t\t/* Clean up per-parsetree context. */\n\t\tMemoryContextSwitchTo(oldcontext);\n\t\tMemoryContextDelete(per_parsetree_context);\n\t}\n\n\t/* Be sure to advance the command counter after the last script command */\n\tCommandCounterIncrement();\n}\n",
+  "change_ids": [],
+  "invariant_source": true,
+  "unit_kind": "function",
+  "page_ids": [
+    "after-whole-1c67103124ffa68c2f11-0000"
+  ]
+}

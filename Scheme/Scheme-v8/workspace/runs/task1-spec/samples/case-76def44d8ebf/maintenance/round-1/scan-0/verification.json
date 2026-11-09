@@ -1,0 +1,225 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0001",
+          "status": "not_target_relevant",
+          "reason": "The removed context field was private bookkeeping. The public API exposes an opaque context, and the changed decode uses a local LUT pointer while context cleanup still frees only an allocated context LUT. Removing the field creates no distinct target obligation.",
+          "errors": []
+        },
+        {
+          "change_id": "g0002",
+          "status": "blocked",
+          "reason": "The new LUT variables support gamma correction, but the sole decode call omits the gamma flag.",
+          "errors": []
+        },
+        {
+          "change_id": "g0003",
+          "status": "blocked",
+          "reason": "The changed LUT selection has both 8-bit and 16-bit gamma routes. The target selects neither gamma correction nor 16-bit output.",
+          "errors": []
+        },
+        {
+          "change_id": "g0004",
+          "status": "blocked",
+          "reason": "LUT population is guarded by the gamma flag; the fixed decode arguments cannot reach it.",
+          "errors": []
+        },
+        {
+          "change_id": "g0005",
+          "status": "blocked",
+          "reason": "The changed pixel lookup is also guarded by the gamma flag, which the target never supplies.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "pass",
+          "reason": "The recipe selects Meson's static library and links that library with zlib; the supplied Meson configuration includes the changed decode source and its math dependency. This is a recipe compatibility assessment, not a claimed build execution.",
+          "errors": []
+        },
+        "input": {
+          "status": "pass",
+          "reason": "Fuzzer bytes are installed as the PNG buffer; the parser can obtain IHDR and a pre-IDAT gAMA chunk from those bytes. Size calculation and the target's allocation guard provide the route to decode for small valid images.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "pass",
+          "reason": "The target creates a valid context, checks allocation, and frees its context and output on both success and error paths. Decode releases its scanline allocations through the common cleanup path.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "blocked",
+          "reason": "The sole decode invocation fixes RGBA8 and SPNG_DECODE_USE_TRNS. Source branches requiring SPNG_DECODE_USE_GAMA, SPNG_DECODE_USE_SBIT, or RGBA16 cannot be selected by any fuzz input.",
+          "errors": []
+        }
+      },
+      "errors": [],
+      "missing_information": [],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "id": "gamma_rgba8",
+        "change_ids": [
+          "g0002",
+          "g0003",
+          "g0004",
+          "g0005"
+        ],
+        "kind": "call",
+        "necessary": true,
+        "established": true,
+        "requirement": "For a valid PNG containing a pre-IDAT gAMA chunk, the RGBA8 decode operation must be able to request gamma correction so the 256-entry LUT is built and applied.",
+        "target_route": "A finite small PNG in the fuzzer bytes supplies IHDR, gAMA, IDAT, and image data; size calculation succeeds, then the target calls spng_decode_image with RGBA8.",
+        "failure_condition": "The target always passes SPNG_DECODE_USE_TRNS (1), while gamma correction requires SPNG_DECODE_USE_GAMA (2); both LUT construction and lookup are skipped.",
+        "alternative_paths": "The complete target has one decode call and no input-controlled flags or second call. A gAMA chunk sets stored_gama but does not set the gamma flag; defaults do not enable the guarded behavior.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-99387c45a543ae2a73f5b37e",
+            "quote": "    uint16_t *gamma_lut = NULL;\n    uint16_t gamma_lut8[256];\n\n    if(flags & SPNG_DECODE_USE_GAMA && ctx->stored_gama)\n    {\n        float file_gamma = (float)ctx->gama / 100000.0f;\n        float max;\n\n        uint32_t i, lut_entries;\n\n        if(fmt == SPNG_FMT_RGBA8)\n        {\n            lut_entries = 256;\n            max = 255.0f;\n            \n            gamma_lut = gamma_lut8;\n        }\n        else /* SPNG_FMT_RGBA16 */\n        {\n            lut_entries = 65536;\n            max = 65535.0f;\n\n            ctx->gamma_lut = spng__malloc(ctx, lut_entries * sizeof(uint16_t));\n            if(ctx->gamma_lut == NULL)\n            {\n                ret = SPNG_EMEM;\n                goto decode_err;\n            }\n            gamma_lut = ctx->gamma_lut;\n        }\n        \n        for(i=0; i < lut_entries; i++)\n        {\n            float screen_gamma = 2.2f;\n            float exp = 1.0f / (file_gamma * screen_gamma);\n            float c = pow((float)i / max, exp) * max;\n\n            gamma_lut[i] = c;\n        }\n    }\n"
+          },
+          {
+            "evidence_id": "loc-5b88e2a6d234e5a8419a60aa",
+            "quote": "                if(flags & SPNG_DECODE_USE_GAMA && ctx->stored_gama)\n                {\n                    r = gamma_lut[r];\n                    g = gamma_lut[g];\n                    b = gamma_lut[b];\n                }\n"
+          },
+          {
+            "evidence_id": "loc-de06fa628da983589212fef7",
+            "quote": "        else if(!memcmp(chunk.type, type_gama, 4))\n        {\n            if(ctx->file_plte && chunk.offset > ctx->plte_offset) return SPNG_ECHUNK_POS;\n            if(ctx->file_gama) return SPNG_EDUP_GAMA;\n\n            if(chunk.length != 4) return SPNG_ECHUNK_SIZE;\n\n            ctx->gama = read_u32(data);\n\n            if(ctx->gama > png_u32max) return SPNG_EGAMA;\n\n            ctx->file_gama = 1;\n            ctx->stored_gama = 1;\n        }\n"
+          },
+          {
+            "evidence_id": "loc-dbe50ba86e3385072377e223",
+            "quote": "enum spng_decode_flags\n{\n    SPNG_DECODE_USE_TRNS = 1,\n    SPNG_DECODE_USE_GAMA = 2,\n    SPNG_DECODE_USE_SBIT = 8 /* Rescale samples using sBIT values */\n};\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-3548d3ab0146e6b1008f2846",
+            "quote": "extern \"C\" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)\n{\n    unsigned char *out = NULL;\n\n    spng_ctx *ctx = spng_ctx_new(0);\n    if(ctx == NULL) return 0;\n\n    if(spng_set_png_buffer(ctx, (void*)data, size)) goto err;\n\n    spng_set_image_limits(ctx, 200000, 200000);\n\n    spng_set_crc_action(ctx, SPNG_CRC_USE, SPNG_CRC_USE);\n\n    size_t out_size;\n    if(spng_decoded_image_size(ctx, SPNG_FMT_RGBA8, &out_size)) goto err;\n\n    if(out_size > 80000000) goto err;\n\n    out = (unsigned char*)malloc(out_size);\n    if(out == NULL) goto err;\n\n    if(spng_decode_image(ctx, out, out_size, SPNG_FMT_RGBA8, SPNG_DECODE_USE_TRNS)) goto err;\n\nerr:\n    spng_ctx_free(ctx);\n    if(out != NULL) free(out);\n\n    return 0;\n}\n"
+          }
+        ],
+        "missing_information": [],
+        "errors": []
+      },
+      {
+        "id": "gamma_rgba16",
+        "change_ids": [
+          "g0003",
+          "g0004",
+          "g0005"
+        ],
+        "kind": "call",
+        "necessary": true,
+        "established": true,
+        "requirement": "The decode operation must be able to request gamma-corrected RGBA16 output, which uses the allocated 65536-entry LUT.",
+        "target_route": "A finite small valid PNG with gAMA and IDAT can be sized and decoded as RGBA16 by the source API.",
+        "failure_condition": "The target fixes both sizing and decoding to RGBA8 and passes only the transparency flag, so the RGBA16 gamma allocation, population, and lookup cannot run.",
+        "alternative_paths": "PNG bit depth does not change the requested output format. The complete target has no alternate sizing or decode call and no input-controlled format or flags.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-ddf4fccedf6f45a2de1662a1",
+            "quote": "    if(flags & SPNG_DECODE_USE_GAMA && ctx->stored_gama)\n    {\n        float file_gamma = (float)ctx->gama / 100000.0f;\n        float max;\n\n        uint32_t i, lut_entries;\n\n        if(fmt == SPNG_FMT_RGBA8)\n        {\n            lut_entries = 256;\n            max = 255.0f;\n            \n            gamma_lut = gamma_lut8;\n        }\n        else /* SPNG_FMT_RGBA16 */\n        {\n            lut_entries = 65536;\n            max = 65535.0f;\n\n            ctx->gamma_lut = spng__malloc(ctx, lut_entries * sizeof(uint16_t));\n            if(ctx->gamma_lut == NULL)\n            {\n                ret = SPNG_EMEM;\n                goto decode_err;\n            }\n            gamma_lut = ctx->gamma_lut;\n        }\n        \n        for(i=0; i < lut_entries; i++)\n        {\n            float screen_gamma = 2.2f;\n            float exp = 1.0f / (file_gamma * screen_gamma);\n            float c = pow((float)i / max, exp) * max;\n\n            gamma_lut[i] = c;\n        }\n"
+          },
+          {
+            "evidence_id": "loc-5b88e2a6d234e5a8419a60aa",
+            "quote": "                if(flags & SPNG_DECODE_USE_GAMA && ctx->stored_gama)\n                {\n                    r = gamma_lut[r];\n                    g = gamma_lut[g];\n                    b = gamma_lut[b];\n                }\n"
+          },
+          {
+            "evidence_id": "loc-8e5ecd171761e7c0947eb48d",
+            "quote": "    size_t res;\n    if(fmt == SPNG_FMT_RGBA8)\n    {\n        if(4 > SIZE_MAX / ctx->ihdr.width) return SPNG_EOVERFLOW;\n        res = 4 * ctx->ihdr.width;\n\n        if(res > SIZE_MAX / ctx->ihdr.height) return SPNG_EOVERFLOW;\n        res = res * ctx->ihdr.height;\n    }\n    else if(fmt == SPNG_FMT_RGBA16)\n    {\n        if(8 > SIZE_MAX / ctx->ihdr.width) return SPNG_EOVERFLOW;\n        res = 8 * ctx->ihdr.width;\n\n        if(res > SIZE_MAX / ctx->ihdr.height) return SPNG_EOVERFLOW;\n        res = res * ctx->ihdr.height;\n    }\n    else return SPNG_EFMT;\n\n    *out = res;\n"
+          },
+          {
+            "evidence_id": "loc-ce0f896723aa1823c53e1fdf",
+            "quote": "                else if(fmt == SPNG_FMT_RGBA16)\n                {\n                    pixel_size = 8;\n\n                    memcpy(pixel, &r_16, 2);\n                    memcpy(pixel + 2, &g_16, 2);\n                    memcpy(pixel + 4, &b_16, 2);\n                    memcpy(pixel + 6, &a_16, 2);\n"
+          },
+          {
+            "evidence_id": "loc-3a80271e09636141728bc688",
+            "quote": "        else if(!memcmp(chunk.type, type_gama, 4))\n        {\n            if(ctx->file_plte && chunk.offset > ctx->plte_offset) return SPNG_ECHUNK_POS;\n            if(ctx->file_gama) return SPNG_EDUP_GAMA;\n\n            if(chunk.length != 4) return SPNG_ECHUNK_SIZE;\n\n            ctx->gama = read_u32(data);\n\n            if(ctx->gama > png_u32max) return SPNG_EGAMA;\n\n            ctx->file_gama = 1;\n            ctx->stored_gama = 1;\n        }\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-7e8e43a3d4a2bc38aa15982d",
+            "quote": "    size_t out_size;\n    if(spng_decoded_image_size(ctx, SPNG_FMT_RGBA8, &out_size)) goto err;\n\n    if(out_size > 80000000) goto err;\n\n    out = (unsigned char*)malloc(out_size);\n    if(out == NULL) goto err;\n\n    if(spng_decode_image(ctx, out, out_size, SPNG_FMT_RGBA8, SPNG_DECODE_USE_TRNS)) goto err;\n\nerr:\n    spng_ctx_free(ctx);\n    if(out != NULL) free(out);\n"
+          }
+        ],
+        "missing_information": [],
+        "errors": []
+      },
+      {
+        "id": "rgba16_output",
+        "change_ids": [],
+        "kind": "call",
+        "necessary": true,
+        "established": true,
+        "requirement": "The decode operation must be able to produce supported RGBA16 output without requiring gamma correction.",
+        "target_route": "A finite small valid PNG is supplied as the buffer; spng_decoded_image_size and spng_decode_image accept SPNG_FMT_RGBA16.",
+        "failure_condition": "Both target calls hard-code SPNG_FMT_RGBA8, making every RGBA16 output route unreachable.",
+        "alternative_paths": "Input PNG bit depth affects source samples, while the explicit fmt argument determines output depth. The complete target has no second output route.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-fbb6f94f9329f16fa5e3342c",
+            "quote": "    size_t res;\n    if(fmt == SPNG_FMT_RGBA8)\n    {\n        if(4 > SIZE_MAX / ctx->ihdr.width) return SPNG_EOVERFLOW;\n        res = 4 * ctx->ihdr.width;\n\n        if(res > SIZE_MAX / ctx->ihdr.height) return SPNG_EOVERFLOW;\n        res = res * ctx->ihdr.height;\n    }\n    else if(fmt == SPNG_FMT_RGBA16)\n    {\n        if(8 > SIZE_MAX / ctx->ihdr.width) return SPNG_EOVERFLOW;\n        res = 8 * ctx->ihdr.width;\n\n        if(res > SIZE_MAX / ctx->ihdr.height) return SPNG_EOVERFLOW;\n        res = res * ctx->ihdr.height;\n    }\n    else return SPNG_EFMT;\n\n    *out = res;\n"
+          },
+          {
+            "evidence_id": "loc-bc8df036e2812916735a0d5f",
+            "quote": "                else if(fmt == SPNG_FMT_RGBA16)\n                {\n                    pixel_size = 8;\n\n                    memcpy(pixel, &r_16, 2);\n                    memcpy(pixel + 2, &g_16, 2);\n                    memcpy(pixel + 4, &b_16, 2);\n                    memcpy(pixel + 6, &a_16, 2);\n"
+          },
+          {
+            "evidence_id": "loc-7da1e5557f2fec6bc3c0be99",
+            "quote": "enum spng_format\n{\n    SPNG_FMT_RGBA8 = 1,\n    SPNG_FMT_RGBA16 = 2\n};\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-7e8e43a3d4a2bc38aa15982d",
+            "quote": "    size_t out_size;\n    if(spng_decoded_image_size(ctx, SPNG_FMT_RGBA8, &out_size)) goto err;\n\n    if(out_size > 80000000) goto err;\n\n    out = (unsigned char*)malloc(out_size);\n    if(out == NULL) goto err;\n\n    if(spng_decode_image(ctx, out, out_size, SPNG_FMT_RGBA8, SPNG_DECODE_USE_TRNS)) goto err;\n\nerr:\n    spng_ctx_free(ctx);\n    if(out != NULL) free(out);\n"
+          }
+        ],
+        "missing_information": [],
+        "errors": []
+      },
+      {
+        "id": "sbit_processing",
+        "change_ids": [],
+        "kind": "call",
+        "necessary": true,
+        "established": true,
+        "requirement": "The decode operation must be able to rescale samples using a valid PNG sBIT chunk and SPNG_DECODE_USE_SBIT.",
+        "target_route": "A finite small valid PNG supplies an sBIT chunk before IDAT; the parser stores it and decode can use it when the sBIT flag is set.",
+        "failure_condition": "The target always supplies only SPNG_DECODE_USE_TRNS, so the sBIT guarded processing cannot run.",
+        "alternative_paths": "The sBIT chunk sets stored_sbit but does not set the decode flag. The complete target contains no alternative decode invocation.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-68a9aa03001030dea3427b4c",
+            "quote": "    if(ctx->stored_sbit)\n    {\n        if(flags & SPNG_DECODE_USE_SBIT)\n        {\n            if(ctx->ihdr.color_type == 0)\n            {\n                grayscale_sbits = ctx->sbit.grayscale_bits;\n                alpha_sbits = ctx->ihdr.bit_depth;\n            }\n            else if(ctx->ihdr.color_type == 2 || ctx->ihdr.color_type == 3)\n            {\n                red_sbits = ctx->sbit.red_bits;\n                green_sbits = ctx->sbit.green_bits;\n                blue_sbits = ctx->sbit.blue_bits;\n                alpha_sbits = ctx->ihdr.bit_depth;\n            }\n            else if(ctx->ihdr.color_type == 4)\n            {\n                grayscale_sbits = ctx->sbit.grayscale_bits;\n                alpha_sbits = ctx->sbit.alpha_bits;\n            }\n            else /* == 6 */\n            {\n                red_sbits = ctx->sbit.red_bits;\n                green_sbits = ctx->sbit.green_bits;\n                blue_sbits = ctx->sbit.blue_bits;\n                alpha_sbits = ctx->sbit.alpha_bits;\n            }\n        }\n    }\n"
+          },
+          {
+            "evidence_id": "loc-45b7e02d7146493e3afc35a9",
+            "quote": "        else if(!memcmp(chunk.type, type_sbit, 4))\n        {\n            if(ctx->file_plte && chunk.offset > ctx->plte_offset) return SPNG_ECHUNK_POS;\n            if(ctx->file_sbit) return SPNG_EDUP_SBIT;\n\n            if(ctx->ihdr.color_type == 0)\n            {\n                if(chunk.length != 1) return SPNG_ECHUNK_SIZE;\n\n                memcpy(&ctx->sbit.grayscale_bits, data, 1);\n            }\n            else if(ctx->ihdr.color_type == 2 || ctx->ihdr.color_type == 3)\n            {\n                if(chunk.length != 3) return SPNG_ECHUNK_SIZE;\n\n                memcpy(&ctx->sbit.red_bits, data, 1);\n                memcpy(&ctx->sbit.green_bits, data + 1 , 1);\n                memcpy(&ctx->sbit.blue_bits, data + 2, 1);\n            }\n            else if(ctx->ihdr.color_type == 4)\n            {\n                if(chunk.length != 2) return SPNG_ECHUNK_SIZE;\n\n                memcpy(&ctx->sbit.grayscale_bits, data, 1);\n                memcpy(&ctx->sbit.alpha_bits, data + 1, 1);\n            }\n            else if(ctx->ihdr.color_type == 6)\n            {\n                if(chunk.length != 4) return SPNG_ECHUNK_SIZE;\n\n                memcpy(&ctx->sbit.red_bits, data, 1);\n                memcpy(&ctx->sbit.green_bits, data + 1, 1);\n                memcpy(&ctx->sbit.blue_bits, data + 2, 1);\n                memcpy(&ctx->sbit.alpha_bits, data + 3, 1);\n            }\n\n            if(check_sbit(&ctx->sbit, &ctx->ihdr)) return SPNG_ESBIT;\n\n            ctx->file_sbit = 1;\n            ctx->stored_sbit = 1;\n        }\n"
+          },
+          {
+            "evidence_id": "loc-98c0edb533c770b016f3a116",
+            "quote": "enum spng_decode_flags\n{\n    SPNG_DECODE_USE_TRNS = 1,\n    SPNG_DECODE_USE_GAMA = 2,\n    SPNG_DECODE_USE_SBIT = 8 /* Rescale samples using sBIT values */\n};\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-3548d3ab0146e6b1008f2846",
+            "quote": "extern \"C\" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)\n{\n    unsigned char *out = NULL;\n\n    spng_ctx *ctx = spng_ctx_new(0);\n    if(ctx == NULL) return 0;\n\n    if(spng_set_png_buffer(ctx, (void*)data, size)) goto err;\n\n    spng_set_image_limits(ctx, 200000, 200000);\n\n    spng_set_crc_action(ctx, SPNG_CRC_USE, SPNG_CRC_USE);\n\n    size_t out_size;\n    if(spng_decoded_image_size(ctx, SPNG_FMT_RGBA8, &out_size)) goto err;\n\n    if(out_size > 80000000) goto err;\n\n    out = (unsigned char*)malloc(out_size);\n    if(out == NULL) goto err;\n\n    if(spng_decode_image(ctx, out, out_size, SPNG_FMT_RGBA8, SPNG_DECODE_USE_TRNS)) goto err;\n\nerr:\n    spng_ctx_free(ctx);\n    if(out != NULL) free(out);\n\n    return 0;\n}\n"
+          }
+        ],
+        "missing_information": [],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

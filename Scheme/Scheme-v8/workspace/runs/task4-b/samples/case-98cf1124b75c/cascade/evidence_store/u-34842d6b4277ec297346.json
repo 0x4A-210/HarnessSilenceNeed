@@ -1,0 +1,22 @@
+{
+  "unit_id": "u-34842d6b4277ec297346",
+  "original_unit_id": "420bfb422d72a8756fd3",
+  "kind": "source",
+  "path": "input/source/library/ecp.c",
+  "version": "after",
+  "name": "ecp_mul_comb",
+  "start": 2114,
+  "end": 2233,
+  "line_origin": "file",
+  "sha256": "55ae7f3b326ae56177a74b9b53254b9cfcb69e95485d30442f8638ee4615c025",
+  "text": "static int ecp_mul_comb( mbedtls_ecp_group *grp, mbedtls_ecp_point *R,\n                         const mbedtls_mpi *m, const mbedtls_ecp_point *P,\n                         int (*f_rng)(void *, unsigned char *, size_t),\n                         void *p_rng,\n                         mbedtls_ecp_restart_ctx *rs_ctx )\n{\n    int ret = MBEDTLS_ERR_ERROR_CORRUPTION_DETECTED;\n    unsigned char w, p_eq_g, i;\n    size_t d;\n    unsigned char T_size = 0, T_ok = 0;\n    mbedtls_ecp_point *T = NULL;\n\n    ECP_RS_ENTER( rsm );\n\n    /* Is P the base point ? */\n#if MBEDTLS_ECP_FIXED_POINT_OPTIM == 1\n    p_eq_g = ( mbedtls_mpi_cmp_mpi( &P->Y, &grp->G.Y ) == 0 &&\n               mbedtls_mpi_cmp_mpi( &P->X, &grp->G.X ) == 0 );\n#else\n    p_eq_g = 0;\n#endif\n\n    /* Pick window size and deduce related sizes */\n    w = ecp_pick_window_size( grp, p_eq_g );\n    T_size = 1U << ( w - 1 );\n    d = ( grp->nbits + w - 1 ) / w;\n\n    /* Pre-computed table: do we have it already for the base point? */\n    if( p_eq_g && grp->T != NULL )\n    {\n        /* second pointer to the same table, will be deleted on exit */\n        T = grp->T;\n        T_ok = 1;\n    }\n    else\n#if defined(MBEDTLS_ECP_RESTARTABLE)\n    /* Pre-computed table: do we have one in progress? complete? */\n    if( rs_ctx != NULL && rs_ctx->rsm != NULL && rs_ctx->rsm->T != NULL )\n    {\n        /* transfer ownership of T from rsm to local function */\n        T = rs_ctx->rsm->T;\n        rs_ctx->rsm->T = NULL;\n        rs_ctx->rsm->T_size = 0;\n\n        /* This effectively jumps to the call to mul_comb_after_precomp() */\n        T_ok = rs_ctx->rsm->state >= ecp_rsm_comb_core;\n    }\n    else\n#endif\n    /* Allocate table if we didn't have any */\n    {\n        T = mbedtls_calloc( T_size, sizeof( mbedtls_ecp_point ) );\n        if( T == NULL )\n        {\n            ret = MBEDTLS_ERR_ECP_ALLOC_FAILED;\n            goto cleanup;\n        }\n\n        for( i = 0; i < T_size; i++ )\n            mbedtls_ecp_point_init( &T[i] );\n\n        T_ok = 0;\n    }\n\n    /* Compute table (or finish computing it) if not done already */\n    if( !T_ok )\n    {\n        MBEDTLS_MPI_CHK( ecp_precompute_comb( grp, T, P, w, d, rs_ctx ) );\n\n        if( p_eq_g )\n        {\n            /* almost transfer ownership of T to the group, but keep a copy of\n             * the pointer to use for calling the next function more easily */\n            grp->T = T;\n            grp->T_size = T_size;\n        }\n    }\n\n    /* Actual comb multiplication using precomputed points */\n    MBEDTLS_MPI_CHK( ecp_mul_comb_after_precomp( grp, R, m,\n                                                 T, T_size, w, d,\n                                                 f_rng, p_rng, rs_ctx ) );\n\ncleanup:\n\n    /* does T belong to the group? */\n    if( T == grp->T )\n        T = NULL;\n\n    /* does T belong to the restart context? */\n#if defined(MBEDTLS_ECP_RESTARTABLE)\n    if( rs_ctx != NULL && rs_ctx->rsm != NULL && ret == MBEDTLS_ERR_ECP_IN_PROGRESS && T != NULL )\n    {\n        /* transfer ownership of T from local function to rsm */\n        rs_ctx->rsm->T_size = T_size;\n        rs_ctx->rsm->T = T;\n        T = NULL;\n    }\n#endif\n\n    /* did T belong to us? then let's destroy it! */\n    if( T != NULL )\n    {\n        for( i = 0; i < T_size; i++ )\n            mbedtls_ecp_point_free( &T[i] );\n        mbedtls_free( T );\n    }\n\n    /* don't free R while in progress in case R == P */\n#if defined(MBEDTLS_ECP_RESTARTABLE)\n    if( ret != MBEDTLS_ERR_ECP_IN_PROGRESS )\n#endif\n    /* prevent caller from using invalid value */\n    if( ret != 0 )\n        mbedtls_ecp_point_free( R );\n\n    ECP_RS_LEAVE( rsm );\n\n    return( ret );\n}\n",
+  "change_ids": [
+    "g0041",
+    "g0042"
+  ],
+  "invariant_source": false,
+  "unit_kind": "function",
+  "page_ids": [
+    "fn-420bfb422d72a8756fd3-0000"
+  ]
+}

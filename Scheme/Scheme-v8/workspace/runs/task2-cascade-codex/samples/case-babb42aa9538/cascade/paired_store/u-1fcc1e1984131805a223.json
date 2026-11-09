@@ -1,0 +1,19 @@
+{
+  "unit_id": "u-1fcc1e1984131805a223",
+  "original_unit_id": "dca45b992883b2fee6e2",
+  "kind": "before_source",
+  "path": "input/source/src/asio_client_session_impl.cc",
+  "version": "before",
+  "name": "submit",
+  "start": 479,
+  "end": 577,
+  "line_origin": "file",
+  "sha256": "1bd074549ee5b40b2672b7238ec30791ba56be75a38e93a613a30079771c013d",
+  "text": "const request *session_impl::submit(boost::system::error_code &ec,\n                                    const std::string &method,\n                                    const std::string &uri, generator_cb cb,\n                                    header_map h, priority_spec prio) {\n  ec.clear();\n\n  if (stopped_) {\n    ec = make_error_code(static_cast<nghttp2_error>(NGHTTP2_INTERNAL_ERROR));\n    return nullptr;\n  }\n\n  http_parser_url u{};\n  // TODO Handle CONNECT method\n  if (http_parser_parse_url(uri.c_str(), uri.size(), 0, &u) != 0) {\n    ec = make_error_code(boost::system::errc::invalid_argument);\n    return nullptr;\n  }\n\n  if ((u.field_set & (1 << UF_SCHEMA)) == 0 ||\n      (u.field_set & (1 << UF_HOST)) == 0) {\n    ec = make_error_code(boost::system::errc::invalid_argument);\n    return nullptr;\n  }\n\n  auto strm = create_stream();\n  auto &req = strm->request().impl();\n  auto &uref = req.uri();\n\n  http2::copy_url_component(uref.scheme, &u, UF_SCHEMA, uri.c_str());\n  http2::copy_url_component(uref.host, &u, UF_HOST, uri.c_str());\n  http2::copy_url_component(uref.raw_path, &u, UF_PATH, uri.c_str());\n  http2::copy_url_component(uref.raw_query, &u, UF_QUERY, uri.c_str());\n\n  if (util::ipv6_numeric_addr(uref.host.c_str())) {\n    uref.host = \"[\" + uref.host;\n    uref.host += ']';\n  }\n  if (u.field_set & (1 << UF_PORT)) {\n    uref.host += ':';\n    uref.host += util::utos(u.port);\n  }\n\n  if (uref.raw_path.empty()) {\n    uref.raw_path = \"/\";\n  }\n\n  uref.path = percent_decode(uref.raw_path);\n\n  auto path = uref.raw_path;\n  if (u.field_set & (1 << UF_QUERY)) {\n    path += '?';\n    path += uref.raw_query;\n  }\n\n  auto nva = std::vector<nghttp2_nv>();\n  nva.reserve(4 + h.size());\n  nva.push_back(http2::make_nv_ls(\":method\", method));\n  nva.push_back(http2::make_nv_ls(\":scheme\", uref.scheme));\n  nva.push_back(http2::make_nv_ls(\":path\", path));\n  nva.push_back(http2::make_nv_ls(\":authority\", uref.host));\n  for (auto &kv : h) {\n    nva.push_back(\n        http2::make_nv(kv.first, kv.second.value, kv.second.sensitive));\n  }\n\n  req.header(std::move(h));\n\n  nghttp2_data_provider *prdptr = nullptr;\n  nghttp2_data_provider prd;\n\n  if (cb) {\n    strm->request().impl().on_read(std::move(cb));\n    prd.source.ptr = strm.get();\n    prd.read_callback = [](nghttp2_session *session, int32_t stream_id,\n                           uint8_t *buf, size_t length, uint32_t *data_flags,\n                           nghttp2_data_source *source,\n                           void *user_data) -> ssize_t {\n      auto strm = static_cast<stream *>(source->ptr);\n      return strm->request().impl().call_on_read(buf, length, data_flags);\n    };\n    prdptr = &prd;\n  }\n\n  auto stream_id = nghttp2_submit_request(session_, prio.get(), nva.data(),\n                                          nva.size(), prdptr, strm.get());\n  if (stream_id < 0) {\n    ec = make_error_code(static_cast<nghttp2_error>(stream_id));\n    return nullptr;\n  }\n\n  signal_write();\n\n  strm->stream_id(stream_id);\n\n  auto p = streams_.emplace(stream_id, std::move(strm));\n  assert(p.second);\n  ping_.cancel();\n  return &(*p.first).second->request();\n}\n",
+  "change_ids": [],
+  "invariant_source": true,
+  "unit_kind": "function",
+  "page_ids": [
+    "before-whole-dca45b992883b2fee6e2-0000"
+  ]
+}

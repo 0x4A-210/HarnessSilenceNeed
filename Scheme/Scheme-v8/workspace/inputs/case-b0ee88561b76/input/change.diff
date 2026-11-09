@@ -1,0 +1,339 @@
+diff --git a/src/json.hpp b/src/json.hpp
+index ebca577f41532cca43926e96201bf15fc648db30..42a07f8727a9f4da92a0764c105676f2e647f377 100644
+--- a/src/json.hpp
++++ b/src/json.hpp
+@@ -263,16 +263,8 @@ struct external_constructor<value_t::number_float>
+     template<typename BasicJsonType>
+     static void construct(BasicJsonType& j, typename BasicJsonType::number_float_t val) noexcept
+     {
+-        // replace infinity and NAN by null
+-        if (not std::isfinite(val))
+-        {
+-            j = BasicJsonType{};
+-        }
+-        else
+-        {
+-            j.m_type = value_t::number_float;
+-            j.m_value = val;
+-        }
++        j.m_type = value_t::number_float;
++        j.m_value = val;
+         j.assert_invariant();
+     }
+ };
+@@ -6653,6 +6645,13 @@ class basic_json
+         */
+         void dump_float(number_float_t x)
+         {
++            // NaN / inf
++            if (not std::isfinite(x) or std::isnan(x))
++            {
++                o.write("null", 4);
++                return;
++            }
++
+             // special case for 0.0 and -0.0
+             if (x == 0)
+             {
+@@ -11425,11 +11424,10 @@ basic_json_parser_74:
+                 result.m_type = value_t::number_float;
+                 result.m_value = val;
+ 
+-                // replace infinity and NAN by null
++                // throw in case of infinity or NAN
+                 if (not std::isfinite(result.m_value.number_float))
+                 {
+-                    result.m_type  = value_t::null;
+-                    result.m_value = basic_json::json_value();
++                    JSON_THROW(std::out_of_range("number overflow: " + get_token_string()));
+                 }
+ 
+                 return true;
+diff --git a/src/json.hpp.re2c b/src/json.hpp.re2c
+index bdbd806db49cea3815bea914d3140164bb36e2f5..042e3ab7d6d75b16ea9ed56983c11054b8afa81d 100644
+--- a/src/json.hpp.re2c
++++ b/src/json.hpp.re2c
+@@ -263,16 +263,8 @@ struct external_constructor<value_t::number_float>
+     template<typename BasicJsonType>
+     static void construct(BasicJsonType& j, typename BasicJsonType::number_float_t val) noexcept
+     {
+-        // replace infinity and NAN by null
+-        if (not std::isfinite(val))
+-        {
+-            j = BasicJsonType{};
+-        }
+-        else
+-        {
+-            j.m_type = value_t::number_float;
+-            j.m_value = val;
+-        }
++        j.m_type = value_t::number_float;
++        j.m_value = val;
+         j.assert_invariant();
+     }
+ };
+@@ -6653,6 +6645,13 @@ class basic_json
+         */
+         void dump_float(number_float_t x)
+         {
++            // NaN / inf
++            if (not std::isfinite(x) or std::isnan(x))
++            {
++                o.write("null", 4);
++                return;
++            }
++
+             // special case for 0.0 and -0.0
+             if (x == 0)
+             {
+@@ -10459,11 +10458,10 @@ class basic_json
+                 result.m_type = value_t::number_float;
+                 result.m_value = val;
+ 
+-                // replace infinity and NAN by null
++                // throw in case of infinity or NAN
+                 if (not std::isfinite(result.m_value.number_float))
+                 {
+-                    result.m_type  = value_t::null;
+-                    result.m_value = basic_json::json_value();
++                    JSON_THROW(std::out_of_range("number overflow: " + get_token_string()));
+                 }
+ 
+                 return true;
+diff --git a/test/src/unit-cbor.cpp b/test/src/unit-cbor.cpp
+index 84b280bc96bffa94b9fb6bf47a2327ab846574cf..d313727d7b0a481fdd76399f1acac068f1f54b58 100644
+--- a/test/src/unit-cbor.cpp
++++ b/test/src/unit-cbor.cpp
+@@ -33,6 +33,7 @@ SOFTWARE.
+ using nlohmann::json;
+ 
+ #include <fstream>
++#include <cmath>
+ 
+ TEST_CASE("CBOR")
+ {
+@@ -744,13 +745,17 @@ TEST_CASE("CBOR")
+                 SECTION("infinity")
+                 {
+                     json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0x7c, 0x00}));
+-                    CHECK(j == nullptr);
++                    json::number_float_t d = j;
++                    CHECK(not std::isfinite(d));
++                    CHECK(j.dump() == "null");
+                 }
+ 
+                 SECTION("NaN")
+                 {
+                     json j = json::from_cbor(std::vector<uint8_t>({0xf9, 0x7c, 0x01}));
+-                    CHECK(j == nullptr);
++                    json::number_float_t d = j;
++                    CHECK(std::isnan(d));
++                    CHECK(j.dump() == "null");
+                 }
+             }
+         }
+@@ -1344,7 +1349,7 @@ TEST_CASE("CBOR roundtrips", "[hide]")
+                     "test/data/nst_json_testsuite/test_parsing/y_number_after_space.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_double_close_to_zero.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_double_huge_neg_exp.json",
+-                    "test/data/nst_json_testsuite/test_parsing/y_number_huge_exp.json",
++                    //"test/data/nst_json_testsuite/test_parsing/y_number_huge_exp.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_int_with_exp.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_minus_zero.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_negative_int.json",
+@@ -1356,9 +1361,9 @@ TEST_CASE("CBOR roundtrips", "[hide]")
+                     "test/data/nst_json_testsuite/test_parsing/y_number_real_exponent.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_real_fraction_exponent.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_real_neg_exp.json",
+-                    "test/data/nst_json_testsuite/test_parsing/y_number_real_neg_overflow.json",
++                    //"test/data/nst_json_testsuite/test_parsing/y_number_real_neg_overflow.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_real_pos_exponent.json",
+-                    "test/data/nst_json_testsuite/test_parsing/y_number_real_pos_overflow.json",
++                    //"test/data/nst_json_testsuite/test_parsing/y_number_real_pos_overflow.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_real_underflow.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_simple_int.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_simple_real.json",
+diff --git a/test/src/unit-class_parser.cpp b/test/src/unit-class_parser.cpp
+index e3ad3723af6af0cfce943d976481a00dcaf94e83..35aafe05917943d9bc74ac852d82db26ad07c294 100644
+--- a/test/src/unit-class_parser.cpp
++++ b/test/src/unit-class_parser.cpp
+@@ -272,7 +272,9 @@ TEST_CASE("parser class")
+ 
+             SECTION("overflow")
+             {
+-                CHECK(json::parser("1.18973e+4932").parse() == json());
++                // overflows during parsing yield an exception
++                CHECK_THROWS_AS(json::parser("1.18973e+4932").parse() == json(), std::out_of_range);
++                CHECK_THROWS_WITH(json::parser("1.18973e+4932").parse() == json(), "number overflow: 1.18973e+4932");
+             }
+ 
+             SECTION("invalid numbers")
+diff --git a/test/src/unit-constructor1.cpp b/test/src/unit-constructor1.cpp
+index 9363f0ba278c6d1c2590a2e8cac7d560413009e2..3b23d78dc466d1f3c0891663e9d36256bf8d9720 100644
+--- a/test/src/unit-constructor1.cpp
++++ b/test/src/unit-constructor1.cpp
+@@ -702,11 +702,17 @@ TEST_CASE("constructors")
+ 
+         SECTION("infinity")
+         {
+-            // infinity is stored as null
+-            // should change in the future: https://github.com/nlohmann/json/issues/388
++            // infinity is stored properly, but serialized to null
+             json::number_float_t n(std::numeric_limits<json::number_float_t>::infinity());
+             json j(n);
+-            CHECK(j.type() == json::value_t::null);
++            CHECK(j.type() == json::value_t::number_float);
++
++            // check round trip of infinity
++            json::number_float_t d = j;
++            CHECK(d == n);
++
++            // check that inf is serialized to null
++            CHECK(j.dump() == "null");
+         }
+     }
+ 
+diff --git a/test/src/unit-msgpack.cpp b/test/src/unit-msgpack.cpp
+index 3a2ae5b15f966d77b9556c2e33ad0ba62664ba5e..90b4eb2a79c0c377a48c115d43e197b9accc847d 100644
+--- a/test/src/unit-msgpack.cpp
++++ b/test/src/unit-msgpack.cpp
+@@ -1116,7 +1116,7 @@ TEST_CASE("MessagePack roundtrips", "[hide]")
+                     "test/data/nst_json_testsuite/test_parsing/y_number_after_space.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_double_close_to_zero.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_double_huge_neg_exp.json",
+-                    "test/data/nst_json_testsuite/test_parsing/y_number_huge_exp.json",
++                    //"test/data/nst_json_testsuite/test_parsing/y_number_huge_exp.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_int_with_exp.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_minus_zero.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_negative_int.json",
+@@ -1128,9 +1128,9 @@ TEST_CASE("MessagePack roundtrips", "[hide]")
+                     "test/data/nst_json_testsuite/test_parsing/y_number_real_exponent.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_real_fraction_exponent.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_real_neg_exp.json",
+-                    "test/data/nst_json_testsuite/test_parsing/y_number_real_neg_overflow.json",
++                    //"test/data/nst_json_testsuite/test_parsing/y_number_real_neg_overflow.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_real_pos_exponent.json",
+-                    "test/data/nst_json_testsuite/test_parsing/y_number_real_pos_overflow.json",
++                    //"test/data/nst_json_testsuite/test_parsing/y_number_real_pos_overflow.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_real_underflow.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_simple_int.json",
+                     "test/data/nst_json_testsuite/test_parsing/y_number_simple_real.json",
+diff --git a/test/src/unit-regression.cpp b/test/src/unit-regression.cpp
+index 7b4086b1000e7d99344dae16226edd46670037f5..b1c1f590a17e58722ff887c8d4ff833248532949 100644
+--- a/test/src/unit-regression.cpp
++++ b/test/src/unit-regression.cpp
+@@ -49,6 +49,7 @@ TEST_CASE("regression tests")
+ 
+     SECTION("issue #70 - Handle infinity and NaN cases")
+     {
++        /*
+         SECTION("NAN value")
+         {
+             CHECK(json(NAN) == json());
+@@ -60,6 +61,36 @@ TEST_CASE("regression tests")
+             CHECK(json(INFINITY) == json());
+             CHECK(json(json::number_float_t(INFINITY)) == json());
+         }
++        */
++
++        // With 3.0.0, the semantics of this changed: NAN and infinity are
++        // stored properly inside the JSON value (no exception or conversion
++        // to null), but are serialized as null.
++        SECTION("NAN value")
++        {
++            json j1 = NAN;
++            CHECK(j1.is_number_float());
++            json::number_float_t f1 = j1;
++            CHECK(std::isnan(f1));
++
++            json j2 = json::number_float_t(NAN);
++            CHECK(j2.is_number_float());
++            json::number_float_t f2 = j2;
++            CHECK(std::isnan(f2));
++        }
++
++        SECTION("infinity")
++        {
++            json j1 = INFINITY;
++            CHECK(j1.is_number_float());
++            json::number_float_t f1 = j1;
++            CHECK(not std::isfinite(f1));
++
++            json j2 = json::number_float_t(INFINITY);
++            CHECK(j2.is_number_float());
++            json::number_float_t f2 = j2;
++            CHECK(not std::isfinite(f2));
++        }
+     }
+ 
+     SECTION("pull request #71 - handle enum type")
+@@ -559,8 +590,8 @@ TEST_CASE("regression tests")
+ 
+     SECTION("issue #329 - serialized value not always can be parsed")
+     {
+-        json j = json::parse("22e2222");
+-        CHECK(j == json());
++        CHECK_THROWS_AS(json::parse("22e2222"), std::out_of_range);
++        CHECK_THROWS_WITH(json::parse("22e2222"), "number overflow: 22e2222");
+     }
+ 
+     SECTION("issue #366 - json::parse on failed stream gets stuck")
+diff --git a/test/src/unit-testsuites.cpp b/test/src/unit-testsuites.cpp
+index e83d5b740660367e39eeb40623afc1c3558a94cc..8eb4d211f5ec46e52a42906ef6901ab28f6df1da 100644
+--- a/test/src/unit-testsuites.cpp
++++ b/test/src/unit-testsuites.cpp
+@@ -460,7 +460,6 @@ TEST_CASE("nst's JSONTestSuite")
+                         "test/data/nst_json_testsuite/test_parsing/y_number_after_space.json",
+                         "test/data/nst_json_testsuite/test_parsing/y_number_double_close_to_zero.json",
+                         "test/data/nst_json_testsuite/test_parsing/y_number_double_huge_neg_exp.json",
+-                        "test/data/nst_json_testsuite/test_parsing/y_number_huge_exp.json",
+                         "test/data/nst_json_testsuite/test_parsing/y_number_int_with_exp.json",
+                         "test/data/nst_json_testsuite/test_parsing/y_number_minus_zero.json",
+                         "test/data/nst_json_testsuite/test_parsing/y_number_negative_int.json",
+@@ -472,9 +471,7 @@ TEST_CASE("nst's JSONTestSuite")
+                         "test/data/nst_json_testsuite/test_parsing/y_number_real_exponent.json",
+                         "test/data/nst_json_testsuite/test_parsing/y_number_real_fraction_exponent.json",
+                         "test/data/nst_json_testsuite/test_parsing/y_number_real_neg_exp.json",
+-                        "test/data/nst_json_testsuite/test_parsing/y_number_real_neg_overflow.json",
+                         "test/data/nst_json_testsuite/test_parsing/y_number_real_pos_exponent.json",
+-                        "test/data/nst_json_testsuite/test_parsing/y_number_real_pos_overflow.json",
+                         "test/data/nst_json_testsuite/test_parsing/y_number_real_underflow.json",
+                         "test/data/nst_json_testsuite/test_parsing/y_number_simple_int.json",
+                         "test/data/nst_json_testsuite/test_parsing/y_number_simple_real.json",
+@@ -765,9 +762,6 @@ TEST_CASE("nst's JSONTestSuite")
+         {
+             for (auto filename :
+                     {
+-                        // we currently do not limit exponents
+-                        "test/data/nst_json_testsuite/test_parsing/i_number_neg_int_huge_exp.json",
+-                        "test/data/nst_json_testsuite/test_parsing/i_number_pos_double_huge_exp.json",
+                         // we do not pose a limit on nesting
+                         "test/data/nst_json_testsuite/test_parsing/i_structure_500_nested_arrays.json",
+                         // we silently ignore BOMs
+@@ -787,6 +781,26 @@ TEST_CASE("nst's JSONTestSuite")
+             }
+         }
+ 
++        // numbers that overflow during parsing
++        SECTION("i/y -> n (out of range)")
++        {
++            for (auto filename :
++                    {
++                        "test/data/nst_json_testsuite/test_parsing/i_number_neg_int_huge_exp.json",
++                        "test/data/nst_json_testsuite/test_parsing/i_number_pos_double_huge_exp.json",
++                        "test/data/nst_json_testsuite/test_parsing/y_number_huge_exp.json",
++                        "test/data/nst_json_testsuite/test_parsing/y_number_real_neg_overflow.json",
++                        "test/data/nst_json_testsuite/test_parsing/y_number_real_pos_overflow.json"
++                    }
++                )
++            {
++                CAPTURE(filename);
++                std::ifstream f(filename);
++                json j;
++                CHECK_THROWS_AS(j << f, std::out_of_range);
++            }
++        }
++
+         SECTION("i -> n")
+         {
+             for (auto filename :

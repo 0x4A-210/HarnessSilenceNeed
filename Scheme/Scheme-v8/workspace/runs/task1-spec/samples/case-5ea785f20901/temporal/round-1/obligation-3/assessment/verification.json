@@ -1,0 +1,61 @@
+{
+  "checked": {
+    "status": "unknown",
+    "gap": null,
+    "introduced_by_this_change": null,
+    "claims": [
+      {
+        "claim_id": "o-d89778f5b2bd526f",
+        "status": "not_necessary",
+        "necessary": "no",
+        "before": {
+          "requirement": "Avoid a second release of a terminal orphan comment during parser destruction.",
+          "applicability": "not_applicable",
+          "harness_status": "not_applicable",
+          "reason": "The terminal orphan branch requires no current object, stack object or top object. The state machine creates a top object before reaching terminal cleanup. Even if the branch were reached, the old destructor has no last_comment release.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-cf50d9c00301164f251a7227",
+              "quote": "\tif (parser->last_comment) {\n\t\tif (parser->cur_obj) {\n\t\t\tucl_attach_comment(parser, parser->cur_obj, true);\n\t\t}\n\t\telse if (parser->stack && parser->stack->obj) {\n\t\t\tucl_attach_comment(parser, parser->stack->obj, true);\n\t\t}\n\t\telse if (parser->top_obj) {\n\t\t\tucl_attach_comment(parser, parser->top_obj, true);\n\t\t}\n\t\telse {\n\t\t\tucl_object_unref(parser->last_comment);\n\t\t}\n\t}\n"
+            },
+            {
+              "evidence_id": "loc-5f04312f24909f65dc3c90dc",
+              "quote": "\tif (parser->top_obj == NULL) {\n\t\tparser->state = UCL_STATE_INIT;\n\t}\n\n\tp = chunk->pos;\n\twhile (chunk->pos < chunk->end) {\n\t\tswitch (parser->state) {\n\t\tcase UCL_STATE_INIT:\n\t\t\t/*\n\t\t\t * At the init state we can either go to the parse array or object\n\t\t\t * if we got [ or { correspondingly or can just treat new data as\n\t\t\t * a key of newly created object\n\t\t\t */\n\t\t\tif (!ucl_skip_comments(parser)) {\n\t\t\t\tparser->prev_state = parser->state;\n\t\t\t\tparser->state = UCL_STATE_ERROR;\n\t\t\t\treturn false;\n\t\t\t}\n\t\t\telse {\n\t\t\t\tbool seen_obrace = false;\n\n\t\t\t\t/* Skip any spaces */\n\t\t\t\twhile (p < chunk->end && ucl_test_character(*p,\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\tUCL_CHARACTER_WHITESPACE_UNSAFE)) {\n\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\t}\n\n\t\t\t\tp = chunk->pos;\n\n\t\t\t\tif (p < chunk->end) {\n\t\t\t\t\tif (*p == '[') {\n\t\t\t\t\t\tparser->state = UCL_STATE_VALUE;\n\t\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\t\t\tseen_obrace = true;\n\t\t\t\t\t}\n\t\t\t\t\telse {\n\n\t\t\t\t\t\tif (*p == '{') {\n\t\t\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\t\t\t\tparser->state = UCL_STATE_KEY_OBRACE;\n\t\t\t\t\t\t\tseen_obrace = true;\n\t\t\t\t\t\t}\n\t\t\t\t\t\telse {\n\t\t\t\t\t\t\tparser->state = UCL_STATE_KEY;\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t}\n\n\t\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t\tif (parser->state == UCL_STATE_VALUE) {\n\t\t\t\t\t\tobj = ucl_parser_add_container(NULL, parser, true, 0,\n\t\t\t\t\t\t\t\t\t\t\t\t\t   seen_obrace);\n\t\t\t\t\t}\n\t\t\t\t\telse {\n\t\t\t\t\t\tobj = ucl_parser_add_container(NULL, parser, false, 0,\n\t\t\t\t\t\t\t\t\t\t\t\t\t   seen_obrace);\n\t\t\t\t\t}\n\n\t\t\t\t\tif (obj == NULL) {\n\t\t\t\t\t\treturn false;\n\t\t\t\t\t}\n\n\t\t\t\t\tparser->top_obj = obj;\n\t\t\t\t\tparser->cur_obj = obj;\n\t\t\t\t}\n"
+            },
+            {
+              "evidence_id": "loc-9dee235ce4550fc573d7dcc3",
+              "quote": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Avoid a second release of a terminal orphan comment during parser destruction.",
+          "applicability": "not_applicable",
+          "harness_status": "not_applicable",
+          "reason": "The entry cannot reach the terminal orphan branch. If reached, that branch clears last_comment after release, and the new destructor releases it only when the pointer remains set.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-6ce3420dc1f64572ef0bfaca",
+              "quote": "\tif (parser->last_comment) {\n\t\tif (parser->cur_obj) {\n\t\t\tucl_attach_comment(parser, parser->cur_obj, true);\n\t\t}\n\t\telse if (parser->stack && parser->stack->obj) {\n\t\t\tucl_attach_comment(parser, parser->stack->obj, true);\n\t\t}\n\t\telse if (parser->top_obj) {\n\t\t\tucl_attach_comment(parser, parser->top_obj, true);\n\t\t}\n\t\telse {\n\t\t\tucl_object_unref(parser->last_comment);\n\t\t\tparser->last_comment = NULL;\n\t\t}\n\t}\n"
+            },
+            {
+              "evidence_id": "loc-1b4af987e221c7fce682984f",
+              "quote": "\tif (parser->top_obj == NULL) {\n\t\tparser->state = UCL_STATE_INIT;\n\t}\n\n\tp = chunk->pos;\n\twhile (chunk->pos < chunk->end) {\n\t\tswitch (parser->state) {\n\t\tcase UCL_STATE_INIT:\n\t\t\t/*\n\t\t\t * At the init state we can either go to the parse array or object\n\t\t\t * if we got [ or { correspondingly or can just treat new data as\n\t\t\t * a key of newly created object\n\t\t\t */\n\t\t\tif (!ucl_skip_comments(parser)) {\n\t\t\t\tparser->prev_state = parser->state;\n\t\t\t\tparser->state = UCL_STATE_ERROR;\n\t\t\t\treturn false;\n\t\t\t}\n\t\t\telse {\n\t\t\t\tbool seen_obrace = false;\n\n\t\t\t\t/* Skip any spaces */\n\t\t\t\twhile (p < chunk->end && ucl_test_character(*p,\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\tUCL_CHARACTER_WHITESPACE_UNSAFE)) {\n\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\t}\n\n\t\t\t\tp = chunk->pos;\n\n\t\t\t\tif (p < chunk->end) {\n\t\t\t\t\tif (*p == '[') {\n\t\t\t\t\t\tparser->state = UCL_STATE_VALUE;\n\t\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\t\t\tseen_obrace = true;\n\t\t\t\t\t}\n\t\t\t\t\telse {\n\n\t\t\t\t\t\tif (*p == '{') {\n\t\t\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\t\t\t\tparser->state = UCL_STATE_KEY_OBRACE;\n\t\t\t\t\t\t\tseen_obrace = true;\n\t\t\t\t\t\t}\n\t\t\t\t\t\telse {\n\t\t\t\t\t\t\tparser->state = UCL_STATE_KEY;\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t}\n\n\t\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t\tif (parser->state == UCL_STATE_VALUE) {\n\t\t\t\t\t\tobj = ucl_parser_add_container(NULL, parser, true, 0,\n\t\t\t\t\t\t\t\t\t\t\t\t\t   seen_obrace);\n\t\t\t\t\t}\n\t\t\t\t\telse {\n\t\t\t\t\t\tobj = ucl_parser_add_container(NULL, parser, false, 0,\n\t\t\t\t\t\t\t\t\t\t\t\t\t   seen_obrace);\n\t\t\t\t\t}\n\n\t\t\t\t\tif (obj == NULL) {\n\t\t\t\t\t\treturn false;\n\t\t\t\t\t}\n\n\t\t\t\t\tparser->top_obj = obj;\n\t\t\t\t\tparser->cur_obj = obj;\n\t\t\t\t}\n"
+            },
+            {
+              "evidence_id": "loc-00797a46f547a15ed9559497",
+              "quote": "\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n"
+            }
+          ]
+        },
+        "same_blocker": "not_applicable",
+        "reason": "The same old harness parses once and conditionally destroys the parser. Neither version can release the terminal orphan comment twice through this path. Coverage remains incomplete because this packet asks for the focused candidate only.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": []
+  },
+  "citation_errors": []
+}

@@ -1,0 +1,96 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0032",
+          "status": "blocked",
+          "reason": "The changed vertex branch distinguishes colored from uncolored vertices, and LoadObj clears colors when an uncolored vertex is parsed with fallback disabled. ParseFromString forwards config.vertex_color, but the complete old entry passes an unchanged config that defaults to true.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "unknown",
+          "reason": "The recipe invokes CMake and make, but the supplied evidence does not include the CMakeLists.txt contents needed to establish the resulting fuzz target build.",
+          "errors": []
+        },
+        "input": {
+          "status": "pass",
+          "reason": "A finite input with OBJ text, a NUL delimiter, and at least one trailing MTL byte reaches ParseFromString; the source accepts both text strings.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "pass",
+          "reason": "The entry constructs the config and reader before its single call. ParseFromString keeps its streams and material reader alive through LoadObj, which finishes its output transfer before returning.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "blocked",
+          "reason": "The entry can reach LoadObj's vertex branch, but its unchanged default configuration makes the no-fallback color-clearing guard unreachable for every input.",
+          "errors": []
+        }
+      },
+      "errors": [
+        "missing_duplicate_or_extra_change_assessment",
+        "incomplete_input_scope",
+        "invalid_diff_coverage_ledger",
+        "incomplete_diff_group_selection"
+      ],
+      "missing_information": [],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "kind": "configuration",
+        "necessary": true,
+        "established": true,
+        "requirement": "Allow ParseFromString to run with vertex_color=false so a valid OBJ containing an uncolored vertex can reach LoadObj's supported no-fallback color-clearing behavior.",
+        "target_route": "For example, OBJ text `v 0 0 0 1 0 0\\nv 1 0 0\\n`, followed by a NUL delimiter and a trailing MTL byte, reaches LLVMFuzzerTestOneInput → ObjReader::ParseFromString → LoadObj. With vertex_color=false, the first vertex adds color data and the second causes that data to be cleared.",
+        "failure_condition": "The old entry passes only a default-constructed, unchanged ObjReaderConfig. Its vertex_color value is true, so `!default_vcols_fallback` is false regardless of the input bytes.",
+        "alternative_paths": "OBJ and MTL bytes cannot modify the configuration. An OBJ with no vertices may leave colors empty, but does not reach the no-fallback behavior for a parsed vertex. The complete old entry contains no second call or alternate configuration route.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-672c959e52b4f4ef1febe829",
+            "quote": "      int num_components = parseVertexWithColor(&x, &y, &z, &r, &g, &b, &token);\n      found_all_colors &= (num_components == 6);\n      vertex_weights.push_back(\n          r);  // r = w, and initialized to 1.0 when `w` component is not found.\n\n      if ((num_components == 6) || default_vcols_fallback) {"
+          },
+          {
+            "evidence_id": "loc-37c2dc06809399001ecf2749",
+            "quote": "    // vertex\n    if (token[0] == 'v' && IS_SPACE((token[1]))) {\n      token += 2;\n      real_t x, y, z;\n      real_t r, g, b;\n\n      int num_components = parseVertexWithColor(&x, &y, &z, &r, &g, &b, &token);\n      found_all_colors &= (num_components == 6);\n\n      v.push_back(x);\n      v.push_back(y);\n      v.push_back(z);\n\n      vertex_weights.push_back(\n          r);  // r = w, and initialized to 1.0 when `w` component is not found.\n\n      if ((num_components == 6) || default_vcols_fallback) {\n        vc.push_back(r);\n        vc.push_back(g);\n        vc.push_back(b);\n      }\n\n      continue;\n"
+          },
+          {
+            "evidence_id": "loc-21098921a63d4b2689f8bd86",
+            "quote": "  // not all vertices have colors, no default colors desired? -> clear colors\n  if (!found_all_colors && !default_vcols_fallback) {\n    vc.clear();\n  }\n"
+          },
+          {
+            "evidence_id": "loc-0c6439bccb669d3b1747cbc4",
+            "quote": "  /// Parse vertex color.\n  /// If vertex color is not present, its filled with default value.\n  /// false = no vertex color\n  /// This will increase memory of parsed .obj\n  bool vertex_color;\n\n  ///\n  /// Search path to .mtl file.\n  /// Default = \"\" = search from the same directory of .obj file.\n  /// Valid only when loading .obj from a file.\n  ///\n  std::string mtl_search_path;\n\n  ObjReaderConfig()\n      : triangulate(true), triangulation_method(\"simple\"), vertex_color(true) {}\n"
+          },
+          {
+            "evidence_id": "loc-2ef458fbed0690f6b2c43823",
+            "quote": "bool ObjReader::ParseFromString(const std::string &obj_text,\n                                const std::string &mtl_text,\n                                const ObjReaderConfig &config) {\n  std::stringbuf obj_buf(obj_text);\n  std::stringbuf mtl_buf(mtl_text);\n\n  std::istream obj_ifs(&obj_buf);\n  std::istream mtl_ifs(&mtl_buf);\n\n  MaterialStreamReader mtl_ss(mtl_ifs);\n\n  valid_ = LoadObj(&attrib_, &shapes_, &materials_, &warning_, &error_,\n                   &obj_ifs, &mtl_ss, config.triangulate, config.vertex_color);\n\n  return valid_;\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-cbf2006d6123fe4bbfccc48a",
+            "quote": "extern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {\n    tinyobj::ObjReaderConfig reader_config;\n    tinyobj::ObjReader reader;\n    if (Size < 2) {\n        return 0;\n    }\n    for (size_t i = 0; i < Size-1; i++) {\n        if (Data[i] == 0) {\n            std::string obj_text (reinterpret_cast<const char*>(Data), i);\n            std::string mtl_text (reinterpret_cast<const char*>(Data+i+1), Size-i-1);\n            reader.ParseFromString(obj_text, mtl_text,reader_config);\n            return 0;\n        }\n    }\n    return 0;\n}\n"
+          }
+        ],
+        "missing_information": [],
+        "id": "o-93d56a721a9bfcee",
+        "change_ids": [
+          "g0032"
+        ],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

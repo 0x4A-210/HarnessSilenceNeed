@@ -1,0 +1,71 @@
+{
+  "checked": {
+    "status": "introduced",
+    "gap": true,
+    "introduced_by_this_change": true,
+    "claims": [
+      {
+        "claim_id": "c1",
+        "status": "introduced",
+        "necessary": "yes",
+        "before": {
+          "requirement": "The same retained-marker and boundary-removal capability was not available: STRIPCC removed negative boundary sentinels, and there was no branch to remove a boundary preceding a stripped control.",
+          "applicability": "not_applicable",
+          "harness_status": "not_applicable",
+          "reason": "The old source accepted the option combination but could not produce this specific behavior. The absence of the new regression test alone is not the basis for this assessment.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-7e70afe97eb337f5691525cb",
+              "quote": "UTF8PROC_DLLEXPORT utf8proc_ssize_t utf8proc_normalize_utf32(utf8proc_int32_t *buffer, utf8proc_ssize_t length, unsigned int options) {\n  /* UTF8PROC_NULLTERM option will be ignored, 'length' is never ignored */\n  if (options & (UTF8PROC_NLF2LS | UTF8PROC_NLF2PS | UTF8PROC_STRIPCC)) {\n    utf8proc_ssize_t rpos;\n    utf8proc_ssize_t wpos = 0;\n    utf8proc_int32_t uc;\n    for (rpos = 0; rpos < length; rpos++) {\n      uc = buffer[rpos];\n      if (uc == 0x000D && rpos < length-1 && buffer[rpos+1] == 0x000A) rpos++;\n      if (uc == 0x000A || uc == 0x000D || uc == 0x0085 ||\n          ((options & UTF8PROC_STRIPCC) && (uc == 0x000B || uc == 0x000C))) {\n        if (options & UTF8PROC_NLF2LS) {\n          if (options & UTF8PROC_NLF2PS) {\n            buffer[wpos++] = 0x000A;\n          } else {\n            buffer[wpos++] = 0x2028;\n          }\n        } else {\n          if (options & UTF8PROC_NLF2PS) {\n            buffer[wpos++] = 0x2029;\n          } else {\n            buffer[wpos++] = 0x0020;\n          }\n        }\n      } else if ((options & UTF8PROC_STRIPCC) &&\n          (uc < 0x0020 || (uc >= 0x007F && uc < 0x00A0))) {\n        if (uc == 0x0009) buffer[wpos++] = 0x0020;\n      } else {\n        buffer[wpos++] = uc;\n      }\n    }\n    length = wpos;\n  }\n"
+            },
+            {
+              "evidence_id": "loc-47afadb69d7299b676607441",
+              "quote": "  if (options & UTF8PROC_CHARBOUND) {\n    utf8proc_bool boundary;\n    boundary = grapheme_break_extended(0, property->boundclass, 0, property->indic_conjunct_break,\n                                       last_boundclass);\n    if (boundary) {\n      if (bufsize >= 1) dst[0] = -1; /* sentinel value for grapheme break */\n      if (bufsize >= 2) dst[1] = uc;\n      return 2;\n    }\n  }\n  if (bufsize >= 1) *dst = uc;\n  return 1;\n"
+            },
+            {
+              "evidence_id": "loc-a7b162e90839bfabf19698ac",
+              "quote": "UTF8PROC_DLLEXPORT utf8proc_ssize_t utf8proc_reencode(utf8proc_int32_t *buffer, utf8proc_ssize_t length, unsigned int options) {\n  /* UTF8PROC_NULLTERM option will be ignored, 'length' is never ignored\n     ASSERT: 'buffer' has one spare byte of free space at the end! */\n  length = utf8proc_normalize_utf32(buffer, length, options);\n  if (length < 0) return length;\n  {\n    utf8proc_ssize_t rpos, wpos = 0;\n    utf8proc_int32_t uc;\n    if (options & UTF8PROC_CHARBOUND) {\n        for (rpos = 0; rpos < length; rpos++) {\n            uc = buffer[rpos];\n            wpos += charbound_encode_char(uc, ((utf8proc_uint8_t *)buffer) + wpos);\n        }\n    } else {\n        for (rpos = 0; rpos < length; rpos++) {\n            uc = buffer[rpos];\n            wpos += utf8proc_encode_char(uc, ((utf8proc_uint8_t *)buffer) + wpos);\n        }\n    }\n    ((utf8proc_uint8_t *)buffer)[wpos] = 0;\n    return wpos;\n"
+            },
+            {
+              "evidence_id": "loc-22b1c14d8de2cd6470a9f204",
+              "quote": "    /* issue 356: UTF8PROC_CHARBOUND must still insert 0xff markers when\n       combined with UTF8PROC_COMPOSE or UTF8PROC_DECOMPOSE */\n    {\n        /* \"e\\u0301xy\" -> NFC \"\\u00e9xy\" with a marker before each grapheme */\n        utf8proc_uint8_t input[] = {0x65,0xcc,0x81,0x78,0x79,0x00};\n        utf8proc_uint8_t output[] = {0xff,0xc3,0xa9,0xff,0x78,0xff,0x79,0x00};\n        utf8proc_ssize_t glen;\n        utf8proc_uint8_t *g;\n        glen = utf8proc_map(input, 0, &g, UTF8PROC_NULLTERM | UTF8PROC_CHARBOUND | UTF8PROC_COMPOSE);\n        check(glen == 7, \"CHARBOUND|COMPOSE returned length %zd, expected 7\", glen);\n        check(!strcmp((char*)g, (char*)output), \"CHARBOUND|COMPOSE dropped grapheme markers\");\n        utf8proc_free(g);\n\n        /* same input, decomposed: \"e\\u0301xy\" is unchanged by NFD */\n        {\n            utf8proc_uint8_t nfd[] = {0xff,0x65,0xcc,0x81,0xff,0x78,0xff,0x79,0x00};\n            glen = utf8proc_map(input, 0, &g, UTF8PROC_NULLTERM | UTF8PROC_CHARBOUND | UTF8PROC_DECOMPOSE);\n            check(glen == 8, \"CHARBOUND|DECOMPOSE returned length %zd, expected 8\", glen);\n            check(!strcmp((char*)g, (char*)nfd), \"CHARBOUND|DECOMPOSE dropped grapheme markers\");\n            utf8proc_free(g);\n        }\n    };\n\n    /* https://github.com/JuliaLang/julia/issues/37680 */\n    checkline(\"/ 1f1f8 1f1ea / 1f1f8 1f1ea /\", true); /* Two swedish flags after each other */\n    checkline(\"/ 1f926 1f3fc 200d 2642 fe0f /\", true); /* facepalm + pale skin + zwj + male sign + FE0F */\n    checkline(\"/ 1f468 1f3fb 200d 1f91d 200d 1f468 1f3fd /\", true); /* man face + pale skin + zwj + hand holding + zwj + man face + dark skin */\n\n    /* more GB9c tests */\n    checkline(\"/ 0915 0300 094d 0300 0924 / 0915 /\", true);\n    checkline(\"/ 0915 0300 094d 0300 094d 0924 / 0915 /\", true);\n    checkline(\"/ 0915 0300 0300 / 0924 / 0915 /\", true);\n    checkline(\"/ 0915 0300 094d 0300 / 0078 /\", true);\n    checkline(\"/ 0300 094d 0300 0924 / 0915 /\", true); /* GB9c does not require a leading consonant */\n\n    check(utf8proc_grapheme_break(0x03b1, 0x03b2), \"failed 03b1 / 03b2 test\");\n    check(!utf8proc_grapheme_break(0x03b1, 0x0302), \"failed 03b1 0302 test\");\n\n    printf(\"Passed regression tests!\\n\");\n\n    return 0;\n}\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Mapping a valid control-containing string with CHARBOUND|STRIPCC must retain markers for surviving graphemes and remove the boundary before a stripped control.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "Normalization now retains negative sentinels and removes a preceding boundary when it strips a control with CHARBOUND selected. The old harness never selects both flags.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-32067087efbe8c85efa8fa86",
+              "quote": "UTF8PROC_DLLEXPORT utf8proc_ssize_t utf8proc_normalize_utf32(utf8proc_int32_t *buffer, utf8proc_ssize_t length, unsigned int options) {\n  /* UTF8PROC_NULLTERM option will be ignored, 'length' is never ignored */\n  if (options & (UTF8PROC_NLF2LS | UTF8PROC_NLF2PS | UTF8PROC_STRIPCC)) {\n    utf8proc_ssize_t rpos;\n    utf8proc_ssize_t wpos = 0;\n    utf8proc_int32_t uc;\n    for (rpos = 0; rpos < length; rpos++) {\n      uc = buffer[rpos];\n      if (uc == 0x000D && rpos < length-1 && buffer[rpos+1] == 0x000A) rpos++;\n      if (uc == 0x000A || uc == 0x000D || uc == 0x0085 ||\n          ((options & UTF8PROC_STRIPCC) && (uc == 0x000B || uc == 0x000C))) {\n        if (options & UTF8PROC_NLF2LS) {\n          if (options & UTF8PROC_NLF2PS) {\n            buffer[wpos++] = 0x000A;\n          } else {\n            buffer[wpos++] = 0x2028;\n          }\n        } else {\n          if (options & UTF8PROC_NLF2PS) {\n            buffer[wpos++] = 0x2029;\n          } else {\n            buffer[wpos++] = 0x0020;\n          }\n        }\n      } else if ((options & UTF8PROC_STRIPCC) &&\n          /* uc < 0 is a grapheme-break sentinel from UTF8PROC_CHARBOUND,\n             not a control character, so keep it */\n          ((uc >= 0 && uc < 0x0020) || (uc >= 0x007F && uc < 0x00A0))) {\n        if (uc == 0x0009) buffer[wpos++] = 0x0020;\n        /* a removed control character is a grapheme of its own, so also\n           drop the boundary sentinel that UTF8PROC_CHARBOUND put before it */\n        else if ((options & UTF8PROC_CHARBOUND) && wpos > 0 && buffer[wpos-1] == -1) wpos--;\n      } else {\n        buffer[wpos++] = uc;\n      }\n    }\n    length = wpos;\n  }\n"
+            },
+            {
+              "evidence_id": "loc-8ee484a055be835b0bdfff0e",
+              "quote": "    /* UTF8PROC_STRIPCC must not strip the 0xff markers of UTF8PROC_CHARBOUND */\n    {\n        /* Cover tabs, C1 controls, and a control before the first printable character. */\n        utf8proc_uint8_t input[][8] = {\n            {0x61,0x0a,0x62,0x01,0x63,0x00},\n            {0x61,0x09,0x62,0x00},\n            {0x61,0xc2,0x90,0x62,0x00},\n            {0x01,0x61,0x00}\n        };\n        utf8proc_uint8_t output[][9] = {\n            {0xff,0x61,0xff,0x20,0xff,0x62,0xff,0x63,0x00},\n            {0xff,0x61,0xff,0x20,0xff,0x62,0x00},\n            {0xff,0x61,0xff,0x62,0x00},\n            {0xff,0x61,0x00}\n        };\n        const char *plain[] = {\"a bc\", \"a b\", \"ab\", \"a\"};\n        size_t i;\n        for (i = 0; i < sizeof(input) / sizeof(input[0]); i++) {\n            utf8proc_ssize_t glen;\n            utf8proc_uint8_t *g;\n            glen = utf8proc_map(input[i], 0, &g, UTF8PROC_NULLTERM | UTF8PROC_CHARBOUND | UTF8PROC_STRIPCC);\n            check(glen == (utf8proc_ssize_t)strlen((char*)output[i]), \"CHARBOUND|STRIPCC returned wrong length in case %zu\", i);\n            check(!strcmp((char*)g, (char*)output[i]), \"CHARBOUND|STRIPCC dropped grapheme markers in case %zu\", i);\n            utf8proc_free(g);\n            glen = utf8proc_map(input[i], 0, &g, UTF8PROC_NULLTERM | UTF8PROC_STRIPCC);\n            check(glen == (utf8proc_ssize_t)strlen(plain[i]), \"STRIPCC returned wrong length in case %zu\", i);\n            check(!strcmp((char*)g, plain[i]), \"STRIPCC changed output in case %zu\", i);\n            {\n                utf8proc_uint8_t *separate, *combined;\n                utf8proc_ssize_t separate_len, combined_len;\n                separate_len = utf8proc_map(g, 0, &separate, UTF8PROC_NULLTERM | UTF8PROC_CHARBOUND);\n                combined_len = utf8proc_map(input[i], 0, &combined, UTF8PROC_NULLTERM | UTF8PROC_CHARBOUND | UTF8PROC_STRIPCC);\n                check(separate_len >= 0 && combined_len >= 0, \"two-step mapping failed in case %zu\", i);\n                check(separate_len == combined_len, \"two-step mapping returned different length in case %zu\", i);\n                check(!memcmp(separate, combined, (size_t)combined_len + 1), \"two-step mapping differs from combined flags in case %zu\", i);\n                utf8proc_free(separate);\n                utf8proc_free(combined);\n            }\n            utf8proc_free(g);\n"
+            },
+            {
+              "evidence_id": "loc-38b6735ef8a1b3b17cc1ed0c",
+              "quote": "UTF8PROC_DLLEXPORT utf8proc_ssize_t utf8proc_map_custom(\n  const utf8proc_uint8_t *str, utf8proc_ssize_t strlen, utf8proc_uint8_t **dstptr, unsigned int options,\n  utf8proc_custom_func custom_func, void *custom_data\n) {\n  utf8proc_int32_t *buffer;\n  utf8proc_ssize_t result;\n  utf8proc_ssize_t bufsize;\n  *dstptr = NULL;\n  bufsize = utf8proc_decompose_custom(str, strlen, NULL, 0, options, custom_func, custom_data);\n  if (bufsize < 0) return bufsize;\n  buffer = (utf8proc_int32_t *) malloc(((utf8proc_size_t)bufsize) * sizeof(utf8proc_int32_t) + 1);\n  if (!buffer) return UTF8PROC_ERROR_NOMEM;\n  result = utf8proc_decompose_custom(str, strlen, buffer, bufsize, options, custom_func, custom_data);\n  if (result < 0) {\n    free(buffer);\n    return result;\n  }\n  /* a custom_func that returns different results across the two decompose\n     passes can make the second pass longer than the buffer we sized from the\n     first; reencode would then read and write past the allocation, so bail\n     out instead of corrupting the heap */\n  if (result > bufsize) {\n    free(buffer);\n    return UTF8PROC_ERROR_OVERFLOW;\n  }\n  result = utf8proc_reencode(buffer, result, options);\n  if (result < 0) {\n    free(buffer);\n    return result;\n  }\n  {\n    utf8proc_int32_t *newptr;\n    newptr = (utf8proc_int32_t *) realloc(buffer, (size_t)result+1);\n    if (newptr) buffer = newptr;\n  }\n  *dstptr = (utf8proc_uint8_t *)buffer;\n  return result;\n"
+            },
+            {
+              "evidence_id": "loc-87032911124887080b198c59",
+              "quote": "UTF8PROC_DLLEXPORT utf8proc_ssize_t utf8proc_reencode(utf8proc_int32_t *buffer, utf8proc_ssize_t length, unsigned int options) {\n  /* UTF8PROC_NULLTERM option will be ignored, 'length' is never ignored\n     ASSERT: 'buffer' has one spare byte of free space at the end! */\n  length = utf8proc_normalize_utf32(buffer, length, options);\n  if (length < 0) return length;\n  {\n    utf8proc_ssize_t rpos, wpos = 0;\n    utf8proc_int32_t uc;\n    if (options & UTF8PROC_CHARBOUND) {\n        for (rpos = 0; rpos < length; rpos++) {\n            uc = buffer[rpos];\n            wpos += charbound_encode_char(uc, ((utf8proc_uint8_t *)buffer) + wpos);\n        }\n    } else {\n        for (rpos = 0; rpos < length; rpos++) {\n            uc = buffer[rpos];\n            wpos += utf8proc_encode_char(uc, ((utf8proc_uint8_t *)buffer) + wpos);\n        }\n    }\n    ((utf8proc_uint8_t *)buffer)[wpos] = 0;\n    return wpos;\n"
+            }
+          ]
+        },
+        "same_blocker": "not_applicable",
+        "reason": "The obligation is the same combined-option output capability on both sides. Before, the old implementation removed its marker sentinels; after, the capability exists but the fixed harness options block coverage.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": []
+  },
+  "citation_errors": [],
+  "missing_claims": [],
+  "preimage_errors": []
+}

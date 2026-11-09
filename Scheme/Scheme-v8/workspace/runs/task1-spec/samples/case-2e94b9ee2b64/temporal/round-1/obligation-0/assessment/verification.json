@@ -1,0 +1,73 @@
+{
+  "checked": {
+    "status": "introduced",
+    "gap": true,
+    "introduced_by_this_change": true,
+    "claims": [
+      {
+        "claim_id": "o-a650cb15dfdd5fce",
+        "status": "introduced",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Reach a clean do_dump failure when traversal reaches JSON_PARSER_MAX_DEPTH.",
+          "applicability": "not_applicable",
+          "harness_status": "not_applicable",
+          "reason": "The complete old do_dump body has no depth limit rejection.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-52fce9e74b8c94b4c62b8475",
+              "quote": "static int do_dump(const json_t *json, size_t flags, int depth, hashtable_t *parents,\n                   json_dump_callback_t dump, void *data) {\n    int embed = flags & JSON_EMBED;\n\n    flags &= ~JSON_EMBED;\n\n    if (!json)\n        return -1;\n\n    switch (json_typeof(json)) {\n        case JSON_NULL:\n            return dump(\"null\", 4, data);\n\n        case JSON_TRUE:\n            return dump(\"true\", 4, data);\n\n        case JSON_FALSE:\n            return dump(\"false\", 5, data);\n\n        case JSON_INTEGER: {\n            char buffer[MAX_INTEGER_STR_LENGTH];\n            int size;\n\n            size = snprintf(buffer, MAX_INTEGER_STR_LENGTH, \"%\" JSON_INTEGER_FORMAT,\n                            json_integer_value(json));\n            if (size < 0 || size >= MAX_INTEGER_STR_LENGTH)\n                return -1;\n\n            return dump(buffer, size, data);\n        }\n\n        case JSON_REAL: {\n            char buffer[MAX_REAL_STR_LENGTH];\n            int size;\n            double value = json_real_value(json);\n\n            size = jsonp_dtostr(buffer, MAX_REAL_STR_LENGTH, value,\n                                FLAGS_TO_PRECISION(flags));\n            if (size < 0)\n                return -1;\n\n            return dump(buffer, size, data);\n        }\n\n        case JSON_STRING:\n            return dump_string(json_string_value(json), json_string_length(json), dump,\n                               data, flags);\n\n        case JSON_ARRAY: {\n            size_t n;\n            size_t i;\n            /* Space for \"0x\", double the sizeof a pointer for the hex and a\n             * terminator. */\n            char key[2 + (sizeof(json) * 2) + 1];\n            size_t key_len;\n\n            /* detect circular references */\n            if (jsonp_loop_check(parents, json, key, sizeof(key), &key_len))\n                return -1;\n\n            n = json_array_size(json);\n\n            if (!embed && dump(\"[\", 1, data))\n                return -1;\n            if (n == 0) {\n                hashtable_del(parents, key, key_len);\n                return embed ? 0 : dump(\"]\", 1, data);\n            }\n            if (dump_indent(flags, depth + 1, 0, dump, data))\n                return -1;\n\n            for (i = 0; i < n - 1; ++i) {\n                if (do_dump(json_array_get(json, i), flags, depth + 1, parents, dump,\n                            data))\n                    return -1;\n\n                if (dump(\",\", 1, data) || dump_indent(flags, depth + 1, 1, dump, data))\n                    return -1;\n            }\n\n            if (do_dump(json_array_get(json, i), flags, depth + 1, parents, dump, data))\n                return -1;\n            if (dump_indent(flags, depth, 0, dump, data))\n                return -1;\n\n            hashtable_del(parents, key, key_len);\n            return embed ? 0 : dump(\"]\", 1, data);\n        }\n\n        case JSON_OBJECT: {\n            void *iter;\n            const char *separator;\n            int separator_length;\n            char loop_key[LOOP_KEY_LEN];\n            size_t loop_key_len;\n\n            if (flags & JSON_COMPACT) {\n                separator = \":\";\n                separator_length = 1;\n            } else {\n                separator = \": \";\n                separator_length = 2;\n            }\n\n            /* detect circular references */\n            if (jsonp_loop_check(parents, json, loop_key, sizeof(loop_key),\n                                 &loop_key_len))\n                return -1;\n\n            if (!embed && dump(\"{\", 1, data))\n                return -1;\n\n            iter = json_object_iter((json_t *)json);\n            if (!iter) {\n                hashtable_del(parents, loop_key, loop_key_len);\n                return embed ? 0 : dump(\"}\", 1, data);\n            }\n            if (dump_indent(flags, depth + 1, 0, dump, data))\n                return -1;\n\n            if (flags & JSON_SORT_KEYS) {\n                struct key_len *keys;\n                size_t size, i;\n\n                size = json_object_size(json);\n                keys = jsonp_malloc(size * sizeof(struct key_len));\n                if (!keys)\n                    return -1;\n\n                i = 0;\n                while (iter) {\n                    struct key_len *keylen = &keys[i];\n\n                    keylen->key = json_object_iter_key(iter);\n                    keylen->len = json_object_iter_key_len(iter);\n\n                    iter = json_object_iter_next((json_t *)json, iter);\n                    i++;\n                }\n                assert(i == size);\n\n                qsort(keys, size, sizeof(struct key_len), compare_keys);\n\n                for (i = 0; i < size; i++) {\n                    const struct key_len *key;\n                    json_t *value;\n\n                    key = &keys[i];\n                    value = json_object_getn(json, key->key, key->len);\n                    assert(value);\n\n                    dump_string(key->key, key->len, dump, data, flags);\n                    if (dump(separator, separator_length, data) ||\n                        do_dump(value, flags, depth + 1, parents, dump, data)) {\n                        jsonp_free(keys);\n                        return -1;\n                    }\n\n                    if (i < size - 1) {\n                        if (dump(\",\", 1, data) ||\n                            dump_indent(flags, depth + 1, 1, dump, data)) {\n                            jsonp_free(keys);\n                            return -1;\n                        }\n                    } else {\n                        if (dump_indent(flags, depth, 0, dump, data)) {\n                            jsonp_free(keys);\n                            return -1;\n                        }\n                    }\n                }\n\n                jsonp_free(keys);\n            } else {\n                /* Don't sort keys */\n\n                while (iter) {\n                    void *next = json_object_iter_next((json_t *)json, iter);\n                    const char *key = json_object_iter_key(iter);\n                    const size_t key_len = json_object_iter_key_len(iter);\n\n                    dump_string(key, key_len, dump, data, flags);\n                    if (dump(separator, separator_length, data) ||\n                        do_dump(json_object_iter_value(iter), flags, depth + 1, parents,\n                                dump, data))\n                        return -1;\n\n                    if (next) {\n                        if (dump(\",\", 1, data) ||\n                            dump_indent(flags, depth + 1, 1, dump, data))\n                            return -1;\n                    } else {\n                        if (dump_indent(flags, depth, 0, dump, data))\n                            return -1;\n                    }\n\n                    iter = next;\n                }\n            }\n\n            hashtable_del(parents, loop_key, loop_key_len);\n            return embed ? 0 : dump(\"}\", 1, data);\n        }\n\n        default:\n            /* not reached */\n            return -1;\n    }\n}\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Reach the supported do_dump failure for a JSON value whose traversal reaches JSON_PARSER_MAX_DEPTH.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The new guard returns failure at the limit. The API test supplies an array beyond the limit, but the harness sends only successfully parsed values to dumping. parse_value rejects values beyond the limit, while dump traversal begins one depth level lower than parsing. The harness has no other route to a deeper value.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-d61abb9de7acc0ed6dba87b6",
+              "quote": "static int do_dump(const json_t *json, size_t flags, int depth, hashtable_t *parents,\n                   json_dump_callback_t dump, void *data) {\n    int embed = flags & JSON_EMBED;\n\n    flags &= ~JSON_EMBED;\n\n    if (!json)\n        return -1;\n\n    if (depth >= JSON_PARSER_MAX_DEPTH)\n        return -1;\n"
+            },
+            {
+              "evidence_id": "loc-2f3febfeebefda19436ed2ef",
+              "quote": "        case JSON_ARRAY: {\n            size_t n;\n            size_t i;\n            /* Space for \"0x\", double the sizeof a pointer for the hex and a\n             * terminator. */\n            char key[2 + (sizeof(json) * 2) + 1];\n            size_t key_len;\n\n            /* detect circular references */\n            if (jsonp_loop_check(parents, json, key, sizeof(key), &key_len))\n                return -1;\n\n            n = json_array_size(json);\n\n            if (!embed && dump(\"[\", 1, data))\n                return -1;\n            if (n == 0) {\n                hashtable_del(parents, key, key_len);\n                return embed ? 0 : dump(\"]\", 1, data);\n            }\n            if (dump_indent(flags, depth + 1, 0, dump, data))\n                return -1;\n\n            for (i = 0; i < n - 1; ++i) {\n                if (do_dump(json_array_get(json, i), flags, depth + 1, parents, dump,\n                            data))\n                    return -1;\n\n                if (dump(\",\", 1, data) || dump_indent(flags, depth + 1, 1, dump, data))\n                    return -1;\n            }\n\n            if (do_dump(json_array_get(json, i), flags, depth + 1, parents, dump, data))\n                return -1;\n"
+            },
+            {
+              "evidence_id": "loc-070375a3059d6227a6f4326f",
+              "quote": "static void max_depth() {\n    json_t *json;\n    char *result;\n\n    /* A structure nested exactly to the limit must still serialize. */\n    json = build_nested_array(JSON_PARSER_MAX_DEPTH);\n    result = json_dumps(json, 0);\n    if (!result)\n        fail(\"json_dumps failed for a structure within the depth limit\");\n    free(result);\n    json_decref(json);\n\n    /* A structure nested deeper than the limit must fail cleanly rather\n       than overflow the stack. */\n    json = build_nested_array(JSON_PARSER_MAX_DEPTH + 100);\n    if (json_dumps(json, 0) != NULL)\n        fail(\"json_dumps didn't fail for a too deeply nested structure\");\n    json_decref(json);\n"
+            },
+            {
+              "evidence_id": "loc-30dd15ba1e49d1e83d6444cc",
+              "quote": "    if (lex_init(&lex, buffer_get, flags, (void *)&stream_data))\n        return NULL;\n\n    result = parse_json(&lex, flags, error);\n\n    lex_close(&lex);\n    return result;\n"
+            },
+            {
+              "evidence_id": "loc-db2779d10e3515cf0acdacd0",
+              "quote": "static json_t *parse_json(lex_t *lex, size_t flags, json_error_t *error) {\n    json_t *result;\n\n    lex->depth = 0;\n\n    lex_scan(lex, error);\n    if (!(flags & JSON_DECODE_ANY)) {\n        if (lex->token != '[' && lex->token != '{') {\n            error_set(error, lex, json_error_invalid_syntax, \"'[' or '{' expected\");\n            return NULL;\n        }\n    }\n\n    result = parse_value(lex, flags, error);\n    if (!result)\n        return NULL;\n"
+            },
+            {
+              "evidence_id": "loc-7282d0759a0a4130580ac0b3",
+              "quote": "static json_t *parse_value(lex_t *lex, size_t flags, json_error_t *error) {\n    json_t *json;\n\n    lex->depth++;\n    if (lex->depth > JSON_PARSER_MAX_DEPTH) {\n        error_set(error, lex, json_error_stack_overflow, \"maximum parsing depth reached\");\n        return NULL;\n    }\n"
+            },
+            {
+              "evidence_id": "loc-b58a5675a5a237263a9f9f50",
+              "quote": "int json_dump_callback(const json_t *json, json_dump_callback_t callback, void *data,\n                       size_t flags) {\n    int res;\n    hashtable_t parents_set;\n\n    if (!(flags & JSON_ENCODE_ANY)) {\n        if (!json_is_array(json) && !json_is_object(json))\n            return -1;\n    }\n\n    if (hashtable_init(&parents_set))\n        return -1;\n    res = do_dump(json, flags, 0, &parents_set, callback, data);\n    hashtable_close(&parents_set);\n\n    return res;\n"
+            },
+            {
+              "evidence_id": "loc-fbf8b7c7145267208cc2ae2c",
+              "quote": "char *json_dumps(const json_t *json, size_t flags) {\n    strbuffer_t strbuff;\n    char *result;\n\n    if (strbuffer_init(&strbuff))\n        return NULL;\n\n    if (json_dump_callback(json, dump_to_strbuffer, (void *)&strbuff, flags))\n        result = NULL;\n    else {\n        char *new_result;\n        result = strbuffer_steal_value(&strbuff);\n        // technically the resizing is not needed.\n        new_result = jsonp_realloc(result, strbuff.size, strbuff.length + 1);\n        if (new_result) { // when realloc fails we just use the original pointer\n            result = new_result;\n        }\n    }\n\n    strbuffer_close(&strbuff);\n    return result;\n}\n"
+            }
+          ]
+        },
+        "same_blocker": "not_applicable",
+        "reason": "The same depth limit tuple is absent from old do_dump and supported by new do_dump. The old harness cannot reach the new behavior because its only dumped objects come from the depth limited parser.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": []
+  },
+  "citation_errors": []
+}

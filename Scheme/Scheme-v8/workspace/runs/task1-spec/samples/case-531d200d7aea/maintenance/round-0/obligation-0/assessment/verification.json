@@ -1,0 +1,86 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [],
+      "foundation": {
+        "build": {
+          "status": "pass",
+          "reason": "The supplied recipe builds libyaml, compiles the fuzz target, and links it with libyaml.a. This establishes the build wiring for the focused route; no build execution result is supplied.",
+          "errors": []
+        },
+        "input": {
+          "status": "pass",
+          "reason": "The entry reserves two option bytes and passes the remaining bytes and length to the parser's string-input API, allowing a valid YAML stream such as `[]` to be supplied.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "pass",
+          "reason": "On the focused early-exit route, the parsed event is deleted before the jump; cleanup deletes the parser, emitter, copied events, and output buffer.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "blocked",
+          "reason": "A successful stream-start copy returns 1, which the entry treats as a reason to jump to cleanup before emission or another parse iteration.",
+          "errors": []
+        }
+      },
+      "errors": [
+        "incomplete_input_scope",
+        "invalid_diff_coverage_ledger",
+        "incomplete_diff_group_selection"
+      ],
+      "missing_information": [],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "kind": "check",
+        "necessary": true,
+        "established": true,
+        "requirement": "After copying a successfully parsed event, pass that event to yaml_emitter_emit and continue parsing the stream.",
+        "target_route": "LLVMFuzzerTestOneInput → yaml_parser_parse → copy_event → yaml_emitter_emit → next parse iteration.",
+        "failure_condition": "With two option bytes followed by a valid YAML stream such as `[]`, the stream-start event copies successfully. copy_event returns 1, and the entry jumps to delete_parser before yaml_emitter_emit or the next parse iteration.",
+        "alternative_paths": "The complete entry has one emitter call in its first loop, after the faulty check. Its later parser pass requires that loop to finish; the jump instead reaches cleanup and return.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-1dba4376d79faadf1f42d09a",
+            "quote": "YAML_DECLARE(int)\nyaml_stream_start_event_initialize(yaml_event_t *event,\n        yaml_encoding_t encoding)\n{\n    yaml_mark_t mark = { 0, 0, 0 };\n\n    assert(event);  /* Non-NULL event object is expected. */\n\n    STREAM_START_EVENT_INIT(*event, encoding, mark, mark);\n\n    return 1;\n}\n"
+          },
+          {
+            "evidence_id": "loc-afd0c4454ff11ade10a10d0f",
+            "quote": "YAML_DECLARE(int)\nyaml_parser_parse(yaml_parser_t *parser, yaml_event_t *event)\n{\n    assert(parser);     /* Non-NULL parser object is expected. */\n    assert(event);      /* Non-NULL event object is expected. */\n\n    /* Erase the event object. */\n\n    memset(event, 0, sizeof(yaml_event_t));\n\n    /* No events after the end of the stream or error. */\n\n    if (parser->stream_end_produced || parser->error ||\n            parser->state == YAML_PARSE_END_STATE) {\n        return 1;\n    }\n\n    /* Generate the next event. */\n\n    return yaml_parser_state_machine(parser, event);\n}\n"
+          },
+          {
+            "evidence_id": "loc-15059e537450e45c66535c78",
+            "quote": "YAML_DECLARE(int)\nyaml_emitter_emit(yaml_emitter_t *emitter, yaml_event_t *event)\n{\n    if (!ENQUEUE(emitter, emitter->events, *event)) {\n        yaml_event_delete(event);\n        return 0;\n    }\n\n    while (!yaml_emitter_need_more_events(emitter)) {\n        if (!yaml_emitter_analyze_event(emitter, emitter->events.head))\n            return 0;\n        if (!yaml_emitter_state_machine(emitter, emitter->events.head))\n            return 0;\n        yaml_event_delete(&DEQUEUE(emitter, emitter->events));\n    }\n\n    return 1;\n}\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-def42772e20da43021274045",
+            "quote": "bool copy_event(yaml_event_t *event_to, yaml_event_t *event_from) {\n\n  switch (event_from->type) {\n  case YAML_STREAM_START_EVENT:\n    return yaml_stream_start_event_initialize(\n        event_to, event_from->data.stream_start.encoding);\n\n  case YAML_STREAM_END_EVENT:\n    return yaml_stream_end_event_initialize(event_to);\n"
+          },
+          {
+            "evidence_id": "loc-2799b7a60aab7a98ea9717e8",
+            "quote": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n  if (size < 2)\n    return 0;\n\n  yaml_parser_t parser;\n  yaml_emitter_t emitter;\n  yaml_event_t event;\n  yaml_event_t events[MAX_EVENTS];\n  size_t event_number = 0;\n  bool done = false;\n  int count = 0;\n  bool is_canonical = data[0] & 1;\n  bool is_unicode = data[1] & 1;\n  data += 2;\n  size -= 2;\n\n  if (!yaml_parser_initialize(&parser))\n    return 0;\n\n  yaml_parser_set_input_string(&parser, data, size);\n  if (!yaml_emitter_initialize(&emitter)) {\n    yaml_parser_delete(&parser);\n    return 0;\n  }\n\n  yaml_emitter_set_canonical(&emitter, is_canonical);\n  yaml_emitter_set_unicode(&emitter, is_unicode);\n\n  yaml_output_buffer_t out = {/*buf=*/NULL, /*size=*/0, /*capacity=*/1000};\n  yaml_emitter_set_output(&emitter, yaml_write_handler, &out);\n\n  while (!done) {\n    if (!yaml_parser_parse(&parser, &event)) {\n      goto delete_parser;\n    }\n\n    done = (event.type == YAML_STREAM_END_EVENT);\n    if (event_number >= MAX_EVENTS) {\n      yaml_event_delete(&event);\n      goto delete_parser;\n    }\n\n    if (copy_event(&events[event_number++], &event)) {\n      yaml_event_delete(&event);\n      goto delete_parser;\n    }\n\n    if (!yaml_emitter_emit(&emitter, &event)) {\n      goto delete_parser;\n    }\n\n  }\n"
+          },
+          {
+            "evidence_id": "loc-78749629e12175d9ecab05ee",
+            "quote": "\n  yaml_parser_delete(&parser);\n\n  done = false;\n  if (!yaml_parser_initialize(&parser))\n    goto error;\n\n  yaml_parser_set_input_string(&parser, out.buf, out.size);\n\n  while (!done) {\n    if (!yaml_parser_parse(&parser, &event))\n      break;\n\n    done = (event.type == YAML_STREAM_END_EVENT);\n    if (events_equal(events + count, &event)) {\n      yaml_event_delete(&event);\n      break;\n    }\n\n    yaml_event_delete(&event);\n    count++;\n  }\n\ndelete_parser:\n\n  yaml_parser_delete(&parser);\n\nerror:\n\n  yaml_emitter_delete(&emitter);\n\n  for (int k = 0; k < event_number; k++) {\n    yaml_event_delete(events + k);\n  }\n\n  free(out.buf);\n\n  return 0;\n}\n"
+          }
+        ],
+        "missing_information": [],
+        "id": "o-898a50c48c33f951",
+        "change_ids": [],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

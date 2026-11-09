@@ -1,0 +1,73 @@
+{
+  "checked": {
+    "status": "unknown",
+    "gap": null,
+    "introduced_by_this_change": null,
+    "claims": [
+      {
+        "claim_id": "dictionary_stream_compression",
+        "status": "unknown",
+        "necessary": "unknown",
+        "before": {
+          "requirement": "Streaming compression with a loaded dictionary must be reachable through a supported context setup.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The source provides dictionary loading and dictionary-specific compression. The harness uses streaming compression but makes no dictionary load or reference call; fuzz input cannot change that setup.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-b1ca22a46d39c4223ed8a29c",
+              "quote": "size_t ZSTD_CCtx_loadDictionary_advanced(\n        ZSTD_CCtx* cctx,\n        const void* dict, size_t dictSize,\n        ZSTD_dictLoadMethod_e dictLoadMethod,\n        ZSTD_dictContentType_e dictContentType)\n{\n    DEBUGLOG(4, \"ZSTD_CCtx_loadDictionary_advanced (size: %u)\", (U32)dictSize);\n    RETURN_ERROR_IF(cctx->streamStage != zcss_init, stage_wrong,\n                    \"Can't load a dictionary when cctx is not in init stage.\");\n    ZSTD_clearAllDicts(cctx);  /* erase any previously set dictionary */\n    if (dict == NULL || dictSize == 0)  /* no dictionary */\n        return 0;\n    if (dictLoadMethod == ZSTD_dlm_byRef) {\n        cctx->localDict.dict = dict;\n    } else {\n        /* copy dictionary content inside CCtx to own its lifetime */\n        void* dictBuffer;\n        RETURN_ERROR_IF(cctx->staticSize, memory_allocation,\n                        \"static CCtx can't allocate for an internal copy of dictionary\");\n        dictBuffer = ZSTD_customMalloc(dictSize, cctx->customMem);\n        RETURN_ERROR_IF(dictBuffer==NULL, memory_allocation,\n                        \"allocation failed for dictionary content\");\n        ZSTD_memcpy(dictBuffer, dict, dictSize);\n        cctx->localDict.dictBuffer = dictBuffer;  /* owned ptr to free */\n        cctx->localDict.dict = dictBuffer;        /* read-only reference */\n    }\n    cctx->localDict.dictSize = dictSize;\n    cctx->localDict.dictContentType = dictContentType;\n    return 0;\n}\n\nsize_t ZSTD_CCtx_loadDictionary_byReference(\n      ZSTD_CCtx* cctx, const void* dict, size_t dictSize)\n{\n    return ZSTD_CCtx_loadDictionary_advanced(\n            cctx, dict, dictSize, ZSTD_dlm_byRef, ZSTD_dct_auto);\n}\n\nsize_t ZSTD_CCtx_loadDictionary(ZSTD_CCtx* cctx, const void* dict, size_t dictSize)\n{\n    return ZSTD_CCtx_loadDictionary_advanced(\n            cctx, dict, dictSize, ZSTD_dlm_byCopy, ZSTD_dct_auto);\n}\n"
+            },
+            {
+              "evidence_id": "loc-024c84251b78c2335db2703c",
+              "quote": "ZSTD_blockCompressor ZSTD_selectBlockCompressor(ZSTD_strategy strat, ZSTD_paramSwitch_e useRowMatchFinder, ZSTD_dictMode_e dictMode)\n{\n    static const ZSTD_blockCompressor blockCompressor[4][ZSTD_STRATEGY_MAX+1] = {\n        { ZSTD_compressBlock_fast  /* default for 0 */,\n          ZSTD_compressBlock_fast,\n          ZSTD_compressBlock_doubleFast,\n          ZSTD_compressBlock_greedy,\n          ZSTD_compressBlock_lazy,\n          ZSTD_compressBlock_lazy2,\n          ZSTD_compressBlock_btlazy2,\n          ZSTD_compressBlock_btopt,\n          ZSTD_compressBlock_btultra,\n          ZSTD_compressBlock_btultra2 },\n        { ZSTD_compressBlock_fast_extDict  /* default for 0 */,\n          ZSTD_compressBlock_fast_extDict,\n          ZSTD_compressBlock_doubleFast_extDict,\n          ZSTD_compressBlock_greedy_extDict,\n          ZSTD_compressBlock_lazy_extDict,\n          ZSTD_compressBlock_lazy2_extDict,\n          ZSTD_compressBlock_btlazy2_extDict,\n          ZSTD_compressBlock_btopt_extDict,\n          ZSTD_compressBlock_btultra_extDict,\n          ZSTD_compressBlock_btultra_extDict },\n        { ZSTD_compressBlock_fast_dictMatchState  /* default for 0 */,\n          ZSTD_compressBlock_fast_dictMatchState,\n          ZSTD_compressBlock_doubleFast_dictMatchState,\n          ZSTD_compressBlock_greedy_dictMatchState,\n          ZSTD_compressBlock_lazy_dictMatchState,\n          ZSTD_compressBlock_lazy2_dictMatchState,\n          ZSTD_compressBlock_btlazy2_dictMatchState,\n          ZSTD_compressBlock_btopt_dictMatchState,\n          ZSTD_compressBlock_btultra_dictMatchState,\n          ZSTD_compressBlock_btultra_dictMatchState },\n        { NULL  /* default for 0 */,\n          NULL,\n          NULL,\n          ZSTD_compressBlock_greedy_dedicatedDictSearch,\n          ZSTD_compressBlock_lazy_dedicatedDictSearch,\n          ZSTD_compressBlock_lazy2_dedicatedDictSearch,\n          NULL,\n          NULL,\n          NULL,\n          NULL }\n    };\n    ZSTD_blockCompressor selectedCompressor;\n    ZSTD_STATIC_ASSERT((unsigned)ZSTD_fast == 1);\n\n    assert(ZSTD_cParam_withinBounds(ZSTD_c_strategy, strat));\n    DEBUGLOG(4, \"Selected block compressor: dictMode=%d strat=%d rowMatchfinder=%d\", (int)dictMode, (int)strat, (int)useRowMatchFinder);\n    if (ZSTD_rowMatchFinderUsed(strat, useRowMatchFinder)) {\n        static const ZSTD_blockCompressor rowBasedBlockCompressors[4][3] = {\n            { ZSTD_compressBlock_greedy_row,\n            ZSTD_compressBlock_lazy_row,\n            ZSTD_compressBlock_lazy2_row },\n            { ZSTD_compressBlock_greedy_extDict_row,\n            ZSTD_compressBlock_lazy_extDict_row,\n            ZSTD_compressBlock_lazy2_extDict_row },\n            { ZSTD_compressBlock_greedy_dictMatchState_row,\n            ZSTD_compressBlock_lazy_dictMatchState_row,\n            ZSTD_compressBlock_lazy2_dictMatchState_row },\n            { ZSTD_compressBlock_greedy_dedicatedDictSearch_row,\n            ZSTD_compressBlock_lazy_dedicatedDictSearch_row,\n            ZSTD_compressBlock_lazy2_dedicatedDictSearch_row }\n        };\n        DEBUGLOG(4, \"Selecting a row-based matchfinder\");\n        assert(useRowMatchFinder != ZSTD_ps_auto);\n        selectedCompressor = rowBasedBlockCompressors[(int)dictMode][(int)strat - (int)ZSTD_greedy];\n    } else {\n        selectedCompressor = blockCompressor[(int)dictMode][(int)strat];\n    }\n    assert(selectedCompressor != NULL);\n    return selectedCompressor;\n}\n"
+            },
+            {
+              "evidence_id": "loc-9936898642d84357bab21124",
+              "quote": "static size_t ZSTD_CCtx_init_compressStream2(ZSTD_CCtx* cctx,\n                                             ZSTD_EndDirective endOp,\n                                             size_t inSize)\n{\n    ZSTD_CCtx_params params = cctx->requestedParams;\n    ZSTD_prefixDict const prefixDict = cctx->prefixDict;\n    FORWARD_IF_ERROR( ZSTD_initLocalDict(cctx) , \"\"); /* Init the local dict if present. */\n    ZSTD_memset(&cctx->prefixDict, 0, sizeof(cctx->prefixDict));   /* single usage */\n    assert(prefixDict.dict==NULL || cctx->cdict==NULL);    /* only one can be set */\n    if (cctx->cdict && !cctx->localDict.cdict) {\n        /* Let the cdict's compression level take priority over the requested params.\n         * But do not take the cdict's compression level if the \"cdict\" is actually a localDict\n         * generated from ZSTD_initLocalDict().\n         */\n        params.compressionLevel = cctx->cdict->compressionLevel;\n    }\n    DEBUGLOG(4, \"ZSTD_compressStream2 : transparent init stage\");\n    if (endOp == ZSTD_e_end) cctx->pledgedSrcSizePlusOne = inSize + 1;  /* auto-determine pledgedSrcSize */\n\n    {   size_t const dictSize = prefixDict.dict\n                ? prefixDict.dictSize\n                : (cctx->cdict ? cctx->cdict->dictContentSize : 0);\n        ZSTD_cParamMode_e const mode = ZSTD_getCParamMode(cctx->cdict, &params, cctx->pledgedSrcSizePlusOne - 1);\n        params.cParams = ZSTD_getCParamsFromCCtxParams(\n                &params, cctx->pledgedSrcSizePlusOne-1,\n                dictSize, mode);\n    }\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Streaming compression with a loaded dictionary must remain reachable if the after-source setup and invocation path supports it.",
+          "applicability": "unknown",
+          "harness_status": "unknown",
+          "reason": "Dictionary compressor declarations remain visible, but the supplied after source does not show whether the target's streaming call can reach them through a supported dictionary setup.",
+          "source_evidence": [
+            {
+              "evidence_id": "INVALID:/claims/0/after/source_evidence/0",
+              "quote": "missing primary contract"
+            }
+          ]
+        },
+        "same_blocker": "unknown",
+        "reason": "The old harness's lack of dictionary setup is established, but the same obligation cannot be timed across both versions without the after-source call path.",
+        "error": "necessity_not_established",
+        "missing_information": [
+          "After-source bodies for ZSTD_CCtx_loadDictionary, ZSTD_CCtx_refCDict, ZSTD_CCtx_init_compressStream2 and ZSTD_selectBlockCompressor.",
+          "The selected diff hunks for g0008 and g0009."
+        ]
+      }
+    ],
+    "errors": [
+      "dictionary_stream_compression:necessity_not_established"
+    ],
+    "missing_information": [
+      "The supplied evidence contains no selected diff hunks and no after-source body of lib/compress/zstd_compress.c, preventing assessment of g0003 through g0009.",
+      "The selected changes in lib/compress/zstd_lazy.h, lib/compress/zstd_opt.h and lib/libzstd.mk cannot establish complete target coverage without the after-source compressor selection and streaming call path."
+    ]
+  },
+  "citation_errors": [
+    {
+      "pointer": "/claims/0/after/source_evidence/0",
+      "location": {
+        "unit_id": "u-5e5c5cee0710efbfa875",
+        "start_line": 49,
+        "end_line": 66,
+        "role": "dependency",
+        "dependency_reason": "These declarations show dictionary-specific compressor variants, but do not establish the public streaming setup path."
+      },
+      "reason": "missing_primary_contract:after:claim=dictionary_stream_compression;provide_the_direct_contract_not_just_dependencies"
+    }
+  ]
+}

@@ -1,0 +1,345 @@
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index c0fd4da24597a5cc356f581e84e1f5d9d207d294..998a6b7f052d8e265ec091a78881df9f6cc4421c 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -53,9 +53,9 @@ jobs:
+       - uses: actions/checkout@v6
+       - env:
+           CC: ${{matrix.cc}}
+-        run: cmake .
+-      - run: cmake --build .
+-      - run: ctest --output-on-failure
++        run: cmake -DCMAKE_BUILD_TYPE=Release .
++      - run: cmake --build . --config Release
++      - run: ctest --output-on-failure -C Release
+ 
+   valgrind:
+     runs-on: ubuntu-latest
+diff --git a/appveyor.yml b/appveyor.yml
+index e2bdad7fcbeebafcc8f7f9115f84a88207c2fa7d..23ddb2ed92c6ba5b2c5717f77bb9ca4638d5b33d 100644
+--- a/appveyor.yml
++++ b/appveyor.yml
+@@ -15,4 +15,4 @@ build_script:
+   - cd build
+   - cmake -G "%VS%" ..
+   - cmake --build . --config Release
+-  - ctest --output-on-failure
++  - ctest --output-on-failure -C Release
+diff --git a/doc/apiref.rst b/doc/apiref.rst
+index 7f812fc97288ce5c866abdecf1636d269f620ef3..b19f62e80ee502a93dbe033ba9838e25351c6097 100644
+--- a/doc/apiref.rst
++++ b/doc/apiref.rst
+@@ -1867,13 +1867,15 @@ only if they are exactly the same value, but also if they have equal
+   if their types are equal. (Because these values are singletons,
+   their equality can actually be tested with ``==``.)
+ 
++* Values nested more deeply than ``JSON_PARSER_MAX_DEPTH`` are not
++  recursed into, and thus cosidered unequal, to avoid stack exhaustion.
++
+ .. function:: int json_equal(json_t *value1, json_t *value2)
+ 
+    Returns 1 if *value1* and *value2* are equal, as defined above.
+    Returns 0 if they are unequal or one or both of the pointers are
+    *NULL*.
+ 
+-
+ Copying
+ =======
+ 
+@@ -1901,7 +1903,9 @@ Copying objects preserves the insertion order of keys.
+ 
+    .. refcounting:: new
+ 
+-   Returns a deep copy of *value*, or *NULL* on error.
++   Returns a deep copy of *value*, or *NULL* on error. Copying fails if
++   *value* is nested more deeply than ``JSON_PARSER_MAX_DEPTH``, to avoid
++   stack exhaustion.
+ 
+ 
+ .. _apiref-custom-memory-allocation:
+diff --git a/src/dump.c b/src/dump.c
+index e8d2a2998c0f029e881e287a596ee8d2d95e4f8f..9b44c112560f5e6a824f72d922aa88638488d9ed 100644
+--- a/src/dump.c
++++ b/src/dump.c
+@@ -221,6 +221,9 @@ static int do_dump(const json_t *json, size_t flags, int depth, hashtable_t *par
+     if (!json)
+         return -1;
+ 
++    if (depth >= JSON_PARSER_MAX_DEPTH)
++        return -1;
++
+     switch (json_typeof(json)) {
+         case JSON_NULL:
+             return dump("null", 4, data);
+diff --git a/src/value.c b/src/value.c
+index bb43272632a9a81a65664747686b80673e84e604..cb347385638fa0fa7d737f0495b214292892f4cc 100644
+--- a/src/value.c
++++ b/src/value.c
+@@ -37,7 +37,8 @@ static JSON_INLINE int isnan(double x) { return x != x; }
+ static JSON_INLINE int isinf(double x) { return !isnan(x) && isnan(x - x); }
+ #endif
+ 
+-json_t *do_deep_copy(const json_t *json, hashtable_t *parents);
++static int do_equal(const json_t *json1, const json_t *json2, int depth);
++json_t *do_deep_copy(const json_t *json, hashtable_t *parents, int depth);
+ 
+ static JSON_INLINE void json_init(json_t *json, json_type type) {
+     json->type = type;
+@@ -352,7 +353,7 @@ void *json_object_key_to_iter(const char *key) {
+     return hashtable_key_to_iter(key);
+ }
+ 
+-static int json_object_equal(const json_t *object1, const json_t *object2) {
++static int json_object_equal(const json_t *object1, const json_t *object2, int depth) {
+     const char *key;
+     size_t key_len;
+     const json_t *value1, *value2;
+@@ -363,7 +364,7 @@ static int json_object_equal(const json_t *object1, const json_t *object2) {
+     json_object_keylen_foreach((json_t *)object1, key, key_len, value1) {
+         value2 = json_object_getn(object2, key, key_len);
+ 
+-        if (!json_equal(value1, value2))
++        if (!do_equal(value1, value2, depth + 1))
+             return 0;
+     }
+ 
+@@ -387,7 +388,8 @@ static json_t *json_object_copy(json_t *object) {
+     return result;
+ }
+ 
+-static json_t *json_object_deep_copy(const json_t *object, hashtable_t *parents) {
++static json_t *json_object_deep_copy(const json_t *object, hashtable_t *parents,
++                                     int depth) {
+     json_t *result;
+     void *iter;
+     char loop_key[LOOP_KEY_LEN];
+@@ -412,7 +414,7 @@ static json_t *json_object_deep_copy(const json_t *object, hashtable_t *parents)
+         value = json_object_iter_value(iter);
+ 
+         if (json_object_setn_new_nocheck(result, key, key_len,
+-                                         do_deep_copy(value, parents))) {
++                                         do_deep_copy(value, parents, depth + 1))) {
+             json_decref(result);
+             result = NULL;
+             break;
+@@ -638,7 +640,7 @@ int json_array_extend(json_t *json, json_t *other_json) {
+     return 0;
+ }
+ 
+-static int json_array_equal(const json_t *array1, const json_t *array2) {
++static int json_array_equal(const json_t *array1, const json_t *array2, int depth) {
+     size_t i, size;
+ 
+     size = json_array_size(array1);
+@@ -651,7 +653,7 @@ static int json_array_equal(const json_t *array1, const json_t *array2) {
+         value1 = json_array_get(array1, i);
+         value2 = json_array_get(array2, i);
+ 
+-        if (!json_equal(value1, value2))
++        if (!do_equal(value1, value2, depth + 1))
+             return 0;
+     }
+ 
+@@ -672,7 +674,8 @@ static json_t *json_array_copy(json_t *array) {
+     return result;
+ }
+ 
+-static json_t *json_array_deep_copy(const json_t *array, hashtable_t *parents) {
++static json_t *json_array_deep_copy(const json_t *array, hashtable_t *parents,
++                                    int depth) {
+     json_t *result;
+     size_t i;
+     char loop_key[LOOP_KEY_LEN];
+@@ -686,8 +689,8 @@ static json_t *json_array_deep_copy(const json_t *array, hashtable_t *parents) {
+         goto out;
+ 
+     for (i = 0; i < json_array_size(array); i++) {
+-        if (json_array_append_new(result,
+-                                  do_deep_copy(json_array_get(array, i), parents))) {
++        if (json_array_append_new(
++                result, do_deep_copy(json_array_get(array, i), parents, depth + 1))) {
+             json_decref(result);
+             result = NULL;
+             break;
+@@ -1017,6 +1020,10 @@ void json_delete(json_t *json) {
+ /*** equality ***/
+ 
+ int json_equal(const json_t *json1, const json_t *json2) {
++    return do_equal(json1, json2, 0);
++}
++
++static int do_equal(const json_t *json1, const json_t *json2, int depth) {
+     if (!json1 || !json2)
+         return 0;
+ 
+@@ -1027,11 +1034,14 @@ int json_equal(const json_t *json1, const json_t *json2) {
+     if (json1 == json2)
+         return 1;
+ 
++    if (depth >= JSON_PARSER_MAX_DEPTH)
++        return 0;
++
+     switch (json_typeof(json1)) {
+         case JSON_OBJECT:
+-            return json_object_equal(json1, json2);
++            return json_object_equal(json1, json2, depth);
+         case JSON_ARRAY:
+-            return json_array_equal(json1, json2);
++            return json_array_equal(json1, json2, depth);
+         case JSON_STRING:
+             return json_string_equal(json1, json2);
+         case JSON_INTEGER:
+@@ -1075,21 +1085,24 @@ json_t *json_deep_copy(const json_t *json) {
+ 
+     if (hashtable_init(&parents_set))
+         return NULL;
+-    res = do_deep_copy(json, &parents_set);
++    res = do_deep_copy(json, &parents_set, 0);
+     hashtable_close(&parents_set);
+ 
+     return res;
+ }
+ 
+-json_t *do_deep_copy(const json_t *json, hashtable_t *parents) {
++json_t *do_deep_copy(const json_t *json, hashtable_t *parents, int depth) {
+     if (!json)
+         return NULL;
+ 
++    if (depth >= JSON_PARSER_MAX_DEPTH)
++        return NULL;
++
+     switch (json_typeof(json)) {
+         case JSON_OBJECT:
+-            return json_object_deep_copy(json, parents);
++            return json_object_deep_copy(json, parents, depth);
+         case JSON_ARRAY:
+-            return json_array_deep_copy(json, parents);
++            return json_array_deep_copy(json, parents, depth);
+             /* for the rest of the types, deep copying doesn't differ from
+                shallow copying */
+         case JSON_STRING:
+diff --git a/test/suites/api/test_copy.c b/test/suites/api/test_copy.c
+index 656d98dd746ce7068485f8d04f7a04cb3ea55c13..a6032af531dc4aa03617a0c36109a67be7c56812 100644
+--- a/test/suites/api/test_copy.c
++++ b/test/suites/api/test_copy.c
+@@ -364,6 +364,25 @@ static void test_deep_copy_circular_references(void) {
+     json_decref(json);
+ }
+ 
++static void test_deep_copy_max_depth(void) {
++    json_t *json;
++    json_t *copy;
++    int i;
++
++    json = json_array();
++    for (i = 1; i < JSON_PARSER_MAX_DEPTH + 100; i++) {
++        json_t *outer = json_array();
++        json_array_append_new(outer, json);
++        json = outer;
++    }
++
++    copy = json_deep_copy(json);
++    if (copy)
++        fail("json_deep_copy didn't fail for a too deeply nested structure!");
++
++    json_decref(json);
++}
++
+ static void run_tests() {
+     test_copy_simple();
+     test_deep_copy_simple();
+@@ -372,4 +391,5 @@ static void run_tests() {
+     test_copy_object();
+     test_deep_copy_object();
+     test_deep_copy_circular_references();
++    test_deep_copy_max_depth();
+ }
+diff --git a/test/suites/api/test_dump.c b/test/suites/api/test_dump.c
+index e8cb5196262774d0ace262ca6f285df83ee73304..a4fbaa3885134d7e6f9819cf5db094a61c3fac8d 100644
+--- a/test/suites/api/test_dump.c
++++ b/test/suites/api/test_dump.c
+@@ -297,6 +297,39 @@ static void embed() {
+     }
+ }
+ 
++static json_t *build_nested_array(int depth) {
++    json_t *json = json_array();
++    int i;
++
++    for (i = 1; i < depth; i++) {
++        json_t *outer = json_array();
++        json_array_append_new(outer, json);
++        json = outer;
++    }
++
++    return json;
++}
++
++static void max_depth() {
++    json_t *json;
++    char *result;
++
++    /* A structure nested exactly to the limit must still serialize. */
++    json = build_nested_array(JSON_PARSER_MAX_DEPTH);
++    result = json_dumps(json, 0);
++    if (!result)
++        fail("json_dumps failed for a structure within the depth limit");
++    free(result);
++    json_decref(json);
++
++    /* A structure nested deeper than the limit must fail cleanly rather
++       than overflow the stack. */
++    json = build_nested_array(JSON_PARSER_MAX_DEPTH + 100);
++    if (json_dumps(json, 0) != NULL)
++        fail("json_dumps didn't fail for a too deeply nested structure");
++    json_decref(json);
++}
++
+ static void run_tests() {
+     encode_null();
+     encode_twice();
+@@ -308,4 +341,5 @@ static void run_tests() {
+     dumpb();
+     dumpfd();
+     embed();
++    max_depth();
+ }
+diff --git a/test/suites/api/test_equal.c b/test/suites/api/test_equal.c
+index d068b7bf859cad07e06f91a4edcf4c507c7df4ff..914d72273d377581ee030a77bce695b277e1a41e 100644
+--- a/test/suites/api/test_equal.c
++++ b/test/suites/api/test_equal.c
+@@ -194,9 +194,34 @@ static void test_equal_complex() {
+     json_decref(value3);
+ }
+ 
++static void test_equal_max_depth() {
++    json_t *value1, *value2;
++    int i;
++
++    value1 = json_array();
++    value2 = json_array();
++    for (i = 1; i < JSON_PARSER_MAX_DEPTH + 100; i++) {
++        json_t *outer1 = json_array();
++        json_t *outer2 = json_array();
++        json_array_append_new(outer1, value1);
++        json_array_append_new(outer2, value2);
++        value1 = outer1;
++        value2 = outer2;
++    }
++
++    /* The structures are structurally equal, but exceed the depth limit;
++       json_equal must bail out rather than overflow the stack. */
++    if (json_equal(value1, value2))
++        fail("json_equal didn't bail out for a too deeply nested structure");
++
++    json_decref(value1);
++    json_decref(value2);
++}
++
+ static void run_tests() {
+     test_equal_simple();
+     test_equal_array();
+     test_equal_object();
+     test_equal_complex();
++    test_equal_max_depth();
+ }

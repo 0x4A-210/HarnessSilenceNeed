@@ -1,0 +1,821 @@
+{
+  "decision": "uncertain",
+  "errors": [],
+  "answer": {
+    "candidate_id": "o-4370a90ca297681f",
+    "decision": "uncertain",
+    "effect": "unclear",
+    "reason": "The target caps requested windowLog and hashLog at 15, but the packet does not establish that this build supports a distinct effective setting above 15. The frozen coverage obligation therefore remains unresolved.",
+    "finite_witness": "",
+    "scope_contract": {
+      "status": "established",
+      "reason": "Window and hash logs configure the target's primary streaming compression operation; both are source compression parameters and are set through the target's helper.",
+      "evidence": [
+        {
+          "evidence_id": "loc-293f9fa58079c513e2af4f7e",
+          "quote": "ZSTD_bounds ZSTD_cParam_getBounds(ZSTD_cParameter param)\n{\n    ZSTD_bounds bounds = { 0, 0, 0 };\n\n    switch(param)\n    {\n    case ZSTD_c_compressionLevel:\n        bounds.lowerBound = ZSTD_minCLevel();\n        bounds.upperBound = ZSTD_maxCLevel();\n        return bounds;\n\n    case ZSTD_c_windowLog:\n        bounds.lowerBound = ZSTD_WINDOWLOG_MIN;\n        bounds.upperBound = ZSTD_WINDOWLOG_MAX;\n        return bounds;\n\n    case ZSTD_c_hashLog:\n        bounds.lowerBound = ZSTD_HASHLOG_MIN;\n        bounds.upperBound = ZSTD_HASHLOG_MAX;\n        return bounds;\n"
+        },
+        {
+          "evidence_id": "loc-ad252277a4e78cda8b0c578a",
+          "quote": "static ZSTD_compressionParameters\nZSTD_adjustCParams_internal(ZSTD_compressionParameters cPar,\n                            unsigned long long srcSize,\n                            size_t dictSize,\n                            ZSTD_cParamMode_e mode,\n                            ZSTD_paramSwitch_e useRowMatchFinder)\n{\n    const U64 minSrcSize = 513; /* (1<<9) + 1 */\n    const U64 maxWindowResize = 1ULL << (ZSTD_WINDOWLOG_MAX-1);\n    assert(ZSTD_checkCParams(cPar)==0);\n\n    /* Cascade the selected strategy down to the next-highest one built into\n     * this binary. */\n#ifdef ZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btultra2) {\n        cPar.strategy = ZSTD_btultra;\n    }\n    if (cPar.strategy == ZSTD_btultra) {\n        cPar.strategy = ZSTD_btopt;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_BTOPT_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btopt) {\n        cPar.strategy = ZSTD_btlazy2;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_BTLAZY2_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btlazy2) {\n        cPar.strategy = ZSTD_lazy2;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_LAZY2_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_lazy2) {\n        cPar.strategy = ZSTD_lazy;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_LAZY_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_lazy) {\n        cPar.strategy = ZSTD_greedy;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_GREEDY_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_greedy) {\n        cPar.strategy = ZSTD_dfast;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_DFAST_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_dfast) {\n        cPar.strategy = ZSTD_fast;\n        cPar.targetLength = 0;\n    }\n#endif\n\n    switch (mode) {\n    case ZSTD_cpm_unknown:\n    case ZSTD_cpm_noAttachDict:\n        /* If we don't know the source size, don't make any\n         * assumptions about it. We will already have selected\n         * smaller parameters if a dictionary is in use.\n         */\n        break;\n    case ZSTD_cpm_createCDict:\n        /* Assume a small source size when creating a dictionary\n         * with an unknown source size.\n         */\n        if (dictSize && srcSize == ZSTD_CONTENTSIZE_UNKNOWN)\n            srcSize = minSrcSize;\n        break;\n    case ZSTD_cpm_attachDict:\n        /* Dictionary has its own dedicated parameters which have\n         * already been selected. We are selecting parameters\n         * for only the source.\n         */\n        dictSize = 0;\n        break;\n    default:\n        assert(0);\n        break;\n    }\n\n    /* resize windowLog if input is small enough, to use less memory */\n    if ( (srcSize <= maxWindowResize)\n      && (dictSize <= maxWindowResize) )  {\n        U32 const tSize = (U32)(srcSize + dictSize);\n        static U32 const hashSizeMin = 1 << ZSTD_HASHLOG_MIN;\n        U32 const srcLog = (tSize < hashSizeMin) ? ZSTD_HASHLOG_MIN :\n                            ZSTD_highbit32(tSize-1) + 1;\n        if (cPar.windowLog > srcLog) cPar.windowLog = srcLog;\n    }\n    if (srcSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        U32 const dictAndWindowLog = ZSTD_dictAndWindowLog(cPar.windowLog, (U64)srcSize, (U64)dictSize);\n        U32 const cycleLog = ZSTD_cycleLog(cPar.chainLog, cPar.strategy);\n        if (cPar.hashLog > dictAndWindowLog+1) cPar.hashLog = dictAndWindowLog+1;\n        if (cycleLog > dictAndWindowLog)\n            cPar.chainLog -= (cycleLog - dictAndWindowLog);\n    }\n\n    if (cPar.windowLog < ZSTD_WINDOWLOG_ABSOLUTEMIN)\n        cPar.windowLog = ZSTD_WINDOWLOG_ABSOLUTEMIN;  /* minimum wlog required for valid frame header */\n\n    /* We can't use more than 32 bits of hash in total, so that means that we require:\n     * (hashLog + 8) <= 32 && (chainLog + 8) <= 32\n     */\n    if (mode == ZSTD_cpm_createCDict && ZSTD_CDictIndicesAreTagged(&cPar)) {\n        U32 const maxShortCacheHashLog = 32 - ZSTD_SHORT_CACHE_TAG_BITS;\n        if (cPar.hashLog > maxShortCacheHashLog) {\n            cPar.hashLog = maxShortCacheHashLog;\n        }\n        if (cPar.chainLog > maxShortCacheHashLog) {\n            cPar.chainLog = maxShortCacheHashLog;\n        }\n    }\n\n\n    /* At this point, we aren't 100% sure if we are using the row match finder.\n     * Unless it is explicitly disabled, conservatively assume that it is enabled.\n     * In this case it will only be disabled for small sources, so shrinking the\n     * hash log a little bit shouldn't result in any ratio loss.\n     */\n    if (useRowMatchFinder == ZSTD_ps_auto)\n        useRowMatchFinder = ZSTD_ps_enable;\n\n    /* We can't hash more than 32-bits in total. So that means that we require:\n     * (hashLog - rowLog + 8) <= 32\n     */\n    if (ZSTD_rowMatchFinderUsed(cPar.strategy, useRowMatchFinder)) {\n        /* Switch to 32-entry rows if searchLog is 5 (or more) */\n        U32 const rowLog = BOUNDED(4, cPar.searchLog, 6);\n        U32 const maxRowHashLog = 32 - ZSTD_ROW_HASH_TAG_BITS;\n        U32 const maxHashLog = maxRowHashLog + rowLog;\n        assert(cPar.hashLog >= rowLog);\n        if (cPar.hashLog > maxHashLog) {\n            cPar.hashLog = maxHashLog;\n        }\n    }\n\n    return cPar;\n}\n"
+        },
+        {
+          "evidence_id": "loc-56f03d66affdb49db25f3c6c",
+          "quote": "    size_t dstSize = 0;\n    ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);\n    FUZZ_setRandomParameters(cctx, srcSize, producer);\n    int maxBlockSize;\n    FUZZ_ZASSERT(ZSTD_CCtx_getParameter(cctx, ZSTD_c_maxBlockSize, &maxBlockSize));\n\n    while (srcSize > 0) {\n        ZSTD_inBuffer in = makeInBuffer(&src, &srcSize, producer);\n        /* Mode controls the action. If mode == -1 we pick a new mode */\n        int mode = -1;\n        while (in.pos < in.size || mode != -1) {\n            ZSTD_outBuffer out = makeOutBuffer(dst, capacity, producer);\n            /* Previous action finished, pick a new mode. */\n            if (mode == -1) mode = FUZZ_dataProducer_uint32Range(producer, 0, 9);\n            switch (mode) {\n                case 0: /* fall-through */\n                case 1: /* fall-through */\n                case 2: {\n                    size_t const ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_flush);\n                    FUZZ_ZASSERT(ret);\n                    if (ret == 0)\n                        mode = -1;\n                    break;\n                }\n                case 3: {\n                    size_t ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_end);\n"
+        },
+        {
+          "evidence_id": "loc-e8f220682a7250ca95ea4ea9",
+          "quote": "void FUZZ_setRandomParameters(ZSTD_CCtx *cctx, size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    ZSTD_compressionParameters cParams = FUZZ_randomCParams(srcSize, producer);\n    set(cctx, ZSTD_c_windowLog, cParams.windowLog);\n    set(cctx, ZSTD_c_hashLog, cParams.hashLog);\n    set(cctx, ZSTD_c_chainLog, cParams.chainLog);\n    set(cctx, ZSTD_c_searchLog, cParams.searchLog);\n    set(cctx, ZSTD_c_minMatch, cParams.minMatch);\n    set(cctx, ZSTD_c_targetLength, cParams.targetLength);\n    set(cctx, ZSTD_c_strategy, cParams.strategy);\n"
+        }
+      ]
+    },
+    "feasible_trigger": {
+      "status": "unknown",
+      "reason": "The source expresses the supported maxima as macros without their effective numeric values. Adjustment can also lower the logs for the input size. The recipe delegates the decisive build settings.",
+      "evidence": [
+        {
+          "evidence_id": "loc-08d51b999fe5ecb4df3f8661",
+          "quote": "    case ZSTD_c_windowLog:\n        bounds.lowerBound = ZSTD_WINDOWLOG_MIN;\n        bounds.upperBound = ZSTD_WINDOWLOG_MAX;\n        return bounds;\n\n    case ZSTD_c_hashLog:\n        bounds.lowerBound = ZSTD_HASHLOG_MIN;\n        bounds.upperBound = ZSTD_HASHLOG_MAX;\n        return bounds;\n"
+        },
+        {
+          "evidence_id": "loc-e8ba20e1c4da14991f7c7cda",
+          "quote": "    /* resize windowLog if input is small enough, to use less memory */\n    if ( (srcSize <= maxWindowResize)\n      && (dictSize <= maxWindowResize) )  {\n        U32 const tSize = (U32)(srcSize + dictSize);\n        static U32 const hashSizeMin = 1 << ZSTD_HASHLOG_MIN;\n        U32 const srcLog = (tSize < hashSizeMin) ? ZSTD_HASHLOG_MIN :\n                            ZSTD_highbit32(tSize-1) + 1;\n        if (cPar.windowLog > srcLog) cPar.windowLog = srcLog;\n    }\n    if (srcSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        U32 const dictAndWindowLog = ZSTD_dictAndWindowLog(cPar.windowLog, (U64)srcSize, (U64)dictSize);\n        U32 const cycleLog = ZSTD_cycleLog(cPar.chainLog, cPar.strategy);\n        if (cPar.hashLog > dictAndWindowLog+1) cPar.hashLog = dictAndWindowLog+1;\n        if (cycleLog > dictAndWindowLog)\n            cPar.chainLog -= (cycleLog - dictAndWindowLog);\n    }\n"
+        },
+        {
+          "evidence_id": "loc-aee54f75baf598cc505ed9a6",
+          "quote": "ZSTD_compressionParameters FUZZ_randomCParams(size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    /* Select compression parameters */\n    ZSTD_compressionParameters cParams;\n    cParams.windowLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_WINDOWLOG_MIN, 15);\n    cParams.hashLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_HASHLOG_MIN, 15);\n    cParams.chainLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_CHAINLOG_MIN, 16);\n    cParams.searchLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_SEARCHLOG_MIN, 9);\n    cParams.minMatch = FUZZ_dataProducer_uint32Range(producer, ZSTD_MINMATCH_MIN,\n                                          ZSTD_MINMATCH_MAX);\n    cParams.targetLength = FUZZ_dataProducer_uint32Range(producer, 0, 512);\n    cParams.strategy = FUZZ_dataProducer_uint32Range(producer, ZSTD_STRATEGY_MIN, ZSTD_STRATEGY_MAX);\n    return ZSTD_adjustCParams(cParams, srcSize, 0);\n"
+        },
+        {
+          "evidence_id": "loc-87cf26b365c2445856697c5b",
+          "quote": "cd tests/fuzz\n\n# Download the seed corpora\nmake -j seedcorpora\n# Build all of the fuzzers\n./fuzz.py build all\n"
+        }
+      ]
+    },
+    "observable_consequence": {
+      "status": "unknown",
+      "reason": "If an effective log above 15 is supported, the target's explicit selection appears to leave that configuration unexercised. The packet does not establish the prerequisite supported configuration.",
+      "evidence": [
+        {
+          "evidence_id": "loc-31b2a24ba1c9ec997b711419",
+          "quote": "static void ZSTD_overrideCParams(\n              ZSTD_compressionParameters* cParams,\n        const ZSTD_compressionParameters* overrides)\n{\n    if (overrides->windowLog)    cParams->windowLog    = overrides->windowLog;\n    if (overrides->hashLog)      cParams->hashLog      = overrides->hashLog;\n    if (overrides->chainLog)     cParams->chainLog     = overrides->chainLog;\n    if (overrides->searchLog)    cParams->searchLog    = overrides->searchLog;\n    if (overrides->minMatch)     cParams->minMatch     = overrides->minMatch;\n    if (overrides->targetLength) cParams->targetLength = overrides->targetLength;\n    if (overrides->strategy)     cParams->strategy     = overrides->strategy;\n}\n\nZSTD_compressionParameters ZSTD_getCParamsFromCCtxParams(\n        const ZSTD_CCtx_params* CCtxParams, U64 srcSizeHint, size_t dictSize, ZSTD_cParamMode_e mode)\n{\n    ZSTD_compressionParameters cParams;\n    if (srcSizeHint == ZSTD_CONTENTSIZE_UNKNOWN && CCtxParams->srcSizeHint > 0) {\n      srcSizeHint = CCtxParams->srcSizeHint;\n    }\n    cParams = ZSTD_getCParams_internal(CCtxParams->compressionLevel, srcSizeHint, dictSize, mode);\n    if (CCtxParams->ldmParams.enableLdm == ZSTD_ps_enable) cParams.windowLog = ZSTD_LDM_DEFAULT_WINDOW_LOG;\n    ZSTD_overrideCParams(&cParams, &CCtxParams->cParams);\n    assert(!ZSTD_checkCParams(cParams));\n    /* srcSizeHint == 0 means 0 */\n    return ZSTD_adjustCParams_internal(cParams, srcSizeHint, dictSize, mode, CCtxParams->useRowMatchFinder);\n"
+        },
+        {
+          "evidence_id": "loc-8893e61d525e0cfc9331a26e",
+          "quote": "ZSTD_compressionParameters FUZZ_randomCParams(size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    /* Select compression parameters */\n    ZSTD_compressionParameters cParams;\n    cParams.windowLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_WINDOWLOG_MIN, 15);\n    cParams.hashLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_HASHLOG_MIN, 15);\n    cParams.chainLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_CHAINLOG_MIN, 16);\n    cParams.searchLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_SEARCHLOG_MIN, 9);\n    cParams.minMatch = FUZZ_dataProducer_uint32Range(producer, ZSTD_MINMATCH_MIN,\n                                          ZSTD_MINMATCH_MAX);\n    cParams.targetLength = FUZZ_dataProducer_uint32Range(producer, 0, 512);\n    cParams.strategy = FUZZ_dataProducer_uint32Range(producer, ZSTD_STRATEGY_MIN, ZSTD_STRATEGY_MAX);\n    return ZSTD_adjustCParams(cParams, srcSize, 0);\n"
+        },
+        {
+          "evidence_id": "loc-76f1d8091a92f08d87b1bb66",
+          "quote": "    {\n        size_t const cSize = compress(cBuf, neededBufSize, src, size, producer);\n        size_t const rSize = decompress(rBuf, neededBufSize, cBuf, cSize, producer);\n        FUZZ_ZASSERT(rSize);\n        FUZZ_ASSERT_MSG(rSize == size, \"Incorrect regenerated size\");\n        FUZZ_ASSERT_MSG(!FUZZ_memcmp(src, rBuf, size), \"Corruption!\");\n\n        /* Test in-place decompression (note the macro doesn't work in this case) */\n        {\n            size_t const margin = ZSTD_decompressionMargin(cBuf, cSize);\n            size_t const outputSize = size + margin;\n            char* const output = (char*)FUZZ_malloc(outputSize);\n            char* const input = output + outputSize - cSize;\n            size_t dSize;\n            FUZZ_ASSERT(outputSize >= cSize);\n            memcpy(input, cBuf, cSize);\n\n            dSize = ZSTD_decompressDCtx(dctx, output, outputSize, input, cSize);\n            FUZZ_ZASSERT(dSize);\n            FUZZ_ASSERT_MSG(dSize == size, \"Incorrect regenerated size\");\n            FUZZ_ASSERT_MSG(!FUZZ_memcmp(src, output, size), \"Corruption!\");\n"
+        }
+      ]
+    },
+    "alternatives_ruled_out": {
+      "status": "unknown",
+      "reason": "The complete target and helper show no direct request above the generated values, and the separate LDM hash setting is not the frozen main hash log. A zero value could select a default; the numeric minima and effective defaults needed to exclude that route are not supplied.",
+      "evidence": [
+        {
+          "evidence_id": "loc-9114153cae656c28682a9f9a",
+          "quote": "    case ZSTD_c_windowLog :\n        if (value!=0)   /* 0 => use default */\n            BOUNDCHECK(ZSTD_c_windowLog, value);\n        CCtxParams->cParams.windowLog = (U32)value;\n        return CCtxParams->cParams.windowLog;\n\n    case ZSTD_c_hashLog :\n        if (value!=0)   /* 0 => use default */\n            BOUNDCHECK(ZSTD_c_hashLog, value);\n        CCtxParams->cParams.hashLog = (U32)value;\n        return CCtxParams->cParams.hashLog;\n"
+        },
+        {
+          "evidence_id": "loc-31b2a24ba1c9ec997b711419",
+          "quote": "static void ZSTD_overrideCParams(\n              ZSTD_compressionParameters* cParams,\n        const ZSTD_compressionParameters* overrides)\n{\n    if (overrides->windowLog)    cParams->windowLog    = overrides->windowLog;\n    if (overrides->hashLog)      cParams->hashLog      = overrides->hashLog;\n    if (overrides->chainLog)     cParams->chainLog     = overrides->chainLog;\n    if (overrides->searchLog)    cParams->searchLog    = overrides->searchLog;\n    if (overrides->minMatch)     cParams->minMatch     = overrides->minMatch;\n    if (overrides->targetLength) cParams->targetLength = overrides->targetLength;\n    if (overrides->strategy)     cParams->strategy     = overrides->strategy;\n}\n\nZSTD_compressionParameters ZSTD_getCParamsFromCCtxParams(\n        const ZSTD_CCtx_params* CCtxParams, U64 srcSizeHint, size_t dictSize, ZSTD_cParamMode_e mode)\n{\n    ZSTD_compressionParameters cParams;\n    if (srcSizeHint == ZSTD_CONTENTSIZE_UNKNOWN && CCtxParams->srcSizeHint > 0) {\n      srcSizeHint = CCtxParams->srcSizeHint;\n    }\n    cParams = ZSTD_getCParams_internal(CCtxParams->compressionLevel, srcSizeHint, dictSize, mode);\n    if (CCtxParams->ldmParams.enableLdm == ZSTD_ps_enable) cParams.windowLog = ZSTD_LDM_DEFAULT_WINDOW_LOG;\n    ZSTD_overrideCParams(&cParams, &CCtxParams->cParams);\n    assert(!ZSTD_checkCParams(cParams));\n    /* srcSizeHint == 0 means 0 */\n    return ZSTD_adjustCParams_internal(cParams, srcSizeHint, dictSize, mode, CCtxParams->useRowMatchFinder);\n"
+        },
+        {
+          "evidence_id": "loc-8df1b6136df0207fed59cf27",
+          "quote": "static size_t compress(uint8_t *dst, size_t capacity,\n                       const uint8_t *src, size_t srcSize,\n                     FUZZ_dataProducer_t *producer)\n{\n    size_t dstSize = 0;\n    ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);\n    FUZZ_setRandomParameters(cctx, srcSize, producer);\n    int maxBlockSize;\n    FUZZ_ZASSERT(ZSTD_CCtx_getParameter(cctx, ZSTD_c_maxBlockSize, &maxBlockSize));\n\n    while (srcSize > 0) {\n        ZSTD_inBuffer in = makeInBuffer(&src, &srcSize, producer);\n        /* Mode controls the action. If mode == -1 we pick a new mode */\n        int mode = -1;\n        while (in.pos < in.size || mode != -1) {\n            ZSTD_outBuffer out = makeOutBuffer(dst, capacity, producer);\n            /* Previous action finished, pick a new mode. */\n            if (mode == -1) mode = FUZZ_dataProducer_uint32Range(producer, 0, 9);\n            switch (mode) {\n                case 0: /* fall-through */\n                case 1: /* fall-through */\n                case 2: {\n                    size_t const ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_flush);\n                    FUZZ_ZASSERT(ret);\n                    if (ret == 0)\n                        mode = -1;\n                    break;\n                }\n                case 3: {\n                    size_t ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_end);\n                    FUZZ_ZASSERT(ret);\n                    /* Reset the compressor when the frame is finished */\n                    if (ret == 0) {\n                        ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);\n                        if (FUZZ_dataProducer_uint32Range(producer, 0, 7) == 0) {\n                            size_t const remaining = in.size - in.pos;\n                            FUZZ_setRandomParameters(cctx, remaining, producer);\n                            /* Always use the same maxBlockSize */\n                            FUZZ_ZASSERT(ZSTD_CCtx_setParameter(cctx, ZSTD_c_maxBlockSize, maxBlockSize));\n                        }\n                        mode = -1;\n                    }\n                    break;\n                }\n                case 4: {\n                    ZSTD_inBuffer nullIn = { NULL, 0, 0 };\n                    ZSTD_outBuffer nullOut = { NULL, 0, 0 };\n                    size_t const ret = ZSTD_compressStream2(cctx, &nullOut, &nullIn, ZSTD_e_continue);\n                    FUZZ_ZASSERT(ret);\n                }\n                /* fall-through */\n                default: {\n                    size_t const ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_continue);\n                    FUZZ_ZASSERT(ret);\n                    mode = -1;\n                }\n            }\n            dst += out.pos;\n            dstSize += out.pos;\n            capacity -= out.pos;\n        }\n    }\n    for (;;) {\n        ZSTD_inBuffer in = {NULL, 0, 0};\n        ZSTD_outBuffer out = makeOutBuffer(dst, capacity, producer);\n        size_t const ret = ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_end);\n        FUZZ_ZASSERT(ret);\n\n        dst += out.pos;\n        dstSize += out.pos;\n        capacity -= out.pos;\n        if (ret == 0)\n            break;\n    }\n    return dstSize;\n}\n"
+        },
+        {
+          "evidence_id": "loc-6d20745008385b596c2cffd6",
+          "quote": "ZSTD_compressionParameters FUZZ_randomCParams(size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    /* Select compression parameters */\n    ZSTD_compressionParameters cParams;\n    cParams.windowLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_WINDOWLOG_MIN, 15);\n    cParams.hashLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_HASHLOG_MIN, 15);\n    cParams.chainLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_CHAINLOG_MIN, 16);\n    cParams.searchLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_SEARCHLOG_MIN, 9);\n    cParams.minMatch = FUZZ_dataProducer_uint32Range(producer, ZSTD_MINMATCH_MIN,\n                                          ZSTD_MINMATCH_MAX);\n    cParams.targetLength = FUZZ_dataProducer_uint32Range(producer, 0, 512);\n    cParams.strategy = FUZZ_dataProducer_uint32Range(producer, ZSTD_STRATEGY_MIN, ZSTD_STRATEGY_MAX);\n    return ZSTD_adjustCParams(cParams, srcSize, 0);\n"
+        },
+        {
+          "evidence_id": "loc-e31104cf5e3a6a564e0dc08a",
+          "quote": "    ZSTD_compressionParameters cParams = FUZZ_randomCParams(srcSize, producer);\n    set(cctx, ZSTD_c_windowLog, cParams.windowLog);\n    set(cctx, ZSTD_c_hashLog, cParams.hashLog);\n    set(cctx, ZSTD_c_chainLog, cParams.chainLog);\n    set(cctx, ZSTD_c_searchLog, cParams.searchLog);\n    set(cctx, ZSTD_c_minMatch, cParams.minMatch);\n    set(cctx, ZSTD_c_targetLength, cParams.targetLength);\n    set(cctx, ZSTD_c_strategy, cParams.strategy);\n    /* Select frame parameters */\n    setRand(cctx, ZSTD_c_contentSizeFlag, 0, 1, producer);\n    setRand(cctx, ZSTD_c_checksumFlag, 0, 1, producer);\n    setRand(cctx, ZSTD_c_dictIDFlag, 0, 1, producer);\n    /* Select long distance matching parameters */\n    setRand(cctx, ZSTD_c_enableLongDistanceMatching, ZSTD_ps_auto, ZSTD_ps_disable, producer);\n    setRand(cctx, ZSTD_c_ldmHashLog, ZSTD_HASHLOG_MIN, 16, producer);\n"
+        }
+      ]
+    },
+    "identity_preserved": {
+      "status": "established",
+      "reason": "The same streaming compression configuration above 15 and the same old harness cap are assessed before and after. The after strategy cascade does not itself change either log.",
+      "evidence": [
+        {
+          "evidence_id": "loc-969f9b2bebb401db131440eb",
+          "quote": "    /* resize windowLog if input is small enough, to use less memory */\n    if ( (srcSize <= maxWindowResize)\n      && (dictSize <= maxWindowResize) )  {\n        U32 const tSize = (U32)(srcSize + dictSize);\n        static U32 const hashSizeMin = 1 << ZSTD_HASHLOG_MIN;\n        U32 const srcLog = (tSize < hashSizeMin) ? ZSTD_HASHLOG_MIN :\n                            ZSTD_highbit32(tSize-1) + 1;\n        if (cPar.windowLog > srcLog) cPar.windowLog = srcLog;\n    }\n    if (srcSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        U32 const dictAndWindowLog = ZSTD_dictAndWindowLog(cPar.windowLog, (U64)srcSize, (U64)dictSize);\n        U32 const cycleLog = ZSTD_cycleLog(cPar.chainLog, cPar.strategy);\n        if (cPar.hashLog > dictAndWindowLog+1) cPar.hashLog = dictAndWindowLog+1;\n        if (cycleLog > dictAndWindowLog)\n            cPar.chainLog -= (cycleLog - dictAndWindowLog);\n    }\n\n    if (cPar.windowLog < ZSTD_WINDOWLOG_ABSOLUTEMIN)\n        cPar.windowLog = ZSTD_WINDOWLOG_ABSOLUTEMIN;  /* minimum wlog required for valid frame header */\n\n    /* We can't use more than 32 bits of hash in total, so that means that we require:\n     * (hashLog + 8) <= 32 && (chainLog + 8) <= 32\n     */\n    if (mode == ZSTD_cpm_createCDict && ZSTD_CDictIndicesAreTagged(&cPar)) {\n        U32 const maxShortCacheHashLog = 32 - ZSTD_SHORT_CACHE_TAG_BITS;\n        if (cPar.hashLog > maxShortCacheHashLog) {\n            cPar.hashLog = maxShortCacheHashLog;\n        }\n        if (cPar.chainLog > maxShortCacheHashLog) {\n            cPar.chainLog = maxShortCacheHashLog;\n        }\n    }\n\n\n    /* At this point, we aren't 100% sure if we are using the row match finder.\n     * Unless it is explicitly disabled, conservatively assume that it is enabled.\n     * In this case it will only be disabled for small sources, so shrinking the\n     * hash log a little bit shouldn't result in any ratio loss.\n     */\n    if (useRowMatchFinder == ZSTD_ps_auto)\n        useRowMatchFinder = ZSTD_ps_enable;\n\n    /* We can't hash more than 32-bits in total. So that means that we require:\n     * (hashLog - rowLog + 8) <= 32\n     */\n    if (ZSTD_rowMatchFinderUsed(cPar.strategy, useRowMatchFinder)) {\n        /* Switch to 32-entry rows if searchLog is 5 (or more) */\n        U32 const rowLog = BOUNDED(4, cPar.searchLog, 6);\n        U32 const maxRowHashLog = 32 - ZSTD_ROW_HASH_TAG_BITS;\n        U32 const maxHashLog = maxRowHashLog + rowLog;\n        assert(cPar.hashLog >= rowLog);\n        if (cPar.hashLog > maxHashLog) {\n            cPar.hashLog = maxHashLog;\n        }\n    }\n\n    return cPar;\n"
+        },
+        {
+          "evidence_id": "loc-13276582f5438028eb631895",
+          "quote": "    /* Cascade the selected strategy down to the next-highest one built into\n     * this binary. */\n#ifdef ZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btultra2) {\n        cPar.strategy = ZSTD_btultra;\n    }\n    if (cPar.strategy == ZSTD_btultra) {\n        cPar.strategy = ZSTD_btopt;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_BTOPT_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btopt) {\n        cPar.strategy = ZSTD_btlazy2;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_BTLAZY2_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btlazy2) {\n        cPar.strategy = ZSTD_lazy2;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_LAZY2_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_lazy2) {\n        cPar.strategy = ZSTD_lazy;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_LAZY_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_lazy) {\n        cPar.strategy = ZSTD_greedy;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_GREEDY_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_greedy) {\n        cPar.strategy = ZSTD_dfast;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_DFAST_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_dfast) {\n        cPar.strategy = ZSTD_fast;\n        cPar.targetLength = 0;\n    }\n#endif\n\n    switch (mode) {\n    case ZSTD_cpm_unknown:\n    case ZSTD_cpm_noAttachDict:\n        /* If we don't know the source size, don't make any\n         * assumptions about it. We will already have selected\n         * smaller parameters if a dictionary is in use.\n         */\n        break;\n    case ZSTD_cpm_createCDict:\n        /* Assume a small source size when creating a dictionary\n         * with an unknown source size.\n         */\n        if (dictSize && srcSize == ZSTD_CONTENTSIZE_UNKNOWN)\n            srcSize = minSrcSize;\n        break;\n    case ZSTD_cpm_attachDict:\n        /* Dictionary has its own dedicated parameters which have\n         * already been selected. We are selecting parameters\n         * for only the source.\n         */\n        dictSize = 0;\n        break;\n    default:\n        assert(0);\n        break;\n    }\n\n    /* resize windowLog if input is small enough, to use less memory */\n    if ( (srcSize <= maxWindowResize)\n      && (dictSize <= maxWindowResize) )  {\n        U32 const tSize = (U32)(srcSize + dictSize);\n        static U32 const hashSizeMin = 1 << ZSTD_HASHLOG_MIN;\n        U32 const srcLog = (tSize < hashSizeMin) ? ZSTD_HASHLOG_MIN :\n                            ZSTD_highbit32(tSize-1) + 1;\n        if (cPar.windowLog > srcLog) cPar.windowLog = srcLog;\n    }\n    if (srcSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        U32 const dictAndWindowLog = ZSTD_dictAndWindowLog(cPar.windowLog, (U64)srcSize, (U64)dictSize);\n        U32 const cycleLog = ZSTD_cycleLog(cPar.chainLog, cPar.strategy);\n        if (cPar.hashLog > dictAndWindowLog+1) cPar.hashLog = dictAndWindowLog+1;\n        if (cycleLog > dictAndWindowLog)\n            cPar.chainLog -= (cycleLog - dictAndWindowLog);\n    }\n\n    if (cPar.windowLog < ZSTD_WINDOWLOG_ABSOLUTEMIN)\n        cPar.windowLog = ZSTD_WINDOWLOG_ABSOLUTEMIN;  /* minimum wlog required for valid frame header */\n\n    /* We can't use more than 32 bits of hash in total, so that means that we require:\n     * (hashLog + 8) <= 32 && (chainLog + 8) <= 32\n     */\n    if (mode == ZSTD_cpm_createCDict && ZSTD_CDictIndicesAreTagged(&cPar)) {\n        U32 const maxShortCacheHashLog = 32 - ZSTD_SHORT_CACHE_TAG_BITS;\n        if (cPar.hashLog > maxShortCacheHashLog) {\n            cPar.hashLog = maxShortCacheHashLog;\n        }\n        if (cPar.chainLog > maxShortCacheHashLog) {\n            cPar.chainLog = maxShortCacheHashLog;\n        }\n    }\n\n\n    /* At this point, we aren't 100% sure if we are using the row match finder.\n     * Unless it is explicitly disabled, conservatively assume that it is enabled.\n     * In this case it will only be disabled for small sources, so shrinking the\n     * hash log a little bit shouldn't result in any ratio loss.\n     */\n    if (useRowMatchFinder == ZSTD_ps_auto)\n        useRowMatchFinder = ZSTD_ps_enable;\n\n    /* We can't hash more than 32-bits in total. So that means that we require:\n     * (hashLog - rowLog + 8) <= 32\n     */\n    if (ZSTD_rowMatchFinderUsed(cPar.strategy, useRowMatchFinder)) {\n        /* Switch to 32-entry rows if searchLog is 5 (or more) */\n        U32 const rowLog = BOUNDED(4, cPar.searchLog, 6);\n        U32 const maxRowHashLog = 32 - ZSTD_ROW_HASH_TAG_BITS;\n        U32 const maxHashLog = maxRowHashLog + rowLog;\n        assert(cPar.hashLog >= rowLog);\n        if (cPar.hashLog > maxHashLog) {\n            cPar.hashLog = maxHashLog;\n        }\n    }\n\n    return cPar;\n"
+        },
+        {
+          "evidence_id": "loc-641364eca02541171ad90672",
+          "quote": "ZSTD_compressionParameters FUZZ_randomCParams(size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    /* Select compression parameters */\n    ZSTD_compressionParameters cParams;\n    cParams.windowLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_WINDOWLOG_MIN, 15);\n    cParams.hashLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_HASHLOG_MIN, 15);\n    cParams.chainLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_CHAINLOG_MIN, 16);\n    cParams.searchLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_SEARCHLOG_MIN, 9);\n    cParams.minMatch = FUZZ_dataProducer_uint32Range(producer, ZSTD_MINMATCH_MIN,\n                                          ZSTD_MINMATCH_MAX);\n    cParams.targetLength = FUZZ_dataProducer_uint32Range(producer, 0, 512);\n    cParams.strategy = FUZZ_dataProducer_uint32Range(producer, ZSTD_STRATEGY_MIN, ZSTD_STRATEGY_MAX);\n    return ZSTD_adjustCParams(cParams, srcSize, 0);\n"
+        }
+      ]
+    },
+    "source_evidence": [
+      {
+        "evidence_id": "loc-cf0122ea7af1038b99b52b8c",
+        "quote": "ZSTD_bounds ZSTD_cParam_getBounds(ZSTD_cParameter param)\n{\n    ZSTD_bounds bounds = { 0, 0, 0 };\n\n    switch(param)\n    {\n    case ZSTD_c_compressionLevel:\n        bounds.lowerBound = ZSTD_minCLevel();\n        bounds.upperBound = ZSTD_maxCLevel();\n        return bounds;\n\n    case ZSTD_c_windowLog:\n        bounds.lowerBound = ZSTD_WINDOWLOG_MIN;\n        bounds.upperBound = ZSTD_WINDOWLOG_MAX;\n        return bounds;\n\n    case ZSTD_c_hashLog:\n        bounds.lowerBound = ZSTD_HASHLOG_MIN;\n        bounds.upperBound = ZSTD_HASHLOG_MAX;\n        return bounds;\n"
+      },
+      {
+        "evidence_id": "loc-afdc7d061916c756c051552f",
+        "quote": "static ZSTD_compressionParameters\nZSTD_adjustCParams_internal(ZSTD_compressionParameters cPar,\n                            unsigned long long srcSize,\n                            size_t dictSize,\n                            ZSTD_cParamMode_e mode,\n                            ZSTD_paramSwitch_e useRowMatchFinder)\n{\n    const U64 minSrcSize = 513; /* (1<<9) + 1 */\n    const U64 maxWindowResize = 1ULL << (ZSTD_WINDOWLOG_MAX-1);\n    assert(ZSTD_checkCParams(cPar)==0);\n\n    switch (mode) {\n    case ZSTD_cpm_unknown:\n    case ZSTD_cpm_noAttachDict:\n        /* If we don't know the source size, don't make any\n         * assumptions about it. We will already have selected\n         * smaller parameters if a dictionary is in use.\n         */\n        break;\n    case ZSTD_cpm_createCDict:\n        /* Assume a small source size when creating a dictionary\n         * with an unknown source size.\n         */\n        if (dictSize && srcSize == ZSTD_CONTENTSIZE_UNKNOWN)\n            srcSize = minSrcSize;\n        break;\n    case ZSTD_cpm_attachDict:\n        /* Dictionary has its own dedicated parameters which have\n         * already been selected. We are selecting parameters\n         * for only the source.\n         */\n        dictSize = 0;\n        break;\n    default:\n        assert(0);\n        break;\n    }\n\n    /* resize windowLog if input is small enough, to use less memory */\n    if ( (srcSize <= maxWindowResize)\n      && (dictSize <= maxWindowResize) )  {\n        U32 const tSize = (U32)(srcSize + dictSize);\n        static U32 const hashSizeMin = 1 << ZSTD_HASHLOG_MIN;\n        U32 const srcLog = (tSize < hashSizeMin) ? ZSTD_HASHLOG_MIN :\n                            ZSTD_highbit32(tSize-1) + 1;\n        if (cPar.windowLog > srcLog) cPar.windowLog = srcLog;\n    }\n    if (srcSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        U32 const dictAndWindowLog = ZSTD_dictAndWindowLog(cPar.windowLog, (U64)srcSize, (U64)dictSize);\n        U32 const cycleLog = ZSTD_cycleLog(cPar.chainLog, cPar.strategy);\n        if (cPar.hashLog > dictAndWindowLog+1) cPar.hashLog = dictAndWindowLog+1;\n        if (cycleLog > dictAndWindowLog)\n            cPar.chainLog -= (cycleLog - dictAndWindowLog);\n    }\n\n    if (cPar.windowLog < ZSTD_WINDOWLOG_ABSOLUTEMIN)\n        cPar.windowLog = ZSTD_WINDOWLOG_ABSOLUTEMIN;  /* minimum wlog required for valid frame header */\n\n    /* We can't use more than 32 bits of hash in total, so that means that we require:\n     * (hashLog + 8) <= 32 && (chainLog + 8) <= 32\n     */\n    if (mode == ZSTD_cpm_createCDict && ZSTD_CDictIndicesAreTagged(&cPar)) {\n        U32 const maxShortCacheHashLog = 32 - ZSTD_SHORT_CACHE_TAG_BITS;\n        if (cPar.hashLog > maxShortCacheHashLog) {\n            cPar.hashLog = maxShortCacheHashLog;\n        }\n        if (cPar.chainLog > maxShortCacheHashLog) {\n            cPar.chainLog = maxShortCacheHashLog;\n        }\n    }\n\n\n    /* At this point, we aren't 100% sure if we are using the row match finder.\n     * Unless it is explicitly disabled, conservatively assume that it is enabled.\n     * In this case it will only be disabled for small sources, so shrinking the\n     * hash log a little bit shouldn't result in any ratio loss.\n     */\n    if (useRowMatchFinder == ZSTD_ps_auto)\n        useRowMatchFinder = ZSTD_ps_enable;\n\n    /* We can't hash more than 32-bits in total. So that means that we require:\n     * (hashLog - rowLog + 8) <= 32\n     */\n    if (ZSTD_rowMatchFinderUsed(cPar.strategy, useRowMatchFinder)) {\n        /* Switch to 32-entry rows if searchLog is 5 (or more) */\n        U32 const rowLog = BOUNDED(4, cPar.searchLog, 6);\n        U32 const maxRowHashLog = 32 - ZSTD_ROW_HASH_TAG_BITS;\n        U32 const maxHashLog = maxRowHashLog + rowLog;\n        assert(cPar.hashLog >= rowLog);\n        if (cPar.hashLog > maxHashLog) {\n            cPar.hashLog = maxHashLog;\n        }\n    }\n\n    return cPar;\n"
+      },
+      {
+        "evidence_id": "loc-293f9fa58079c513e2af4f7e",
+        "quote": "ZSTD_bounds ZSTD_cParam_getBounds(ZSTD_cParameter param)\n{\n    ZSTD_bounds bounds = { 0, 0, 0 };\n\n    switch(param)\n    {\n    case ZSTD_c_compressionLevel:\n        bounds.lowerBound = ZSTD_minCLevel();\n        bounds.upperBound = ZSTD_maxCLevel();\n        return bounds;\n\n    case ZSTD_c_windowLog:\n        bounds.lowerBound = ZSTD_WINDOWLOG_MIN;\n        bounds.upperBound = ZSTD_WINDOWLOG_MAX;\n        return bounds;\n\n    case ZSTD_c_hashLog:\n        bounds.lowerBound = ZSTD_HASHLOG_MIN;\n        bounds.upperBound = ZSTD_HASHLOG_MAX;\n        return bounds;\n"
+      },
+      {
+        "evidence_id": "loc-ad252277a4e78cda8b0c578a",
+        "quote": "static ZSTD_compressionParameters\nZSTD_adjustCParams_internal(ZSTD_compressionParameters cPar,\n                            unsigned long long srcSize,\n                            size_t dictSize,\n                            ZSTD_cParamMode_e mode,\n                            ZSTD_paramSwitch_e useRowMatchFinder)\n{\n    const U64 minSrcSize = 513; /* (1<<9) + 1 */\n    const U64 maxWindowResize = 1ULL << (ZSTD_WINDOWLOG_MAX-1);\n    assert(ZSTD_checkCParams(cPar)==0);\n\n    /* Cascade the selected strategy down to the next-highest one built into\n     * this binary. */\n#ifdef ZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btultra2) {\n        cPar.strategy = ZSTD_btultra;\n    }\n    if (cPar.strategy == ZSTD_btultra) {\n        cPar.strategy = ZSTD_btopt;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_BTOPT_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btopt) {\n        cPar.strategy = ZSTD_btlazy2;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_BTLAZY2_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btlazy2) {\n        cPar.strategy = ZSTD_lazy2;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_LAZY2_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_lazy2) {\n        cPar.strategy = ZSTD_lazy;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_LAZY_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_lazy) {\n        cPar.strategy = ZSTD_greedy;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_GREEDY_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_greedy) {\n        cPar.strategy = ZSTD_dfast;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_DFAST_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_dfast) {\n        cPar.strategy = ZSTD_fast;\n        cPar.targetLength = 0;\n    }\n#endif\n\n    switch (mode) {\n    case ZSTD_cpm_unknown:\n    case ZSTD_cpm_noAttachDict:\n        /* If we don't know the source size, don't make any\n         * assumptions about it. We will already have selected\n         * smaller parameters if a dictionary is in use.\n         */\n        break;\n    case ZSTD_cpm_createCDict:\n        /* Assume a small source size when creating a dictionary\n         * with an unknown source size.\n         */\n        if (dictSize && srcSize == ZSTD_CONTENTSIZE_UNKNOWN)\n            srcSize = minSrcSize;\n        break;\n    case ZSTD_cpm_attachDict:\n        /* Dictionary has its own dedicated parameters which have\n         * already been selected. We are selecting parameters\n         * for only the source.\n         */\n        dictSize = 0;\n        break;\n    default:\n        assert(0);\n        break;\n    }\n\n    /* resize windowLog if input is small enough, to use less memory */\n    if ( (srcSize <= maxWindowResize)\n      && (dictSize <= maxWindowResize) )  {\n        U32 const tSize = (U32)(srcSize + dictSize);\n        static U32 const hashSizeMin = 1 << ZSTD_HASHLOG_MIN;\n        U32 const srcLog = (tSize < hashSizeMin) ? ZSTD_HASHLOG_MIN :\n                            ZSTD_highbit32(tSize-1) + 1;\n        if (cPar.windowLog > srcLog) cPar.windowLog = srcLog;\n    }\n    if (srcSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        U32 const dictAndWindowLog = ZSTD_dictAndWindowLog(cPar.windowLog, (U64)srcSize, (U64)dictSize);\n        U32 const cycleLog = ZSTD_cycleLog(cPar.chainLog, cPar.strategy);\n        if (cPar.hashLog > dictAndWindowLog+1) cPar.hashLog = dictAndWindowLog+1;\n        if (cycleLog > dictAndWindowLog)\n            cPar.chainLog -= (cycleLog - dictAndWindowLog);\n    }\n\n    if (cPar.windowLog < ZSTD_WINDOWLOG_ABSOLUTEMIN)\n        cPar.windowLog = ZSTD_WINDOWLOG_ABSOLUTEMIN;  /* minimum wlog required for valid frame header */\n\n    /* We can't use more than 32 bits of hash in total, so that means that we require:\n     * (hashLog + 8) <= 32 && (chainLog + 8) <= 32\n     */\n    if (mode == ZSTD_cpm_createCDict && ZSTD_CDictIndicesAreTagged(&cPar)) {\n        U32 const maxShortCacheHashLog = 32 - ZSTD_SHORT_CACHE_TAG_BITS;\n        if (cPar.hashLog > maxShortCacheHashLog) {\n            cPar.hashLog = maxShortCacheHashLog;\n        }\n        if (cPar.chainLog > maxShortCacheHashLog) {\n            cPar.chainLog = maxShortCacheHashLog;\n        }\n    }\n\n\n    /* At this point, we aren't 100% sure if we are using the row match finder.\n     * Unless it is explicitly disabled, conservatively assume that it is enabled.\n     * In this case it will only be disabled for small sources, so shrinking the\n     * hash log a little bit shouldn't result in any ratio loss.\n     */\n    if (useRowMatchFinder == ZSTD_ps_auto)\n        useRowMatchFinder = ZSTD_ps_enable;\n\n    /* We can't hash more than 32-bits in total. So that means that we require:\n     * (hashLog - rowLog + 8) <= 32\n     */\n    if (ZSTD_rowMatchFinderUsed(cPar.strategy, useRowMatchFinder)) {\n        /* Switch to 32-entry rows if searchLog is 5 (or more) */\n        U32 const rowLog = BOUNDED(4, cPar.searchLog, 6);\n        U32 const maxRowHashLog = 32 - ZSTD_ROW_HASH_TAG_BITS;\n        U32 const maxHashLog = maxRowHashLog + rowLog;\n        assert(cPar.hashLog >= rowLog);\n        if (cPar.hashLog > maxHashLog) {\n            cPar.hashLog = maxHashLog;\n        }\n    }\n\n    return cPar;\n}\n"
+      },
+      {
+        "evidence_id": "loc-128070451004547d6c11f7e6",
+        "quote": "static void ZSTD_overrideCParams(\n              ZSTD_compressionParameters* cParams,\n        const ZSTD_compressionParameters* overrides)\n{\n    if (overrides->windowLog)    cParams->windowLog    = overrides->windowLog;\n    if (overrides->hashLog)      cParams->hashLog      = overrides->hashLog;\n    if (overrides->chainLog)     cParams->chainLog     = overrides->chainLog;\n    if (overrides->searchLog)    cParams->searchLog    = overrides->searchLog;\n    if (overrides->minMatch)     cParams->minMatch     = overrides->minMatch;\n    if (overrides->targetLength) cParams->targetLength = overrides->targetLength;\n    if (overrides->strategy)     cParams->strategy     = overrides->strategy;\n}\n\nZSTD_compressionParameters ZSTD_getCParamsFromCCtxParams(\n        const ZSTD_CCtx_params* CCtxParams, U64 srcSizeHint, size_t dictSize, ZSTD_cParamMode_e mode)\n{\n    ZSTD_compressionParameters cParams;\n    if (srcSizeHint == ZSTD_CONTENTSIZE_UNKNOWN && CCtxParams->srcSizeHint > 0) {\n      srcSizeHint = CCtxParams->srcSizeHint;\n    }\n    cParams = ZSTD_getCParams_internal(CCtxParams->compressionLevel, srcSizeHint, dictSize, mode);\n    if (CCtxParams->ldmParams.enableLdm == ZSTD_ps_enable) cParams.windowLog = ZSTD_LDM_DEFAULT_WINDOW_LOG;\n    ZSTD_overrideCParams(&cParams, &CCtxParams->cParams);\n    assert(!ZSTD_checkCParams(cParams));\n    /* srcSizeHint == 0 means 0 */\n    return ZSTD_adjustCParams_internal(cParams, srcSizeHint, dictSize, mode, CCtxParams->useRowMatchFinder);\n"
+      }
+    ],
+    "harness_evidence": [
+      {
+        "evidence_id": "loc-246840d9fe3f7a322985485d",
+        "quote": "static size_t compress(uint8_t *dst, size_t capacity,\n                       const uint8_t *src, size_t srcSize,\n                     FUZZ_dataProducer_t *producer)\n{\n    size_t dstSize = 0;\n    ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);\n    FUZZ_setRandomParameters(cctx, srcSize, producer);\n    int maxBlockSize;\n    FUZZ_ZASSERT(ZSTD_CCtx_getParameter(cctx, ZSTD_c_maxBlockSize, &maxBlockSize));\n\n    while (srcSize > 0) {\n        ZSTD_inBuffer in = makeInBuffer(&src, &srcSize, producer);\n        /* Mode controls the action. If mode == -1 we pick a new mode */\n        int mode = -1;\n        while (in.pos < in.size || mode != -1) {\n            ZSTD_outBuffer out = makeOutBuffer(dst, capacity, producer);\n            /* Previous action finished, pick a new mode. */\n            if (mode == -1) mode = FUZZ_dataProducer_uint32Range(producer, 0, 9);\n            switch (mode) {\n                case 0: /* fall-through */\n                case 1: /* fall-through */\n                case 2: {\n                    size_t const ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_flush);\n                    FUZZ_ZASSERT(ret);\n                    if (ret == 0)\n                        mode = -1;\n                    break;\n                }\n                case 3: {\n                    size_t ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_end);\n                    FUZZ_ZASSERT(ret);\n                    /* Reset the compressor when the frame is finished */\n                    if (ret == 0) {\n                        ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);\n                        if (FUZZ_dataProducer_uint32Range(producer, 0, 7) == 0) {\n                            size_t const remaining = in.size - in.pos;\n                            FUZZ_setRandomParameters(cctx, remaining, producer);\n                            /* Always use the same maxBlockSize */\n                            FUZZ_ZASSERT(ZSTD_CCtx_setParameter(cctx, ZSTD_c_maxBlockSize, maxBlockSize));\n                        }\n                        mode = -1;\n                    }\n                    break;\n                }\n                case 4: {\n                    ZSTD_inBuffer nullIn = { NULL, 0, 0 };\n                    ZSTD_outBuffer nullOut = { NULL, 0, 0 };\n                    size_t const ret = ZSTD_compressStream2(cctx, &nullOut, &nullIn, ZSTD_e_continue);\n                    FUZZ_ZASSERT(ret);\n                }\n                /* fall-through */\n                default: {\n                    size_t const ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_continue);\n                    FUZZ_ZASSERT(ret);\n                    mode = -1;\n                }\n            }\n            dst += out.pos;\n            dstSize += out.pos;\n            capacity -= out.pos;\n        }\n    }\n    for (;;) {\n        ZSTD_inBuffer in = {NULL, 0, 0};\n        ZSTD_outBuffer out = makeOutBuffer(dst, capacity, producer);\n        size_t const ret = ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_end);\n        FUZZ_ZASSERT(ret);\n\n        dst += out.pos;\n        dstSize += out.pos;\n        capacity -= out.pos;\n        if (ret == 0)\n            break;\n    }\n    return dstSize;\n}\n"
+      },
+      {
+        "evidence_id": "loc-78e2982e62270fc4ad04b200",
+        "quote": "ZSTD_compressionParameters FUZZ_randomCParams(size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    /* Select compression parameters */\n    ZSTD_compressionParameters cParams;\n    cParams.windowLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_WINDOWLOG_MIN, 15);\n    cParams.hashLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_HASHLOG_MIN, 15);\n    cParams.chainLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_CHAINLOG_MIN, 16);\n    cParams.searchLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_SEARCHLOG_MIN, 9);\n    cParams.minMatch = FUZZ_dataProducer_uint32Range(producer, ZSTD_MINMATCH_MIN,\n                                          ZSTD_MINMATCH_MAX);\n    cParams.targetLength = FUZZ_dataProducer_uint32Range(producer, 0, 512);\n    cParams.strategy = FUZZ_dataProducer_uint32Range(producer, ZSTD_STRATEGY_MIN, ZSTD_STRATEGY_MAX);\n    return ZSTD_adjustCParams(cParams, srcSize, 0);\n"
+      },
+      {
+        "evidence_id": "loc-e856a5c2326c453d2c0d986d",
+        "quote": "void FUZZ_setRandomParameters(ZSTD_CCtx *cctx, size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    ZSTD_compressionParameters cParams = FUZZ_randomCParams(srcSize, producer);\n    set(cctx, ZSTD_c_windowLog, cParams.windowLog);\n    set(cctx, ZSTD_c_hashLog, cParams.hashLog);\n    set(cctx, ZSTD_c_chainLog, cParams.chainLog);\n    set(cctx, ZSTD_c_searchLog, cParams.searchLog);\n    set(cctx, ZSTD_c_minMatch, cParams.minMatch);\n    set(cctx, ZSTD_c_targetLength, cParams.targetLength);\n    set(cctx, ZSTD_c_strategy, cParams.strategy);\n"
+      },
+      {
+        "evidence_id": "loc-75a588b2208239da489e2acc",
+        "quote": "cd tests/fuzz\n\n# Download the seed corpora\nmake -j seedcorpora\n# Build all of the fuzzers\n./fuzz.py build all\n"
+      }
+    ],
+    "missing_information": [
+      "Effective definitions of ZSTD_WINDOWLOG_MIN, ZSTD_WINDOWLOG_MAX, ZSTD_HASHLOG_MIN, and ZSTD_HASHLOG_MAX under the supplied build.",
+      "The stream_round_trip build flags and relevant defaults selected by tests/fuzz/fuzz.py and tests/fuzz/Makefile."
+    ],
+    "requested_symbols": [
+      "ZSTD_WINDOWLOG_MIN",
+      "ZSTD_WINDOWLOG_MAX",
+      "ZSTD_HASHLOG_MIN",
+      "ZSTD_HASHLOG_MAX"
+    ],
+    "requested_paths": [
+      "tests/fuzz/fuzz.py",
+      "tests/fuzz/Makefile"
+    ],
+    "obligation_class": "target_coverage",
+    "scope_basis": "target_state_contract",
+    "trigger_basis": "unknown",
+    "coverage_witness": {
+      "supported_behavior": "Streaming compression with an effective windowLog or hashLog above 15, if this build supports a distinct such setting.",
+      "required_setup": "A valid high-log parameter and an input size for which adjustment retains an effective log above 15.",
+      "actual_target_setup": "FUZZ_randomCParams requests both logs with upper endpoint 15; FUZZ_setRandomParameters applies the results.",
+      "blocked_behavior": "The proposed high-log configuration appears unreachable, conditional on its build-supported validity and the absence of a default route.",
+      "equivalent_routes": "The separate LDM hash setting does not establish the main hash-log route. A zero-valued request selecting a high default cannot yet be excluded."
+    }
+  },
+  "citation_errors": [],
+  "citations": [
+    {
+      "pointer": "/scope_contract/evidence/0",
+      "evidence_id": "loc-293f9fa58079c513e2af4f7e",
+      "kind": "after_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "ZSTD_bounds ZSTD_cParam_getBounds(ZSTD_cParameter param)\n{\n    ZSTD_bounds bounds = { 0, 0, 0 };\n\n    switch(param)\n    {\n    case ZSTD_c_compressionLevel:\n        bounds.lowerBound = ZSTD_minCLevel();\n        bounds.upperBound = ZSTD_maxCLevel();\n        return bounds;\n\n    case ZSTD_c_windowLog:\n        bounds.lowerBound = ZSTD_WINDOWLOG_MIN;\n        bounds.upperBound = ZSTD_WINDOWLOG_MAX;\n        return bounds;\n\n    case ZSTD_c_hashLog:\n        bounds.lowerBound = ZSTD_HASHLOG_MIN;\n        bounds.upperBound = ZSTD_HASHLOG_MAX;\n        return bounds;\n",
+      "change_ids": [
+        "g0003",
+        "g0004",
+        "g0005",
+        "g0006",
+        "g0007",
+        "g0008",
+        "g0009"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-b5697ee0104bd691ea91",
+        "version": "after",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 425,
+        "end_line": 444,
+        "unit_sha256": "1a829f196bd7f8bf55ab80052293648aea204b7d5ab91391f90ecfe110804898",
+        "quote_sha256": "ec0894f9e7cc2dbd7e0bddccd68f5904203936f911cd68120d1ecd2a4ee3d533"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/1",
+      "evidence_id": "loc-ad252277a4e78cda8b0c578a",
+      "kind": "after_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "static ZSTD_compressionParameters\nZSTD_adjustCParams_internal(ZSTD_compressionParameters cPar,\n                            unsigned long long srcSize,\n                            size_t dictSize,\n                            ZSTD_cParamMode_e mode,\n                            ZSTD_paramSwitch_e useRowMatchFinder)\n{\n    const U64 minSrcSize = 513; /* (1<<9) + 1 */\n    const U64 maxWindowResize = 1ULL << (ZSTD_WINDOWLOG_MAX-1);\n    assert(ZSTD_checkCParams(cPar)==0);\n\n    /* Cascade the selected strategy down to the next-highest one built into\n     * this binary. */\n#ifdef ZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btultra2) {\n        cPar.strategy = ZSTD_btultra;\n    }\n    if (cPar.strategy == ZSTD_btultra) {\n        cPar.strategy = ZSTD_btopt;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_BTOPT_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btopt) {\n        cPar.strategy = ZSTD_btlazy2;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_BTLAZY2_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btlazy2) {\n        cPar.strategy = ZSTD_lazy2;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_LAZY2_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_lazy2) {\n        cPar.strategy = ZSTD_lazy;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_LAZY_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_lazy) {\n        cPar.strategy = ZSTD_greedy;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_GREEDY_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_greedy) {\n        cPar.strategy = ZSTD_dfast;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_DFAST_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_dfast) {\n        cPar.strategy = ZSTD_fast;\n        cPar.targetLength = 0;\n    }\n#endif\n\n    switch (mode) {\n    case ZSTD_cpm_unknown:\n    case ZSTD_cpm_noAttachDict:\n        /* If we don't know the source size, don't make any\n         * assumptions about it. We will already have selected\n         * smaller parameters if a dictionary is in use.\n         */\n        break;\n    case ZSTD_cpm_createCDict:\n        /* Assume a small source size when creating a dictionary\n         * with an unknown source size.\n         */\n        if (dictSize && srcSize == ZSTD_CONTENTSIZE_UNKNOWN)\n            srcSize = minSrcSize;\n        break;\n    case ZSTD_cpm_attachDict:\n        /* Dictionary has its own dedicated parameters which have\n         * already been selected. We are selecting parameters\n         * for only the source.\n         */\n        dictSize = 0;\n        break;\n    default:\n        assert(0);\n        break;\n    }\n\n    /* resize windowLog if input is small enough, to use less memory */\n    if ( (srcSize <= maxWindowResize)\n      && (dictSize <= maxWindowResize) )  {\n        U32 const tSize = (U32)(srcSize + dictSize);\n        static U32 const hashSizeMin = 1 << ZSTD_HASHLOG_MIN;\n        U32 const srcLog = (tSize < hashSizeMin) ? ZSTD_HASHLOG_MIN :\n                            ZSTD_highbit32(tSize-1) + 1;\n        if (cPar.windowLog > srcLog) cPar.windowLog = srcLog;\n    }\n    if (srcSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        U32 const dictAndWindowLog = ZSTD_dictAndWindowLog(cPar.windowLog, (U64)srcSize, (U64)dictSize);\n        U32 const cycleLog = ZSTD_cycleLog(cPar.chainLog, cPar.strategy);\n        if (cPar.hashLog > dictAndWindowLog+1) cPar.hashLog = dictAndWindowLog+1;\n        if (cycleLog > dictAndWindowLog)\n            cPar.chainLog -= (cycleLog - dictAndWindowLog);\n    }\n\n    if (cPar.windowLog < ZSTD_WINDOWLOG_ABSOLUTEMIN)\n        cPar.windowLog = ZSTD_WINDOWLOG_ABSOLUTEMIN;  /* minimum wlog required for valid frame header */\n\n    /* We can't use more than 32 bits of hash in total, so that means that we require:\n     * (hashLog + 8) <= 32 && (chainLog + 8) <= 32\n     */\n    if (mode == ZSTD_cpm_createCDict && ZSTD_CDictIndicesAreTagged(&cPar)) {\n        U32 const maxShortCacheHashLog = 32 - ZSTD_SHORT_CACHE_TAG_BITS;\n        if (cPar.hashLog > maxShortCacheHashLog) {\n            cPar.hashLog = maxShortCacheHashLog;\n        }\n        if (cPar.chainLog > maxShortCacheHashLog) {\n            cPar.chainLog = maxShortCacheHashLog;\n        }\n    }\n\n\n    /* At this point, we aren't 100% sure if we are using the row match finder.\n     * Unless it is explicitly disabled, conservatively assume that it is enabled.\n     * In this case it will only be disabled for small sources, so shrinking the\n     * hash log a little bit shouldn't result in any ratio loss.\n     */\n    if (useRowMatchFinder == ZSTD_ps_auto)\n        useRowMatchFinder = ZSTD_ps_enable;\n\n    /* We can't hash more than 32-bits in total. So that means that we require:\n     * (hashLog - rowLog + 8) <= 32\n     */\n    if (ZSTD_rowMatchFinderUsed(cPar.strategy, useRowMatchFinder)) {\n        /* Switch to 32-entry rows if searchLog is 5 (or more) */\n        U32 const rowLog = BOUNDED(4, cPar.searchLog, 6);\n        U32 const maxRowHashLog = 32 - ZSTD_ROW_HASH_TAG_BITS;\n        U32 const maxHashLog = maxRowHashLog + rowLog;\n        assert(cPar.hashLog >= rowLog);\n        if (cPar.hashLog > maxHashLog) {\n            cPar.hashLog = maxHashLog;\n        }\n    }\n\n    return cPar;\n}\n",
+      "change_ids": [
+        "g0003"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-31b9fce4fcddd0beca8e",
+        "version": "after",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 1459,
+        "end_line": 1596,
+        "unit_sha256": "6189b31678d87b62a6c3f893a63065626012db0d6e5f23aa7772e6bf069a7e0c",
+        "quote_sha256": "6189b31678d87b62a6c3f893a63065626012db0d6e5f23aa7772e6bf069a7e0c"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/2",
+      "evidence_id": "loc-56f03d66affdb49db25f3c6c",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzz/stream_round_trip.c",
+      "text": "    size_t dstSize = 0;\n    ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);\n    FUZZ_setRandomParameters(cctx, srcSize, producer);\n    int maxBlockSize;\n    FUZZ_ZASSERT(ZSTD_CCtx_getParameter(cctx, ZSTD_c_maxBlockSize, &maxBlockSize));\n\n    while (srcSize > 0) {\n        ZSTD_inBuffer in = makeInBuffer(&src, &srcSize, producer);\n        /* Mode controls the action. If mode == -1 we pick a new mode */\n        int mode = -1;\n        while (in.pos < in.size || mode != -1) {\n            ZSTD_outBuffer out = makeOutBuffer(dst, capacity, producer);\n            /* Previous action finished, pick a new mode. */\n            if (mode == -1) mode = FUZZ_dataProducer_uint32Range(producer, 0, 9);\n            switch (mode) {\n                case 0: /* fall-through */\n                case 1: /* fall-through */\n                case 2: {\n                    size_t const ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_flush);\n                    FUZZ_ZASSERT(ret);\n                    if (ret == 0)\n                        mode = -1;\n                    break;\n                }\n                case 3: {\n                    size_t ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_end);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The target configures its context, then invokes streaming compression.",
+      "location": {
+        "unit_id": "u-9dc9e88ae722c8cbe085",
+        "version": "harness",
+        "path": "input/harness/tests/fuzz/stream_round_trip.c",
+        "start_line": 63,
+        "end_line": 90,
+        "unit_sha256": "1e5d2236216c35bfb73c8add163ea709078d65de023f454e43fef0b9a940a3e6",
+        "quote_sha256": "3f6ad108ddc0fd9ec758da22427dbf3884aca17264a32bd9c3173e4210090c4b"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/3",
+      "evidence_id": "loc-e8f220682a7250ca95ea4ea9",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzz/zstd_helpers.c",
+      "text": "void FUZZ_setRandomParameters(ZSTD_CCtx *cctx, size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    ZSTD_compressionParameters cParams = FUZZ_randomCParams(srcSize, producer);\n    set(cctx, ZSTD_c_windowLog, cParams.windowLog);\n    set(cctx, ZSTD_c_hashLog, cParams.hashLog);\n    set(cctx, ZSTD_c_chainLog, cParams.chainLog);\n    set(cctx, ZSTD_c_searchLog, cParams.searchLog);\n    set(cctx, ZSTD_c_minMatch, cParams.minMatch);\n    set(cctx, ZSTD_c_targetLength, cParams.targetLength);\n    set(cctx, ZSTD_c_strategy, cParams.strategy);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The helper sets both generated logs on the compression context.",
+      "location": {
+        "unit_id": "u-194debf8ea4cd55b47ba",
+        "version": "harness",
+        "path": "input/harness/tests/fuzz/zstd_helpers.c",
+        "start_line": 101,
+        "end_line": 110,
+        "unit_sha256": "5254ad970efeacf43ac5c0d63ec7ae1edfc3863f217213711981a2390d9f5e19",
+        "quote_sha256": "04aa357331fd25eacff56b97ed77d619c39e440c13819f46059a55181df75f4b"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/0",
+      "evidence_id": "loc-08d51b999fe5ecb4df3f8661",
+      "kind": "after_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "    case ZSTD_c_windowLog:\n        bounds.lowerBound = ZSTD_WINDOWLOG_MIN;\n        bounds.upperBound = ZSTD_WINDOWLOG_MAX;\n        return bounds;\n\n    case ZSTD_c_hashLog:\n        bounds.lowerBound = ZSTD_HASHLOG_MIN;\n        bounds.upperBound = ZSTD_HASHLOG_MAX;\n        return bounds;\n",
+      "change_ids": [
+        "g0003",
+        "g0004",
+        "g0005",
+        "g0006",
+        "g0007",
+        "g0008",
+        "g0009"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-b5697ee0104bd691ea91",
+        "version": "after",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 436,
+        "end_line": 444,
+        "unit_sha256": "1a829f196bd7f8bf55ab80052293648aea204b7d5ab91391f90ecfe110804898",
+        "quote_sha256": "a68afb54f436ba3c2de5d25957f72bba9f9efd1221431adb55d67505782f8f16"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/1",
+      "evidence_id": "loc-e8ba20e1c4da14991f7c7cda",
+      "kind": "after_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "    /* resize windowLog if input is small enough, to use less memory */\n    if ( (srcSize <= maxWindowResize)\n      && (dictSize <= maxWindowResize) )  {\n        U32 const tSize = (U32)(srcSize + dictSize);\n        static U32 const hashSizeMin = 1 << ZSTD_HASHLOG_MIN;\n        U32 const srcLog = (tSize < hashSizeMin) ? ZSTD_HASHLOG_MIN :\n                            ZSTD_highbit32(tSize-1) + 1;\n        if (cPar.windowLog > srcLog) cPar.windowLog = srcLog;\n    }\n    if (srcSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        U32 const dictAndWindowLog = ZSTD_dictAndWindowLog(cPar.windowLog, (U64)srcSize, (U64)dictSize);\n        U32 const cycleLog = ZSTD_cycleLog(cPar.chainLog, cPar.strategy);\n        if (cPar.hashLog > dictAndWindowLog+1) cPar.hashLog = dictAndWindowLog+1;\n        if (cycleLog > dictAndWindowLog)\n            cPar.chainLog -= (cycleLog - dictAndWindowLog);\n    }\n",
+      "change_ids": [
+        "g0003"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-31b9fce4fcddd0beca8e",
+        "version": "after",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 1539,
+        "end_line": 1554,
+        "unit_sha256": "6189b31678d87b62a6c3f893a63065626012db0d6e5f23aa7772e6bf069a7e0c",
+        "quote_sha256": "0f941fe6a2c9b777136664148b52abb3f1516ffc613b690f0e94b32787229d6c"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/2",
+      "evidence_id": "loc-aee54f75baf598cc505ed9a6",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzz/zstd_helpers.c",
+      "text": "ZSTD_compressionParameters FUZZ_randomCParams(size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    /* Select compression parameters */\n    ZSTD_compressionParameters cParams;\n    cParams.windowLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_WINDOWLOG_MIN, 15);\n    cParams.hashLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_HASHLOG_MIN, 15);\n    cParams.chainLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_CHAINLOG_MIN, 16);\n    cParams.searchLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_SEARCHLOG_MIN, 9);\n    cParams.minMatch = FUZZ_dataProducer_uint32Range(producer, ZSTD_MINMATCH_MIN,\n                                          ZSTD_MINMATCH_MAX);\n    cParams.targetLength = FUZZ_dataProducer_uint32Range(producer, 0, 512);\n    cParams.strategy = FUZZ_dataProducer_uint32Range(producer, ZSTD_STRATEGY_MIN, ZSTD_STRATEGY_MAX);\n    return ZSTD_adjustCParams(cParams, srcSize, 0);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The target generator requests values no higher than 15.",
+      "location": {
+        "unit_id": "u-194debf8ea4cd55b47ba",
+        "version": "harness",
+        "path": "input/harness/tests/fuzz/zstd_helpers.c",
+        "start_line": 44,
+        "end_line": 56,
+        "unit_sha256": "5254ad970efeacf43ac5c0d63ec7ae1edfc3863f217213711981a2390d9f5e19",
+        "quote_sha256": "a03bd4f77617feb163ed5d185b66b6ce26add7bb1d0235fd8deae7a76018926b"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/3",
+      "evidence_id": "loc-87cf26b365c2445856697c5b",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/build.sh",
+      "text": "cd tests/fuzz\n\n# Download the seed corpora\nmake -j seedcorpora\n# Build all of the fuzzers\n./fuzz.py build all\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The build recipe delegates configuration to fuzz.py.",
+      "location": {
+        "unit_id": "u-043cf5aa9ced10a35cb6",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/build.sh",
+        "start_line": 19,
+        "end_line": 24,
+        "unit_sha256": "5c921da26b16cf726a048811480a0c78dd8eca9561457a5939f066e82d771501",
+        "quote_sha256": "50e8f41ee8355658e607ca48124b4a7141b0240c7bdc5f81f83a0f1c84fc189d"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/0",
+      "evidence_id": "loc-31b2a24ba1c9ec997b711419",
+      "kind": "after_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "static void ZSTD_overrideCParams(\n              ZSTD_compressionParameters* cParams,\n        const ZSTD_compressionParameters* overrides)\n{\n    if (overrides->windowLog)    cParams->windowLog    = overrides->windowLog;\n    if (overrides->hashLog)      cParams->hashLog      = overrides->hashLog;\n    if (overrides->chainLog)     cParams->chainLog     = overrides->chainLog;\n    if (overrides->searchLog)    cParams->searchLog    = overrides->searchLog;\n    if (overrides->minMatch)     cParams->minMatch     = overrides->minMatch;\n    if (overrides->targetLength) cParams->targetLength = overrides->targetLength;\n    if (overrides->strategy)     cParams->strategy     = overrides->strategy;\n}\n\nZSTD_compressionParameters ZSTD_getCParamsFromCCtxParams(\n        const ZSTD_CCtx_params* CCtxParams, U64 srcSizeHint, size_t dictSize, ZSTD_cParamMode_e mode)\n{\n    ZSTD_compressionParameters cParams;\n    if (srcSizeHint == ZSTD_CONTENTSIZE_UNKNOWN && CCtxParams->srcSizeHint > 0) {\n      srcSizeHint = CCtxParams->srcSizeHint;\n    }\n    cParams = ZSTD_getCParams_internal(CCtxParams->compressionLevel, srcSizeHint, dictSize, mode);\n    if (CCtxParams->ldmParams.enableLdm == ZSTD_ps_enable) cParams.windowLog = ZSTD_LDM_DEFAULT_WINDOW_LOG;\n    ZSTD_overrideCParams(&cParams, &CCtxParams->cParams);\n    assert(!ZSTD_checkCParams(cParams));\n    /* srcSizeHint == 0 means 0 */\n    return ZSTD_adjustCParams_internal(cParams, srcSizeHint, dictSize, mode, CCtxParams->useRowMatchFinder);\n",
+      "change_ids": [
+        "g0003",
+        "g0004",
+        "g0005",
+        "g0006",
+        "g0007",
+        "g0008",
+        "g0009"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-b5697ee0104bd691ea91",
+        "version": "after",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 1611,
+        "end_line": 1636,
+        "unit_sha256": "1a829f196bd7f8bf55ab80052293648aea204b7d5ab91391f90ecfe110804898",
+        "quote_sha256": "ee214a433acbbc50df816fac7d57a41f148454943333a04002d5d2365092f4f3"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/1",
+      "evidence_id": "loc-8893e61d525e0cfc9331a26e",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzz/zstd_helpers.c",
+      "text": "ZSTD_compressionParameters FUZZ_randomCParams(size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    /* Select compression parameters */\n    ZSTD_compressionParameters cParams;\n    cParams.windowLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_WINDOWLOG_MIN, 15);\n    cParams.hashLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_HASHLOG_MIN, 15);\n    cParams.chainLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_CHAINLOG_MIN, 16);\n    cParams.searchLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_SEARCHLOG_MIN, 9);\n    cParams.minMatch = FUZZ_dataProducer_uint32Range(producer, ZSTD_MINMATCH_MIN,\n                                          ZSTD_MINMATCH_MAX);\n    cParams.targetLength = FUZZ_dataProducer_uint32Range(producer, 0, 512);\n    cParams.strategy = FUZZ_dataProducer_uint32Range(producer, ZSTD_STRATEGY_MIN, ZSTD_STRATEGY_MAX);\n    return ZSTD_adjustCParams(cParams, srcSize, 0);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The generator caps both requested logs at 15 before adjustment.",
+      "location": {
+        "unit_id": "u-194debf8ea4cd55b47ba",
+        "version": "harness",
+        "path": "input/harness/tests/fuzz/zstd_helpers.c",
+        "start_line": 44,
+        "end_line": 56,
+        "unit_sha256": "5254ad970efeacf43ac5c0d63ec7ae1edfc3863f217213711981a2390d9f5e19",
+        "quote_sha256": "a03bd4f77617feb163ed5d185b66b6ce26add7bb1d0235fd8deae7a76018926b"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/2",
+      "evidence_id": "loc-76f1d8091a92f08d87b1bb66",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzz/stream_round_trip.c",
+      "text": "    {\n        size_t const cSize = compress(cBuf, neededBufSize, src, size, producer);\n        size_t const rSize = decompress(rBuf, neededBufSize, cBuf, cSize, producer);\n        FUZZ_ZASSERT(rSize);\n        FUZZ_ASSERT_MSG(rSize == size, \"Incorrect regenerated size\");\n        FUZZ_ASSERT_MSG(!FUZZ_memcmp(src, rBuf, size), \"Corruption!\");\n\n        /* Test in-place decompression (note the macro doesn't work in this case) */\n        {\n            size_t const margin = ZSTD_decompressionMargin(cBuf, cSize);\n            size_t const outputSize = size + margin;\n            char* const output = (char*)FUZZ_malloc(outputSize);\n            char* const input = output + outputSize - cSize;\n            size_t dSize;\n            FUZZ_ASSERT(outputSize >= cSize);\n            memcpy(input, cBuf, cSize);\n\n            dSize = ZSTD_decompressDCtx(dctx, output, outputSize, input, cSize);\n            FUZZ_ZASSERT(dSize);\n            FUZZ_ASSERT_MSG(dSize == size, \"Incorrect regenerated size\");\n            FUZZ_ASSERT_MSG(!FUZZ_memcmp(src, output, size), \"Corruption!\");\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The existing checks verify round-trip results, not which log setting was exercised.",
+      "location": {
+        "unit_id": "u-9dc9e88ae722c8cbe085",
+        "version": "harness",
+        "path": "input/harness/tests/fuzz/stream_round_trip.c",
+        "start_line": 185,
+        "end_line": 205,
+        "unit_sha256": "1e5d2236216c35bfb73c8add163ea709078d65de023f454e43fef0b9a940a3e6",
+        "quote_sha256": "0487097ff24ecb4fb30d2a64ec6521e0f609597bb45d5ef98514d8737897dd73"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/0",
+      "evidence_id": "loc-9114153cae656c28682a9f9a",
+      "kind": "after_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "    case ZSTD_c_windowLog :\n        if (value!=0)   /* 0 => use default */\n            BOUNDCHECK(ZSTD_c_windowLog, value);\n        CCtxParams->cParams.windowLog = (U32)value;\n        return CCtxParams->cParams.windowLog;\n\n    case ZSTD_c_hashLog :\n        if (value!=0)   /* 0 => use default */\n            BOUNDCHECK(ZSTD_c_hashLog, value);\n        CCtxParams->cParams.hashLog = (U32)value;\n        return CCtxParams->cParams.hashLog;\n",
+      "change_ids": [
+        "g0003",
+        "g0004",
+        "g0005",
+        "g0006",
+        "g0007",
+        "g0008",
+        "g0009"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-b5697ee0104bd691ea91",
+        "version": "after",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 789,
+        "end_line": 799,
+        "unit_sha256": "1a829f196bd7f8bf55ab80052293648aea204b7d5ab91391f90ecfe110804898",
+        "quote_sha256": "a143934fb32e8e6a8ad7123c39364cd8770921ab0c693b35ad018dce5975e022"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/1",
+      "evidence_id": "loc-31b2a24ba1c9ec997b711419",
+      "kind": "after_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "static void ZSTD_overrideCParams(\n              ZSTD_compressionParameters* cParams,\n        const ZSTD_compressionParameters* overrides)\n{\n    if (overrides->windowLog)    cParams->windowLog    = overrides->windowLog;\n    if (overrides->hashLog)      cParams->hashLog      = overrides->hashLog;\n    if (overrides->chainLog)     cParams->chainLog     = overrides->chainLog;\n    if (overrides->searchLog)    cParams->searchLog    = overrides->searchLog;\n    if (overrides->minMatch)     cParams->minMatch     = overrides->minMatch;\n    if (overrides->targetLength) cParams->targetLength = overrides->targetLength;\n    if (overrides->strategy)     cParams->strategy     = overrides->strategy;\n}\n\nZSTD_compressionParameters ZSTD_getCParamsFromCCtxParams(\n        const ZSTD_CCtx_params* CCtxParams, U64 srcSizeHint, size_t dictSize, ZSTD_cParamMode_e mode)\n{\n    ZSTD_compressionParameters cParams;\n    if (srcSizeHint == ZSTD_CONTENTSIZE_UNKNOWN && CCtxParams->srcSizeHint > 0) {\n      srcSizeHint = CCtxParams->srcSizeHint;\n    }\n    cParams = ZSTD_getCParams_internal(CCtxParams->compressionLevel, srcSizeHint, dictSize, mode);\n    if (CCtxParams->ldmParams.enableLdm == ZSTD_ps_enable) cParams.windowLog = ZSTD_LDM_DEFAULT_WINDOW_LOG;\n    ZSTD_overrideCParams(&cParams, &CCtxParams->cParams);\n    assert(!ZSTD_checkCParams(cParams));\n    /* srcSizeHint == 0 means 0 */\n    return ZSTD_adjustCParams_internal(cParams, srcSizeHint, dictSize, mode, CCtxParams->useRowMatchFinder);\n",
+      "change_ids": [
+        "g0003",
+        "g0004",
+        "g0005",
+        "g0006",
+        "g0007",
+        "g0008",
+        "g0009"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-b5697ee0104bd691ea91",
+        "version": "after",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 1611,
+        "end_line": 1636,
+        "unit_sha256": "1a829f196bd7f8bf55ab80052293648aea204b7d5ab91391f90ecfe110804898",
+        "quote_sha256": "ee214a433acbbc50df816fac7d57a41f148454943333a04002d5d2365092f4f3"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/2",
+      "evidence_id": "loc-8df1b6136df0207fed59cf27",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzz/stream_round_trip.c",
+      "text": "static size_t compress(uint8_t *dst, size_t capacity,\n                       const uint8_t *src, size_t srcSize,\n                     FUZZ_dataProducer_t *producer)\n{\n    size_t dstSize = 0;\n    ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);\n    FUZZ_setRandomParameters(cctx, srcSize, producer);\n    int maxBlockSize;\n    FUZZ_ZASSERT(ZSTD_CCtx_getParameter(cctx, ZSTD_c_maxBlockSize, &maxBlockSize));\n\n    while (srcSize > 0) {\n        ZSTD_inBuffer in = makeInBuffer(&src, &srcSize, producer);\n        /* Mode controls the action. If mode == -1 we pick a new mode */\n        int mode = -1;\n        while (in.pos < in.size || mode != -1) {\n            ZSTD_outBuffer out = makeOutBuffer(dst, capacity, producer);\n            /* Previous action finished, pick a new mode. */\n            if (mode == -1) mode = FUZZ_dataProducer_uint32Range(producer, 0, 9);\n            switch (mode) {\n                case 0: /* fall-through */\n                case 1: /* fall-through */\n                case 2: {\n                    size_t const ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_flush);\n                    FUZZ_ZASSERT(ret);\n                    if (ret == 0)\n                        mode = -1;\n                    break;\n                }\n                case 3: {\n                    size_t ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_end);\n                    FUZZ_ZASSERT(ret);\n                    /* Reset the compressor when the frame is finished */\n                    if (ret == 0) {\n                        ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);\n                        if (FUZZ_dataProducer_uint32Range(producer, 0, 7) == 0) {\n                            size_t const remaining = in.size - in.pos;\n                            FUZZ_setRandomParameters(cctx, remaining, producer);\n                            /* Always use the same maxBlockSize */\n                            FUZZ_ZASSERT(ZSTD_CCtx_setParameter(cctx, ZSTD_c_maxBlockSize, maxBlockSize));\n                        }\n                        mode = -1;\n                    }\n                    break;\n                }\n                case 4: {\n                    ZSTD_inBuffer nullIn = { NULL, 0, 0 };\n                    ZSTD_outBuffer nullOut = { NULL, 0, 0 };\n                    size_t const ret = ZSTD_compressStream2(cctx, &nullOut, &nullIn, ZSTD_e_continue);\n                    FUZZ_ZASSERT(ret);\n                }\n                /* fall-through */\n                default: {\n                    size_t const ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_continue);\n                    FUZZ_ZASSERT(ret);\n                    mode = -1;\n                }\n            }\n            dst += out.pos;\n            dstSize += out.pos;\n            capacity -= out.pos;\n        }\n    }\n    for (;;) {\n        ZSTD_inBuffer in = {NULL, 0, 0};\n        ZSTD_outBuffer out = makeOutBuffer(dst, capacity, producer);\n        size_t const ret = ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_end);\n        FUZZ_ZASSERT(ret);\n\n        dst += out.pos;\n        dstSize += out.pos;\n        capacity -= out.pos;\n        if (ret == 0)\n            break;\n    }\n    return dstSize;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The complete compression helper repeats the same parameter selection route after a frame reset.",
+      "location": {
+        "unit_id": "u-9dc9e88ae722c8cbe085",
+        "version": "harness",
+        "path": "input/harness/tests/fuzz/stream_round_trip.c",
+        "start_line": 59,
+        "end_line": 137,
+        "unit_sha256": "1e5d2236216c35bfb73c8add163ea709078d65de023f454e43fef0b9a940a3e6",
+        "quote_sha256": "3d0c22161739877649565a5634df39218986b130801802a23b9797c9afa33b34"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/3",
+      "evidence_id": "loc-6d20745008385b596c2cffd6",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzz/zstd_helpers.c",
+      "text": "ZSTD_compressionParameters FUZZ_randomCParams(size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    /* Select compression parameters */\n    ZSTD_compressionParameters cParams;\n    cParams.windowLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_WINDOWLOG_MIN, 15);\n    cParams.hashLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_HASHLOG_MIN, 15);\n    cParams.chainLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_CHAINLOG_MIN, 16);\n    cParams.searchLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_SEARCHLOG_MIN, 9);\n    cParams.minMatch = FUZZ_dataProducer_uint32Range(producer, ZSTD_MINMATCH_MIN,\n                                          ZSTD_MINMATCH_MAX);\n    cParams.targetLength = FUZZ_dataProducer_uint32Range(producer, 0, 512);\n    cParams.strategy = FUZZ_dataProducer_uint32Range(producer, ZSTD_STRATEGY_MIN, ZSTD_STRATEGY_MAX);\n    return ZSTD_adjustCParams(cParams, srcSize, 0);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The generated ranges end at 15.",
+      "location": {
+        "unit_id": "u-194debf8ea4cd55b47ba",
+        "version": "harness",
+        "path": "input/harness/tests/fuzz/zstd_helpers.c",
+        "start_line": 44,
+        "end_line": 56,
+        "unit_sha256": "5254ad970efeacf43ac5c0d63ec7ae1edfc3863f217213711981a2390d9f5e19",
+        "quote_sha256": "a03bd4f77617feb163ed5d185b66b6ce26add7bb1d0235fd8deae7a76018926b"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/4",
+      "evidence_id": "loc-e31104cf5e3a6a564e0dc08a",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzz/zstd_helpers.c",
+      "text": "    ZSTD_compressionParameters cParams = FUZZ_randomCParams(srcSize, producer);\n    set(cctx, ZSTD_c_windowLog, cParams.windowLog);\n    set(cctx, ZSTD_c_hashLog, cParams.hashLog);\n    set(cctx, ZSTD_c_chainLog, cParams.chainLog);\n    set(cctx, ZSTD_c_searchLog, cParams.searchLog);\n    set(cctx, ZSTD_c_minMatch, cParams.minMatch);\n    set(cctx, ZSTD_c_targetLength, cParams.targetLength);\n    set(cctx, ZSTD_c_strategy, cParams.strategy);\n    /* Select frame parameters */\n    setRand(cctx, ZSTD_c_contentSizeFlag, 0, 1, producer);\n    setRand(cctx, ZSTD_c_checksumFlag, 0, 1, producer);\n    setRand(cctx, ZSTD_c_dictIDFlag, 0, 1, producer);\n    /* Select long distance matching parameters */\n    setRand(cctx, ZSTD_c_enableLongDistanceMatching, ZSTD_ps_auto, ZSTD_ps_disable, producer);\n    setRand(cctx, ZSTD_c_ldmHashLog, ZSTD_HASHLOG_MIN, 16, producer);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The helper names the main hash log and LDM hash log as separate parameters.",
+      "location": {
+        "unit_id": "u-194debf8ea4cd55b47ba",
+        "version": "harness",
+        "path": "input/harness/tests/fuzz/zstd_helpers.c",
+        "start_line": 103,
+        "end_line": 117,
+        "unit_sha256": "5254ad970efeacf43ac5c0d63ec7ae1edfc3863f217213711981a2390d9f5e19",
+        "quote_sha256": "38d75e0fe32b786e8fad92da354091b79bc0029648637f9f791e248705c192ea"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/0",
+      "evidence_id": "loc-969f9b2bebb401db131440eb",
+      "kind": "before_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "    /* resize windowLog if input is small enough, to use less memory */\n    if ( (srcSize <= maxWindowResize)\n      && (dictSize <= maxWindowResize) )  {\n        U32 const tSize = (U32)(srcSize + dictSize);\n        static U32 const hashSizeMin = 1 << ZSTD_HASHLOG_MIN;\n        U32 const srcLog = (tSize < hashSizeMin) ? ZSTD_HASHLOG_MIN :\n                            ZSTD_highbit32(tSize-1) + 1;\n        if (cPar.windowLog > srcLog) cPar.windowLog = srcLog;\n    }\n    if (srcSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        U32 const dictAndWindowLog = ZSTD_dictAndWindowLog(cPar.windowLog, (U64)srcSize, (U64)dictSize);\n        U32 const cycleLog = ZSTD_cycleLog(cPar.chainLog, cPar.strategy);\n        if (cPar.hashLog > dictAndWindowLog+1) cPar.hashLog = dictAndWindowLog+1;\n        if (cycleLog > dictAndWindowLog)\n            cPar.chainLog -= (cycleLog - dictAndWindowLog);\n    }\n\n    if (cPar.windowLog < ZSTD_WINDOWLOG_ABSOLUTEMIN)\n        cPar.windowLog = ZSTD_WINDOWLOG_ABSOLUTEMIN;  /* minimum wlog required for valid frame header */\n\n    /* We can't use more than 32 bits of hash in total, so that means that we require:\n     * (hashLog + 8) <= 32 && (chainLog + 8) <= 32\n     */\n    if (mode == ZSTD_cpm_createCDict && ZSTD_CDictIndicesAreTagged(&cPar)) {\n        U32 const maxShortCacheHashLog = 32 - ZSTD_SHORT_CACHE_TAG_BITS;\n        if (cPar.hashLog > maxShortCacheHashLog) {\n            cPar.hashLog = maxShortCacheHashLog;\n        }\n        if (cPar.chainLog > maxShortCacheHashLog) {\n            cPar.chainLog = maxShortCacheHashLog;\n        }\n    }\n\n\n    /* At this point, we aren't 100% sure if we are using the row match finder.\n     * Unless it is explicitly disabled, conservatively assume that it is enabled.\n     * In this case it will only be disabled for small sources, so shrinking the\n     * hash log a little bit shouldn't result in any ratio loss.\n     */\n    if (useRowMatchFinder == ZSTD_ps_auto)\n        useRowMatchFinder = ZSTD_ps_enable;\n\n    /* We can't hash more than 32-bits in total. So that means that we require:\n     * (hashLog - rowLog + 8) <= 32\n     */\n    if (ZSTD_rowMatchFinderUsed(cPar.strategy, useRowMatchFinder)) {\n        /* Switch to 32-entry rows if searchLog is 5 (or more) */\n        U32 const rowLog = BOUNDED(4, cPar.searchLog, 6);\n        U32 const maxRowHashLog = 32 - ZSTD_ROW_HASH_TAG_BITS;\n        U32 const maxHashLog = maxRowHashLog + rowLog;\n        assert(cPar.hashLog >= rowLog);\n        if (cPar.hashLog > maxHashLog) {\n            cPar.hashLog = maxHashLog;\n        }\n    }\n\n    return cPar;\n",
+      "change_ids": [
+        "g0003"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-facf31de921eddbcf157",
+        "version": "before",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 1497,
+        "end_line": 1553,
+        "unit_sha256": "de93d0d73c3b6d2ca7a26fe3a58ab6ba841066a5dc0e3048e40061eb8db5c70d",
+        "quote_sha256": "fdb267c3a33c3a032ee510dee0ea2b5e167cf7fc80f6d463ba52473c339eb22a"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/1",
+      "evidence_id": "loc-13276582f5438028eb631895",
+      "kind": "after_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "    /* Cascade the selected strategy down to the next-highest one built into\n     * this binary. */\n#ifdef ZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btultra2) {\n        cPar.strategy = ZSTD_btultra;\n    }\n    if (cPar.strategy == ZSTD_btultra) {\n        cPar.strategy = ZSTD_btopt;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_BTOPT_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btopt) {\n        cPar.strategy = ZSTD_btlazy2;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_BTLAZY2_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btlazy2) {\n        cPar.strategy = ZSTD_lazy2;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_LAZY2_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_lazy2) {\n        cPar.strategy = ZSTD_lazy;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_LAZY_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_lazy) {\n        cPar.strategy = ZSTD_greedy;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_GREEDY_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_greedy) {\n        cPar.strategy = ZSTD_dfast;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_DFAST_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_dfast) {\n        cPar.strategy = ZSTD_fast;\n        cPar.targetLength = 0;\n    }\n#endif\n\n    switch (mode) {\n    case ZSTD_cpm_unknown:\n    case ZSTD_cpm_noAttachDict:\n        /* If we don't know the source size, don't make any\n         * assumptions about it. We will already have selected\n         * smaller parameters if a dictionary is in use.\n         */\n        break;\n    case ZSTD_cpm_createCDict:\n        /* Assume a small source size when creating a dictionary\n         * with an unknown source size.\n         */\n        if (dictSize && srcSize == ZSTD_CONTENTSIZE_UNKNOWN)\n            srcSize = minSrcSize;\n        break;\n    case ZSTD_cpm_attachDict:\n        /* Dictionary has its own dedicated parameters which have\n         * already been selected. We are selecting parameters\n         * for only the source.\n         */\n        dictSize = 0;\n        break;\n    default:\n        assert(0);\n        break;\n    }\n\n    /* resize windowLog if input is small enough, to use less memory */\n    if ( (srcSize <= maxWindowResize)\n      && (dictSize <= maxWindowResize) )  {\n        U32 const tSize = (U32)(srcSize + dictSize);\n        static U32 const hashSizeMin = 1 << ZSTD_HASHLOG_MIN;\n        U32 const srcLog = (tSize < hashSizeMin) ? ZSTD_HASHLOG_MIN :\n                            ZSTD_highbit32(tSize-1) + 1;\n        if (cPar.windowLog > srcLog) cPar.windowLog = srcLog;\n    }\n    if (srcSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        U32 const dictAndWindowLog = ZSTD_dictAndWindowLog(cPar.windowLog, (U64)srcSize, (U64)dictSize);\n        U32 const cycleLog = ZSTD_cycleLog(cPar.chainLog, cPar.strategy);\n        if (cPar.hashLog > dictAndWindowLog+1) cPar.hashLog = dictAndWindowLog+1;\n        if (cycleLog > dictAndWindowLog)\n            cPar.chainLog -= (cycleLog - dictAndWindowLog);\n    }\n\n    if (cPar.windowLog < ZSTD_WINDOWLOG_ABSOLUTEMIN)\n        cPar.windowLog = ZSTD_WINDOWLOG_ABSOLUTEMIN;  /* minimum wlog required for valid frame header */\n\n    /* We can't use more than 32 bits of hash in total, so that means that we require:\n     * (hashLog + 8) <= 32 && (chainLog + 8) <= 32\n     */\n    if (mode == ZSTD_cpm_createCDict && ZSTD_CDictIndicesAreTagged(&cPar)) {\n        U32 const maxShortCacheHashLog = 32 - ZSTD_SHORT_CACHE_TAG_BITS;\n        if (cPar.hashLog > maxShortCacheHashLog) {\n            cPar.hashLog = maxShortCacheHashLog;\n        }\n        if (cPar.chainLog > maxShortCacheHashLog) {\n            cPar.chainLog = maxShortCacheHashLog;\n        }\n    }\n\n\n    /* At this point, we aren't 100% sure if we are using the row match finder.\n     * Unless it is explicitly disabled, conservatively assume that it is enabled.\n     * In this case it will only be disabled for small sources, so shrinking the\n     * hash log a little bit shouldn't result in any ratio loss.\n     */\n    if (useRowMatchFinder == ZSTD_ps_auto)\n        useRowMatchFinder = ZSTD_ps_enable;\n\n    /* We can't hash more than 32-bits in total. So that means that we require:\n     * (hashLog - rowLog + 8) <= 32\n     */\n    if (ZSTD_rowMatchFinderUsed(cPar.strategy, useRowMatchFinder)) {\n        /* Switch to 32-entry rows if searchLog is 5 (or more) */\n        U32 const rowLog = BOUNDED(4, cPar.searchLog, 6);\n        U32 const maxRowHashLog = 32 - ZSTD_ROW_HASH_TAG_BITS;\n        U32 const maxHashLog = maxRowHashLog + rowLog;\n        assert(cPar.hashLog >= rowLog);\n        if (cPar.hashLog > maxHashLog) {\n            cPar.hashLog = maxHashLog;\n        }\n    }\n\n    return cPar;\n",
+      "change_ids": [
+        "g0003"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-31b9fce4fcddd0beca8e",
+        "version": "after",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 1470,
+        "end_line": 1595,
+        "unit_sha256": "6189b31678d87b62a6c3f893a63065626012db0d6e5f23aa7772e6bf069a7e0c",
+        "quote_sha256": "2a7906adf10dd3d66d3c777b7e0e28892ae237824024836af7aae2c1b5dcec63"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/2",
+      "evidence_id": "loc-641364eca02541171ad90672",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzz/zstd_helpers.c",
+      "text": "ZSTD_compressionParameters FUZZ_randomCParams(size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    /* Select compression parameters */\n    ZSTD_compressionParameters cParams;\n    cParams.windowLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_WINDOWLOG_MIN, 15);\n    cParams.hashLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_HASHLOG_MIN, 15);\n    cParams.chainLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_CHAINLOG_MIN, 16);\n    cParams.searchLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_SEARCHLOG_MIN, 9);\n    cParams.minMatch = FUZZ_dataProducer_uint32Range(producer, ZSTD_MINMATCH_MIN,\n                                          ZSTD_MINMATCH_MAX);\n    cParams.targetLength = FUZZ_dataProducer_uint32Range(producer, 0, 512);\n    cParams.strategy = FUZZ_dataProducer_uint32Range(producer, ZSTD_STRATEGY_MIN, ZSTD_STRATEGY_MAX);\n    return ZSTD_adjustCParams(cParams, srcSize, 0);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The fixed old harness uses the same capped generator on both source versions.",
+      "location": {
+        "unit_id": "u-194debf8ea4cd55b47ba",
+        "version": "harness",
+        "path": "input/harness/tests/fuzz/zstd_helpers.c",
+        "start_line": 44,
+        "end_line": 56,
+        "unit_sha256": "5254ad970efeacf43ac5c0d63ec7ae1edfc3863f217213711981a2390d9f5e19",
+        "quote_sha256": "a03bd4f77617feb163ed5d185b66b6ce26add7bb1d0235fd8deae7a76018926b"
+      }
+    },
+    {
+      "pointer": "/source_evidence/0",
+      "evidence_id": "loc-cf0122ea7af1038b99b52b8c",
+      "kind": "before_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "ZSTD_bounds ZSTD_cParam_getBounds(ZSTD_cParameter param)\n{\n    ZSTD_bounds bounds = { 0, 0, 0 };\n\n    switch(param)\n    {\n    case ZSTD_c_compressionLevel:\n        bounds.lowerBound = ZSTD_minCLevel();\n        bounds.upperBound = ZSTD_maxCLevel();\n        return bounds;\n\n    case ZSTD_c_windowLog:\n        bounds.lowerBound = ZSTD_WINDOWLOG_MIN;\n        bounds.upperBound = ZSTD_WINDOWLOG_MAX;\n        return bounds;\n\n    case ZSTD_c_hashLog:\n        bounds.lowerBound = ZSTD_HASHLOG_MIN;\n        bounds.upperBound = ZSTD_HASHLOG_MAX;\n        return bounds;\n",
+      "change_ids": [
+        "g0003",
+        "g0004",
+        "g0005",
+        "g0006",
+        "g0007",
+        "g0008",
+        "g0009"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-860860e3395d8f95d959",
+        "version": "before",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 425,
+        "end_line": 444,
+        "unit_sha256": "298f4c03c87dc1c8443dc1d3ec24668d3834d8146c9c366bfb442836489245fe",
+        "quote_sha256": "ec0894f9e7cc2dbd7e0bddccd68f5904203936f911cd68120d1ecd2a4ee3d533"
+      }
+    },
+    {
+      "pointer": "/source_evidence/1",
+      "evidence_id": "loc-afdc7d061916c756c051552f",
+      "kind": "before_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "static ZSTD_compressionParameters\nZSTD_adjustCParams_internal(ZSTD_compressionParameters cPar,\n                            unsigned long long srcSize,\n                            size_t dictSize,\n                            ZSTD_cParamMode_e mode,\n                            ZSTD_paramSwitch_e useRowMatchFinder)\n{\n    const U64 minSrcSize = 513; /* (1<<9) + 1 */\n    const U64 maxWindowResize = 1ULL << (ZSTD_WINDOWLOG_MAX-1);\n    assert(ZSTD_checkCParams(cPar)==0);\n\n    switch (mode) {\n    case ZSTD_cpm_unknown:\n    case ZSTD_cpm_noAttachDict:\n        /* If we don't know the source size, don't make any\n         * assumptions about it. We will already have selected\n         * smaller parameters if a dictionary is in use.\n         */\n        break;\n    case ZSTD_cpm_createCDict:\n        /* Assume a small source size when creating a dictionary\n         * with an unknown source size.\n         */\n        if (dictSize && srcSize == ZSTD_CONTENTSIZE_UNKNOWN)\n            srcSize = minSrcSize;\n        break;\n    case ZSTD_cpm_attachDict:\n        /* Dictionary has its own dedicated parameters which have\n         * already been selected. We are selecting parameters\n         * for only the source.\n         */\n        dictSize = 0;\n        break;\n    default:\n        assert(0);\n        break;\n    }\n\n    /* resize windowLog if input is small enough, to use less memory */\n    if ( (srcSize <= maxWindowResize)\n      && (dictSize <= maxWindowResize) )  {\n        U32 const tSize = (U32)(srcSize + dictSize);\n        static U32 const hashSizeMin = 1 << ZSTD_HASHLOG_MIN;\n        U32 const srcLog = (tSize < hashSizeMin) ? ZSTD_HASHLOG_MIN :\n                            ZSTD_highbit32(tSize-1) + 1;\n        if (cPar.windowLog > srcLog) cPar.windowLog = srcLog;\n    }\n    if (srcSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        U32 const dictAndWindowLog = ZSTD_dictAndWindowLog(cPar.windowLog, (U64)srcSize, (U64)dictSize);\n        U32 const cycleLog = ZSTD_cycleLog(cPar.chainLog, cPar.strategy);\n        if (cPar.hashLog > dictAndWindowLog+1) cPar.hashLog = dictAndWindowLog+1;\n        if (cycleLog > dictAndWindowLog)\n            cPar.chainLog -= (cycleLog - dictAndWindowLog);\n    }\n\n    if (cPar.windowLog < ZSTD_WINDOWLOG_ABSOLUTEMIN)\n        cPar.windowLog = ZSTD_WINDOWLOG_ABSOLUTEMIN;  /* minimum wlog required for valid frame header */\n\n    /* We can't use more than 32 bits of hash in total, so that means that we require:\n     * (hashLog + 8) <= 32 && (chainLog + 8) <= 32\n     */\n    if (mode == ZSTD_cpm_createCDict && ZSTD_CDictIndicesAreTagged(&cPar)) {\n        U32 const maxShortCacheHashLog = 32 - ZSTD_SHORT_CACHE_TAG_BITS;\n        if (cPar.hashLog > maxShortCacheHashLog) {\n            cPar.hashLog = maxShortCacheHashLog;\n        }\n        if (cPar.chainLog > maxShortCacheHashLog) {\n            cPar.chainLog = maxShortCacheHashLog;\n        }\n    }\n\n\n    /* At this point, we aren't 100% sure if we are using the row match finder.\n     * Unless it is explicitly disabled, conservatively assume that it is enabled.\n     * In this case it will only be disabled for small sources, so shrinking the\n     * hash log a little bit shouldn't result in any ratio loss.\n     */\n    if (useRowMatchFinder == ZSTD_ps_auto)\n        useRowMatchFinder = ZSTD_ps_enable;\n\n    /* We can't hash more than 32-bits in total. So that means that we require:\n     * (hashLog - rowLog + 8) <= 32\n     */\n    if (ZSTD_rowMatchFinderUsed(cPar.strategy, useRowMatchFinder)) {\n        /* Switch to 32-entry rows if searchLog is 5 (or more) */\n        U32 const rowLog = BOUNDED(4, cPar.searchLog, 6);\n        U32 const maxRowHashLog = 32 - ZSTD_ROW_HASH_TAG_BITS;\n        U32 const maxHashLog = maxRowHashLog + rowLog;\n        assert(cPar.hashLog >= rowLog);\n        if (cPar.hashLog > maxHashLog) {\n            cPar.hashLog = maxHashLog;\n        }\n    }\n\n    return cPar;\n",
+      "change_ids": [
+        "g0003"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-facf31de921eddbcf157",
+        "version": "before",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 1459,
+        "end_line": 1553,
+        "unit_sha256": "de93d0d73c3b6d2ca7a26fe3a58ab6ba841066a5dc0e3048e40061eb8db5c70d",
+        "quote_sha256": "667b0ac3ba574420df9c60fe974a6b131030760e1ef972c19a8d4c76637ac694"
+      }
+    },
+    {
+      "pointer": "/source_evidence/2",
+      "evidence_id": "loc-293f9fa58079c513e2af4f7e",
+      "kind": "after_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "ZSTD_bounds ZSTD_cParam_getBounds(ZSTD_cParameter param)\n{\n    ZSTD_bounds bounds = { 0, 0, 0 };\n\n    switch(param)\n    {\n    case ZSTD_c_compressionLevel:\n        bounds.lowerBound = ZSTD_minCLevel();\n        bounds.upperBound = ZSTD_maxCLevel();\n        return bounds;\n\n    case ZSTD_c_windowLog:\n        bounds.lowerBound = ZSTD_WINDOWLOG_MIN;\n        bounds.upperBound = ZSTD_WINDOWLOG_MAX;\n        return bounds;\n\n    case ZSTD_c_hashLog:\n        bounds.lowerBound = ZSTD_HASHLOG_MIN;\n        bounds.upperBound = ZSTD_HASHLOG_MAX;\n        return bounds;\n",
+      "change_ids": [
+        "g0003",
+        "g0004",
+        "g0005",
+        "g0006",
+        "g0007",
+        "g0008",
+        "g0009"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-b5697ee0104bd691ea91",
+        "version": "after",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 425,
+        "end_line": 444,
+        "unit_sha256": "1a829f196bd7f8bf55ab80052293648aea204b7d5ab91391f90ecfe110804898",
+        "quote_sha256": "ec0894f9e7cc2dbd7e0bddccd68f5904203936f911cd68120d1ecd2a4ee3d533"
+      }
+    },
+    {
+      "pointer": "/source_evidence/3",
+      "evidence_id": "loc-ad252277a4e78cda8b0c578a",
+      "kind": "after_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "static ZSTD_compressionParameters\nZSTD_adjustCParams_internal(ZSTD_compressionParameters cPar,\n                            unsigned long long srcSize,\n                            size_t dictSize,\n                            ZSTD_cParamMode_e mode,\n                            ZSTD_paramSwitch_e useRowMatchFinder)\n{\n    const U64 minSrcSize = 513; /* (1<<9) + 1 */\n    const U64 maxWindowResize = 1ULL << (ZSTD_WINDOWLOG_MAX-1);\n    assert(ZSTD_checkCParams(cPar)==0);\n\n    /* Cascade the selected strategy down to the next-highest one built into\n     * this binary. */\n#ifdef ZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btultra2) {\n        cPar.strategy = ZSTD_btultra;\n    }\n    if (cPar.strategy == ZSTD_btultra) {\n        cPar.strategy = ZSTD_btopt;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_BTOPT_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btopt) {\n        cPar.strategy = ZSTD_btlazy2;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_BTLAZY2_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_btlazy2) {\n        cPar.strategy = ZSTD_lazy2;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_LAZY2_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_lazy2) {\n        cPar.strategy = ZSTD_lazy;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_LAZY_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_lazy) {\n        cPar.strategy = ZSTD_greedy;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_GREEDY_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_greedy) {\n        cPar.strategy = ZSTD_dfast;\n    }\n#endif\n#ifdef ZSTD_EXCLUDE_DFAST_BLOCK_COMPRESSOR\n    if (cPar.strategy == ZSTD_dfast) {\n        cPar.strategy = ZSTD_fast;\n        cPar.targetLength = 0;\n    }\n#endif\n\n    switch (mode) {\n    case ZSTD_cpm_unknown:\n    case ZSTD_cpm_noAttachDict:\n        /* If we don't know the source size, don't make any\n         * assumptions about it. We will already have selected\n         * smaller parameters if a dictionary is in use.\n         */\n        break;\n    case ZSTD_cpm_createCDict:\n        /* Assume a small source size when creating a dictionary\n         * with an unknown source size.\n         */\n        if (dictSize && srcSize == ZSTD_CONTENTSIZE_UNKNOWN)\n            srcSize = minSrcSize;\n        break;\n    case ZSTD_cpm_attachDict:\n        /* Dictionary has its own dedicated parameters which have\n         * already been selected. We are selecting parameters\n         * for only the source.\n         */\n        dictSize = 0;\n        break;\n    default:\n        assert(0);\n        break;\n    }\n\n    /* resize windowLog if input is small enough, to use less memory */\n    if ( (srcSize <= maxWindowResize)\n      && (dictSize <= maxWindowResize) )  {\n        U32 const tSize = (U32)(srcSize + dictSize);\n        static U32 const hashSizeMin = 1 << ZSTD_HASHLOG_MIN;\n        U32 const srcLog = (tSize < hashSizeMin) ? ZSTD_HASHLOG_MIN :\n                            ZSTD_highbit32(tSize-1) + 1;\n        if (cPar.windowLog > srcLog) cPar.windowLog = srcLog;\n    }\n    if (srcSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        U32 const dictAndWindowLog = ZSTD_dictAndWindowLog(cPar.windowLog, (U64)srcSize, (U64)dictSize);\n        U32 const cycleLog = ZSTD_cycleLog(cPar.chainLog, cPar.strategy);\n        if (cPar.hashLog > dictAndWindowLog+1) cPar.hashLog = dictAndWindowLog+1;\n        if (cycleLog > dictAndWindowLog)\n            cPar.chainLog -= (cycleLog - dictAndWindowLog);\n    }\n\n    if (cPar.windowLog < ZSTD_WINDOWLOG_ABSOLUTEMIN)\n        cPar.windowLog = ZSTD_WINDOWLOG_ABSOLUTEMIN;  /* minimum wlog required for valid frame header */\n\n    /* We can't use more than 32 bits of hash in total, so that means that we require:\n     * (hashLog + 8) <= 32 && (chainLog + 8) <= 32\n     */\n    if (mode == ZSTD_cpm_createCDict && ZSTD_CDictIndicesAreTagged(&cPar)) {\n        U32 const maxShortCacheHashLog = 32 - ZSTD_SHORT_CACHE_TAG_BITS;\n        if (cPar.hashLog > maxShortCacheHashLog) {\n            cPar.hashLog = maxShortCacheHashLog;\n        }\n        if (cPar.chainLog > maxShortCacheHashLog) {\n            cPar.chainLog = maxShortCacheHashLog;\n        }\n    }\n\n\n    /* At this point, we aren't 100% sure if we are using the row match finder.\n     * Unless it is explicitly disabled, conservatively assume that it is enabled.\n     * In this case it will only be disabled for small sources, so shrinking the\n     * hash log a little bit shouldn't result in any ratio loss.\n     */\n    if (useRowMatchFinder == ZSTD_ps_auto)\n        useRowMatchFinder = ZSTD_ps_enable;\n\n    /* We can't hash more than 32-bits in total. So that means that we require:\n     * (hashLog - rowLog + 8) <= 32\n     */\n    if (ZSTD_rowMatchFinderUsed(cPar.strategy, useRowMatchFinder)) {\n        /* Switch to 32-entry rows if searchLog is 5 (or more) */\n        U32 const rowLog = BOUNDED(4, cPar.searchLog, 6);\n        U32 const maxRowHashLog = 32 - ZSTD_ROW_HASH_TAG_BITS;\n        U32 const maxHashLog = maxRowHashLog + rowLog;\n        assert(cPar.hashLog >= rowLog);\n        if (cPar.hashLog > maxHashLog) {\n            cPar.hashLog = maxHashLog;\n        }\n    }\n\n    return cPar;\n}\n",
+      "change_ids": [
+        "g0003"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-31b9fce4fcddd0beca8e",
+        "version": "after",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 1459,
+        "end_line": 1596,
+        "unit_sha256": "6189b31678d87b62a6c3f893a63065626012db0d6e5f23aa7772e6bf069a7e0c",
+        "quote_sha256": "6189b31678d87b62a6c3f893a63065626012db0d6e5f23aa7772e6bf069a7e0c"
+      }
+    },
+    {
+      "pointer": "/source_evidence/4",
+      "evidence_id": "loc-128070451004547d6c11f7e6",
+      "kind": "after_source",
+      "path": "input/source/lib/compress/zstd_compress.c",
+      "text": "static void ZSTD_overrideCParams(\n              ZSTD_compressionParameters* cParams,\n        const ZSTD_compressionParameters* overrides)\n{\n    if (overrides->windowLog)    cParams->windowLog    = overrides->windowLog;\n    if (overrides->hashLog)      cParams->hashLog      = overrides->hashLog;\n    if (overrides->chainLog)     cParams->chainLog     = overrides->chainLog;\n    if (overrides->searchLog)    cParams->searchLog    = overrides->searchLog;\n    if (overrides->minMatch)     cParams->minMatch     = overrides->minMatch;\n    if (overrides->targetLength) cParams->targetLength = overrides->targetLength;\n    if (overrides->strategy)     cParams->strategy     = overrides->strategy;\n}\n\nZSTD_compressionParameters ZSTD_getCParamsFromCCtxParams(\n        const ZSTD_CCtx_params* CCtxParams, U64 srcSizeHint, size_t dictSize, ZSTD_cParamMode_e mode)\n{\n    ZSTD_compressionParameters cParams;\n    if (srcSizeHint == ZSTD_CONTENTSIZE_UNKNOWN && CCtxParams->srcSizeHint > 0) {\n      srcSizeHint = CCtxParams->srcSizeHint;\n    }\n    cParams = ZSTD_getCParams_internal(CCtxParams->compressionLevel, srcSizeHint, dictSize, mode);\n    if (CCtxParams->ldmParams.enableLdm == ZSTD_ps_enable) cParams.windowLog = ZSTD_LDM_DEFAULT_WINDOW_LOG;\n    ZSTD_overrideCParams(&cParams, &CCtxParams->cParams);\n    assert(!ZSTD_checkCParams(cParams));\n    /* srcSizeHint == 0 means 0 */\n    return ZSTD_adjustCParams_internal(cParams, srcSizeHint, dictSize, mode, CCtxParams->useRowMatchFinder);\n",
+      "change_ids": [
+        "g0003",
+        "g0004",
+        "g0005",
+        "g0006",
+        "g0007",
+        "g0008",
+        "g0009"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Streaming parameter derivation applies requested log overrides before adjustment.",
+      "location": {
+        "unit_id": "u-b5697ee0104bd691ea91",
+        "version": "after",
+        "path": "input/source/lib/compress/zstd_compress.c",
+        "start_line": 1611,
+        "end_line": 1636,
+        "unit_sha256": "1a829f196bd7f8bf55ab80052293648aea204b7d5ab91391f90ecfe110804898",
+        "quote_sha256": "ee214a433acbbc50df816fac7d57a41f148454943333a04002d5d2365092f4f3"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/0",
+      "evidence_id": "loc-246840d9fe3f7a322985485d",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzz/stream_round_trip.c",
+      "text": "static size_t compress(uint8_t *dst, size_t capacity,\n                       const uint8_t *src, size_t srcSize,\n                     FUZZ_dataProducer_t *producer)\n{\n    size_t dstSize = 0;\n    ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);\n    FUZZ_setRandomParameters(cctx, srcSize, producer);\n    int maxBlockSize;\n    FUZZ_ZASSERT(ZSTD_CCtx_getParameter(cctx, ZSTD_c_maxBlockSize, &maxBlockSize));\n\n    while (srcSize > 0) {\n        ZSTD_inBuffer in = makeInBuffer(&src, &srcSize, producer);\n        /* Mode controls the action. If mode == -1 we pick a new mode */\n        int mode = -1;\n        while (in.pos < in.size || mode != -1) {\n            ZSTD_outBuffer out = makeOutBuffer(dst, capacity, producer);\n            /* Previous action finished, pick a new mode. */\n            if (mode == -1) mode = FUZZ_dataProducer_uint32Range(producer, 0, 9);\n            switch (mode) {\n                case 0: /* fall-through */\n                case 1: /* fall-through */\n                case 2: {\n                    size_t const ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_flush);\n                    FUZZ_ZASSERT(ret);\n                    if (ret == 0)\n                        mode = -1;\n                    break;\n                }\n                case 3: {\n                    size_t ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_end);\n                    FUZZ_ZASSERT(ret);\n                    /* Reset the compressor when the frame is finished */\n                    if (ret == 0) {\n                        ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);\n                        if (FUZZ_dataProducer_uint32Range(producer, 0, 7) == 0) {\n                            size_t const remaining = in.size - in.pos;\n                            FUZZ_setRandomParameters(cctx, remaining, producer);\n                            /* Always use the same maxBlockSize */\n                            FUZZ_ZASSERT(ZSTD_CCtx_setParameter(cctx, ZSTD_c_maxBlockSize, maxBlockSize));\n                        }\n                        mode = -1;\n                    }\n                    break;\n                }\n                case 4: {\n                    ZSTD_inBuffer nullIn = { NULL, 0, 0 };\n                    ZSTD_outBuffer nullOut = { NULL, 0, 0 };\n                    size_t const ret = ZSTD_compressStream2(cctx, &nullOut, &nullIn, ZSTD_e_continue);\n                    FUZZ_ZASSERT(ret);\n                }\n                /* fall-through */\n                default: {\n                    size_t const ret =\n                        ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_continue);\n                    FUZZ_ZASSERT(ret);\n                    mode = -1;\n                }\n            }\n            dst += out.pos;\n            dstSize += out.pos;\n            capacity -= out.pos;\n        }\n    }\n    for (;;) {\n        ZSTD_inBuffer in = {NULL, 0, 0};\n        ZSTD_outBuffer out = makeOutBuffer(dst, capacity, producer);\n        size_t const ret = ZSTD_compressStream2(cctx, &out, &in, ZSTD_e_end);\n        FUZZ_ZASSERT(ret);\n\n        dst += out.pos;\n        dstSize += out.pos;\n        capacity -= out.pos;\n        if (ret == 0)\n            break;\n    }\n    return dstSize;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-9dc9e88ae722c8cbe085",
+        "version": "harness",
+        "path": "input/harness/tests/fuzz/stream_round_trip.c",
+        "start_line": 59,
+        "end_line": 137,
+        "unit_sha256": "1e5d2236216c35bfb73c8add163ea709078d65de023f454e43fef0b9a940a3e6",
+        "quote_sha256": "3d0c22161739877649565a5634df39218986b130801802a23b9797c9afa33b34"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/1",
+      "evidence_id": "loc-78e2982e62270fc4ad04b200",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzz/zstd_helpers.c",
+      "text": "ZSTD_compressionParameters FUZZ_randomCParams(size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    /* Select compression parameters */\n    ZSTD_compressionParameters cParams;\n    cParams.windowLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_WINDOWLOG_MIN, 15);\n    cParams.hashLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_HASHLOG_MIN, 15);\n    cParams.chainLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_CHAINLOG_MIN, 16);\n    cParams.searchLog = FUZZ_dataProducer_uint32Range(producer, ZSTD_SEARCHLOG_MIN, 9);\n    cParams.minMatch = FUZZ_dataProducer_uint32Range(producer, ZSTD_MINMATCH_MIN,\n                                          ZSTD_MINMATCH_MAX);\n    cParams.targetLength = FUZZ_dataProducer_uint32Range(producer, 0, 512);\n    cParams.strategy = FUZZ_dataProducer_uint32Range(producer, ZSTD_STRATEGY_MIN, ZSTD_STRATEGY_MAX);\n    return ZSTD_adjustCParams(cParams, srcSize, 0);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The target's parameter generator caps both log ranges at 15.",
+      "location": {
+        "unit_id": "u-194debf8ea4cd55b47ba",
+        "version": "harness",
+        "path": "input/harness/tests/fuzz/zstd_helpers.c",
+        "start_line": 44,
+        "end_line": 56,
+        "unit_sha256": "5254ad970efeacf43ac5c0d63ec7ae1edfc3863f217213711981a2390d9f5e19",
+        "quote_sha256": "a03bd4f77617feb163ed5d185b66b6ce26add7bb1d0235fd8deae7a76018926b"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/2",
+      "evidence_id": "loc-e856a5c2326c453d2c0d986d",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzz/zstd_helpers.c",
+      "text": "void FUZZ_setRandomParameters(ZSTD_CCtx *cctx, size_t srcSize, FUZZ_dataProducer_t *producer)\n{\n    ZSTD_compressionParameters cParams = FUZZ_randomCParams(srcSize, producer);\n    set(cctx, ZSTD_c_windowLog, cParams.windowLog);\n    set(cctx, ZSTD_c_hashLog, cParams.hashLog);\n    set(cctx, ZSTD_c_chainLog, cParams.chainLog);\n    set(cctx, ZSTD_c_searchLog, cParams.searchLog);\n    set(cctx, ZSTD_c_minMatch, cParams.minMatch);\n    set(cctx, ZSTD_c_targetLength, cParams.targetLength);\n    set(cctx, ZSTD_c_strategy, cParams.strategy);\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The helper applies the generated values to the context.",
+      "location": {
+        "unit_id": "u-194debf8ea4cd55b47ba",
+        "version": "harness",
+        "path": "input/harness/tests/fuzz/zstd_helpers.c",
+        "start_line": 101,
+        "end_line": 110,
+        "unit_sha256": "5254ad970efeacf43ac5c0d63ec7ae1edfc3863f217213711981a2390d9f5e19",
+        "quote_sha256": "04aa357331fd25eacff56b97ed77d619c39e440c13819f46059a55181df75f4b"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/3",
+      "evidence_id": "loc-75a588b2208239da489e2acc",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/build.sh",
+      "text": "cd tests/fuzz\n\n# Download the seed corpora\nmake -j seedcorpora\n# Build all of the fuzzers\n./fuzz.py build all\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The recipe delegates target construction and flags to fuzz.py.",
+      "location": {
+        "unit_id": "u-043cf5aa9ced10a35cb6",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/build.sh",
+        "start_line": 19,
+        "end_line": 24,
+        "unit_sha256": "5c921da26b16cf726a048811480a0c78dd8eca9561457a5939f066e82d771501",
+        "quote_sha256": "50e8f41ee8355658e607ca48124b4a7141b0240c7bdc5f81f83a0f1c84fc189d"
+      }
+    }
+  ],
+  "obligation_class": "target_coverage"
+}

@@ -1,0 +1,95 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0001",
+          "status": "unknown",
+          "reason": "The supplied after-source shows a reachable parser error path, but does not identify the exact added or removed behavior for this change group.",
+          "errors": []
+        },
+        {
+          "change_id": "g0002",
+          "status": "unknown",
+          "reason": "The supplied after-source establishes the cleanup operation, but does not identify the exact added or removed behavior for this change group.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "pass",
+          "reason": "The supplied recipe builds the library, compiles this target, and links it with the fuzzing engine; the called API declarations are supplied. This is a structural assessment, not a claim that a build was run.",
+          "errors": []
+        },
+        "input": {
+          "status": "pass",
+          "reason": "The entry skips zero-length input and passes the nonzero byte length explicitly, so the string helper does not take its strlen fallback.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "blocked",
+          "reason": "For a nonempty input consisting of `{`, parsing records an unmatched open brace. The entry then returns when it reads that error, before calling ucl_parser_free.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "pass",
+          "reason": "For nonempty input, the entry calls add_string, which delegates through add_chunk_full to the UCL state machine; the entry then queries the parser error.",
+          "errors": []
+        }
+      },
+      "errors": [],
+      "missing_information": [],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "kind": "lifecycle",
+        "necessary": true,
+        "established": true,
+        "requirement": "Free the parser created for an input after parsing, including when parsing reports an error.",
+        "target_route": "LLVMFuzzerTestOneInput receives nonempty `{` → ucl_parser_new(0) → ucl_parser_add_string with its explicit length → UCL state machine reports an unmatched open brace → ucl_parser_get_error → error return before ucl_parser_free.",
+        "failure_condition": "The error return at harness line 20 bypasses the only parser-free call at line 23, leaving the allocated parser and owned state unreleased.",
+        "alternative_paths": "The complete entry contains no other cleanup call or ownership transfer on the error branch.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-abb0db8cc18a7193946f03e1",
+            "quote": "\tparser = UCL_ALLOC(sizeof(struct ucl_parser));\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tmemset(parser, 0, sizeof(struct ucl_parser));\n"
+          },
+          {
+            "evidence_id": "loc-406882d08cae485797ddbd9f",
+            "quote": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n"
+          },
+          {
+            "evidence_id": "loc-fd75dea6c2ce0640f9a1f3ed",
+            "quote": "\t\t\t\tif (p < chunk->end) {\n\t\t\t\t\tif (*p == '[') {\n\t\t\t\t\t\tparser->state = UCL_STATE_VALUE;\n\t\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\t\t\tseen_obrace = true;\n\t\t\t\t\t}\n\t\t\t\t\telse {\n\n\t\t\t\t\t\tif (*p == '{') {\n\t\t\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\t\t\t\tparser->state = UCL_STATE_KEY_OBRACE;\n\t\t\t\t\t\t\tseen_obrace = true;\n\t\t\t\t\t\t}\n\t\t\t\t\t\telse {\n\t\t\t\t\t\t\tparser->state = UCL_STATE_KEY;\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t}\n\n\t\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t\tif (parser->state == UCL_STATE_VALUE) {\n\t\t\t\t\t\tobj = ucl_parser_add_container(NULL, parser, true, 0,\n\t\t\t\t\t\t\t\t\t\t\t\t\t   seen_obrace);\n\t\t\t\t\t}\n\t\t\t\t\telse {\n\t\t\t\t\t\tobj = ucl_parser_add_container(NULL, parser, false, 0,\n\t\t\t\t\t\t\t\t\t\t\t\t\t   seen_obrace);\n\t\t\t\t\t}\n\n\t\t\t\t\tif (obj == NULL) {\n\t\t\t\t\t\treturn false;\n\t\t\t\t\t}\n\n\t\t\t\t\tparser->top_obj = obj;\n\t\t\t\t\tparser->cur_obj = obj;\n"
+          },
+          {
+            "evidence_id": "loc-7b0fb157745720972729b69a",
+            "quote": "\tif (parser->stack != NULL && parser->state != UCL_STATE_ERROR) {\n\t\tstruct ucl_stack *st;\n\t\tbool has_error = false;\n\n\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n"
+          },
+          {
+            "evidence_id": "loc-59510ab59a7a474b83ce19f8",
+            "quote": "const char *\nucl_parser_get_error(struct ucl_parser *parser)\n{\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tif (parser->err == NULL) {\n\t\treturn NULL;\n\t}\n\n\treturn utstring_body(parser->err);\n}\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-760c8fa17b5ceaf69a38215d",
+            "quote": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\t// If size is 0 we need a null-terminated string.\n\t// We dont null-terminate the string and by the design\n\t// of the API passing 0 as size with non null-terminated string\n\t// gives undefined behavior. \t\n\tif(size==0){\n\t\treturn 0;\n\t}\n\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n}\n"
+          }
+        ],
+        "missing_information": [],
+        "id": "o-63d81bf5a0d2fee4",
+        "change_ids": [],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

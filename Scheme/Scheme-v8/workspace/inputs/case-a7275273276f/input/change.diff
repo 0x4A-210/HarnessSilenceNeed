@@ -1,0 +1,292 @@
+diff --git a/FAQ b/FAQ
+index df12668255718f7a5ff5f7aceced6992af768350..b6b11bd01ded432e827b77ac33b4455223420306 100644
+--- a/FAQ
++++ b/FAQ
+@@ -258,15 +258,15 @@ The latest zlib FAQ is at http://zlib.net/zlib_faq.html
+ 33. Does zlib have any security vulnerabilities?
+ 
+     The only one that we are aware of is potentially in gzprintf().  If zlib is
+-    compiled to use sprintf() or vsprintf(), then there is no protection
+-    against a buffer overflow of an 8K string space (or other value as set by
+-    gzbuffer()), other than the caller of gzprintf() assuring that the output
+-    will not exceed 8K.  On the other hand, if zlib is compiled to use
+-    snprintf() or vsnprintf(), which should normally be the case, then there is
+-    no vulnerability.  The ./configure script will display warnings if an
+-    insecure variation of sprintf() will be used by gzprintf().  Also the
+-    zlibCompileFlags() function will return information on what variant of
+-    sprintf() is used by gzprintf().
++    compiled to use sprintf() or vsprintf(), which requires that ZLIB_INSECURE
++    be defined, then there is no protection against a buffer overflow of an 8K
++    string space (or other value as set by gzbuffer()), other than the caller
++    of gzprintf() assuring that the output will not exceed 8K.  On the other
++    hand, if zlib is compiled to use snprintf() or vsnprintf(), which should
++    normally be the case, then there is no vulnerability.  The ./configure
++    script will display warnings if an insecure variation of sprintf() will be
++    used by gzprintf().  Also the zlibCompileFlags() function will return
++    information on what variant of sprintf() is used by gzprintf().
+ 
+     If you don't have snprintf() or vsnprintf() and would like one, you can
+     find a good portable implementation in stb_sprintf.h here:
+diff --git a/configure b/configure
+index 1d3d660eaec0e1f6dcbffc3533bff6a853d9d96e..872c50a6198145344b988acddf143c68e55e3ede 100755
+--- a/configure
++++ b/configure
+@@ -92,6 +92,7 @@ warn=0
+ debug=0
+ address=0
+ memory=0
++insecure=0
+ unknown=0
+ old_cc="$CC"
+ old_cflags="$CFLAGS"
+@@ -118,7 +119,7 @@ case "$1" in
+     -h* | --help)
+       echo 'usage:' | tee -a configure.log
+       echo '  configure [--const] [--zprefix] [--prefix=PREFIX]  [--eprefix=EXPREFIX]' | tee -a configure.log
+-      echo '    [--static] [--64] [--libdir=LIBDIR] [--sharedlibdir=LIBDIR]' | tee -a configure.log
++      echo '    [--insecure] [--static] [--64] [--libdir=LIBDIR] [--sharedlibdir=LIBDIR]' | tee -a configure.log
+       echo '    [--includedir=INCLUDEDIR] [--archs="-arch i386 -arch x86_64"]' | tee -a configure.log
+         exit 0 ;;
+     -p*=* | --prefix=*) prefix=`echo $1 | sed 's/.*=//'`; shift ;;
+@@ -146,6 +147,7 @@ case "$1" in
+     --sanitize) address=1; shift ;;
+     --address) address=1; shift ;;
+     --memory) memory=1; shift ;;
++    --insecure) insecure=1; shift ;;
+     *) unknown=1; echo "unknown option ignored: $1" | tee -a configure.log; shift;;
+     esac
+ done
+@@ -256,6 +258,9 @@ if test "$gcc" -eq 1 && ($cc -c $test.c) >> configure.log 2>&1; then
+   if test $memory -eq 1; then
+     CFLAGS="${CFLAGS} -g -fsanitize=memory -fno-omit-frame-pointer"
+   fi
++  if test $insecure -eq 1; then
++    CFLAGS="${CFLAGS} -DZLIB_INSECURE"
++  fi
+   if test $debug -eq 1; then
+     CFLAGS="${CFLAGS} -DZLIB_DEBUG"
+     SFLAGS="${SFLAGS} -DZLIB_DEBUG"
+@@ -740,7 +745,10 @@ EOF
+     echo "  WARNING: vsnprintf() not found, falling back to vsprintf(). zlib" | tee -a configure.log
+     echo "  can build but will be open to possible buffer-overflow security" | tee -a configure.log
+     echo "  vulnerabilities." | tee -a configure.log
+-
++    if test $insecure -ne 1; then
++      echo "  The --insecure option must be provided to ./configure in order to" | tee -a configure.log
++      echo "  compile using the insecure vsprintf() function." | tee -a configure.log
++    fi
+     echo >> configure.log
+     cat >$test.c <<EOF
+ #include <stdio.h>
+@@ -824,7 +832,10 @@ EOF
+     echo "  WARNING: snprintf() not found, falling back to sprintf(). zlib" | tee -a configure.log
+     echo "  can build but will be open to possible buffer-overflow security" | tee -a configure.log
+     echo "  vulnerabilities." | tee -a configure.log
+-
++    if test $insecure -ne 1; then
++      echo "  The --insecure option must be provided to ./configure in order to" | tee -a configure.log
++      echo "  compile using the insecure sprintf() function." | tee -a configure.log
++    fi
+     echo >> configure.log
+     cat >$test.c <<EOF
+ #include <stdio.h>
+diff --git a/gzwrite.c b/gzwrite.c
+index 93484734c94285e83f12c64eae21edcc1599f251..acea74fe32b7efc5d4da95eccdb181d7243ff628 100644
+--- a/gzwrite.c
++++ b/gzwrite.c
+@@ -371,6 +371,9 @@ int ZEXPORT gzputs(gzFile file, const char *s) {
+     return len && put == 0 ? -1 : (int)put;
+ }
+ 
++#if (((!defined(STDC) && !defined(Z_HAVE_STDARG_H)) || !defined(NO_vsnprintf)) && \
++     (defined(STDC) || defined(Z_HAVE_STDARG_H) || !defined(NO_snprintf))) || \
++    defined(ZLIB_INSECURE)
+ /* If the second half of the input buffer is occupied, write out the contents.
+    If there is any input remaining due to a non-blocking stall on write, move
+    it to the start of the buffer. Return true if this did not open up the
+@@ -391,12 +394,20 @@ local int gz_vacate(gz_statep state) {
+     strm->next_in = state->in;
+     return strm->avail_in > state->size;
+ }
++#endif
+ 
+ #if defined(STDC) || defined(Z_HAVE_STDARG_H)
+ #include <stdarg.h>
+ 
+ /* -- see zlib.h -- */
+ int ZEXPORTVA gzvprintf(gzFile file, const char *format, va_list va) {
++#if defined(NO_vsnprintf) && !defined(ZLIB_INSECURE)
++#warning "vsnprintf() not available -- gzprintf() stub returns Z_STREAM_ERROR"
++#warning "you can recompile with ZLIB_INSECURE defined to use vsprintf()"
++    /* prevent use of insecure vsprintf(), unless purposefully requested */
++    (void)file, (void)format, (void)va;
++    return Z_STREAM_ERROR;
++#else
+     int len, ret;
+     char *next;
+     gz_statep state;
+@@ -470,6 +481,7 @@ int ZEXPORTVA gzvprintf(gzFile file, const char *format, va_list va) {
+     if (state->err && !state->again)
+         return state->err;
+     return len;
++#endif
+ }
+ 
+ int ZEXPORTVA gzprintf(gzFile file, const char *format, ...) {
+@@ -489,6 +501,17 @@ int ZEXPORTVA gzprintf(gzFile file, const char *format, int a1, int a2, int a3,
+                        int a4, int a5, int a6, int a7, int a8, int a9, int a10,
+                        int a11, int a12, int a13, int a14, int a15, int a16,
+                        int a17, int a18, int a19, int a20) {
++#if defined(NO_snprintf) && !defined(ZLIB_INSECURE)
++#warning "snprintf() not available -- gzprintf() stub returns Z_STREAM_ERROR"
++#warning "you can recompile with ZLIB_INSECURE defined to use sprintf()"
++    /* prevent use of insecure sprintf(), unless purposefully requested */
++    (void)file, (void)format, (void)a1, (void)a2, (void)a3, (void)a4, (void)a5,
++    (void)a6, (void)a7, (void)a8, (void)a9, (void)a10, (void)a11, (void)a12,
++    (void)a13, (void)a14, (void)a15, (void)a16, (void)a17, (void)a18,
++    (void)a19, (void)a20;
++    return Z_STREAM_ERROR;
++#else
++    int ret;
+     unsigned len, left;
+     char *next;
+     gz_statep state;
+@@ -511,11 +534,11 @@ int ZEXPORTVA gzprintf(gzFile file, const char *format, int a1, int a2, int a3,
+ 
+     /* make sure we have some buffer space */
+     if (state->size == 0 && gz_init(state) == -1)
+-        return state->error;
++        return state->err;
+ 
+     /* check for seek request */
+     if (state->skip && gz_zero(state) == -1)
+-        return state->error;
++        return state->err;
+ 
+     /* do the printf() into the input buffer, put length in len -- the input
+        buffer is double-sized just for this function, so there is guaranteed to
+@@ -571,6 +594,7 @@ int ZEXPORTVA gzprintf(gzFile file, const char *format, int a1, int a2, int a3,
+     if (state->err && !state->again)
+         return state->err;
+     return (int)len;
++#endif
+ }
+ 
+ #endif
+diff --git a/zlib.h b/zlib.h
+index 2881da71c6b5a36c692982923d8b535205ec775e..595e3cfd6955433ddcc269c4585b166f7ee93d1d 100644
+--- a/zlib.h
++++ b/zlib.h
+@@ -1239,13 +1239,14 @@ ZEXTERN uLong ZEXPORT zlibCompileFlags(void);
+      21: FASTEST -- deflate algorithm with only one, lowest compression level
+      22,23: 0 (reserved)
+ 
+-    The sprintf variant used by gzprintf (zero is best):
++    The sprintf variant used by gzprintf (all zeros is best):
+      24: 0 = vs*, 1 = s* -- 1 means limited to 20 arguments after the format
+-     25: 0 = *nprintf, 1 = *printf -- 1 means gzprintf() not secure!
++     25: 0 = *nprintf, 1 = *printf -- 1 means gzprintf() is not secure!
+      26: 0 = returns value, 1 = void -- 1 means inferred string length returned
++     27: 0 = gzprintf() present, 1 = not -- 1 means gzprintf() returns an error
+ 
+     Remainder:
+-     27-31: 0 (reserved)
++     28-31: 0 (reserved)
+  */
+ 
+ #ifndef Z_SOLO
+@@ -1527,7 +1528,11 @@ ZEXTERN z_size_t ZEXPORT gzfwrite(voidpc buf, z_size_t size,
+    gzwrite() instead.
+ */
+ 
++#if defined(STDC) || defined(Z_HAVE_STDARG_H)
+ ZEXTERN int ZEXPORTVA gzprintf(gzFile file, const char *format, ...);
++#else
++ZEXTERN int ZEXPORTVA gzprintf();
++#endif
+ /*
+      Convert, format, compress, and write the arguments (...) to file under
+    control of the string format, as in fprintf.  gzprintf returns the number of
+@@ -1535,11 +1540,16 @@ ZEXTERN int ZEXPORTVA gzprintf(gzFile file, const char *format, ...);
+    of error.  The number of uncompressed bytes written is limited to 8191, or
+    one less than the buffer size given to gzbuffer().  The caller should assure
+    that this limit is not exceeded.  If it is exceeded, then gzprintf() will
+-   return an error (0) with nothing written.  In this case, there may also be a
+-   buffer overflow with unpredictable consequences, which is possible only if
+-   zlib was compiled with the insecure functions sprintf() or vsprintf(),
+-   because the secure snprintf() or vsnprintf() functions were not available.
+-   This can be determined using zlibCompileFlags().
++   return an error (0) with nothing written.
++
++     In that last case, there may also be a buffer overflow with unpredictable
++   consequences, which is possible only if zlib was compiled with the insecure
++   functions sprintf() or vsprintf(), because the secure snprintf() and
++   vsnprintf() functions were not available. That would only be the case for
++   a non-ANSI C compiler. zlib may have been built without gzprintf() because
++   secure functions were not available and having gzprintf() be insecure was
++   not an option, in which case, gzprintf() returns Z_STREAM_ERROR. All of
++   these possibilities can be determined using zlibCompileFlags().
+ 
+      If a Z_BUF_ERROR is returned, then nothing was written due to a stall on
+    the non-blocking write destination.
+diff --git a/zutil.c b/zutil.c
+index b1c5d2d3c6daf5a4b7a337dafe3e862ca177b41c..6e8a3697e373dc08312f0b2e8a4f701d5acb67e7 100644
+--- a/zutil.c
++++ b/zutil.c
+@@ -86,28 +86,36 @@ uLong ZEXPORT zlibCompileFlags(void) {
+     flags += 1L << 21;
+ #endif
+ #if defined(STDC) || defined(Z_HAVE_STDARG_H)
+-#  ifdef NO_vsnprintf
+-    flags += 1L << 25;
+-#    ifdef HAS_vsprintf_void
+-    flags += 1L << 26;
+-#    endif
+-#  else
+-#    ifdef HAS_vsnprintf_void
+-    flags += 1L << 26;
+-#    endif
+-#  endif
++#   ifdef NO_vsnprintf
++#       ifdef ZLIB_INSECURE
++            flags += 1L << 25;
++#       else
++            flags += 1L << 27;
++#       endif
++#       ifdef HAS_vsprintf_void
++            flags += 1L << 26;
++#       endif
++#   else
++#       ifdef HAS_vsnprintf_void
++            flags += 1L << 26;
++#       endif
++#   endif
+ #else
+     flags += 1L << 24;
+-#  ifdef NO_snprintf
+-    flags += 1L << 25;
+-#    ifdef HAS_sprintf_void
+-    flags += 1L << 26;
+-#    endif
+-#  else
+-#    ifdef HAS_snprintf_void
+-    flags += 1L << 26;
+-#    endif
+-#  endif
++#   ifdef NO_snprintf
++#       ifdef ZLIB_INSECURE
++            flags += 1L << 25;
++#       else
++            flags += 1L << 27;
++#       endif
++#       ifdef HAS_sprintf_void
++            flags += 1L << 26;
++#       endif
++#   else
++#       ifdef HAS_snprintf_void
++            flags += 1L << 26;
++#       endif
++#   endif
+ #endif
+     return flags;
+ }

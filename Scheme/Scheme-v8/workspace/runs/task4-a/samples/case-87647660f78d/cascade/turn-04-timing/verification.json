@@ -1,0 +1,81 @@
+{
+  "checked": {
+    "status": "introduced",
+    "gap": true,
+    "introduced_by_this_change": true,
+    "claims": [
+      {
+        "claim_id": "c1",
+        "status": "introduced",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Decode magicless frames through a configured DStream.",
+          "applicability": "not_applicable",
+          "harness_status": "not_applicable",
+          "reason": "The before interface is described as compression only, its stream parser requires an ordinary magic number, and its DStream parameter setter supports only maximum window size. Magicless decoding was not a supported format on this side.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-1f0feb6cd4b00239829aee0e",
+              "quote": "/*===   New advanced API (experimental, and compression only)  ===*/\n *   In this proposal, parameters are pushed one by one into an existing CCtx,\n *   It stands a good chance to become \"stable\",\n *   after a reasonable testing period.\n *   It feels clearer in light of potential variants :\n *   ZSTD_DCtx_setParameter()  (rather than ZSTD_setDCtxParameter() )\n *   Left variant feels easier to distinguish.\n * All enum will be manually set to explicit values before reaching \"stable API\" status */"
+            },
+            {
+              "evidence_id": "loc-6bbee29ea7e04dbfe452e381",
+              "quote": "size_t ZSTD_setDStreamParameter(ZSTD_DStream* zds,\n                                ZSTD_DStreamParameter_e paramType, unsigned paramValue)\n{\n    switch(paramType)\n    {\n        default : return ERROR(parameter_unsupported);\n        case DStream_p_maxWindowSize : zds->maxWindowSize = paramValue ? paramValue : (U32)(-1); break;\n    }\n    return 0;\n}\n"
+            },
+            {
+              "evidence_id": "loc-a49e46e2f7b4cdd9d83547a5",
+              "quote": "size_t ZSTD_getFrameHeader(ZSTD_frameHeader* zfhPtr, const void* src, size_t srcSize)\n{\n    const BYTE* ip = (const BYTE*)src;\n    if (srcSize < ZSTD_frameHeaderSize_prefix) return ZSTD_frameHeaderSize_prefix;\n\n    if (MEM_readLE32(src) != ZSTD_MAGICNUMBER) {\n        if ((MEM_readLE32(src) & 0xFFFFFFF0U) == ZSTD_MAGIC_SKIPPABLE_START) {\n            /* skippable frame */\n            if (srcSize < ZSTD_skippableHeaderSize)\n                return ZSTD_skippableHeaderSize; /* magic number + frame length */\n            memset(zfhPtr, 0, sizeof(*zfhPtr));\n            zfhPtr->frameContentSize = MEM_readLE32((const char *)src + 4);\n            zfhPtr->frameType = ZSTD_skippableFrame;\n            return 0;\n        }\n        return ERROR(prefix_unknown);\n"
+            },
+            {
+              "evidence_id": "loc-fa6bea1dc33b415816bebacb",
+              "quote": "    while (someMoreWork) {\n        switch(zds->streamStage)\n        {\n        case zdss_init :\n            ZSTD_resetDStream(zds);   /* transparent reset on starting decoding a new frame */\n            /* fall-through */\n\n        case zdss_loadHeader :\n            {   size_t const hSize = ZSTD_getFrameHeader(&zds->fParams, zds->headerBuffer, zds->lhSize);\n                if (ZSTD_isError(hSize)) {\n#if defined(ZSTD_LEGACY_SUPPORT) && (ZSTD_LEGACY_SUPPORT>=1)\n                    U32 const legacyVersion = ZSTD_isLegacy(istart, iend-istart);\n                    if (legacyVersion) {\n                        const void* const dict = zds->ddict ? zds->ddict->dictContent : NULL;\n                        size_t const dictSize = zds->ddict ? zds->ddict->dictSize : 0;\n                        /* legacy support is incompatible with static dctx */\n                        if (zds->staticSize) return ERROR(memory_allocation);\n                        CHECK_F(ZSTD_initLegacyStream(&zds->legacyContext,\n                                    zds->previousLegacyVersion, legacyVersion,\n                                    dict, dictSize));\n                        zds->legacyVersion = zds->previousLegacyVersion = legacyVersion;\n                        return ZSTD_decompressLegacyStream(zds->legacyContext, legacyVersion, output, input);\n                    }\n#endif\n                    return hSize; /* error */\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Set ZSTD_f_zstd1_magicless on the DStream before decoding a magicless frame.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The new format requires an instruction, and the new setter can apply it before decoding. The fixed harness initializes or resets the stream, then calls decompressStream without setting the format; the ordinary format causes magicless input to fail the header check.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-70d36c1f0e1d3e3b9d711570",
+              "quote": "    ZSTD_f_zstd1 = 0,        /* zstd frame format, specified in zstd_compression_format.md (default) */\n    ZSTD_f_zstd1_magicless,  /* Variant of zstd frame format, without initial 4-bytes magic number.\n                              * Useful to save 4 bytes per generated frame.\n                              * Decoder cannot recognise automatically this format, requiring instructions. */\n} ZSTD_format_e;\n"
+            },
+            {
+              "evidence_id": "loc-bb4d3ac2c0190283705db946",
+              "quote": "/*! ZSTD_DCtx_setFormat() :\n *  Instruct the decoder context about what kind of data to decode next.\n *  This instruction is mandatory to decode data without a fully-formed header,\n *  such ZSTD_f_zstd1_magicless for example.\n * @return : 0, or an error code (which can be tested using ZSTD_isError()).\n */\nZSTDLIB_API size_t ZSTD_DCtx_setFormat(ZSTD_DCtx* dctx, ZSTD_format_e format);\n"
+            },
+            {
+              "evidence_id": "loc-ade9fddaa12023e259c6ae5d",
+              "quote": "size_t ZSTD_DCtx_setFormat(ZSTD_DCtx* dctx, ZSTD_format_e format)\n{\n    DEBUGLOG(4, \"ZSTD_DCtx_setFormat : %u\", (unsigned)format);\n    ZSTD_STATIC_ASSERT((unsigned)zdss_loadHeader >= (unsigned)zdss_init);\n    if ((unsigned)dctx->streamStage > (unsigned)zdss_loadHeader)\n        return ERROR(stage_wrong);\n    dctx->format = format;\n    return 0;\n"
+            },
+            {
+              "evidence_id": "loc-45bc8308484a98bdc2ec557f",
+              "quote": "static void ZSTD_initDCtx_internal(ZSTD_DCtx* dctx)\n{\n    dctx->format = ZSTD_f_zstd1;  /* ZSTD_decompressBegin() invokes ZSTD_startingInputLength() with argument dctx->format */\n    dctx->staticSize  = 0;\n    dctx->maxWindowSize = ZSTD_MAXWINDOWSIZE_DEFAULT;\n    dctx->ddict       = NULL;\n    dctx->ddictLocal  = NULL;\n    dctx->inBuff      = NULL;\n    dctx->inBuffSize  = 0;\n    dctx->outBuffSize = 0;\n    dctx->streamStage = zdss_init;\n"
+            },
+            {
+              "evidence_id": "loc-77e8bef2cdbcac850647627b",
+              "quote": "        case zdss_init :\n            ZSTD_resetDStream(zds);   /* transparent reset on starting decoding a new frame */\n            /* fall-through */\n\n        case zdss_loadHeader :\n            DEBUGLOG(5, \"stage zdss_loadHeader (srcSize : %u)\", (U32)(iend - ip));\n            {   size_t const hSize = ZSTD_getFrameHeader_internal(&zds->fParams, zds->headerBuffer, zds->lhSize, zds->format);\n                DEBUGLOG(5, \"header size : %u\", (U32)hSize);\n                if (ZSTD_isError(hSize)) {\n#if defined(ZSTD_LEGACY_SUPPORT) && (ZSTD_LEGACY_SUPPORT>=1)\n                    U32 const legacyVersion = ZSTD_isLegacy(istart, iend-istart);\n                    if (legacyVersion) {\n                        const void* const dict = zds->ddict ? zds->ddict->dictContent : NULL;\n                        size_t const dictSize = zds->ddict ? zds->ddict->dictSize : 0;\n                        /* legacy support is incompatible with static dctx */\n                        if (zds->staticSize) return ERROR(memory_allocation);\n                        CHECK_F(ZSTD_initLegacyStream(&zds->legacyContext,\n                                    zds->previousLegacyVersion, legacyVersion,\n                                    dict, dictSize));\n                        zds->legacyVersion = zds->previousLegacyVersion = legacyVersion;\n                        return ZSTD_decompressLegacyStream(zds->legacyContext, legacyVersion, output, input);\n                    }\n#endif\n                    return hSize; /* error */\n"
+            },
+            {
+              "evidence_id": "loc-2d1bf1c582e0a0654774e3e1",
+              "quote": "static size_t ZSTD_getFrameHeader_internal(ZSTD_frameHeader* zfhPtr, const void* src, size_t srcSize, ZSTD_format_e format)\n{\n    const BYTE* ip = (const BYTE*)src;\n    size_t const minInputSize = ZSTD_startingInputLength(format);\n\n    if (srcSize < minInputSize) return minInputSize;\n\n    if ( (format != ZSTD_f_zstd1_magicless)\n      && (MEM_readLE32(src) != ZSTD_MAGICNUMBER) ) {\n        if ((MEM_readLE32(src) & 0xFFFFFFF0U) == ZSTD_MAGIC_SKIPPABLE_START) {\n            /* skippable frame */\n            if (srcSize < ZSTD_skippableHeaderSize)\n                return ZSTD_skippableHeaderSize; /* magic number + frame length */\n            memset(zfhPtr, 0, sizeof(*zfhPtr));\n            zfhPtr->frameContentSize = MEM_readLE32((const char *)src + ZSTD_frameIdSize);\n            zfhPtr->frameType = ZSTD_skippableFrame;\n            return 0;\n        }\n        return ERROR(prefix_unknown);\n    }\n"
+            }
+          ]
+        },
+        "same_blocker": "not_applicable",
+        "reason": "The missing format-setting call blocks c1 after the change. Before the change, the magicless decoding requirement did not exist, so there is no same before-side blocker.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": [],
+    "cascade_status": "introduced",
+    "necessity_frozen": true
+  },
+  "citation_errors": [],
+  "missing_claims": [],
+  "preimage_errors": []
+}

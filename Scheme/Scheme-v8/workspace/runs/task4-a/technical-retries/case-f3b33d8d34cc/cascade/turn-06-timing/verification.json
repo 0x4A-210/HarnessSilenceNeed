@@ -1,0 +1,85 @@
+{
+  "checked": {
+    "status": "introduced",
+    "gap": true,
+    "introduced_by_this_change": true,
+    "claims": [
+      {
+        "claim_id": "c1",
+        "status": "introduced",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Call BaseInit to create standalone shared memory through InitCommunication; then call InitProcess to acquire MyProc and InitPostgres to register the buffer exit callback.",
+          "applicability": "required",
+          "harness_status": "sat",
+          "reason": "The unchanged harness calls BaseInit, InitProcess and InitPostgres in that order. Before the change, BaseInit itself invokes the standalone shared-memory helper, and InitPostgres performs the later buffer-manager initialization.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-dc992fc55fa1f750d78716d5",
+              "quote": "void\nBaseInit(void)\n{\n\t/*\n\t * Attach to shared memory and semaphores, and initialize our\n\t * input/output/debugging file descriptors.\n\t */\n\tInitCommunication();\n\tDebugFileOpen();\n\n\t/* Do local initialization of file, storage and buffer managers */\n\tInitFileAccess();\n\tInitSync();\n\tsmgrinit();\n\tInitBufferPoolAccess();\n}\n"
+            },
+            {
+              "evidence_id": "loc-dbc51ba85b42d61a6e8c5b91",
+              "quote": "static void\nInitCommunication(void)\n{\n\t/*\n\t * initialize shared memory and semaphores appropriately.\n\t */\n\tif (!IsUnderPostmaster)\t\t/* postmaster already did this */\n\t{\n\t\t/*\n\t\t * We're running a postgres bootstrap process or a standalone backend,\n\t\t * so we need to set up shmem.\n\t\t */\n\t\tCreateSharedMemoryAndSemaphores();\n\t}\n}\n"
+            },
+            {
+              "evidence_id": "loc-54b625922c5cafdd3b83da5d",
+              "quote": "\t/*\n\t * bufmgr needs another initialization call too\n\t */\n\tInitBufferPoolBackend();\n"
+            },
+            {
+              "evidence_id": "loc-0788b5315e5fb1a4fa9a8839",
+              "quote": "\t/*\n\t * ProcGlobal should be set up already (if we are a backend, we inherit\n\t * this by fork() or EXEC_BACKEND mechanism from the postmaster).\n\t */\n\tif (ProcGlobal == NULL)\n\t\telog(PANIC, \"proc header uninitialized\");\n\n\tif (MyProc != NULL)\n\t\telog(ERROR, \"you already exist\");\n\n\t/* Decide which list should supply our PGPROC. */\n\tif (IsAnyAutoVacuumProcess())\n\t\tprocgloballist = &ProcGlobal->autovacFreeProcs;\n\telse if (IsBackgroundWorker)\n\t\tprocgloballist = &ProcGlobal->bgworkerFreeProcs;\n\telse if (am_walsender)\n\t\tprocgloballist = &ProcGlobal->walsenderFreeProcs;\n\telse\n\t\tprocgloballist = &ProcGlobal->freeProcs;\n\n\t/*\n\t * Try to get a proc struct from the appropriate free list.  If this\n\t * fails, we must be out of PGPROC structures (not to mention semaphores).\n\t *\n\t * While we are holding the ProcStructLock, also copy the current shared\n\t * estimate of spins_per_delay to local storage.\n\t */\n\tSpinLockAcquire(ProcStructLock);\n\n\tset_spins_per_delay(ProcGlobal->spins_per_delay);\n\n\tMyProc = *procgloballist;\n\n\tif (MyProc != NULL)\n\t{\n\t\t*procgloballist = (PGPROC *) MyProc->links.next;\n\t\tSpinLockRelease(ProcStructLock);\n"
+            },
+            {
+              "evidence_id": "loc-7eda90000ef82cb02dfe90e2",
+              "quote": "\t * Set up process table\n\t */\n\tif (!IsUnderPostmaster)\n\t\tInitProcGlobal();\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Create standalone shared memory, call InitProcess to acquire MyProc, and only then call BaseInit and InitPostgres.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "BaseInit no longer creates shared memory and now checks MyProc; InitBufferPoolAccess also checks MyProc and registers the callback. The harness still calls BaseInit before InitProcess and never calls CreateSharedMemoryAndSemaphores, so InitProcess would PANIC on its NULL ProcGlobal check even when assertions are disabled.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-ceb5d535b728d2bf3538de70",
+              "quote": "void\nBaseInit(void)\n{\n\tAssert(MyProc != NULL);\n\n\t/*\n\t * Initialize our input/output/debugging file descriptors.\n\t */\n\tDebugFileOpen();\n\n\t/* Do local initialization of file, storage and buffer managers */\n\tInitFileAccess();\n\tInitSync();\n\tsmgrinit();\n\tInitBufferPoolAccess();\n}\n"
+            },
+            {
+              "evidence_id": "loc-164782e60883f8417b718201",
+              "quote": "void\nInitBufferPoolAccess(void)\n{\n\tHASHCTL\t\thash_ctl;\n\n\tmemset(&PrivateRefCountArray, 0, sizeof(PrivateRefCountArray));\n\n\thash_ctl.keysize = sizeof(int32);\n\thash_ctl.entrysize = sizeof(PrivateRefCountEntry);\n\n\tPrivateRefCountHash = hash_create(\"PrivateRefCount\", 100, &hash_ctl,\n\t\t\t\t\t\t\t\t\t  HASH_ELEM | HASH_BLOBS);\n\n\t/*\n\t * AtProcExit_Buffers needs LWLock access, and thereby has to be called at\n\t * the corresponding phase of backend shutdown.\n\t */\n\tAssert(MyProc != NULL);\n\ton_shmem_exit(AtProcExit_Buffers, 0);\n}\n"
+            },
+            {
+              "evidence_id": "loc-f425f9ed961d39f82b055bc4",
+              "quote": "\telog(DEBUG3, \"InitPostgres\");\n\n\t/*\n\t * Add my PGPROC struct to the ProcArray.\n\t *\n\t * Once I have done this, I am visible to other backends!\n\t */\n\tInitProcessPhase2();\n"
+            },
+            {
+              "evidence_id": "loc-6f02434d9295f34b7297105b",
+              "quote": "\t * Set up process table\n\t */\n\tif (!IsUnderPostmaster)\n\t\tInitProcGlobal();\n"
+            },
+            {
+              "evidence_id": "loc-3b15d26d9626c226bdfd8596",
+              "quote": "\t/*\n\t * ProcGlobal should be set up already (if we are a backend, we inherit\n\t * this by fork() or EXEC_BACKEND mechanism from the postmaster).\n\t */\n\tif (ProcGlobal == NULL)\n\t\telog(PANIC, \"proc header uninitialized\");\n\n\tif (MyProc != NULL)\n\t\telog(ERROR, \"you already exist\");\n\n\t/* Decide which list should supply our PGPROC. */\n\tif (IsAnyAutoVacuumProcess())\n\t\tprocgloballist = &ProcGlobal->autovacFreeProcs;\n\telse if (IsBackgroundWorker)\n\t\tprocgloballist = &ProcGlobal->bgworkerFreeProcs;\n\telse if (am_walsender)\n\t\tprocgloballist = &ProcGlobal->walsenderFreeProcs;\n\telse\n\t\tprocgloballist = &ProcGlobal->freeProcs;\n\n\t/*\n\t * Try to get a proc struct from the appropriate free list.  If this\n\t * fails, we must be out of PGPROC structures (not to mention semaphores).\n\t *\n\t * While we are holding the ProcStructLock, also copy the current shared\n\t * estimate of spins_per_delay to local storage.\n\t */\n\tSpinLockAcquire(ProcStructLock);\n\n\tset_spins_per_delay(ProcGlobal->spins_per_delay);\n\n\tMyProc = *procgloballist;\n\n\tif (MyProc != NULL)\n\t{\n\t\t*procgloballist = (PGPROC *) MyProc->links.next;\n\t\tSpinLockRelease(ProcStructLock);\n"
+            },
+            {
+              "evidence_id": "loc-ed60d28f30c55af41831fccf",
+              "quote": "\t\t/* Initialize MaxBackends (if under postmaster, was done already) */\n\t\tInitializeMaxBackends();\n\n\t\tCreateSharedMemoryAndSemaphores();\n\t}\n\n\t/*\n\t * Create a per-backend PGPROC struct in shared memory, except in the\n\t * EXEC_BACKEND case where this was done in SubPostmasterMain. We must do\n\t * this before we can use LWLocks (and in the EXEC_BACKEND case we already\n\t * had to do some stuff with LWLocks).\n\t */\n#ifdef EXEC_BACKEND\n\tif (!IsUnderPostmaster)\n\t\tInitProcess();\n#else\n\tInitProcess();\n#endif\n\n\t/* Early initialization */\n\tBaseInit();\n\n\t/* We need to allow SIGINT, etc during the initial transaction */\n\tPG_SETMASK(&UnBlockSig);\n\n\t/*\n\t * General initialization.\n\t *\n\t * NOTE: if you are tempted to add code in this vicinity, consider putting\n\t * it inside InitPostgres() instead.  In particular, anything that\n\t * involves database access should be there, not here.\n\t */\n\tInitPostgres(dbname, InvalidOid, username, InvalidOid, NULL, false);\n"
+            }
+          ]
+        },
+        "same_blocker": "no",
+        "reason": "The concrete old-harness sequence is unchanged. It worked before because BaseInit created shared memory and InitPostgres performed the later buffer initialization. After the change, those responsibilities moved ahead of BaseInit, so the same sequence fails. There is no common before-and-after blocker for c1.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": [],
+    "cascade_status": "introduced",
+    "necessity_frozen": true
+  },
+  "citation_errors": [],
+  "missing_claims": [],
+  "preimage_errors": []
+}

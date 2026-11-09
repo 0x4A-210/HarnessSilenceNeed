@@ -1,0 +1,71 @@
+{
+  "checked": {
+    "status": "preexisting",
+    "gap": true,
+    "introduced_by_this_change": false,
+    "claims": [
+      {
+        "claim_id": "c1",
+        "status": "preexisting",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Reach successful uncompress of a valid zlib stream producing 65,536 bytes.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The old decoder accepts successive stored blocks, but the one-shot wrapper uses the target's smaller output capacity and cannot reach stream end.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-2837571acca74b10b9fe4fcf",
+              "quote": "    do\n    {\n        TINFL_GET_BITS(3, r->m_final, 3);\n        r->m_type = r->m_final >> 1;\n        if (r->m_type == 0)\n        {\n            TINFL_SKIP_BITS(5, num_bits & 7);\n            for (counter = 0; counter < 4; ++counter)\n            {\n                if (num_bits)\n                    TINFL_GET_BITS(6, r->m_raw_header[counter], 8);\n                else\n                    TINFL_GET_BYTE(7, r->m_raw_header[counter]);\n            }\n            if ((counter = (r->m_raw_header[0] | (r->m_raw_header[1] << 8))) != (mz_uint)(0xFFFF ^ (r->m_raw_header[2] | (r->m_raw_header[3] << 8))))\n            {\n                TINFL_CR_RETURN_FOREVER(39, TINFL_STATUS_FAILED);\n            }\n            while ((counter) && (num_bits))\n            {\n                TINFL_GET_BITS(51, dist, 8);\n                while (pOut_buf_cur >= pOut_buf_end)\n                {\n                    TINFL_CR_RETURN(52, TINFL_STATUS_HAS_MORE_OUTPUT);\n                }\n                *pOut_buf_cur++ = (mz_uint8)dist;\n                counter--;\n            }\n            while (counter)\n            {\n                size_t n;\n                while (pOut_buf_cur >= pOut_buf_end)\n                {\n                    TINFL_CR_RETURN(9, TINFL_STATUS_HAS_MORE_OUTPUT);\n                }\n                while (pIn_buf_cur >= pIn_buf_end)\n                {\n                    TINFL_CR_RETURN(38, (decomp_flags & TINFL_FLAG_HAS_MORE_INPUT) ? TINFL_STATUS_NEEDS_MORE_INPUT : TINFL_STATUS_FAILED_CANNOT_MAKE_PROGRESS);\n                }\n                n = MZ_MIN(MZ_MIN((size_t)(pOut_buf_end - pOut_buf_cur), (size_t)(pIn_buf_end - pIn_buf_cur)), counter);\n                TINFL_MEMCPY(pOut_buf_cur, pIn_buf_cur, n);\n                pIn_buf_cur += n;\n                pOut_buf_cur += n;\n                counter -= (mz_uint)n;\n            }\n        }\n"
+            },
+            {
+              "evidence_id": "loc-bea008dbeb71b6f6878c3610",
+              "quote": "    } while (!(r->m_final & 1));\n\n    /* Ensure byte alignment and put back any bytes from the bitbuf if we've looked ahead too far on gzip, or other Deflate streams followed by arbitrary data. */\n    /* I'm being super conservative here. A number of simplifications can be made to the byte alignment part, and the Adler32 check shouldn't ever need to worry about reading from the bitbuf now. */\n    TINFL_SKIP_BITS(32, num_bits & 7);\n    while ((pIn_buf_cur > pIn_buf_next) && (num_bits >= 8))\n    {\n        --pIn_buf_cur;\n        num_bits -= 8;\n    }\n    bit_buf &= ~(~(tinfl_bit_buf_t)0 << num_bits);\n    MZ_ASSERT(!num_bits); /* if this assert fires then we've read beyond the end of non-deflate/zlib streams with following data (such as gzip streams). */\n\n    if (decomp_flags & TINFL_FLAG_PARSE_ZLIB_HEADER)\n    {\n        for (counter = 0; counter < 4; ++counter)\n        {\n            mz_uint s;\n            if (num_bits)\n                TINFL_GET_BITS(41, s, 8);\n            else\n                TINFL_GET_BYTE(42, s);\n            r->m_z_adler32 = (r->m_z_adler32 << 8) | s;\n        }\n    }\n    TINFL_CR_RETURN_FOREVER(34, TINFL_STATUS_DONE);\n"
+            },
+            {
+              "evidence_id": "loc-65e9394485e2f857e33ad4da",
+              "quote": "    if ((flush == MZ_FINISH) && (first_call))\n    {\n        /* MZ_FINISH on the first call implies that the input and output buffers are large enough to hold the entire compressed/decompressed file. */\n        decomp_flags |= TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;\n        in_bytes = pStream->avail_in;\n        out_bytes = pStream->avail_out;\n        status = tinfl_decompress(&pState->m_decomp, pStream->next_in, &in_bytes, pStream->next_out, pStream->next_out, &out_bytes, decomp_flags);\n        pState->m_last_status = status;\n        pStream->next_in += (mz_uint)in_bytes;\n        pStream->avail_in -= (mz_uint)in_bytes;\n        pStream->total_in += (mz_uint)in_bytes;\n        pStream->adler = tinfl_get_adler32(&pState->m_decomp);\n        pStream->next_out += (mz_uint)out_bytes;\n        pStream->avail_out -= (mz_uint)out_bytes;\n        pStream->total_out += (mz_uint)out_bytes;\n\n        if (status < 0)\n            return MZ_DATA_ERROR;\n        else if (status != TINFL_STATUS_DONE)\n        {\n            pState->m_last_status = TINFL_STATUS_FAILED;\n            return MZ_BUF_ERROR;\n        }\n        return MZ_STREAM_END;\n"
+            },
+            {
+              "evidence_id": "loc-42d3746924f870c83a0b9351",
+              "quote": "    stream.next_in = pSource;\n    stream.avail_in = (mz_uint32)*pSource_len;\n    stream.next_out = pDest;\n    stream.avail_out = (mz_uint32)*pDest_len;\n\n    status = mz_inflateInit(&stream);\n    if (status != MZ_OK)\n        return status;\n\n    status = mz_inflate(&stream, MZ_FINISH);\n    *pSource_len = *pSource_len - stream.avail_in;\n    if (status != MZ_STREAM_END)\n    {\n        mz_inflateEnd(&stream);\n        return ((status == MZ_BUF_ERROR) && (!stream.avail_in)) ? MZ_DATA_ERROR : status;\n    }\n    *pDest_len = stream.total_out;\n\n    return mz_inflateEnd(&stream);\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Reach successful uncompress of a valid zlib stream producing 65,536 bytes.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The new tree-clearing call is on the Huffman path; stored-block decoding and the one-shot capacity requirement remain the same.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-3bd190fb690dd40a355bf547",
+              "quote": "    do\n    {\n        TINFL_GET_BITS(3, r->m_final, 3);\n        r->m_type = r->m_final >> 1;\n        if (r->m_type == 0)\n        {\n            TINFL_SKIP_BITS(5, num_bits & 7);\n            for (counter = 0; counter < 4; ++counter)\n            {\n                if (num_bits)\n                    TINFL_GET_BITS(6, r->m_raw_header[counter], 8);\n                else\n                    TINFL_GET_BYTE(7, r->m_raw_header[counter]);\n            }\n            if ((counter = (r->m_raw_header[0] | (r->m_raw_header[1] << 8))) != (mz_uint)(0xFFFF ^ (r->m_raw_header[2] | (r->m_raw_header[3] << 8))))\n            {\n                TINFL_CR_RETURN_FOREVER(39, TINFL_STATUS_FAILED);\n            }\n            while ((counter) && (num_bits))\n            {\n                TINFL_GET_BITS(51, dist, 8);\n                while (pOut_buf_cur >= pOut_buf_end)\n                {\n                    TINFL_CR_RETURN(52, TINFL_STATUS_HAS_MORE_OUTPUT);\n                }\n                *pOut_buf_cur++ = (mz_uint8)dist;\n                counter--;\n            }\n            while (counter)\n            {\n                size_t n;\n                while (pOut_buf_cur >= pOut_buf_end)\n                {\n                    TINFL_CR_RETURN(9, TINFL_STATUS_HAS_MORE_OUTPUT);\n                }\n                while (pIn_buf_cur >= pIn_buf_end)\n                {\n                    TINFL_CR_RETURN(38, (decomp_flags & TINFL_FLAG_HAS_MORE_INPUT) ? TINFL_STATUS_NEEDS_MORE_INPUT : TINFL_STATUS_FAILED_CANNOT_MAKE_PROGRESS);\n                }\n                n = MZ_MIN(MZ_MIN((size_t)(pOut_buf_end - pOut_buf_cur), (size_t)(pIn_buf_end - pIn_buf_cur)), counter);\n                TINFL_MEMCPY(pOut_buf_cur, pIn_buf_cur, n);\n                pIn_buf_cur += n;\n                pOut_buf_cur += n;\n                counter -= (mz_uint)n;\n            }\n"
+            },
+            {
+              "evidence_id": "loc-11efc40779f4d884288b590e",
+              "quote": "    } while (!(r->m_final & 1));\n\n    /* Ensure byte alignment and put back any bytes from the bitbuf if we've looked ahead too far on gzip, or other Deflate streams followed by arbitrary data. */\n    /* I'm being super conservative here. A number of simplifications can be made to the byte alignment part, and the Adler32 check shouldn't ever need to worry about reading from the bitbuf now. */\n    TINFL_SKIP_BITS(32, num_bits & 7);\n    while ((pIn_buf_cur > pIn_buf_next) && (num_bits >= 8))\n    {\n        --pIn_buf_cur;\n        num_bits -= 8;\n    }\n    bit_buf &= ~(~(tinfl_bit_buf_t)0 << num_bits);\n    MZ_ASSERT(!num_bits); /* if this assert fires then we've read beyond the end of non-deflate/zlib streams with following data (such as gzip streams). */\n\n    if (decomp_flags & TINFL_FLAG_PARSE_ZLIB_HEADER)\n    {\n        for (counter = 0; counter < 4; ++counter)\n        {\n            mz_uint s;\n            if (num_bits)\n                TINFL_GET_BITS(41, s, 8);\n            else\n                TINFL_GET_BYTE(42, s);\n            r->m_z_adler32 = (r->m_z_adler32 << 8) | s;\n        }\n    }\n    TINFL_CR_RETURN_FOREVER(34, TINFL_STATUS_DONE);\n"
+            },
+            {
+              "evidence_id": "loc-f62fd0bf3a9f9110811c088a",
+              "quote": "    if ((flush == MZ_FINISH) && (first_call))\n    {\n        /* MZ_FINISH on the first call implies that the input and output buffers are large enough to hold the entire compressed/decompressed file. */\n        decomp_flags |= TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;\n        in_bytes = pStream->avail_in;\n        out_bytes = pStream->avail_out;\n        status = tinfl_decompress(&pState->m_decomp, pStream->next_in, &in_bytes, pStream->next_out, pStream->next_out, &out_bytes, decomp_flags);\n        pState->m_last_status = status;\n        pStream->next_in += (mz_uint)in_bytes;\n        pStream->avail_in -= (mz_uint)in_bytes;\n        pStream->total_in += (mz_uint)in_bytes;\n        pStream->adler = tinfl_get_adler32(&pState->m_decomp);\n        pStream->next_out += (mz_uint)out_bytes;\n        pStream->avail_out -= (mz_uint)out_bytes;\n        pStream->total_out += (mz_uint)out_bytes;\n\n        if (status < 0)\n            return MZ_DATA_ERROR;\n        else if (status != TINFL_STATUS_DONE)\n        {\n            pState->m_last_status = TINFL_STATUS_FAILED;\n            return MZ_BUF_ERROR;\n        }\n        return MZ_STREAM_END;\n"
+            },
+            {
+              "evidence_id": "loc-11f5436241f17e6e72fb71ed",
+              "quote": "    stream.next_in = pSource;\n    stream.avail_in = (mz_uint32)*pSource_len;\n    stream.next_out = pDest;\n    stream.avail_out = (mz_uint32)*pDest_len;\n\n    status = mz_inflateInit(&stream);\n    if (status != MZ_OK)\n        return status;\n\n    status = mz_inflate(&stream, MZ_FINISH);\n    *pSource_len = *pSource_len - stream.avail_in;\n    if (status != MZ_STREAM_END)\n    {\n        mz_inflateEnd(&stream);\n        return ((status == MZ_BUF_ERROR) && (!stream.avail_in)) ? MZ_DATA_ERROR : status;\n    }\n    *pDest_len = stream.total_out;\n\n    return mz_inflateEnd(&stream);\n"
+            }
+          ]
+        },
+        "same_blocker": "yes",
+        "reason": "The same input-derived buffer limit blocks the same supported 65,536-byte output before and after. The changed tree-clearing operation does not affect this stored-block witness.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": []
+  },
+  "citation_errors": [],
+  "missing_claims": [],
+  "preimage_errors": []
+}

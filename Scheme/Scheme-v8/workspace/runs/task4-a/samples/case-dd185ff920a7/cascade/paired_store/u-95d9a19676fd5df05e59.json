@@ -1,0 +1,19 @@
+{
+  "unit_id": "u-95d9a19676fd5df05e59",
+  "original_unit_id": "02d8effc739e38b29741",
+  "kind": "after_source",
+  "path": "input/source/programs/lz4io.c",
+  "version": "after",
+  "name": "LZ4IO_decodeLegacyStream",
+  "start": 1837,
+  "end": 1917,
+  "line_origin": "file",
+  "sha256": "d166f5c000843b57317aa5f795e4261f484aa06b0519748d7823aec683bf2e10",
+  "text": "static unsigned long long\nLZ4IO_decodeLegacyStream(FILE* finput, FILE* foutput, const LZ4IO_prefs_t* prefs)\n{\n    unsigned long long streamSize = 0;\n    unsigned storedSkips = 0;\n\n    TPool* const tPool = TPool_create(1, 1);\n    TPool* const wPool = TPool_create(1, 1);\n#define NB_BUFFSETS 4 /* 1 being read, 1 being processed, 1 being written, 1 being queued */\n    void* inBuffs[NB_BUFFSETS];\n    void* outBuffs[NB_BUFFSETS];\n    int bSetNb;\n\n    if (tPool == NULL || wPool == NULL)\n        END_PROCESS(21, \"threadpool creation error \");\n\n    /* allocate buffers up front */\n    for (bSetNb=0; bSetNb<NB_BUFFSETS; bSetNb++) {\n        inBuffs[bSetNb] = malloc((size_t)LZ4_compressBound(LEGACY_BLOCKSIZE));\n        outBuffs[bSetNb] = malloc(LEGACY_BLOCKSIZE);\n        if (!inBuffs[bSetNb] || !outBuffs[bSetNb])\n            END_PROCESS(31, \"Allocation error : can't allocate buffer for legacy decoding\");\n    }\n\n    /* Main Loop */\n    for (bSetNb = 0;;bSetNb = (bSetNb+1) % NB_BUFFSETS) {\n        char header[LZ4IO_LEGACY_BLOCK_HEADER_SIZE];\n        unsigned int blockSize;\n\n        /* Block Size */\n        {   size_t const sizeCheck = fread(header, 1, LZ4IO_LEGACY_BLOCK_HEADER_SIZE, finput);\n            if (sizeCheck == 0) break;                   /* Nothing to read : file read is completed */\n            if (sizeCheck != LZ4IO_LEGACY_BLOCK_HEADER_SIZE)\n                END_PROCESS(61, \"Error: cannot read block size in Legacy format\");\n        }\n        blockSize = LZ4IO_readLE32(header);       /* Convert to Little Endian */\n        if (blockSize > LZ4_COMPRESSBOUND(LEGACY_BLOCKSIZE)) {\n            /* Cannot read next block : maybe new stream ? */\n            g_magicRead = blockSize;\n            break;\n        }\n\n        /* Read Block */\n        {   size_t const sizeCheck = fread(inBuffs[bSetNb], 1, blockSize, finput);\n            if (sizeCheck != blockSize)\n                END_PROCESS(63, \"Read error : cannot access compressed block !\");\n            /* push to decoding thread */\n            {   LegacyBlockInput* const lbi = (LegacyBlockInput*)malloc(sizeof(*lbi));\n                if (lbi==NULL)\n                    END_PROCESS(64, \"Allocation error : not enough memory to allocate job descriptor\");\n                lbi->inBuffer = inBuffs[bSetNb];\n                lbi->inSize = blockSize;\n                lbi->outBuffer = outBuffs[bSetNb];\n                lbi->wPool = wPool;\n                lbi->totalSize = &streamSize;\n                lbi->foutput = foutput;\n                lbi->sparseEnable = prefs->sparseFileSupport;\n                lbi->storedSkips = &storedSkips;\n                TPool_submitJob(tPool, LZ4IO_decompressBlockLegacy, lbi);\n            }\n        }\n    }\n    if (ferror(finput)) END_PROCESS(65, \"Read error : ferror\");\n\n    /* Wait for all completion */\n    TPool_jobsCompleted(tPool);\n    TPool_jobsCompleted(wPool);\n\n    /* flush last zeroes */\n    LZ4IO_fwriteSparseEnd(foutput, storedSkips);\n\n    /* Free */\n    TPool_free(wPool);\n    TPool_free(tPool);\n    for (bSetNb=0; bSetNb<NB_BUFFSETS; bSetNb++) {\n        free(inBuffs[bSetNb]);\n        free(outBuffs[bSetNb]);\n    }\n\n    return streamSize;\n}\n",
+  "change_ids": [],
+  "invariant_source": true,
+  "unit_kind": "function",
+  "page_ids": [
+    "after-whole-02d8effc739e38b29741-0000"
+  ]
+}

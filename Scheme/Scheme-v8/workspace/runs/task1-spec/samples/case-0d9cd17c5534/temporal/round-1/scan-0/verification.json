@@ -1,0 +1,80 @@
+{
+  "checked": {
+    "status": "preexisting",
+    "gap": true,
+    "introduced_by_this_change": false,
+    "claims": [
+      {
+        "claim_id": "dictionary_compression_unreachable",
+        "status": "preexisting",
+        "necessary": "yes",
+        "before": {
+          "requirement": "For a dictionary-loaded stream compression round trip, reach dictionary content loading and dictionary-aware block-compressor selection, then decode with the corresponding dictionary.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The before source supports dictionary loading and selects block compressors by dictionary mode. The old harness creates contexts and performs a stream round trip without supplying either context a dictionary.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-5ebe484c3262069ad4c14628",
+              "quote": "static size_t ZSTD_loadDictionaryContent(ZSTD_matchState_t* ms,\n                                         ldmState_t* ls,\n                                         ZSTD_cwksp* ws,\n                                         ZSTD_CCtx_params const* params,\n                                         const void* src, size_t srcSize,\n                                         ZSTD_dictTableLoadMethod_e dtlm,\n                                         ZSTD_tableFillPurpose_e tfp)\n"
+            },
+            {
+              "evidence_id": "loc-c000d02985c08a15f86757b0",
+              "quote": "    ZSTD_window_update(&ms->window, src, srcSize, /* forceNonContiguous */ 0);\n\n    DEBUGLOG(4, \"ZSTD_loadDictionaryContent(): useRowMatchFinder=%d\", (int)params->useRowMatchFinder);\n\n    if (loadLdmDict) { /* Load the entire dict into LDM matchfinders. */\n        ZSTD_window_update(&ls->window, src, srcSize, /* forceNonContiguous */ 0);\n        ls->loadedDictEnd = params->forceWindow ? 0 : (U32)(iend - ls->window.base);\n        ZSTD_ldm_fillHashTable(ls, ip, iend, &params->ldmParams);\n    }\n\n    /* If the dict is larger than we can reasonably index in our tables, only load the suffix. */\n    if (params->cParams.strategy < ZSTD_btultra) {\n        U32 maxDictSize = 8U << MIN(MAX(params->cParams.hashLog, params->cParams.chainLog), 28);\n        if (srcSize > maxDictSize) {\n            ip = iend - maxDictSize;\n            src = ip;\n            srcSize = maxDictSize;\n        }\n    }\n\n    ms->nextToUpdate = (U32)(ip - ms->window.base);\n    ms->loadedDictEnd = params->forceWindow ? 0 : (U32)(iend - ms->window.base);\n    ms->forceNonContiguous = params->deterministicRefPrefix;\n\n    if (srcSize <= HASH_READ_SIZE) return 0;\n\n    ZSTD_overflowCorrectIfNeeded(ms, ws, params, ip, iend);\n\n    switch(params->cParams.strategy)\n    {\n    case ZSTD_fast:\n        ZSTD_fillHashTable(ms, iend, dtlm, tfp);\n        break;\n    case ZSTD_dfast:\n        ZSTD_fillDoubleHashTable(ms, iend, dtlm, tfp);\n        break;\n\n    case ZSTD_greedy:\n    case ZSTD_lazy:\n    case ZSTD_lazy2:\n        assert(srcSize >= HASH_READ_SIZE);\n        if (ms->dedicatedDictSearch) {\n            assert(ms->chainTable != NULL);\n            ZSTD_dedicatedDictSearch_lazy_loadDictionary(ms, iend-HASH_READ_SIZE);\n        } else {\n            assert(params->useRowMatchFinder != ZSTD_ps_auto);\n            if (params->useRowMatchFinder == ZSTD_ps_enable) {\n                size_t const tagTableSize = ((size_t)1 << params->cParams.hashLog);\n                ZSTD_memset(ms->tagTable, 0, tagTableSize);\n                ZSTD_row_update(ms, iend-HASH_READ_SIZE);\n                DEBUGLOG(4, \"Using row-based hash table for lazy dict\");\n            } else {\n                ZSTD_insertAndFindFirstIndex(ms, iend-HASH_READ_SIZE);\n                DEBUGLOG(4, \"Using chain-based hash table for lazy dict\");\n            }\n        }\n        break;\n\n    case ZSTD_btlazy2:   /* we want the dictionary table fully sorted */\n    case ZSTD_btopt:\n    case ZSTD_btultra:\n    case ZSTD_btultra2:\n        assert(srcSize >= HASH_READ_SIZE);\n        ZSTD_updateTree(ms, iend-HASH_READ_SIZE, iend);\n        break;\n"
+            },
+            {
+              "evidence_id": "loc-61e61703c9d755a9ec4022ba",
+              "quote": "ZSTD_blockCompressor ZSTD_selectBlockCompressor(ZSTD_strategy strat, ZSTD_paramSwitch_e useRowMatchFinder, ZSTD_dictMode_e dictMode)\n{\n    static const ZSTD_blockCompressor blockCompressor[4][ZSTD_STRATEGY_MAX+1] = {\n        { ZSTD_compressBlock_fast  /* default for 0 */,\n          ZSTD_compressBlock_fast,\n          ZSTD_compressBlock_doubleFast,\n          ZSTD_compressBlock_greedy,\n          ZSTD_compressBlock_lazy,\n          ZSTD_compressBlock_lazy2,\n          ZSTD_compressBlock_btlazy2,\n          ZSTD_compressBlock_btopt,\n          ZSTD_compressBlock_btultra,\n          ZSTD_compressBlock_btultra2 },\n        { ZSTD_compressBlock_fast_extDict  /* default for 0 */,\n          ZSTD_compressBlock_fast_extDict,\n          ZSTD_compressBlock_doubleFast_extDict,\n          ZSTD_compressBlock_greedy_extDict,\n          ZSTD_compressBlock_lazy_extDict,\n          ZSTD_compressBlock_lazy2_extDict,\n          ZSTD_compressBlock_btlazy2_extDict,\n          ZSTD_compressBlock_btopt_extDict,\n          ZSTD_compressBlock_btultra_extDict,\n          ZSTD_compressBlock_btultra_extDict },\n        { ZSTD_compressBlock_fast_dictMatchState  /* default for 0 */,\n          ZSTD_compressBlock_fast_dictMatchState,\n          ZSTD_compressBlock_doubleFast_dictMatchState,\n          ZSTD_compressBlock_greedy_dictMatchState,\n          ZSTD_compressBlock_lazy_dictMatchState,\n          ZSTD_compressBlock_lazy2_dictMatchState,\n          ZSTD_compressBlock_btlazy2_dictMatchState,\n          ZSTD_compressBlock_btopt_dictMatchState,\n          ZSTD_compressBlock_btultra_dictMatchState,\n          ZSTD_compressBlock_btultra_dictMatchState },\n        { NULL  /* default for 0 */,\n          NULL,\n          NULL,\n          ZSTD_compressBlock_greedy_dedicatedDictSearch,\n          ZSTD_compressBlock_lazy_dedicatedDictSearch,\n          ZSTD_compressBlock_lazy2_dedicatedDictSearch,\n          NULL,\n          NULL,\n          NULL,\n          NULL }\n    };\n"
+            },
+            {
+              "evidence_id": "loc-1ada6e51066882063ad63706",
+              "quote": "size_t ZSTD_CCtx_loadDictionary(ZSTD_CCtx* cctx, const void* dict, size_t dictSize)\n{\n    return ZSTD_CCtx_loadDictionary_advanced(\n            cctx, dict, dictSize, ZSTD_dlm_byCopy, ZSTD_dct_auto);\n}\n"
+            },
+            {
+              "evidence_id": "loc-cac5d1605a093e43fb2b645c",
+              "quote": "size_t ZSTD_DCtx_loadDictionary(ZSTD_DCtx* dctx, const void* dict, size_t dictSize)\n{\n    return ZSTD_DCtx_loadDictionary_advanced(dctx, dict, dictSize, ZSTD_dlm_byCopy, ZSTD_dct_auto);\n}\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "For a dictionary-loaded stream compression round trip, reach dictionary content loading and dictionary-aware block-compressor selection, then decode with the corresponding dictionary.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The after source retains dictionary content loading and dictionary-mode dispatch. The same old harness still supplies no dictionary to either context.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-a175ac3671e928e5bd0e0412",
+              "quote": "static size_t ZSTD_loadDictionaryContent(ZSTD_matchState_t* ms,\n                                         ldmState_t* ls,\n                                         ZSTD_cwksp* ws,\n                                         ZSTD_CCtx_params const* params,\n                                         const void* src, size_t srcSize,\n                                         ZSTD_dictTableLoadMethod_e dtlm,\n                                         ZSTD_tableFillPurpose_e tfp)\n"
+            },
+            {
+              "evidence_id": "loc-38655397ab7dcfd7309a416b",
+              "quote": "    ZSTD_window_update(&ms->window, src, srcSize, /* forceNonContiguous */ 0);\n\n    DEBUGLOG(4, \"ZSTD_loadDictionaryContent(): useRowMatchFinder=%d\", (int)params->useRowMatchFinder);\n\n    if (loadLdmDict) { /* Load the entire dict into LDM matchfinders. */\n        ZSTD_window_update(&ls->window, src, srcSize, /* forceNonContiguous */ 0);\n        ls->loadedDictEnd = params->forceWindow ? 0 : (U32)(iend - ls->window.base);\n        ZSTD_ldm_fillHashTable(ls, ip, iend, &params->ldmParams);\n    }\n\n    /* If the dict is larger than we can reasonably index in our tables, only load the suffix. */\n    if (params->cParams.strategy < ZSTD_btultra) {\n        U32 maxDictSize = 8U << MIN(MAX(params->cParams.hashLog, params->cParams.chainLog), 28);\n        if (srcSize > maxDictSize) {\n            ip = iend - maxDictSize;\n            src = ip;\n            srcSize = maxDictSize;\n        }\n    }\n\n    ms->nextToUpdate = (U32)(ip - ms->window.base);\n    ms->loadedDictEnd = params->forceWindow ? 0 : (U32)(iend - ms->window.base);\n    ms->forceNonContiguous = params->deterministicRefPrefix;\n\n    if (srcSize <= HASH_READ_SIZE) return 0;\n\n    ZSTD_overflowCorrectIfNeeded(ms, ws, params, ip, iend);\n\n    switch(params->cParams.strategy)\n    {\n    case ZSTD_fast:\n        ZSTD_fillHashTable(ms, iend, dtlm, tfp);\n        break;\n    case ZSTD_dfast:\n#ifndef ZSTD_EXCLUDE_DFAST_BLOCK_COMPRESSOR\n        ZSTD_fillDoubleHashTable(ms, iend, dtlm, tfp);\n#else\n        assert(0); /* shouldn't be called: cparams should've been adjusted. */\n#endif\n        break;\n\n    case ZSTD_greedy:\n    case ZSTD_lazy:\n    case ZSTD_lazy2:\n#if !defined(ZSTD_EXCLUDE_GREEDY_BLOCK_COMPRESSOR) \\\n || !defined(ZSTD_EXCLUDE_LAZY_BLOCK_COMPRESSOR) \\\n || !defined(ZSTD_EXCLUDE_LAZY2_BLOCK_COMPRESSOR)\n        assert(srcSize >= HASH_READ_SIZE);\n        if (ms->dedicatedDictSearch) {\n            assert(ms->chainTable != NULL);\n            ZSTD_dedicatedDictSearch_lazy_loadDictionary(ms, iend-HASH_READ_SIZE);\n        } else {\n            assert(params->useRowMatchFinder != ZSTD_ps_auto);\n            if (params->useRowMatchFinder == ZSTD_ps_enable) {\n                size_t const tagTableSize = ((size_t)1 << params->cParams.hashLog);\n                ZSTD_memset(ms->tagTable, 0, tagTableSize);\n                ZSTD_row_update(ms, iend-HASH_READ_SIZE);\n                DEBUGLOG(4, \"Using row-based hash table for lazy dict\");\n            } else {\n                ZSTD_insertAndFindFirstIndex(ms, iend-HASH_READ_SIZE);\n                DEBUGLOG(4, \"Using chain-based hash table for lazy dict\");\n            }\n        }\n#else\n        assert(0); /* shouldn't be called: cparams should've been adjusted. */\n#endif\n        break;\n\n    case ZSTD_btlazy2:   /* we want the dictionary table fully sorted */\n    case ZSTD_btopt:\n    case ZSTD_btultra:\n    case ZSTD_btultra2:\n#if !defined(ZSTD_EXCLUDE_BTLAZY2_BLOCK_COMPRESSOR) \\\n || !defined(ZSTD_EXCLUDE_BTOPT_BLOCK_COMPRESSOR) \\\n || !defined(ZSTD_EXCLUDE_BTULTRA_BLOCK_COMPRESSOR)\n        assert(srcSize >= HASH_READ_SIZE);\n        ZSTD_updateTree(ms, iend-HASH_READ_SIZE, iend);\n#else\n        assert(0); /* shouldn't be called: cparams should've been adjusted. */\n#endif\n        break;\n"
+            },
+            {
+              "evidence_id": "loc-3461d13d9193f02cdf0b5127",
+              "quote": "ZSTD_blockCompressor ZSTD_selectBlockCompressor(ZSTD_strategy strat, ZSTD_paramSwitch_e useRowMatchFinder, ZSTD_dictMode_e dictMode)\n{\n    static const ZSTD_blockCompressor blockCompressor[4][ZSTD_STRATEGY_MAX+1] = {\n        { ZSTD_compressBlock_fast  /* default for 0 */,\n          ZSTD_compressBlock_fast,\n          ZSTD_COMPRESSBLOCK_DOUBLEFAST,\n          ZSTD_COMPRESSBLOCK_GREEDY,\n          ZSTD_COMPRESSBLOCK_LAZY,\n          ZSTD_COMPRESSBLOCK_LAZY2,\n          ZSTD_COMPRESSBLOCK_BTLAZY2,\n          ZSTD_COMPRESSBLOCK_BTOPT,\n          ZSTD_COMPRESSBLOCK_BTULTRA,\n          ZSTD_COMPRESSBLOCK_BTULTRA2\n        },\n        { ZSTD_compressBlock_fast_extDict  /* default for 0 */,\n          ZSTD_compressBlock_fast_extDict,\n          ZSTD_COMPRESSBLOCK_DOUBLEFAST_EXTDICT,\n          ZSTD_COMPRESSBLOCK_GREEDY_EXTDICT,\n          ZSTD_COMPRESSBLOCK_LAZY_EXTDICT,\n          ZSTD_COMPRESSBLOCK_LAZY2_EXTDICT,\n          ZSTD_COMPRESSBLOCK_BTLAZY2_EXTDICT,\n          ZSTD_COMPRESSBLOCK_BTOPT_EXTDICT,\n          ZSTD_COMPRESSBLOCK_BTULTRA_EXTDICT,\n          ZSTD_COMPRESSBLOCK_BTULTRA_EXTDICT\n        },\n        { ZSTD_compressBlock_fast_dictMatchState  /* default for 0 */,\n          ZSTD_compressBlock_fast_dictMatchState,\n          ZSTD_COMPRESSBLOCK_DOUBLEFAST_DICTMATCHSTATE,\n          ZSTD_COMPRESSBLOCK_GREEDY_DICTMATCHSTATE,\n          ZSTD_COMPRESSBLOCK_LAZY_DICTMATCHSTATE,\n          ZSTD_COMPRESSBLOCK_LAZY2_DICTMATCHSTATE,\n          ZSTD_COMPRESSBLOCK_BTLAZY2_DICTMATCHSTATE,\n          ZSTD_COMPRESSBLOCK_BTOPT_DICTMATCHSTATE,\n          ZSTD_COMPRESSBLOCK_BTULTRA_DICTMATCHSTATE,\n          ZSTD_COMPRESSBLOCK_BTULTRA_DICTMATCHSTATE\n        },\n        { NULL  /* default for 0 */,\n          NULL,\n          NULL,\n          ZSTD_COMPRESSBLOCK_GREEDY_DEDICATEDDICTSEARCH,\n          ZSTD_COMPRESSBLOCK_LAZY_DEDICATEDDICTSEARCH,\n          ZSTD_COMPRESSBLOCK_LAZY2_DEDICATEDDICTSEARCH,\n          NULL,\n          NULL,\n          NULL,\n          NULL }\n    };\n"
+            },
+            {
+              "evidence_id": "loc-d29d7c44346d4a36ec48f226",
+              "quote": "size_t ZSTD_CCtx_loadDictionary(ZSTD_CCtx* cctx, const void* dict, size_t dictSize)\n{\n    return ZSTD_CCtx_loadDictionary_advanced(\n            cctx, dict, dictSize, ZSTD_dlm_byCopy, ZSTD_dct_auto);\n}\n"
+            },
+            {
+              "evidence_id": "loc-b300cfe819f15710c5bd7ee8",
+              "quote": "size_t ZSTD_DCtx_loadDictionary(ZSTD_DCtx* dctx, const void* dict, size_t dictSize)\n{\n    return ZSTD_DCtx_loadDictionary_advanced(dctx, dict, dictSize, ZSTD_dlm_byCopy, ZSTD_dct_auto);\n}\n"
+            }
+          ]
+        },
+        "same_blocker": "yes",
+        "reason": "The dictionary-loaded operation is supported on both sides. The identical old-harness constraint—no dictionary setup for either context—blocks it on both sides.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": [
+      "The supplied build script delegates target compilation to tests/fuzz/fuzz.py; its body and the referenced make configuration were cataloged but not supplied as evidence. Their flags are decisive for assessing the new compressor-exclusion behavior across the selected change groups.",
+      "The compression initialization and parameter-adjustment call path is needed to determine whether any selected strategy behavior creates another reachable obligation under the fixed build."
+    ]
+  },
+  "citation_errors": []
+}

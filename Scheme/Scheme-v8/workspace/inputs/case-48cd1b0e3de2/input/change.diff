@@ -1,0 +1,3547 @@
+diff --git a/.travis.yml b/.travis.yml
+index c8edbf793bb39b76947778f3a38f13bcf0d341e2..1d52184f58f7172634fc1ed596658f54d1667379 100644
+--- a/.travis.yml
++++ b/.travis.yml
+@@ -37,7 +37,7 @@ matrix:
+           env: BUILD_TYPE=lsan
+         - os: linux
+           compiler: clang
+-          env: BUILD_TYPE=analyse
++          env: BUILD_TYPE=analyze
+         - os: linux
+           compiler: gcc
+           env: BUILD_TYPE=valgrind
+@@ -64,7 +64,7 @@ install:
+ before_script:
+     - |
+         if [ "$BUILD_TYPE" = "coverage" ]; then
+-             export CONFIG_OPTS="--enable-debug --disable-shared --enable-code-coverage"
++             export CONFIG_OPTS="--enable-debug --disable-shared --enable-code-coverage --enable-tests"
+         fi
+     - |
+          if [ "$BUILD_TYPE" = "asan" ]; then
+@@ -86,9 +86,9 @@ before_script:
+              export LDFLAGS="-fsanitize=undefined"
+          fi
+     - |
+-         if [ "$BUILD_TYPE" = "analyse" ]; then
++         if [ "$BUILD_TYPE" = "analyze" ]; then
+              export SCAN_WRAP="scan-build-7 --status-bugs"
+-             export CONFIG_OPTS="--enable-debug"
++             export CONFIG_OPTS="--enable-debug --disable-tests"
+              export CXX="clang++-7"
+              export CC="clang-7"
+          fi
+@@ -100,7 +100,7 @@ before_script:
+          fi
+     - |
+          if [ "$BUILD_TYPE" = "ios" ]; then
+-             export CONFIG_OPTS=--host=arm-apple-darwin10
++             export CONFIG_OPTS="--host=arm-apple-darwin10 --disable-tests"
+              export DEVPATH=`xcode-select -print-path`/Platforms/iPhoneOS.platform/Developer
+              export IOSFLAGS="-isysroot $DEVPATH/SDKs/iPhoneOS.sdk -arch armv7 -miphoneos-version-min=8.0.0"
+              export CFLAGS=$IOSFLAGS
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b8e91c2022b396b0e9d022cbe35a37b9dae7828a..aebfa32e938e11dfeb7bc940db4438aeabc74d48 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -548,11 +548,8 @@ IF (HAVE_WINDOWS_H)
+ 	SET (CARES_HAVE_WINDOWS_H 1)
+ ENDIF()
+ 
+-# Write ares_build.h configuration file.  This is an installed file.
+-CONFIGURE_FILE (ares_build.h.cmake ${PROJECT_BINARY_DIR}/ares_build.h)
+-
+-# Write ares_config.h configuration file.  This is used only for the build.
+-CONFIGURE_FILE (ares_config.h.cmake ${PROJECT_BINARY_DIR}/ares_config.h)
++# Record toplevel CMakeLists.txt path
++set(CARES_TOPLEVEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+ 
+ 
+ # TRANSFORM_MAKEFILE_INC
+@@ -586,124 +583,21 @@ function(TRANSFORM_MAKEFILE_INC INPUT_FILE OUTPUT_FILE)
+ 	file(WRITE ${OUTPUT_FILE} ${MAKEFILE_INC_TEXT})
+ endfunction()
+ 
+-# run the function...
+-transform_makefile_inc("Makefile.inc" "${PROJECT_BINARY_DIR}/Makefile.inc.cmake")
+-include(${PROJECT_BINARY_DIR}/Makefile.inc.cmake)
+-
+-
+-# Build the dynamic/shared library
+-IF (CARES_SHARED)
+-	ADD_LIBRARY (${PROJECT_NAME} SHARED ${CSOURCES})
+-
+-	# Convert CARES_LIB_VERSIONINFO libtool version format into VERSION and SOVERSION
+-	# Convert from ":" separated into CMake list format using ";"
+-	STRING (REPLACE ":" ";" CARES_LIB_VERSIONINFO ${CARES_LIB_VERSIONINFO})
+-	LIST (GET CARES_LIB_VERSIONINFO 0 CARES_LIB_VERSION_CURRENT)
+-	LIST (GET CARES_LIB_VERSIONINFO 1 CARES_LIB_VERSION_REVISION)
+-	LIST (GET CARES_LIB_VERSIONINFO 2 CARES_LIB_VERSION_AGE)
+-	MATH (EXPR CARES_LIB_VERSION_MAJOR "${CARES_LIB_VERSION_CURRENT} - ${CARES_LIB_VERSION_AGE}")
+-	SET  (CARES_LIB_VERSION_MINOR "${CARES_LIB_VERSION_AGE}")
+-	SET  (CARES_LIB_VERSION_RELEASE "${CARES_LIB_VERSION_REVISION}")
+-
+-	SET_TARGET_PROPERTIES (${PROJECT_NAME} PROPERTIES
+-		EXPORT_NAME                  cares
+-		OUTPUT_NAME                  cares
+-		COMPILE_PDB_NAME             cares
+-		COMPILE_PDB_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+-		SOVERSION                    ${CARES_LIB_VERSION_MAJOR}
+-		VERSION                      "${CARES_LIB_VERSION_MAJOR}.${CARES_LIB_VERSION_MINOR}.${CARES_LIB_VERSION_RELEASE}"
+-	)
+-
+-	TARGET_INCLUDE_DIRECTORIES (${PROJECT_NAME} PUBLIC "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}>")
+-	TARGET_INCLUDE_DIRECTORIES (${PROJECT_NAME} PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>")
+-	TARGET_INCLUDE_DIRECTORIES (${PROJECT_NAME} PUBLIC "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
+-
+-	TARGET_COMPILE_DEFINITIONS (${PROJECT_NAME} PRIVATE HAVE_CONFIG_H=1 CARES_BUILDING_LIBRARY)
+-
+-	TARGET_LINK_LIBRARIES (${PROJECT_NAME} PUBLIC ${CARES_DEPENDENT_LIBS})
+-
+-	IF (CARES_INSTALL)
+-		INSTALL (TARGETS ${PROJECT_NAME}
+-			EXPORT ${PROJECT_NAME}-targets
+-			COMPONENT Library
+-			${TARGETS_INST_DEST}
+-		)
+-		INSTALL(FILES ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/cares.pdb
+-			DESTINATION ${CMAKE_INSTALL_BINDIR}
+-			COMPONENT Library
+-			OPTIONAL
+-		)
+-	ENDIF ()
+-	SET (STATIC_SUFFIX "_static")
+-
+-	# For chain building: add alias targets that look like import libs that would be returned by find_package(c-ares).
+-	ADD_LIBRARY (${PROJECT_NAME}::cares_shared ALIAS ${PROJECT_NAME})
+-	ADD_LIBRARY (${PROJECT_NAME}::cares        ALIAS ${PROJECT_NAME})
+-ENDIF ()
+-
+-# Build the static library
+-IF (CARES_STATIC)
+-	SET (LIBNAME ${PROJECT_NAME}${STATIC_SUFFIX})
+-
+-	ADD_LIBRARY (${LIBNAME} STATIC ${CSOURCES})
+-
+-	SET_TARGET_PROPERTIES (${LIBNAME} PROPERTIES
+-		EXPORT_NAME                  cares${STATIC_SUFFIX}
+-		OUTPUT_NAME                  cares${STATIC_SUFFIX}
+-		COMPILE_PDB_NAME             cares${STATIC_SUFFIX}
+-		COMPILE_PDB_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+-	)
+-
+-	IF (CARES_STATIC_PIC)
+-		SET_TARGET_PROPERTIES (${LIBNAME} PROPERTIES POSITION_INDEPENDENT_CODE True)
+-	ENDIF ()
++# Directory for includes
++ADD_SUBDIRECTORY (include)
+ 
+-	TARGET_INCLUDE_DIRECTORIES (${LIBNAME} PUBLIC "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}>")
+-	TARGET_INCLUDE_DIRECTORIES (${LIBNAME} PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>")
+-	TARGET_INCLUDE_DIRECTORIES (${LIBNAME} PUBLIC "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
+-
+-	TARGET_COMPILE_DEFINITIONS (${LIBNAME}
+-		PUBLIC  CARES_STATICLIB
+-		PRIVATE HAVE_CONFIG_H=1
+-	)
++# Directory for lib and tools
++ADD_SUBDIRECTORY (src)
+ 
+-	TARGET_LINK_LIBRARIES (${LIBNAME} PUBLIC ${CARES_DEPENDENT_LIBS})
+-	IF (CARES_INSTALL)
+-		INSTALL (TARGETS ${LIBNAME} EXPORT ${PROJECT_NAME}-targets COMPONENT Devel
+-			${TARGETS_INST_DEST}
+-		)
+-		INSTALL(FILES ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/cares${STATIC_SUFFIX}.pdb
+-			DESTINATION ${CMAKE_INSTALL_BINDIR}
+-			COMPONENT Library
+-			OPTIONAL
+-		)
+-	ENDIF ()
+-
+-	# For chain building: add alias targets that look like import libs that would be returned by find_package(c-ares).
+-	ADD_LIBRARY (${PROJECT_NAME}::cares_static ALIAS ${LIBNAME})
+-	IF (NOT TARGET ${PROJECT_NAME}::cares)
+-		# Only use static for the generic alias if shared lib wasn't built.
+-		ADD_LIBRARY (${PROJECT_NAME}::cares ALIAS ${LIBNAME})
+-	ENDIF ()
+-ENDIF ()
++# Docs
++ADD_SUBDIRECTORY (docs)
+ 
++# Tests
+ IF (CARES_BUILD_TESTS OR CARES_BUILD_CONTAINER_TESTS)
+ 	ENABLE_TESTING ()
+ 	ADD_SUBDIRECTORY (test)
+ ENDIF ()
+ 
+-# Headers and Man Pages installation target
+-IF (CARES_INSTALL)
+-	SET (CARES_HEADERS ares.h ares_version.h ares_dns.h "${PROJECT_BINARY_DIR}/ares_build.h" ares_rules.h)
+-	INSTALL (FILES ${CARES_HEADERS} COMPONENT Devel DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+-
+-	# ManPages
+-	FILE (GLOB DevelManPages "." "*.3")
+-	INSTALL (FILES ${DevelManPages}
+-		DESTINATION ${CMAKE_INSTALL_MANDIR}/man3
+-		COMPONENT Devel
+-	)
+-ENDIF ()
+ 
+ # Export targets
+ IF (CARES_INSTALL)
+@@ -730,53 +624,15 @@ IF (CARES_INSTALL)
+ 	INSTALL (FILES "${CMAKE_CURRENT_BINARY_DIR}/libcares.pc" COMPONENT Devel DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
+ ENDIF ()
+ 
++
+ # Legacy chain-building variables (provided for compatibility with old code).
+ # Don't use these, external code should be updated to refer to the aliases directly (e.g., Cares::cares).
+ SET (CARES_FOUND 1 CACHE INTERNAL "CARES LIBRARY FOUND")
+ SET (CARES_LIBRARIES ${PROJECT_NAME}::cares CACHE INTERNAL "CARES LIBRARIES")
+ 
+-IF (CARES_BUILD_TOOLS)
+-	# Build ahost
+-	ADD_EXECUTABLE (ahost ahost.c ${SAMPLESOURCES})
+-	TARGET_COMPILE_DEFINITIONS (ahost PRIVATE HAVE_CONFIG_H=1)
+-	TARGET_LINK_LIBRARIES (ahost PRIVATE ${PROJECT_NAME})
+-	IF (CARES_INSTALL)
+-		INSTALL (TARGETS ahost COMPONENT Tools ${TARGETS_INST_DEST})
+-	ENDIF ()
+-
+-
+-	# Build adig
+-	ADD_EXECUTABLE (adig adig.c ${SAMPLESOURCES})
+-	TARGET_COMPILE_DEFINITIONS (adig PRIVATE HAVE_CONFIG_H=1)
+-	TARGET_LINK_LIBRARIES (adig PRIVATE ${PROJECT_NAME})
+-	IF (CARES_INSTALL)
+-		INSTALL (TARGETS adig COMPONENT Tools ${TARGETS_INST_DEST})
+-	ENDIF ()
+-
+-
+-	# Build acountry
+-	ADD_EXECUTABLE (acountry acountry.c ${SAMPLESOURCES})
+-	TARGET_COMPILE_DEFINITIONS (acountry PRIVATE HAVE_CONFIG_H=1)
+-	TARGET_LINK_LIBRARIES (acountry PRIVATE ${PROJECT_NAME})
+-	IF (CARES_INSTALL)
+-		INSTALL (TARGETS acountry COMPONENT Tools ${TARGETS_INST_DEST})
+-	ENDIF ()
+-
+-	# Install Man Pages
+-	IF (CARES_INSTALL)
+-		FILE (GLOB ToolManPages "." "*.1")
+-		INSTALL (FILES ${ToolManPages}
+-			DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
+-			COMPONENT Tools
+-		)
+-	ENDIF ()
+-ENDIF ()
+-
+ 
+ IF (CARES_INSTALL)
+-
+     # Package creation
+-
+     set( CPACK_PACKAGE_NAME ${PROJECT_NAME} )
+     set( CPACK_PACKAGE_VENDOR "Daniel Stenberg" ) # Github project owner
+     set( CPACK_PACKAGE_DESCRIPTION_SUMMARY "A C library for asynchronous DNS requests" )
+@@ -877,7 +733,6 @@ IF (CARES_INSTALL)
+         set( CPACK_NSIS_URL_INFO_ABOUT ${CPACK_PACKAGE_HOMEPAGE_URL} )
+     endif()
+ 
+-
+     # This must always be last!
+     include( CPack )
+ ENDIF ()
+diff --git a/Makefile.am b/Makefile.am
+index 0811e66dfd45c89c196524b8ccb4c8be4b69615d..813403c407b9ead2a498c65679900c37e09316b0 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -1,56 +1,27 @@
+-AUTOMAKE_OPTIONS = foreign nostdinc
+-
+-ACLOCAL_AMFLAGS = -I m4
+-
+-# Specify our include paths here, and do it relative to $(top_srcdir) and
+-# $(top_builddir), to ensure that these paths which belong to the library
+-# being currently built and tested are searched before the library which
+-# might possibly already be installed in the system.
+-#
+-# When using the low-level hard-hacking memory leak tracking code from
+-# libcurl the generated curl/curlbuild.h file must also be reachable.
+-# Using the libcurl lowlevel code from within c-ares library is ugly and
+-# only works when c-ares is built and linked with a similarly debug-build
+-# libcurl, but we do this anyway for convenience.
+-#
+-# $(top_builddir)/../include/curl for generated curlbuild.h included from curl.h
+-# $(top_builddir)/../include is for libcurl's generated curl/curlbuild.h file
+-# $(top_srcdir)/../include is for libcurl's external include files
+-# $(top_builddir)/../lib is for libcurl's generated lib/curl_config.h file
+-# $(top_srcdir)/../lib is for libcurl's lib/setup.h and other "private" files
+-# $(top_builddir) is for c-ares's generated ares_config.h file
+-# $(top_srcdir) is for c-ares's ares_setup.h and other "c-ares-private" files
+-
+-AM_CPPFLAGS = -I$(top_builddir) \
+-              -I$(top_srcdir)
+-
+-lib_LTLIBRARIES = libcares.la
+-
+-man_MANS = $(MANPAGES)
++AUTOMAKE_OPTIONS = foreign nostdinc 1.9.6
++ACLOCAL_AMFLAGS = -I m4 --install
+ 
+ MSVCFILES = vc/vc6aws.dsw vc/acountry/vc6acountry.dsp vc/adig/vc6adig.dsp	\
+  vc/ahost/vc6ahost.dsp vc/cares/vc6cares.dsp vc/cares/vc6cares.dsw		\
+  msvc_ver.inc
+ 
+-PROGS = ahost adig acountry
+-
+-noinst_PROGRAMS =$(PROGS)
+-
+ # adig and ahost are just sample programs and thus not mentioned with the
+ # regular sources and headers
+-EXTRA_DIST = AUTHORS CHANGES README.cares Makefile.inc Makefile.dj	   \
+- Makefile.m32 Makefile.netware Makefile.msvc Makefile.Watcom $(man_MANS)   \
+- config-win32.h RELEASE-NOTES libcares.pc.in buildconf get_ver.awk maketgz \
+- TODO ares_build.h.in cares.rc README.msvc $(MSVCFILES)	   \
+- $(CSOURCES) $(HHEADERS) config-dos.h acountry.1 adig.1 ahost.1 INSTALL.md	   \
+- CMakeLists.txt ares_build.h.cmake ares_config.h.cmake c-ares-config.cmake.in \
+- libcares.pc.cmake README.md LICENSE.md RELEASE-PROCEDURE.md
++EXTRA_DIST = AUTHORS CHANGES README.cares $(man_MANS) RELEASE-NOTES	\
++ libcares.pc.in buildconf get_ver.awk maketgz TODO README.msvc	\
++ $(MSVCFILES) INSTALL.md README.md LICENSE.md \
++ CMakeLists.txt \
++ Makefile.dj Makefile.m32 Makefile.netware Makefile.msvc Makefile.Watcom \
++ AUTHORS CONTRIBUTING.md SECURITY.md TODO
++
+ 
+ CLEANFILES = $(PDFPAGES) $(HTMLPAGES)
+ 
+-DISTCLEANFILES = ares_build.h
++DISTCLEANFILES = include/ares_build.h
+ 
+-DIST_SUBDIRS = test
++DIST_SUBDIRS = include src test docs
++
++SUBDIRS = @BUILD_SUBDIRS@
+ 
+ pkgconfigdir = $(libdir)/pkgconfig
+ pkgconfig_DATA = libcares.pc
+@@ -63,7 +34,7 @@ CARES_VERSION_INFO = -version-info 6:1:4
+ # If either revision or age are omitted, they default to 0. Also note that age
+ # must be less than or equal to the current interface number.
+ #
+-# Here are a set of rules to help you update your library version information: 
++# Here are a set of rules to help you update your library version information:
+ #
+ # 1.Start with version information of 0:0:0 for each libtool library.
+ #
+@@ -84,112 +55,9 @@ CARES_VERSION_INFO = -version-info 6:1:4
+ # set age to 0. (c:r:a=0)
+ #
+ 
+-AM_LDFLAGS =
+-
+-libcares_la_LDFLAGS_EXTRA =
+-
+-if CARES_LT_SHLIB_USE_VERSION_INFO
+-libcares_la_LDFLAGS_EXTRA += $(CARES_VERSION_INFO)
+-endif
+-
+-if CARES_LT_SHLIB_USE_NO_UNDEFINED
+-libcares_la_LDFLAGS_EXTRA += -no-undefined
+-endif
+-
+-if CARES_LT_SHLIB_USE_MIMPURE_TEXT
+-libcares_la_LDFLAGS_EXTRA += -mimpure-text
+-endif
+-
+-libcares_la_LDFLAGS = $(AM_LDFLAGS) $(libcares_la_LDFLAGS_EXTRA)
+-
+-# Add -Werror if defined
+-CFLAGS += @CARES_CFLAG_EXTRAS@
+-
+-if USE_CPPFLAG_CARES_STATICLIB
+-AM_CPPFLAGS += $(CPPFLAG_CARES_STATICLIB)
+-endif
+-
+-libcares_la_CFLAGS_EXTRA =
+-
+-libcares_la_CPPFLAGS_EXTRA = -DCARES_BUILDING_LIBRARY
+-
+-if DOING_CARES_SYMBOL_HIDING
+-libcares_la_CFLAGS_EXTRA += $(CFLAG_CARES_SYMBOL_HIDING)
+-libcares_la_CPPFLAGS_EXTRA += -DCARES_SYMBOL_HIDING
+-endif
+-
+-@CODE_COVERAGE_RULES@
+-libcares_la_LDFLAGS += $(CODE_COVERAGE_LDFLAGS)
+-libcares_la_CFLAGS_EXTRA += $(CODE_COVERAGE_CFLAGS)
+-
+-libcares_la_CFLAGS = $(AM_CFLAGS) $(libcares_la_CFLAGS_EXTRA)
+-
+-libcares_la_CPPFLAGS = $(AM_CPPFLAGS) $(libcares_la_CPPFLAGS_EXTRA)
+-
+-# Makefile.inc provides the CSOURCES and HHEADERS defines
+-include Makefile.inc
+-
+-libcares_la_SOURCES = $(CSOURCES) $(HHEADERS)
+-
+ # where to install the c-ares headers
+ libcares_ladir = $(includedir)
+-# what headers to install on 'make install':
+-libcares_la_HEADERS = ares.h ares_version.h ares_dns.h \
+-	ares_build.h ares_rules.h
+-
+-ahost_SOURCES = ahost.c $(SAMPLESOURCES) $(SAMPLEHEADERS)
+-ahost_LDADD = $(top_builddir)/libcares.la
+-ahost_CFLAGS = $(AM_CFLAGS)
+-ahost_CPPFLAGS = $(AM_CPPFLAGS)
+-
+-adig_SOURCES = adig.c $(SAMPLESOURCES) $(SAMPLEHEADERS)
+-adig_LDADD = $(top_builddir)/libcares.la
+-adig_CFLAGS = $(AM_CFLAGS)
+-adig_CPPFLAGS = $(AM_CPPFLAGS)
+-
+-acountry_SOURCES = acountry.c $(SAMPLESOURCES) $(SAMPLEHEADERS)
+-acountry_LDADD = $(top_builddir)/libcares.la
+-acountry_CFLAGS = $(AM_CFLAGS)
+-acountry_CPPFLAGS = $(AM_CPPFLAGS)
+-
+-SOURCEDMANDIR = man3
+-SOURCEDMANPAGES = ares_init.3
+-
+-clean-local: clean-sourced-manpages
+-
+-clean-sourced-manpages:
+-	@srcdmandir='$(SOURCEDMANDIR)'; \
+-	echo "rm -rf $(top_builddir)/$$srcdmandir"; \
+-	rm -rf $(top_builddir)/$$srcdmandir
+-
+-sourced-manpages: clean-sourced-manpages
+-	@srcdmandir='$(SOURCEDMANDIR)'; \
+-	srcdmanfiles='$(SOURCEDMANPAGES)'; \
+-	mkdir $(top_builddir)/$$srcdmandir; \
+-	for file in $$srcdmanfiles; do \
+-	  if test -f $(top_srcdir)/$$file; then \
+-	    echo "cp $(top_srcdir)/$$file $(top_builddir)/$$srcdmandir/$$file"; \
+-	    cp $(top_srcdir)/$$file $(top_builddir)/$$srcdmandir/$$file; \
+-	  fi; \
+-	done
+-
+-MAN2HTML = roffit --mandir=. < $< >$@
+-
+-SUFFIXES = .3 .html
+-
+-html: sourced-manpages $(HTMLPAGES)
+-
+-.3.html:
+-	$(MAN2HTML)
+-
+-pdf: sourced-manpages $(PDFPAGES)
+ 
+-.3.pdf:
+-	@(foo=`echo $@ | sed -e 's/\.[0-9]$$//g'`; \
+-	groff -Tps -man $< >$$foo.ps; \
+-	ps2pdf $$foo.ps $@; \
+-	rm $$foo.ps; \
+-	echo "converted $< to $@")
+ 
+ # Make files named *.dist replace the file without .dist extension
+ dist-hook:
+diff --git a/Makefile.m32 b/Makefile.m32
+index 97a28c2ecc59556fd3c4ea389f87c059f5a8a526..055d7b06af91157c30c1319cb650ed454db5606f 100644
+--- a/Makefile.m32
++++ b/Makefile.m32
+@@ -8,7 +8,7 @@
+ ########################################################
+ ## Nothing more to do below this line!
+ 
+-LIB	= libcares.a
++LIB	= src/lib/libcares.a
+ 
+ AR	= $(CROSSPREFIX)ar
+ CC	= $(CROSSPREFIX)gcc
+@@ -17,15 +17,15 @@ RANLIB	= $(CROSSPREFIX)ranlib
+ #RM	= rm -f
+ CP	= cp -afv
+ 
+-CFLAGS	= $(CARES_CFLAG_EXTRAS) -O2 -Wall -I. -D_WIN32_WINNT=0x0600
++CFLAGS	= $(CARES_CFLAG_EXTRAS) -O2 -Wall -I./include -I./src/lib -D_WIN32_WINNT=0x0600
+ CFLAGS	+= -DCARES_STATICLIB
+ LDFLAGS	= $(CARES_LDFLAG_EXTRAS) -s
+ LIBS	= -lwsock32
+ 
+ # Makefile.inc provides the CSOURCES and HHEADERS defines
+-include Makefile.inc
++include src/lib/Makefile.inc
+ 
+-OBJLIB	:= $(patsubst %.c,%.o,$(strip $(CSOURCES)))
++OBJLIB	:= $(patsubst %.c,src/lib/%.o,$(strip $(CSOURCES)))
+ 
+ 
+ $(LIB): $(OBJLIB)
+@@ -34,21 +34,21 @@ $(LIB): $(OBJLIB)
+ 
+ all: $(LIB) demos
+ 
+-demos: adig.exe ahost.exe acountry.exe
++demos: src/tools/adig.exe src/tools/ahost.exe src/tools/acountry.exe
+ 
+ tags:
+ 	etags *.[ch]
+ 
+-%.exe: %.o ares_getopt.o $(LIB)
++%.exe: %.o src/tools/ares_getopt.o $(LIB)
+ 	$(LD) $(LDFLAGS) -o $@ $^ $(LIBS)
+ 
+-$(OBJLIB): ares.h ares_dns.h ares_private.h ares_build.h ares_rules.h
++$(OBJLIB): include/ares.h src/lib/ares_dns.h include/ares_build.h
+ 
+ .c.o:
+-	$(CC) $(CFLAGS) -c $<
++	$(CC) $(CFLAGS) -o $@ -c $<
+ 
+-ares_build.h:
+-	$(CP) ares_build.h.dist ares_build.h
++include/ares_build.h:
++	$(CP) include/ares_build.h.dist include/ares_build.h
+ 
+ check:
+ 
+@@ -59,18 +59,19 @@ install:
+ 	${INSTALL} -m 644 $(LIB) ${DESTDIR}${libdir}
+ 	${RANLIB} ${DESTDIR}${libdir}/$(LIB)
+ 	chmod u-w ${DESTDIR}${libdir}/$(LIB)
+-	${INSTALL} -m 444 ${srcdir}/ares.h ${DESTDIR}${includedir}
+-	${INSTALL} -m 444 ${srcdir}/ares_build.h ${DESTDIR}${includedir}
+-	${INSTALL} -m 444 ${srcdir}/ares_rules.h ${DESTDIR}${includedir}
++	${INSTALL} -m 444 ${srcdir}/include/ares.h ${DESTDIR}${includedir}
++	${INSTALL} -m 444 ${srcdir}/include/ares_build.h ${DESTDIR}${includedir}
++	${INSTALL} -m 444 ${srcdir}/include/ares_rules.h ${DESTDIR}${includedir}
++	${INSTALL} -m 444 ${srcdir}/include/ares_version.h ${DESTDIR}${includedir}
+ 	(for man in $(MANPAGES); do \
+ 	   ${INSTALL} -m 444 ${srcdir}/$${man} ${DESTDIR}${mandir}/man3; \
+ 	done)
+ 
+ clean:
+-	$(RM) ares_getopt.o $(OBJLIB) $(LIB) adig.exe ahost.exe acountry.exe
++	$(RM) src/tools/ares_getopt.o $(OBJLIB) $(LIB) src/tools/adig.exe src/tools/ahost.exe src/tools/acountry.exe
+ 
+ distclean: clean
+ 	$(RM) config.cache config.log config.status Makefile
+-ifeq "$(wildcard ares_build.h.dist)" "ares_build.h.dist"
+-	$(RM) ares_build.h
++ifeq "$(wildcard include/ares_build.h.dist)" "include/ares_build.h.dist"
++	$(RM) include/ares_build.h
+ endif
+diff --git a/Makefile.msvc b/Makefile.msvc
+index 4772e0553177165c4e7cf69e0ad788dbbe6ad8d7..21d3de668192964d31703956002f5da3a28c785a 100644
+--- a/Makefile.msvc
++++ b/Makefile.msvc
+@@ -80,7 +80,7 @@ USE_WATT32 = 0
+ # Verify that current subdir is the c-ares source one
+ # ----------------------------------------------------
+ 
+-!IF ! EXIST(.\ares_init.c)
++!IF ! EXIST(.\src\lib\ares_init.c)
+ !  MESSAGE Can not process Makefile.msvc from outside of c-ares source subdirectory.
+ !  MESSAGE Change to the subdirectory where Makefile.msvc is found, and try again.
+ !  ERROR   See previous message.
+@@ -212,7 +212,7 @@ RT_ERROR_CHECKING = /RTCsu
+ 
+ CC_CMD_REL = cl.exe /nologo $(RTLIB) /DNDEBUG /O2
+ CC_CMD_DBG = cl.exe /nologo $(RTLIBD) /D_DEBUG /Od /Zi $(RT_ERROR_CHECKING)
+-CC_CFLAGS  = $(CFLAGS) /I. /W3 /EHsc /FD
++CC_CFLAGS  = $(CFLAGS) /I.\src\lib /I.\include /W3 /EHsc /FD
+ 
+ RC_CMD_REL = rc.exe /l 0x409 /d "NDEBUG"
+ RC_CMD_DBG = rc.exe /l 0x409 /d "_DEBUG"
+@@ -280,7 +280,8 @@ RC_CMD       = $(RC_CMD_DBG)
+ # Makefile.inc provides lists of source files
+ # --------------------------------------------
+ 
+-!INCLUDE .\Makefile.inc
++!INCLUDE .\src\lib\Makefile.inc
++!INCLUDE .\src\tools\Makefile.inc
+ 
+ # ----------------------------
+ # Build lists of object files
+@@ -308,6 +309,7 @@ CARES_OBJS = $(CARES_OBJS) $(CARES_OBJDIR)\cares.res
+ !ERROR Problem generating PROG1_OBJS list.
+ !ENDIF
+ PROG1_OBJS = $(PROG1_OBJS:.c=.obj)
++PROG1_OBJS = $(PROG1_OBJS:/=\)
+ PROG1_OBJS = $(PROG1_OBJS) $(PROG1_OBJDIR)\acountry.obj
+ 
+ !IF [ECHO PROG2_OBJS=^$(PROG2_OBJDIR)\$(SAMPLESOURCES: = $(PROG2_OBJDIR^)\) > .\prog2_objs.inc] == 0
+@@ -318,6 +320,7 @@ PROG1_OBJS = $(PROG1_OBJS) $(PROG1_OBJDIR)\acountry.obj
+ !ERROR Problem generating PROG2_OBJS list.
+ !ENDIF
+ PROG2_OBJS = $(PROG2_OBJS:.c=.obj)
++PROG2_OBJS = $(PROG2_OBJS:/=\)
+ PROG2_OBJS = $(PROG2_OBJS) $(PROG2_OBJDIR)\adig.obj
+ 
+ !IF [ECHO PROG3_OBJS=^$(PROG3_OBJDIR)\$(SAMPLESOURCES: = $(PROG3_OBJDIR^)\) > .\prog3_objs.inc] == 0
+@@ -328,10 +331,12 @@ PROG2_OBJS = $(PROG2_OBJS) $(PROG2_OBJDIR)\adig.obj
+ !ERROR Problem generating PROG3_OBJS list.
+ !ENDIF
+ PROG3_OBJS = $(PROG3_OBJS:.c=.obj)
++PROG3_OBJS = $(PROG3_OBJS:/=\)
+ PROG3_OBJS = $(PROG3_OBJS) $(PROG3_OBJDIR)\ahost.obj
+ 
+ !ENDIF
+ 
++
+ # --------------------------------
+ # Only our custom inference rules
+ # --------------------------------
+@@ -339,21 +344,33 @@ PROG3_OBJS = $(PROG3_OBJS) $(PROG3_OBJDIR)\ahost.obj
+ .SUFFIXES:
+ .SUFFIXES: .c .rc
+ 
+-{$(SRCDIR)}.rc{$(CARES_OBJDIR)}.res:
++{$(SRCDIR)\src\lib}.rc{$(CARES_OBJDIR)}.res:
+     $(RC_CMD) /Fo $@ $<
+ 
+-{$(SRCDIR)}.c{$(CARES_OBJDIR)}.obj:
++{$(SRCDIR)\src\lib}.c{$(CARES_OBJDIR)}.obj:
+     $(CC_CMD) $(CC_CFLAGS) $(CARES_CFLAGS) /Fo$@ /Fd$(@D)\ /c $<
+ 
+-{$(SRCDIR)}.c{$(PROG1_OBJDIR)}.obj:
++{$(SRCDIR)\src\tools}.c{$(PROG1_OBJDIR)}.obj:
+     $(CC_CMD) $(CC_CFLAGS) $(SPROG_CFLAGS) /Fo$@ /Fd$(@D)\ /c $<
+ 
+-{$(SRCDIR)}.c{$(PROG2_OBJDIR)}.obj:
++{$(SRCDIR)\src\tools}.c{$(PROG2_OBJDIR)}.obj:
+     $(CC_CMD) $(CC_CFLAGS) $(SPROG_CFLAGS) /Fo$@ /Fd$(@D)\ /c $<
+ 
+-{$(SRCDIR)}.c{$(PROG3_OBJDIR)}.obj:
++{$(SRCDIR)\src\tools}.c{$(PROG3_OBJDIR)}.obj:
+     $(CC_CMD) $(CC_CFLAGS) $(SPROG_CFLAGS) /Fo$@ /Fd$(@D)\ /c $<
+ 
++# Hack Alert! we reference ../lib/ files in the Makefile.inc for tools as they
++# share some files with the library itself.  We need to hack around that here.
++
++{$(SRCDIR)\src\lib}.c{$(PROG1_OBJDIR)\..\lib}.obj:
++    $(CC_CMD) $(CC_CFLAGS) $(SPROG_CFLAGS) /Fo$(PROG1_OBJDIR)\$(@F) /Fd$(PROG1_OBJDIR)\ /c $<
++
++{$(SRCDIR)\src\lib}.c{$(PROG2_OBJDIR)\..\lib}.obj:
++    $(CC_CMD) $(CC_CFLAGS) $(SPROG_CFLAGS) /Fo$(PROG2_OBJDIR)\$(@F) /Fd$(PROG2_OBJDIR)\ /c $<
++
++{$(SRCDIR)\src\lib}.c{$(PROG3_OBJDIR)\..\lib}.obj:
++    $(CC_CMD) $(CC_CFLAGS) $(SPROG_CFLAGS) /Fo$(PROG3_OBJDIR)\$(@F) /Fd$(PROG3_OBJDIR)\ /c $<
++
+ # ------------------------------------------------------------- #
+ # ------------------------------------------------------------- #
+ # Default target when no CFG library type has been specified,   #
+@@ -389,22 +406,26 @@ install:
+ ALL: c-ares acountry adig ahost
+     @
+ 
+-c-ares: $(HHEADERS) $(CSOURCES) $(CARES_OBJDIR) $(CARES_OBJS) $(CARES_OUTDIR)
++# $(HHEADERS) $(CSOURCES)
++c-ares: $(CARES_OBJDIR) $(CARES_OBJS) $(CARES_OUTDIR)
+     $(CARES_LINK) $(CARES_LFLAGS) /out:$(CARES_OUTDIR)\$(CARES_TARGET) $(CARES_OBJS)
+ !   IF "$(USE_RES_FILE)" == "TRUE"
+     @if exist $(CARES_OUTDIR)\$(CARES_TARGET).manifest mt -nologo -manifest $(CARES_OUTDIR)\$(CARES_TARGET).manifest -outputresource:$(CARES_OUTDIR)\$(CARES_TARGET);2
+ !   ENDIF
+ 
+-acountry: c-ares acountry.c $(SAMPLESOURCES) $(SAMPLEHEADERS) $(PROG1_OBJDIR) $(PROG1_OBJS) $(PROG1_OUTDIR)
+-    $(SPROG_LINK) $(SPROG_LFLAGS) /out:$(PROG1_OUTDIR)\acountry.exe $(PROG1_OBJS)
++# acountry.c $(SAMPLESOURCES) $(SAMPLEHEADERS)
++acountry: c-ares $(PROG1_OBJDIR) $(PROG1_OBJS) $(PROG1_OUTDIR)
++    $(SPROG_LINK) $(SPROG_LFLAGS) /out:$(PROG1_OUTDIR)\acountry.exe $(PROG1_OBJS:..\lib=)
+     @if exist $(PROG1_OUTDIR)\acountry.exe.manifest mt -nologo -manifest $(PROG1_OUTDIR)\acountry.exe.manifest -outputresource:$(PROG1_OUTDIR)\acountry.exe;1
+ 
+-adig: c-ares adig.c $(SAMPLESOURCES) $(SAMPLEHEADERS) $(PROG2_OBJDIR) $(PROG2_OBJS) $(PROG2_OUTDIR)
+-    $(SPROG_LINK) $(SPROG_LFLAGS) /out:$(PROG2_OUTDIR)\adig.exe $(PROG2_OBJS)
++# adig.c $(SAMPLESOURCES) $(SAMPLEHEADERS)
++adig: c-ares  $(PROG2_OBJDIR) $(PROG2_OBJS) $(PROG2_OUTDIR)
++    $(SPROG_LINK) $(SPROG_LFLAGS) /out:$(PROG2_OUTDIR)\adig.exe $(PROG2_OBJS:..\lib=)
+     @if exist $(PROG2_OUTDIR)\adig.exe.manifest mt -nologo -manifest $(PROG2_OUTDIR)\adig.exe.manifest -outputresource:$(PROG2_OUTDIR)\adig.exe;1
+ 
+-ahost: c-ares ahost.c $(SAMPLESOURCES) $(SAMPLEHEADERS) $(PROG3_OBJDIR) $(PROG3_OBJS) $(PROG3_OUTDIR)
+-    $(SPROG_LINK) $(SPROG_LFLAGS) /out:$(PROG3_OUTDIR)\ahost.exe $(PROG3_OBJS)
++# ahost.c $(SAMPLESOURCES) $(SAMPLEHEADERS)
++ahost: c-ares $(PROG3_OBJDIR) $(PROG3_OBJS) $(PROG3_OUTDIR)
++    $(SPROG_LINK) $(SPROG_LFLAGS) /out:$(PROG3_OUTDIR)\ahost.exe $(PROG3_OBJS:..\lib=)
+     @if exist $(PROG3_OUTDIR)\ahost.exe.manifest mt -nologo -manifest $(PROG3_OUTDIR)\ahost.exe.manifest -outputresource:$(PROG3_OUTDIR)\ahost.exe;1
+ 
+ $(CARES_OUTDIR): $(CARES_DIR)
+@@ -443,11 +464,11 @@ install:
+     @if not exist "$(INSTALL_DIR)"     mkdir "$(INSTALL_DIR)"
+     @if not exist "$(INSTALL_DIR_LIB)" mkdir "$(INSTALL_DIR_LIB)"
+     @if not exist "$(INSTALL_DIR_INC)" mkdir "$(INSTALL_DIR_INC)"
+-    @copy /y $(CARES_OUTDIR)\*.*      "$(INSTALL_DIR_LIB)" >NUL
+-    @copy /y $(SRCDIR)\ares.h         "$(INSTALL_DIR_INC)" >NUL
+-    @copy /y $(SRCDIR)\ares_build.h   "$(INSTALL_DIR_INC)" >NUL
+-    @copy /y $(SRCDIR)\ares_rules.h   "$(INSTALL_DIR_INC)" >NUL
+-    @copy /y $(SRCDIR)\ares_version.h "$(INSTALL_DIR_INC)" >NUL
++    @copy /y $(CARES_OUTDIR)\*.*              "$(INSTALL_DIR_LIB)" >NUL
++    @copy /y $(SRCDIR)\include\ares.h         "$(INSTALL_DIR_INC)" >NUL
++    @copy /y $(SRCDIR)\include\ares_build.h   "$(INSTALL_DIR_INC)" >NUL
++    @copy /y $(SRCDIR)\include\ares_rules.h   "$(INSTALL_DIR_INC)" >NUL
++    @copy /y $(SRCDIR)\include\ares_version.h "$(INSTALL_DIR_INC)" >NUL
+     @echo Installed c-ares $(CFG)
+ 
+ !ENDIF
+diff --git a/appveyor.yml b/appveyor.yml
+index fdd61320684725071013165476b5ef8f267865df..94eebd56955b9dcaae713513d2c4242859000a4c 100644
+--- a/appveyor.yml
++++ b/appveyor.yml
+@@ -61,13 +61,13 @@ before_build:
+   - if "%COMPILER%" == "MSVC" call "%MSVC_SETUP_PATH%" %MSVC_SETUP_ARG%
+ 
+ build_script:
+-  - if "%BUILDTOOL%" == "NMAKE" copy ares_build.h.dist ares_build.h
++  - if "%BUILDTOOL%" == "NMAKE" copy .\include\ares_build.h.dist .\include\ares_build.h
+   - if "%BUILDTOOL%" == "NMAKE" nmake /NOLOGO /f .\Makefile.msvc
+   - if "%BUILDTOOL%" == "CMAKE" mkdir C:\projects\build-cares
+   - if "%BUILDTOOL%" == "CMAKE" cd C:\projects\build-cares
+   - if "%BUILDTOOL%" == "CMAKE" cmake -GNinja -DCMAKE_BUILD_TYPE=%configuration% -DCMAKE_INSTALL_PREFIX=C:\projects\build-cares\test_install -DCARES_STATIC=ON -DCARES_STATIC_PIC=ON -DCARES_BUILD_TESTS=ON %CMAKE_EXTRA_OPTIONS% %APPVEYOR_BUILD_FOLDER%
+   - if "%BUILDTOOL%" == "CMAKE" ninja install
+-  - if "%BUILDTOOL%" == "MAKE" copy ares_build.h.dist ares_build.h
++  - if "%BUILDTOOL%" == "MAKE" copy .\include\ares_build.h.dist .\include\ares_build.h
+   - if "%BUILDTOOL%" == "MAKE" mingw32-make.exe -f Makefile.m32 demos
+ 
+ test_script:
+diff --git a/buildconf b/buildconf
+index a779d86db62059a693cfe76d927b14a191bbab92..e997c21985bff0387b349b443236040b42a9e0b3 100755
+--- a/buildconf
++++ b/buildconf
+@@ -59,7 +59,7 @@ removethis(){
+ # Ensure that buildconf runs from the subdirectory where configure.ac lives
+ #
+ if test ! -f configure.ac ||
+-  test ! -f ares_init.c ||
++  test ! -f src/lib/ares_init.c ||
+   test ! -f m4/cares-functions.m4; then
+   echo "Can not run buildconf from outside of c-ares source subdirectory!"
+   echo "Change to the subdirectory where buildconf is found, and try again."
+diff --git a/configure.ac b/configure.ac
+index 594f91686bd705e31745d94fffd41ea560c20690..6a4b3a610d5a773acb3bed86df4c7f61551ac792 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -7,8 +7,8 @@ XC_OVR_ZZ50
+ XC_OVR_ZZ60
+ CARES_OVERRIDE_AUTOCONF
+ 
+-AC_CONFIG_SRCDIR([ares_ipv6.h])
+-AC_CONFIG_HEADERS([ares_config.h ares_build.h])
++AC_CONFIG_SRCDIR([src/lib/ares_ipv6.h])
++AC_CONFIG_HEADERS([src/lib/ares_config.h include/ares_build.h])
+ AC_CONFIG_MACRO_DIR([m4])
+ AM_MAINTAINER_MODE
+ m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
+@@ -69,10 +69,6 @@ AC_SUBST([AR])
+ 
+ AX_CODE_COVERAGE
+ 
+-dnl Remove non-configure distributed ares_build.h
+-if test -f ${srcdir}/ares_build.h; then
+-  rm -f ${srcdir}/ares_build.h
+-fi
+ 
+ dnl
+ dnl Detect the canonical host and target build environment
+@@ -105,6 +101,7 @@ esac
+ 
+ XC_LIBTOOL
+ 
++
+ #
+ # Automake conditionals based on libtool related checks
+ #
+@@ -179,8 +176,8 @@ dnl Compilation based checks should not be done before this point.
+ dnl **********************************************************************
+ 
+ dnl **********************************************************************
+-dnl Make sure that our checks for headers windows.h winsock.h winsock2.h 
+-dnl and ws2tcpip.h take precedence over any other further checks which 
++dnl Make sure that our checks for headers windows.h winsock.h winsock2.h
++dnl and ws2tcpip.h take precedence over any other further checks which
+ dnl could be done later using AC_CHECK_HEADER or AC_CHECK_HEADERS for
+ dnl this specific header files. And do them before its results are used.
+ dnl **********************************************************************
+@@ -520,7 +517,7 @@ CURL_CHECK_STRUCT_TIMEVAL
+ AC_CHECK_TYPE(long long,
+    [AC_DEFINE(HAVE_LONGLONG, 1,
+      [Define to 1 if the compiler supports the 'long long' data type.])]
+-   longlong="yes"  
++   longlong="yes"
+ )
+ 
+ if test "xyes" = "x$longlong"; then
+@@ -624,7 +621,7 @@ CARES_CHECK_CONSTANT(
+ #include <sys/socket.h>
+ #endif
+ #endif
+-  ], [PF_INET6], 
++  ], [PF_INET6],
+      AC_DEFINE_UNQUOTED(HAVE_PF_INET6,1,[Define to 1 if you have PF_INET6.])
+ )
+ 
+@@ -648,7 +645,7 @@ CARES_CHECK_CONSTANT(
+ #include <sys/socket.h>
+ #endif
+ #endif
+-  ], [AF_INET6], 
++  ], [AF_INET6],
+      AC_DEFINE_UNQUOTED(HAVE_AF_INET6,1,[Define to 1 if you have AF_INET6.])
+ )
+ 
+@@ -676,7 +673,7 @@ CARES_CHECK_STRUCT(
+ #include <netinet/in.h>
+ #endif
+ #endif
+-  ], [in6_addr], 
++  ], [in6_addr],
+      AC_DEFINE_UNQUOTED(HAVE_STRUCT_IN6_ADDR,1,[Define to 1 if you have struct in6_addr.])
+ )
+ 
+@@ -703,7 +700,7 @@ CARES_CHECK_STRUCT(
+ #include <netinet/in.h>
+ #endif
+ #endif
+-  ], [sockaddr_in6], 
++  ], [sockaddr_in6],
+      AC_DEFINE_UNQUOTED(HAVE_STRUCT_SOCKADDR_IN6,1,
+        [Define to 1 if you have struct sockaddr_in6.]) ac_have_sockaddr_in6=yes
+ )
+@@ -824,7 +821,7 @@ AC_HELP_STRING([--with-random=FILE],
+         else
+           AC_MSG_WARN([cannot check for /dev/urandom while cross compiling; assuming none])
+         fi
+-        
++
+     ]
+ )
+ if test -n "$RANDOM_FILE" && test X"$RANDOM_FILE" != Xno ; then
+@@ -881,10 +878,22 @@ if test "x$build_tests" = "xyes" ; then
+ fi
+ AC_MSG_RESULT([$build_tests])
+ 
++
++BUILD_SUBDIRS="include src docs"
+ if test "x$build_tests" = "xyes" ; then
+   AC_CONFIG_SUBDIRS([test])
++  BUILD_SUBDIRS="${BUILD_SUBDIRS} test"
+ fi
+ 
+-AC_CONFIG_FILES([Makefile libcares.pc])
++AC_SUBST(BUILD_SUBDIRS)
++
++AC_CONFIG_FILES([Makefile           \
++                 include/Makefile   \
++                 src/Makefile       \
++                 src/lib/Makefile   \
++                 src/tools/Makefile \
++                 docs/Makefile      \
++                 libcares.pc ])
++
+ AC_OUTPUT
+ XC_AMEND_DISTCLEAN(['.'])
+diff --git a/docs/CMakeLists.txt b/docs/CMakeLists.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b91d313e2fd0f2ef4186738129ddbc2331679b6
+--- /dev/null
++++ b/docs/CMakeLists.txt
+@@ -0,0 +1,17 @@
++# Headers and Man Pages installation target
++IF (CARES_INSTALL)
++	# ManPages
++	FILE (GLOB DevelManPages "." "*.3")
++	INSTALL (FILES ${DevelManPages}
++		DESTINATION ${CMAKE_INSTALL_MANDIR}/man3
++		COMPONENT Devel
++	)
++
++	IF (CARES_BUILD_TOOLS)
++		FILE (GLOB ToolManPages "." "*.1")
++		INSTALL (FILES ${ToolManPages}
++			DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
++			COMPONENT Tools
++		)
++	ENDIF ()
++ENDIF ()
+diff --git a/docs/Makefile.am b/docs/Makefile.am
+new file mode 100644
+index 0000000000000000000000000000000000000000..bdbc55931f9cf13f08f9cbcacdec29de00b9a832
+--- /dev/null
++++ b/docs/Makefile.am
+@@ -0,0 +1,51 @@
++#***************************************************************************
++
++###########################################################################
++
++AUTOMAKE_OPTIONS = foreign subdir-objects no-dependencies
++
++include Makefile.inc
++
++man_MANS = $(MANPAGES)
++
++EXTRA_DIST = $(MANPAGES) ahost.1 adig.1 acountry.1 Makefile.inc CMakeLists.txt
++
++SOURCEDMANDIR = man3
++SOURCEDMANPAGES = ares_init.3
++
++clean-local: clean-sourced-manpages
++
++clean-sourced-manpages:
++	@srcdmandir='$(SOURCEDMANDIR)'; \
++	echo "rm -rf $(top_builddir)/$$srcdmandir"; \
++	rm -rf $(top_builddir)/$$srcdmandir
++
++sourced-manpages: clean-sourced-manpages
++	@srcdmandir='$(SOURCEDMANDIR)'; \
++	srcdmanfiles='$(SOURCEDMANPAGES)'; \
++	mkdir $(top_builddir)/$$srcdmandir; \
++	for file in $$srcdmanfiles; do \
++	  if test -f $(top_srcdir)/$$file; then \
++	    echo "cp $(top_srcdir)/$$file $(top_builddir)/$$srcdmandir/$$file"; \
++	    cp $(top_srcdir)/$$file $(top_builddir)/$$srcdmandir/$$file; \
++	  fi; \
++	done
++
++MAN2HTML = roffit --mandir=. < $< >$@
++
++SUFFIXES = .3 .html
++
++html: sourced-manpages $(HTMLPAGES)
++
++.3.html:
++	$(MAN2HTML)
++
++pdf: sourced-manpages $(PDFPAGES)
++
++
++.3.pdf:
++	@(foo=`echo $@ | sed -e 's/\.[0-9]$$//g'`; \
++	groff -Tps -man $< >$$foo.ps; \
++	ps2pdf $$foo.ps $@; \
++	rm $$foo.ps; \
++	echo "converted $< to $@")
+diff --git a/Makefile.inc b/docs/Makefile.inc
+similarity index 70%
+rename from Makefile.inc
+rename to docs/Makefile.inc
+index f65df1f57fcaaf9767e1bdcf49b7e7f2a09b1ae7..101c27da20e6e1ccc788300f71556977c8e5618e 100644
+--- a/Makefile.inc
++++ b/docs/Makefile.inc
+@@ -1,85 +1,3 @@
+-
+-CSOURCES = ares__close_sockets.c	\
+-  ares__get_hostent.c			\
+-  ares__parse_into_addrinfo.c		\
+-  ares__readaddrinfo.c			\
+-  ares__sortaddrinfo.c			\
+-  ares__read_line.c			\
+-  ares__timeval.c			\
+-  ares_android.c			\
+-  ares_cancel.c				\
+-  ares_data.c				\
+-  ares_destroy.c			\
+-  ares_expand_name.c			\
+-  ares_expand_string.c			\
+-  ares_fds.c				\
+-  ares_free_hostent.c			\
+-  ares_free_string.c			\
+-  ares_freeaddrinfo.c			\
+-  ares_getaddrinfo.c			\
+-  ares_getenv.c				\
+-  ares_gethostbyaddr.c			\
+-  ares_gethostbyname.c			\
+-  ares_getnameinfo.c			\
+-  ares_getsock.c			\
+-  ares_init.c				\
+-  ares_library_init.c			\
+-  ares_llist.c				\
+-  ares_mkquery.c			\
+-  ares_create_query.c			\
+-  ares_nowarn.c				\
+-  ares_options.c			\
+-  ares_parse_a_reply.c			\
+-  ares_parse_aaaa_reply.c		\
+-  ares_parse_mx_reply.c			\
+-  ares_parse_naptr_reply.c		\
+-  ares_parse_ns_reply.c			\
+-  ares_parse_ptr_reply.c		\
+-  ares_parse_soa_reply.c		\
+-  ares_parse_srv_reply.c		\
+-  ares_parse_txt_reply.c		\
+-  ares_platform.c			\
+-  ares_process.c			\
+-  ares_query.c				\
+-  ares_search.c				\
+-  ares_send.c				\
+-  ares_strcasecmp.c			\
+-  ares_strdup.c				\
+-  ares_strerror.c			\
+-  ares_strsplit.c			\
+-  ares_timeout.c			\
+-  ares_version.c			\
+-  ares_writev.c				\
+-  bitncmp.c				\
+-  inet_net_pton.c			\
+-  inet_ntop.c				\
+-  windows_port.c
+-
+-HHEADERS = ares.h			\
+-  ares_android.h                        \
+-  ares_build.h				\
+-  ares_data.h				\
+-  ares_dns.h				\
+-  ares_getenv.h				\
+-  ares_inet_net_pton.h			\
+-  ares_iphlpapi.h			\
+-  ares_ipv6.h				\
+-  ares_library_init.h			\
+-  ares_llist.h				\
+-  ares_nowarn.h				\
+-  ares_platform.h			\
+-  ares_private.h			\
+-  ares_rules.h				\
+-  ares_strcasecmp.h			\
+-  ares_strdup.h				\
+-  ares_strsplit.h			\
+-  ares_version.h			\
+-  ares_writev.h				\
+-  bitncmp.h				\
+-  nameser.h				\
+-  ares_setup.h				\
+-  setup_once.h
+-
+ MANPAGES = ares_cancel.3		\
+   ares_create_query.3			\
+   ares_destroy.3			\
+@@ -251,11 +169,3 @@ PDFPAGES = ares_cancel.pdf		\
+   ares_strerror.pdf			\
+   ares_timeout.pdf			\
+   ares_version.pdf
+-
+-SAMPLESOURCES = ares_getopt.c		\
+-  ares_nowarn.c				\
+-  ares_strcasecmp.c
+-
+-SAMPLEHEADERS = ares_getopt.h		\
+-  ares_nowarn.h				\
+-  ares_strcasecmp.h
+diff --git a/acountry.1 b/docs/acountry.1
+similarity index 100%
+rename from acountry.1
+rename to docs/acountry.1
+diff --git a/adig.1 b/docs/adig.1
+similarity index 100%
+rename from adig.1
+rename to docs/adig.1
+diff --git a/ahost.1 b/docs/ahost.1
+similarity index 100%
+rename from ahost.1
+rename to docs/ahost.1
+diff --git a/ares_cancel.3 b/docs/ares_cancel.3
+similarity index 100%
+rename from ares_cancel.3
+rename to docs/ares_cancel.3
+diff --git a/ares_create_query.3 b/docs/ares_create_query.3
+similarity index 100%
+rename from ares_create_query.3
+rename to docs/ares_create_query.3
+diff --git a/ares_destroy.3 b/docs/ares_destroy.3
+similarity index 100%
+rename from ares_destroy.3
+rename to docs/ares_destroy.3
+diff --git a/ares_destroy_options.3 b/docs/ares_destroy_options.3
+similarity index 100%
+rename from ares_destroy_options.3
+rename to docs/ares_destroy_options.3
+diff --git a/ares_dup.3 b/docs/ares_dup.3
+similarity index 100%
+rename from ares_dup.3
+rename to docs/ares_dup.3
+diff --git a/ares_expand_name.3 b/docs/ares_expand_name.3
+similarity index 100%
+rename from ares_expand_name.3
+rename to docs/ares_expand_name.3
+diff --git a/ares_expand_string.3 b/docs/ares_expand_string.3
+similarity index 100%
+rename from ares_expand_string.3
+rename to docs/ares_expand_string.3
+diff --git a/ares_fds.3 b/docs/ares_fds.3
+similarity index 100%
+rename from ares_fds.3
+rename to docs/ares_fds.3
+diff --git a/ares_free_data.3 b/docs/ares_free_data.3
+similarity index 100%
+rename from ares_free_data.3
+rename to docs/ares_free_data.3
+diff --git a/ares_free_hostent.3 b/docs/ares_free_hostent.3
+similarity index 100%
+rename from ares_free_hostent.3
+rename to docs/ares_free_hostent.3
+diff --git a/ares_free_string.3 b/docs/ares_free_string.3
+similarity index 100%
+rename from ares_free_string.3
+rename to docs/ares_free_string.3
+diff --git a/ares_freeaddrinfo.3 b/docs/ares_freeaddrinfo.3
+similarity index 100%
+rename from ares_freeaddrinfo.3
+rename to docs/ares_freeaddrinfo.3
+diff --git a/ares_get_servers.3 b/docs/ares_get_servers.3
+similarity index 100%
+rename from ares_get_servers.3
+rename to docs/ares_get_servers.3
+diff --git a/ares_get_servers_ports.3 b/docs/ares_get_servers_ports.3
+similarity index 100%
+rename from ares_get_servers_ports.3
+rename to docs/ares_get_servers_ports.3
+diff --git a/ares_getaddrinfo.3 b/docs/ares_getaddrinfo.3
+similarity index 100%
+rename from ares_getaddrinfo.3
+rename to docs/ares_getaddrinfo.3
+diff --git a/ares_gethostbyaddr.3 b/docs/ares_gethostbyaddr.3
+similarity index 100%
+rename from ares_gethostbyaddr.3
+rename to docs/ares_gethostbyaddr.3
+diff --git a/ares_gethostbyname.3 b/docs/ares_gethostbyname.3
+similarity index 100%
+rename from ares_gethostbyname.3
+rename to docs/ares_gethostbyname.3
+diff --git a/ares_gethostbyname_file.3 b/docs/ares_gethostbyname_file.3
+similarity index 100%
+rename from ares_gethostbyname_file.3
+rename to docs/ares_gethostbyname_file.3
+diff --git a/ares_getnameinfo.3 b/docs/ares_getnameinfo.3
+similarity index 100%
+rename from ares_getnameinfo.3
+rename to docs/ares_getnameinfo.3
+diff --git a/ares_getsock.3 b/docs/ares_getsock.3
+similarity index 100%
+rename from ares_getsock.3
+rename to docs/ares_getsock.3
+diff --git a/ares_inet_ntop.3 b/docs/ares_inet_ntop.3
+similarity index 100%
+rename from ares_inet_ntop.3
+rename to docs/ares_inet_ntop.3
+diff --git a/ares_inet_pton.3 b/docs/ares_inet_pton.3
+similarity index 100%
+rename from ares_inet_pton.3
+rename to docs/ares_inet_pton.3
+diff --git a/ares_init.3 b/docs/ares_init.3
+similarity index 100%
+rename from ares_init.3
+rename to docs/ares_init.3
+diff --git a/ares_init_options.3 b/docs/ares_init_options.3
+similarity index 100%
+rename from ares_init_options.3
+rename to docs/ares_init_options.3
+diff --git a/ares_library_cleanup.3 b/docs/ares_library_cleanup.3
+similarity index 100%
+rename from ares_library_cleanup.3
+rename to docs/ares_library_cleanup.3
+diff --git a/ares_library_init.3 b/docs/ares_library_init.3
+similarity index 100%
+rename from ares_library_init.3
+rename to docs/ares_library_init.3
+diff --git a/ares_library_init_android.3 b/docs/ares_library_init_android.3
+similarity index 100%
+rename from ares_library_init_android.3
+rename to docs/ares_library_init_android.3
+diff --git a/ares_library_initialized.3 b/docs/ares_library_initialized.3
+similarity index 100%
+rename from ares_library_initialized.3
+rename to docs/ares_library_initialized.3
+diff --git a/ares_mkquery.3 b/docs/ares_mkquery.3
+similarity index 100%
+rename from ares_mkquery.3
+rename to docs/ares_mkquery.3
+diff --git a/ares_parse_a_reply.3 b/docs/ares_parse_a_reply.3
+similarity index 100%
+rename from ares_parse_a_reply.3
+rename to docs/ares_parse_a_reply.3
+diff --git a/ares_parse_aaaa_reply.3 b/docs/ares_parse_aaaa_reply.3
+similarity index 100%
+rename from ares_parse_aaaa_reply.3
+rename to docs/ares_parse_aaaa_reply.3
+diff --git a/ares_parse_mx_reply.3 b/docs/ares_parse_mx_reply.3
+similarity index 100%
+rename from ares_parse_mx_reply.3
+rename to docs/ares_parse_mx_reply.3
+diff --git a/ares_parse_naptr_reply.3 b/docs/ares_parse_naptr_reply.3
+similarity index 100%
+rename from ares_parse_naptr_reply.3
+rename to docs/ares_parse_naptr_reply.3
+diff --git a/ares_parse_ns_reply.3 b/docs/ares_parse_ns_reply.3
+similarity index 100%
+rename from ares_parse_ns_reply.3
+rename to docs/ares_parse_ns_reply.3
+diff --git a/ares_parse_ptr_reply.3 b/docs/ares_parse_ptr_reply.3
+similarity index 100%
+rename from ares_parse_ptr_reply.3
+rename to docs/ares_parse_ptr_reply.3
+diff --git a/ares_parse_soa_reply.3 b/docs/ares_parse_soa_reply.3
+similarity index 100%
+rename from ares_parse_soa_reply.3
+rename to docs/ares_parse_soa_reply.3
+diff --git a/ares_parse_srv_reply.3 b/docs/ares_parse_srv_reply.3
+similarity index 100%
+rename from ares_parse_srv_reply.3
+rename to docs/ares_parse_srv_reply.3
+diff --git a/ares_parse_txt_reply.3 b/docs/ares_parse_txt_reply.3
+similarity index 100%
+rename from ares_parse_txt_reply.3
+rename to docs/ares_parse_txt_reply.3
+diff --git a/ares_process.3 b/docs/ares_process.3
+similarity index 100%
+rename from ares_process.3
+rename to docs/ares_process.3
+diff --git a/ares_query.3 b/docs/ares_query.3
+similarity index 100%
+rename from ares_query.3
+rename to docs/ares_query.3
+diff --git a/ares_save_options.3 b/docs/ares_save_options.3
+similarity index 100%
+rename from ares_save_options.3
+rename to docs/ares_save_options.3
+diff --git a/ares_search.3 b/docs/ares_search.3
+similarity index 100%
+rename from ares_search.3
+rename to docs/ares_search.3
+diff --git a/ares_send.3 b/docs/ares_send.3
+similarity index 100%
+rename from ares_send.3
+rename to docs/ares_send.3
+diff --git a/ares_set_local_dev.3 b/docs/ares_set_local_dev.3
+similarity index 100%
+rename from ares_set_local_dev.3
+rename to docs/ares_set_local_dev.3
+diff --git a/ares_set_local_ip4.3 b/docs/ares_set_local_ip4.3
+similarity index 100%
+rename from ares_set_local_ip4.3
+rename to docs/ares_set_local_ip4.3
+diff --git a/ares_set_local_ip6.3 b/docs/ares_set_local_ip6.3
+similarity index 100%
+rename from ares_set_local_ip6.3
+rename to docs/ares_set_local_ip6.3
+diff --git a/ares_set_servers.3 b/docs/ares_set_servers.3
+similarity index 100%
+rename from ares_set_servers.3
+rename to docs/ares_set_servers.3
+diff --git a/ares_set_servers_csv.3 b/docs/ares_set_servers_csv.3
+similarity index 100%
+rename from ares_set_servers_csv.3
+rename to docs/ares_set_servers_csv.3
+diff --git a/ares_set_servers_ports.3 b/docs/ares_set_servers_ports.3
+similarity index 100%
+rename from ares_set_servers_ports.3
+rename to docs/ares_set_servers_ports.3
+diff --git a/ares_set_servers_ports_csv.3 b/docs/ares_set_servers_ports_csv.3
+similarity index 100%
+rename from ares_set_servers_ports_csv.3
+rename to docs/ares_set_servers_ports_csv.3
+diff --git a/ares_set_socket_callback.3 b/docs/ares_set_socket_callback.3
+similarity index 100%
+rename from ares_set_socket_callback.3
+rename to docs/ares_set_socket_callback.3
+diff --git a/ares_set_socket_configure_callback.3 b/docs/ares_set_socket_configure_callback.3
+similarity index 100%
+rename from ares_set_socket_configure_callback.3
+rename to docs/ares_set_socket_configure_callback.3
+diff --git a/ares_set_socket_functions.3 b/docs/ares_set_socket_functions.3
+similarity index 100%
+rename from ares_set_socket_functions.3
+rename to docs/ares_set_socket_functions.3
+diff --git a/ares_set_sortlist.3 b/docs/ares_set_sortlist.3
+similarity index 100%
+rename from ares_set_sortlist.3
+rename to docs/ares_set_sortlist.3
+diff --git a/ares_strerror.3 b/docs/ares_strerror.3
+similarity index 100%
+rename from ares_strerror.3
+rename to docs/ares_strerror.3
+diff --git a/ares_timeout.3 b/docs/ares_timeout.3
+similarity index 100%
+rename from ares_timeout.3
+rename to docs/ares_timeout.3
+diff --git a/ares_version.3 b/docs/ares_version.3
+similarity index 100%
+rename from ares_version.3
+rename to docs/ares_version.3
+diff --git a/include/CMakeLists.txt b/include/CMakeLists.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..5aacd8c62f72b3706c5c9722be0fbb56e94ba648
+--- /dev/null
++++ b/include/CMakeLists.txt
+@@ -0,0 +1,8 @@
++# Write ares_build.h configuration file.  This is an installed file.
++CONFIGURE_FILE (ares_build.h.cmake ${PROJECT_BINARY_DIR}/ares_build.h)
++
++# Headers installation target
++IF (CARES_INSTALL)
++	SET (CARES_HEADERS ares.h ares_version.h "${PROJECT_BINARY_DIR}/ares_build.h" ares_rules.h)
++	INSTALL (FILES ${CARES_HEADERS} COMPONENT Devel DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
++ENDIF ()
+diff --git a/include/Makefile.am b/include/Makefile.am
+new file mode 100644
+index 0000000000000000000000000000000000000000..05711c8e5c4dde4c7d0e5ab451b09bcbb036a39c
+--- /dev/null
++++ b/include/Makefile.am
+@@ -0,0 +1,7 @@
++AUTOMAKE_OPTIONS = foreign nostdinc 1.9.6
++ACLOCAL_AMFLAGS = -I m4 --install
++
++# what headers to install on 'make install':
++include_HEADERS = ares.h ares_version.h ares_build.h ares_rules.h
++
++EXTRA_DIST = ares_build.h.cmake ares_build.h.in ares_build.h.dist CMakeLists.txt
+diff --git a/ares.h b/include/ares.h
+similarity index 100%
+rename from ares.h
+rename to include/ares.h
+diff --git a/ares_build.h.cmake b/include/ares_build.h.cmake
+similarity index 100%
+rename from ares_build.h.cmake
+rename to include/ares_build.h.cmake
+diff --git a/ares_build.h.dist b/include/ares_build.h.dist
+similarity index 100%
+rename from ares_build.h.dist
+rename to include/ares_build.h.dist
+diff --git a/ares_build.h.in b/include/ares_build.h.in
+similarity index 100%
+rename from ares_build.h.in
+rename to include/ares_build.h.in
+diff --git a/ares_rules.h b/include/ares_rules.h
+similarity index 100%
+rename from ares_rules.h
+rename to include/ares_rules.h
+diff --git a/ares_version.h b/include/ares_version.h
+similarity index 100%
+rename from ares_version.h
+rename to include/ares_version.h
+diff --git a/maketgz b/maketgz
+index 684dd832d190f822c624aed9cf588ca75d82364a..ec1ecea540afb81dba169a9b136d96e5880a351b 100755
+--- a/maketgz
++++ b/maketgz
+@@ -7,7 +7,7 @@ if($version eq "") {
+     exit;
+ }
+ 
+-if(!-f "ares.h") {
++if(!-f "include/ares.h") {
+     print "run this script in the ares source root dir\n";
+     exit;
+ }
+@@ -18,9 +18,9 @@ $major += 0;
+ $minor += 0;
+ $patch += 0;
+ 
+-open(VER, "<ares_version.h") ||
+-    die "can't open ares_version.h";
+-open(NEWV, ">ares_version.h.dist");
++open(VER, "<include/ares_version.h") ||
++    die "can't open include/ares_version.h";
++open(NEWV, ">include/ares_version.h.dist");
+ while(<VER>) {
+     $_ =~ s/^\#define ARES_VERSION_MAJOR .*/\#define ARES_VERSION_MAJOR $major/;
+     $_ =~ s/^\#define ARES_VERSION_MINOR .*/\#define ARES_VERSION_MINOR $minor/;
+@@ -31,7 +31,7 @@ while(<VER>) {
+ }
+ close(VER);
+ close(NEWV);
+-print "ares_version.h.dist created\n";
++print "include/ares_version.h.dist created\n";
+ 
+ if(!-f "configure") {
+     print "running buildconf\n";
+@@ -64,6 +64,6 @@ print "running make dist\n";
+ print "removing temporary configure.ac file\n";
+ `rm configure.ac.dist`;
+ print "removing temporary ares_version.h file\n";
+-`rm ares_version.h.dist`;
++`rm include/ares_version.h.dist`;
+ 
+ print "NOTE: now tag this release!\n";
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..6750c1780f62319d1c82b605d4ccb1986bb21527
+--- /dev/null
++++ b/src/CMakeLists.txt
+@@ -0,0 +1,2 @@
++ADD_SUBDIRECTORY (lib)
++ADD_SUBDIRECTORY (tools)
+diff --git a/src/Makefile.am b/src/Makefile.am
+new file mode 100644
+index 0000000000000000000000000000000000000000..2e97e422f73adfae38d063773c63232acac12133
+--- /dev/null
++++ b/src/Makefile.am
+@@ -0,0 +1,2 @@
++EXTRA_DIST=CMakeLists.txt
++SUBDIRS=lib tools
+diff --git a/src/lib/CMakeLists.txt b/src/lib/CMakeLists.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d37be21ace7979268bc7a71bb03460ac6dc5c39
+--- /dev/null
++++ b/src/lib/CMakeLists.txt
+@@ -0,0 +1,115 @@
++
++# Transform Makefile.inc
++transform_makefile_inc("Makefile.inc" "${PROJECT_BINARY_DIR}/src/lib/Makefile.inc.cmake")
++include(${PROJECT_BINARY_DIR}/src/lib/Makefile.inc.cmake)
++
++# Write ares_config.h configuration file.  This is used only for the build.
++CONFIGURE_FILE (ares_config.h.cmake ${PROJECT_BINARY_DIR}/ares_config.h)
++
++# Build the dynamic/shared library
++IF (CARES_SHARED)
++	ADD_LIBRARY (${PROJECT_NAME} SHARED ${CSOURCES})
++
++	# Convert CARES_LIB_VERSIONINFO libtool version format into VERSION and SOVERSION
++	# Convert from ":" separated into CMake list format using ";"
++	STRING (REPLACE ":" ";" CARES_LIB_VERSIONINFO ${CARES_LIB_VERSIONINFO})
++	LIST (GET CARES_LIB_VERSIONINFO 0 CARES_LIB_VERSION_CURRENT)
++	LIST (GET CARES_LIB_VERSIONINFO 1 CARES_LIB_VERSION_REVISION)
++	LIST (GET CARES_LIB_VERSIONINFO 2 CARES_LIB_VERSION_AGE)
++	MATH (EXPR CARES_LIB_VERSION_MAJOR "${CARES_LIB_VERSION_CURRENT} - ${CARES_LIB_VERSION_AGE}")
++	SET  (CARES_LIB_VERSION_MINOR "${CARES_LIB_VERSION_AGE}")
++	SET  (CARES_LIB_VERSION_RELEASE "${CARES_LIB_VERSION_REVISION}")
++
++	SET_TARGET_PROPERTIES (${PROJECT_NAME} PROPERTIES
++		EXPORT_NAME                  cares
++		OUTPUT_NAME                  cares
++		COMPILE_PDB_NAME             cares
++		COMPILE_PDB_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
++		SOVERSION                    ${CARES_LIB_VERSION_MAJOR}
++		VERSION                      "${CARES_LIB_VERSION_MAJOR}.${CARES_LIB_VERSION_MINOR}.${CARES_LIB_VERSION_RELEASE}"
++	)
++
++	TARGET_INCLUDE_DIRECTORIES (${PROJECT_NAME}
++		PUBLIC "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}>"
++		       "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>"
++		       "$<BUILD_INTERFACE:${CARES_TOPLEVEL_DIR}/include>"
++		       "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
++		PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
++	)
++
++	TARGET_COMPILE_DEFINITIONS (${PROJECT_NAME} PRIVATE HAVE_CONFIG_H=1 CARES_BUILDING_LIBRARY)
++
++	TARGET_LINK_LIBRARIES (${PROJECT_NAME} PUBLIC ${CARES_DEPENDENT_LIBS})
++
++	IF (CARES_INSTALL)
++		INSTALL (TARGETS ${PROJECT_NAME}
++			EXPORT ${PROJECT_NAME}-targets
++			COMPONENT Library
++			${TARGETS_INST_DEST}
++		)
++		INSTALL(FILES ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/cares.pdb
++			DESTINATION ${CMAKE_INSTALL_BINDIR}
++			COMPONENT Library
++			OPTIONAL
++		)
++	ENDIF ()
++	SET (STATIC_SUFFIX "_static")
++
++	# For chain building: add alias targets that look like import libs that would be returned by find_package(c-ares).
++	ADD_LIBRARY (${PROJECT_NAME}::cares_shared ALIAS ${PROJECT_NAME})
++	ADD_LIBRARY (${PROJECT_NAME}::cares        ALIAS ${PROJECT_NAME})
++ENDIF ()
++
++# Build the static library
++IF (CARES_STATIC)
++	SET (LIBNAME ${PROJECT_NAME}${STATIC_SUFFIX})
++
++	ADD_LIBRARY (${LIBNAME} STATIC ${CSOURCES})
++
++	SET_TARGET_PROPERTIES (${LIBNAME} PROPERTIES
++		EXPORT_NAME                  cares${STATIC_SUFFIX}
++		OUTPUT_NAME                  cares${STATIC_SUFFIX}
++		COMPILE_PDB_NAME             cares${STATIC_SUFFIX}
++		COMPILE_PDB_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
++	)
++
++	IF (CARES_STATIC_PIC)
++		SET_TARGET_PROPERTIES (${LIBNAME} PROPERTIES POSITION_INDEPENDENT_CODE True)
++	ENDIF ()
++
++	TARGET_INCLUDE_DIRECTORIES (${LIBNAME}
++		PUBLIC "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}>"
++		       "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>"
++		       "$<BUILD_INTERFACE:${CARES_TOPLEVEL_DIR}/include>"
++		       "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
++		PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
++	)
++
++	TARGET_COMPILE_DEFINITIONS (${LIBNAME}
++		PUBLIC  CARES_STATICLIB
++		PRIVATE HAVE_CONFIG_H=1
++	)
++
++	TARGET_LINK_LIBRARIES (${LIBNAME} PUBLIC ${CARES_DEPENDENT_LIBS})
++	IF (CARES_INSTALL)
++		INSTALL (TARGETS ${LIBNAME} EXPORT ${PROJECT_NAME}-targets COMPONENT Devel
++			${TARGETS_INST_DEST}
++		)
++		INSTALL(FILES ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/cares${STATIC_SUFFIX}.pdb
++			DESTINATION ${CMAKE_INSTALL_BINDIR}
++			COMPONENT Library
++			OPTIONAL
++		)
++	ENDIF ()
++
++	# For chain building: add alias targets that look like import libs that would be returned by find_package(c-ares).
++	ADD_LIBRARY (${PROJECT_NAME}::cares_static ALIAS ${LIBNAME})
++	IF (NOT TARGET ${PROJECT_NAME}::cares)
++		# Only use static for the generic alias if shared lib wasn't built.
++		ADD_LIBRARY (${PROJECT_NAME}::cares ALIAS ${LIBNAME})
++	ENDIF ()
++ENDIF ()
++
++
++
++
+diff --git a/src/lib/Makefile.am b/src/lib/Makefile.am
+new file mode 100644
+index 0000000000000000000000000000000000000000..36c6c37b8b20228c37c8e0b79c345a240aec14f9
+--- /dev/null
++++ b/src/lib/Makefile.am
+@@ -0,0 +1,72 @@
++AUTOMAKE_OPTIONS = foreign subdir-objects nostdinc 1.9.6
++ACLOCAL_AMFLAGS = -I m4 --install
++
++# Specify our include paths here, and do it relative to $(top_srcdir) and
++# $(top_builddir), to ensure that these paths which belong to the library
++# being currently built and tested are searched before the library which
++# might possibly already be installed in the system.
++
++AM_CPPFLAGS = -I$(top_builddir)/include \
++              -I$(top_builddir)/src/lib \
++              -I$(top_srcdir)/include
++
++lib_LTLIBRARIES = libcares.la
++
++man_MANS = $(MANPAGES)
++
++# adig and ahost are just sample programs and thus not mentioned with the
++# regular sources and headers
++EXTRA_DIST = Makefile.inc config-win32.h CMakeLists.txt \
++  ares_config.h.in ares_config.h.cmake cares.rc \
++  $(CSOURCES) $(HHEADERS) config-dos.h
++
++DISTCLEANFILES = ares_config.h
++
++DIST_SUBDIRS =
++
++AM_LDFLAGS =
++
++libcares_la_LDFLAGS_EXTRA =
++
++if CARES_LT_SHLIB_USE_VERSION_INFO
++libcares_la_LDFLAGS_EXTRA += $(CARES_VERSION_INFO)
++endif
++
++if CARES_LT_SHLIB_USE_NO_UNDEFINED
++libcares_la_LDFLAGS_EXTRA += -no-undefined
++endif
++
++if CARES_LT_SHLIB_USE_MIMPURE_TEXT
++libcares_la_LDFLAGS_EXTRA += -mimpure-text
++endif
++
++libcares_la_LDFLAGS = $(AM_LDFLAGS) $(libcares_la_LDFLAGS_EXTRA)
++
++# Add -Werror if defined
++CFLAGS += @CARES_CFLAG_EXTRAS@
++
++if USE_CPPFLAG_CARES_STATICLIB
++AM_CPPFLAGS += $(CPPFLAG_CARES_STATICLIB)
++endif
++
++libcares_la_CFLAGS_EXTRA =
++
++libcares_la_CPPFLAGS_EXTRA = -DCARES_BUILDING_LIBRARY
++
++if DOING_CARES_SYMBOL_HIDING
++libcares_la_CFLAGS_EXTRA += $(CFLAG_CARES_SYMBOL_HIDING)
++libcares_la_CPPFLAGS_EXTRA += -DCARES_SYMBOL_HIDING
++endif
++
++@CODE_COVERAGE_RULES@
++libcares_la_LDFLAGS += $(CODE_COVERAGE_LDFLAGS)
++libcares_la_CFLAGS_EXTRA += $(CODE_COVERAGE_CFLAGS)
++
++libcares_la_CFLAGS = $(AM_CFLAGS) $(libcares_la_CFLAGS_EXTRA)
++
++libcares_la_CPPFLAGS = $(AM_CPPFLAGS) $(libcares_la_CPPFLAGS_EXTRA)
++
++# Makefile.inc provides the CSOURCES and HHEADERS defines
++include Makefile.inc
++
++libcares_la_SOURCES = $(CSOURCES) $(HHEADERS)
+diff --git a/src/lib/Makefile.inc b/src/lib/Makefile.inc
+new file mode 100644
+index 0000000000000000000000000000000000000000..f315f4f1210cbe34a75ab03a592e6ae32fad3b86
+--- /dev/null
++++ b/src/lib/Makefile.inc
+@@ -0,0 +1,79 @@
++
++CSOURCES = ares__close_sockets.c	\
++  ares__get_hostent.c			\
++  ares__parse_into_addrinfo.c		\
++  ares__readaddrinfo.c			\
++  ares__sortaddrinfo.c			\
++  ares__read_line.c			\
++  ares__timeval.c			\
++  ares_android.c			\
++  ares_cancel.c				\
++  ares_data.c				\
++  ares_destroy.c			\
++  ares_expand_name.c			\
++  ares_expand_string.c			\
++  ares_fds.c				\
++  ares_free_hostent.c			\
++  ares_free_string.c			\
++  ares_freeaddrinfo.c			\
++  ares_getaddrinfo.c			\
++  ares_getenv.c				\
++  ares_gethostbyaddr.c			\
++  ares_gethostbyname.c			\
++  ares_getnameinfo.c			\
++  ares_getsock.c			\
++  ares_init.c				\
++  ares_library_init.c			\
++  ares_llist.c				\
++  ares_mkquery.c			\
++  ares_create_query.c			\
++  ares_nowarn.c				\
++  ares_options.c			\
++  ares_parse_a_reply.c			\
++  ares_parse_aaaa_reply.c		\
++  ares_parse_mx_reply.c			\
++  ares_parse_naptr_reply.c		\
++  ares_parse_ns_reply.c			\
++  ares_parse_ptr_reply.c		\
++  ares_parse_soa_reply.c		\
++  ares_parse_srv_reply.c		\
++  ares_parse_txt_reply.c		\
++  ares_platform.c			\
++  ares_process.c			\
++  ares_query.c				\
++  ares_search.c				\
++  ares_send.c				\
++  ares_strcasecmp.c			\
++  ares_strdup.c				\
++  ares_strerror.c			\
++  ares_strsplit.c			\
++  ares_timeout.c			\
++  ares_version.c			\
++  ares_writev.c				\
++  bitncmp.c				\
++  inet_net_pton.c			\
++  inet_ntop.c				\
++  windows_port.c
++
++HHEADERS = ares_android.h                        \
++  ares_data.h				\
++  ares_dns.h                            \
++  ares_getenv.h				\
++  ares_inet_net_pton.h			\
++  ares_iphlpapi.h			\
++  ares_ipv6.h				\
++  ares_library_init.h			\
++  ares_llist.h				\
++  ares_nowarn.h				\
++  ares_platform.h			\
++  ares_private.h			\
++  ares_strcasecmp.h			\
++  ares_strdup.h				\
++  ares_strsplit.h			\
++  ares_writev.h				\
++  bitncmp.h				\
++  nameser.h				\
++  ares_setup.h				\
++  setup_once.h
++
++
+diff --git a/ares__close_sockets.c b/src/lib/ares__close_sockets.c
+similarity index 100%
+rename from ares__close_sockets.c
+rename to src/lib/ares__close_sockets.c
+diff --git a/ares__get_hostent.c b/src/lib/ares__get_hostent.c
+similarity index 100%
+rename from ares__get_hostent.c
+rename to src/lib/ares__get_hostent.c
+diff --git a/ares__parse_into_addrinfo.c b/src/lib/ares__parse_into_addrinfo.c
+similarity index 100%
+rename from ares__parse_into_addrinfo.c
+rename to src/lib/ares__parse_into_addrinfo.c
+diff --git a/ares__read_line.c b/src/lib/ares__read_line.c
+similarity index 100%
+rename from ares__read_line.c
+rename to src/lib/ares__read_line.c
+diff --git a/ares__readaddrinfo.c b/src/lib/ares__readaddrinfo.c
+similarity index 100%
+rename from ares__readaddrinfo.c
+rename to src/lib/ares__readaddrinfo.c
+diff --git a/ares__sortaddrinfo.c b/src/lib/ares__sortaddrinfo.c
+similarity index 100%
+rename from ares__sortaddrinfo.c
+rename to src/lib/ares__sortaddrinfo.c
+diff --git a/ares__timeval.c b/src/lib/ares__timeval.c
+similarity index 100%
+rename from ares__timeval.c
+rename to src/lib/ares__timeval.c
+diff --git a/ares_android.c b/src/lib/ares_android.c
+similarity index 100%
+rename from ares_android.c
+rename to src/lib/ares_android.c
+diff --git a/ares_android.h b/src/lib/ares_android.h
+similarity index 100%
+rename from ares_android.h
+rename to src/lib/ares_android.h
+diff --git a/ares_cancel.c b/src/lib/ares_cancel.c
+similarity index 100%
+rename from ares_cancel.c
+rename to src/lib/ares_cancel.c
+diff --git a/ares_config.h.cmake b/src/lib/ares_config.h.cmake
+similarity index 100%
+rename from ares_config.h.cmake
+rename to src/lib/ares_config.h.cmake
+diff --git a/ares_create_query.c b/src/lib/ares_create_query.c
+similarity index 100%
+rename from ares_create_query.c
+rename to src/lib/ares_create_query.c
+diff --git a/ares_data.c b/src/lib/ares_data.c
+similarity index 100%
+rename from ares_data.c
+rename to src/lib/ares_data.c
+diff --git a/ares_data.h b/src/lib/ares_data.h
+similarity index 100%
+rename from ares_data.h
+rename to src/lib/ares_data.h
+diff --git a/ares_destroy.c b/src/lib/ares_destroy.c
+similarity index 100%
+rename from ares_destroy.c
+rename to src/lib/ares_destroy.c
+diff --git a/ares_dns.h b/src/lib/ares_dns.h
+similarity index 100%
+rename from ares_dns.h
+rename to src/lib/ares_dns.h
+diff --git a/ares_expand_name.c b/src/lib/ares_expand_name.c
+similarity index 100%
+rename from ares_expand_name.c
+rename to src/lib/ares_expand_name.c
+diff --git a/ares_expand_string.c b/src/lib/ares_expand_string.c
+similarity index 100%
+rename from ares_expand_string.c
+rename to src/lib/ares_expand_string.c
+diff --git a/ares_fds.c b/src/lib/ares_fds.c
+similarity index 100%
+rename from ares_fds.c
+rename to src/lib/ares_fds.c
+diff --git a/ares_free_hostent.c b/src/lib/ares_free_hostent.c
+similarity index 100%
+rename from ares_free_hostent.c
+rename to src/lib/ares_free_hostent.c
+diff --git a/ares_free_string.c b/src/lib/ares_free_string.c
+similarity index 100%
+rename from ares_free_string.c
+rename to src/lib/ares_free_string.c
+diff --git a/ares_freeaddrinfo.c b/src/lib/ares_freeaddrinfo.c
+similarity index 100%
+rename from ares_freeaddrinfo.c
+rename to src/lib/ares_freeaddrinfo.c
+diff --git a/ares_getaddrinfo.c b/src/lib/ares_getaddrinfo.c
+similarity index 100%
+rename from ares_getaddrinfo.c
+rename to src/lib/ares_getaddrinfo.c
+diff --git a/ares_getenv.c b/src/lib/ares_getenv.c
+similarity index 100%
+rename from ares_getenv.c
+rename to src/lib/ares_getenv.c
+diff --git a/ares_getenv.h b/src/lib/ares_getenv.h
+similarity index 100%
+rename from ares_getenv.h
+rename to src/lib/ares_getenv.h
+diff --git a/ares_gethostbyaddr.c b/src/lib/ares_gethostbyaddr.c
+similarity index 100%
+rename from ares_gethostbyaddr.c
+rename to src/lib/ares_gethostbyaddr.c
+diff --git a/ares_gethostbyname.c b/src/lib/ares_gethostbyname.c
+similarity index 100%
+rename from ares_gethostbyname.c
+rename to src/lib/ares_gethostbyname.c
+diff --git a/ares_getnameinfo.c b/src/lib/ares_getnameinfo.c
+similarity index 100%
+rename from ares_getnameinfo.c
+rename to src/lib/ares_getnameinfo.c
+diff --git a/ares_getsock.c b/src/lib/ares_getsock.c
+similarity index 100%
+rename from ares_getsock.c
+rename to src/lib/ares_getsock.c
+diff --git a/ares_inet_net_pton.h b/src/lib/ares_inet_net_pton.h
+similarity index 100%
+rename from ares_inet_net_pton.h
+rename to src/lib/ares_inet_net_pton.h
+diff --git a/ares_init.c b/src/lib/ares_init.c
+similarity index 100%
+rename from ares_init.c
+rename to src/lib/ares_init.c
+diff --git a/ares_iphlpapi.h b/src/lib/ares_iphlpapi.h
+similarity index 100%
+rename from ares_iphlpapi.h
+rename to src/lib/ares_iphlpapi.h
+diff --git a/ares_ipv6.h b/src/lib/ares_ipv6.h
+similarity index 100%
+rename from ares_ipv6.h
+rename to src/lib/ares_ipv6.h
+diff --git a/ares_library_init.c b/src/lib/ares_library_init.c
+similarity index 100%
+rename from ares_library_init.c
+rename to src/lib/ares_library_init.c
+diff --git a/ares_library_init.h b/src/lib/ares_library_init.h
+similarity index 100%
+rename from ares_library_init.h
+rename to src/lib/ares_library_init.h
+diff --git a/ares_llist.c b/src/lib/ares_llist.c
+similarity index 100%
+rename from ares_llist.c
+rename to src/lib/ares_llist.c
+diff --git a/ares_llist.h b/src/lib/ares_llist.h
+similarity index 100%
+rename from ares_llist.h
+rename to src/lib/ares_llist.h
+diff --git a/ares_mkquery.c b/src/lib/ares_mkquery.c
+similarity index 100%
+rename from ares_mkquery.c
+rename to src/lib/ares_mkquery.c
+diff --git a/ares_nowarn.c b/src/lib/ares_nowarn.c
+similarity index 100%
+rename from ares_nowarn.c
+rename to src/lib/ares_nowarn.c
+diff --git a/ares_nowarn.h b/src/lib/ares_nowarn.h
+similarity index 100%
+rename from ares_nowarn.h
+rename to src/lib/ares_nowarn.h
+diff --git a/ares_options.c b/src/lib/ares_options.c
+similarity index 100%
+rename from ares_options.c
+rename to src/lib/ares_options.c
+diff --git a/ares_parse_a_reply.c b/src/lib/ares_parse_a_reply.c
+similarity index 100%
+rename from ares_parse_a_reply.c
+rename to src/lib/ares_parse_a_reply.c
+diff --git a/ares_parse_aaaa_reply.c b/src/lib/ares_parse_aaaa_reply.c
+similarity index 100%
+rename from ares_parse_aaaa_reply.c
+rename to src/lib/ares_parse_aaaa_reply.c
+diff --git a/ares_parse_mx_reply.c b/src/lib/ares_parse_mx_reply.c
+similarity index 100%
+rename from ares_parse_mx_reply.c
+rename to src/lib/ares_parse_mx_reply.c
+diff --git a/ares_parse_naptr_reply.c b/src/lib/ares_parse_naptr_reply.c
+similarity index 100%
+rename from ares_parse_naptr_reply.c
+rename to src/lib/ares_parse_naptr_reply.c
+diff --git a/ares_parse_ns_reply.c b/src/lib/ares_parse_ns_reply.c
+similarity index 100%
+rename from ares_parse_ns_reply.c
+rename to src/lib/ares_parse_ns_reply.c
+diff --git a/ares_parse_ptr_reply.c b/src/lib/ares_parse_ptr_reply.c
+similarity index 100%
+rename from ares_parse_ptr_reply.c
+rename to src/lib/ares_parse_ptr_reply.c
+diff --git a/ares_parse_soa_reply.c b/src/lib/ares_parse_soa_reply.c
+similarity index 100%
+rename from ares_parse_soa_reply.c
+rename to src/lib/ares_parse_soa_reply.c
+diff --git a/ares_parse_srv_reply.c b/src/lib/ares_parse_srv_reply.c
+similarity index 100%
+rename from ares_parse_srv_reply.c
+rename to src/lib/ares_parse_srv_reply.c
+diff --git a/ares_parse_txt_reply.c b/src/lib/ares_parse_txt_reply.c
+similarity index 100%
+rename from ares_parse_txt_reply.c
+rename to src/lib/ares_parse_txt_reply.c
+diff --git a/ares_platform.c b/src/lib/ares_platform.c
+similarity index 100%
+rename from ares_platform.c
+rename to src/lib/ares_platform.c
+diff --git a/ares_platform.h b/src/lib/ares_platform.h
+similarity index 100%
+rename from ares_platform.h
+rename to src/lib/ares_platform.h
+diff --git a/ares_private.h b/src/lib/ares_private.h
+similarity index 100%
+rename from ares_private.h
+rename to src/lib/ares_private.h
+diff --git a/ares_process.c b/src/lib/ares_process.c
+similarity index 100%
+rename from ares_process.c
+rename to src/lib/ares_process.c
+diff --git a/ares_query.c b/src/lib/ares_query.c
+similarity index 100%
+rename from ares_query.c
+rename to src/lib/ares_query.c
+diff --git a/ares_search.c b/src/lib/ares_search.c
+similarity index 100%
+rename from ares_search.c
+rename to src/lib/ares_search.c
+diff --git a/ares_send.c b/src/lib/ares_send.c
+similarity index 100%
+rename from ares_send.c
+rename to src/lib/ares_send.c
+diff --git a/ares_setup.h b/src/lib/ares_setup.h
+similarity index 100%
+rename from ares_setup.h
+rename to src/lib/ares_setup.h
+diff --git a/ares_strcasecmp.c b/src/lib/ares_strcasecmp.c
+similarity index 100%
+rename from ares_strcasecmp.c
+rename to src/lib/ares_strcasecmp.c
+diff --git a/ares_strcasecmp.h b/src/lib/ares_strcasecmp.h
+similarity index 100%
+rename from ares_strcasecmp.h
+rename to src/lib/ares_strcasecmp.h
+diff --git a/ares_strdup.c b/src/lib/ares_strdup.c
+similarity index 100%
+rename from ares_strdup.c
+rename to src/lib/ares_strdup.c
+diff --git a/ares_strdup.h b/src/lib/ares_strdup.h
+similarity index 100%
+rename from ares_strdup.h
+rename to src/lib/ares_strdup.h
+diff --git a/ares_strerror.c b/src/lib/ares_strerror.c
+similarity index 100%
+rename from ares_strerror.c
+rename to src/lib/ares_strerror.c
+diff --git a/ares_strsplit.c b/src/lib/ares_strsplit.c
+similarity index 100%
+rename from ares_strsplit.c
+rename to src/lib/ares_strsplit.c
+diff --git a/ares_strsplit.h b/src/lib/ares_strsplit.h
+similarity index 100%
+rename from ares_strsplit.h
+rename to src/lib/ares_strsplit.h
+diff --git a/ares_timeout.c b/src/lib/ares_timeout.c
+similarity index 100%
+rename from ares_timeout.c
+rename to src/lib/ares_timeout.c
+diff --git a/ares_version.c b/src/lib/ares_version.c
+similarity index 100%
+rename from ares_version.c
+rename to src/lib/ares_version.c
+diff --git a/ares_writev.c b/src/lib/ares_writev.c
+similarity index 100%
+rename from ares_writev.c
+rename to src/lib/ares_writev.c
+diff --git a/ares_writev.h b/src/lib/ares_writev.h
+similarity index 100%
+rename from ares_writev.h
+rename to src/lib/ares_writev.h
+diff --git a/bitncmp.c b/src/lib/bitncmp.c
+similarity index 100%
+rename from bitncmp.c
+rename to src/lib/bitncmp.c
+diff --git a/bitncmp.h b/src/lib/bitncmp.h
+similarity index 100%
+rename from bitncmp.h
+rename to src/lib/bitncmp.h
+diff --git a/cares.rc b/src/lib/cares.rc
+similarity index 98%
+rename from cares.rc
+rename to src/lib/cares.rc
+index 76ec06c1df33492cc26ed06c678aa3867dd0ea73..7da7e11a44fb966af45afa2817cfff5dd65f3bd2 100644
+--- a/cares.rc
++++ b/src/lib/cares.rc
+@@ -15,7 +15,7 @@
+  */
+ 
+ #include <winver.h>
+-#include "ares_version.h"
++#include "../../include/ares_version.h"
+ 
+ LANGUAGE  0x09,0x01
+ 
+diff --git a/config-dos.h b/src/lib/config-dos.h
+similarity index 100%
+rename from config-dos.h
+rename to src/lib/config-dos.h
+diff --git a/config-win32.h b/src/lib/config-win32.h
+similarity index 100%
+rename from config-win32.h
+rename to src/lib/config-win32.h
+diff --git a/inet_net_pton.c b/src/lib/inet_net_pton.c
+similarity index 100%
+rename from inet_net_pton.c
+rename to src/lib/inet_net_pton.c
+diff --git a/inet_ntop.c b/src/lib/inet_ntop.c
+similarity index 100%
+rename from inet_ntop.c
+rename to src/lib/inet_ntop.c
+diff --git a/nameser.h b/src/lib/nameser.h
+similarity index 100%
+rename from nameser.h
+rename to src/lib/nameser.h
+diff --git a/setup_once.h b/src/lib/setup_once.h
+similarity index 100%
+rename from setup_once.h
+rename to src/lib/setup_once.h
+diff --git a/windows_port.c b/src/lib/windows_port.c
+similarity index 100%
+rename from windows_port.c
+rename to src/lib/windows_port.c
+diff --git a/src/tools/CMakeLists.txt b/src/tools/CMakeLists.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..0c44216fcc4efba16e57e0c843441152fbf1f322
+--- /dev/null
++++ b/src/tools/CMakeLists.txt
+@@ -0,0 +1,55 @@
++IF (CARES_BUILD_TOOLS)
++	# Transform Makefile.inc
++	transform_makefile_inc("Makefile.inc" "${PROJECT_BINARY_DIR}/src/tools/Makefile.inc.cmake")
++	include(${PROJECT_BINARY_DIR}/src/tools/Makefile.inc.cmake)
++
++	# Build ahost
++	ADD_EXECUTABLE (ahost ahost.c ${SAMPLESOURCES})
++	TARGET_INCLUDE_DIRECTORIES (ahost
++		PUBLIC "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}>"
++		       "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>"
++		       "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/lib>"
++		       "$<BUILD_INTERFACE:${CARES_TOPLEVEL_DIR}/include>"
++		       "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
++		PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
++	)
++	TARGET_COMPILE_DEFINITIONS (ahost PRIVATE HAVE_CONFIG_H=1)
++	TARGET_LINK_LIBRARIES (ahost PRIVATE ${PROJECT_NAME})
++	IF (CARES_INSTALL)
++		INSTALL (TARGETS ahost COMPONENT Tools ${TARGETS_INST_DEST})
++	ENDIF ()
++
++
++	# Build adig
++	ADD_EXECUTABLE (adig adig.c ${SAMPLESOURCES})
++	TARGET_INCLUDE_DIRECTORIES (adig
++		PUBLIC "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}>"
++		       "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>"
++		       "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/lib>"
++		       "$<BUILD_INTERFACE:${CARES_TOPLEVEL_DIR}/include>"
++		       "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
++		PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
++	)
++	TARGET_COMPILE_DEFINITIONS (adig PRIVATE HAVE_CONFIG_H=1)
++	TARGET_LINK_LIBRARIES (adig PRIVATE ${PROJECT_NAME})
++	IF (CARES_INSTALL)
++		INSTALL (TARGETS adig COMPONENT Tools ${TARGETS_INST_DEST})
++	ENDIF ()
++
++
++	# Build acountry
++	ADD_EXECUTABLE (acountry acountry.c ${SAMPLESOURCES})
++	TARGET_INCLUDE_DIRECTORIES (acountry
++		PUBLIC "$<BUILD_INTERFACE:${PROJECT_BINARY_DIR}>"
++		       "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>"
++		       "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/lib>"
++		       "$<BUILD_INTERFACE:${CARES_TOPLEVEL_DIR}/include>"
++		       "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
++		PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
++	)
++	TARGET_COMPILE_DEFINITIONS (acountry PRIVATE HAVE_CONFIG_H=1)
++	TARGET_LINK_LIBRARIES (acountry PRIVATE ${PROJECT_NAME})
++	IF (CARES_INSTALL)
++		INSTALL (TARGETS acountry COMPONENT Tools ${TARGETS_INST_DEST})
++	ENDIF ()
++ENDIF ()
+diff --git a/src/tools/Makefile.am b/src/tools/Makefile.am
+new file mode 100644
+index 0000000000000000000000000000000000000000..3fe2814312d3063c033d983f4c55777160eb9c13
+--- /dev/null
++++ b/src/tools/Makefile.am
+@@ -0,0 +1,32 @@
++AUTOMAKE_OPTIONS = foreign subdir-objects nostdinc 1.9.6
++PROGS = ahost adig acountry
++
++EXTRA_DIST = CMakeLists.txt Makefile.inc
++
++noinst_PROGRAMS =$(PROGS)
++
++# Specify our include paths here, and do it relative to $(top_srcdir) and
++# $(top_builddir), to ensure that these paths which belong to the library
++# being currently built and tested are searched before the library which
++# might possibly already be installed in the system.
++
++AM_CPPFLAGS = -I$(top_builddir)/include \
++              -I$(top_builddir)/src/lib \
++              -I$(top_srcdir)/include \
++              -I$(top_srcdir)/src/lib
++
++include Makefile.inc
++
++LDADD = $(top_builddir)/src/lib/libcares.la
++
++ahost_SOURCES = ahost.c $(SAMPLESOURCES) $(SAMPLEHEADERS)
++ahost_CFLAGS = $(AM_CFLAGS)
++ahost_CPPFLAGS = $(AM_CPPFLAGS)
++
++adig_SOURCES = adig.c $(SAMPLESOURCES) $(SAMPLEHEADERS)
++adig_CFLAGS = $(AM_CFLAGS)
++adig_CPPFLAGS = $(AM_CPPFLAGS)
++
++acountry_SOURCES = acountry.c $(SAMPLESOURCES) $(SAMPLEHEADERS)
++acountry_CFLAGS = $(AM_CFLAGS)
++acountry_CPPFLAGS = $(AM_CPPFLAGS)
+diff --git a/src/tools/Makefile.inc b/src/tools/Makefile.inc
+new file mode 100644
+index 0000000000000000000000000000000000000000..7aea8e5f259eeae6a41253797931a8b4d5c737dc
+--- /dev/null
++++ b/src/tools/Makefile.inc
+@@ -0,0 +1,7 @@
++SAMPLESOURCES = ares_getopt.c		\
++  ../lib/ares_nowarn.c				\
++  ../lib/ares_strcasecmp.c
++
++SAMPLEHEADERS = ares_getopt.h		\
++  ../lib/ares_nowarn.h				\
++  ../lib/ares_strcasecmp.h
+diff --git a/acountry.c b/src/tools/acountry.c
+similarity index 100%
+rename from acountry.c
+rename to src/tools/acountry.c
+diff --git a/adig.c b/src/tools/adig.c
+similarity index 100%
+rename from adig.c
+rename to src/tools/adig.c
+diff --git a/ahost.c b/src/tools/ahost.c
+similarity index 100%
+rename from ahost.c
+rename to src/tools/ahost.c
+diff --git a/ares_getopt.c b/src/tools/ares_getopt.c
+similarity index 100%
+rename from ares_getopt.c
+rename to src/tools/ares_getopt.c
+diff --git a/ares_getopt.h b/src/tools/ares_getopt.h
+similarity index 100%
+rename from ares_getopt.h
+rename to src/tools/ares_getopt.h
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index ca496d285411246239f52103028fbd4a718900db..15a9bfaa30c90f95560b769c3c0ef0d1ef29151d 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -7,10 +7,17 @@ enable_language(CXX)
+ find_package(Threads)
+ 
+ # create target to access and use internal cares library
+-set(ARES_SRC_DIR ${c-ares_SOURCE_DIR})
+ add_library(caresinternal INTERFACE)
+ target_compile_definitions(caresinternal INTERFACE HAVE_CONFIG_H=1)
+-target_include_directories(caresinternal INTERFACE ${ARES_SRC_DIR})
++
++target_include_directories(caresinternal
++   INTERFACE "${PROJECT_BINARY_DIR}"
++             "${PROJECT_SOURCE_DIR}"
++             "${PROJECT_SOURCE_DIR}/src/lib"
++             "${CARES_TOPLEVEL_DIR}/include"
++             "${CMAKE_INSTALL_INCLUDEDIR}"
++)
++
+ target_link_libraries(caresinternal INTERFACE ${PROJECT_NAME}::cares_static)
+ 
+ # Google Test and Mock
+@@ -28,7 +35,7 @@ target_link_libraries(gmock PRIVATE ${CMAKE_THREAD_LIBS_INIT})
+ transform_makefile_inc("Makefile.inc" "${CMAKE_CURRENT_BINARY_DIR}/Makefile.inc.cmake")
+ include(${CMAKE_CURRENT_BINARY_DIR}/Makefile.inc.cmake)
+ 
+-configure_file(${ARES_SRC_DIR}/ares_config.h.cmake config.h)
++configure_file(${CARES_TOPLEVEL_DIR}/src/lib/ares_config.h.cmake config.h)
+ 
+ add_executable(arestest ${TESTSOURCES} ${TESTHEADERS})
+ target_include_directories(arestest PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+diff --git a/test/Makefile.am b/test/Makefile.am
+index 6ae503bd82863b585133b013fcb8fe28ab1ee12b..add72242e67493bd4411983f93e8aecbf22946a1 100644
+--- a/test/Makefile.am
++++ b/test/Makefile.am
+@@ -1,12 +1,16 @@
+-# Where to find the c-ares source code; needed because the tests use library-internal headers
+-ARES_SRC_DIR = ..
+-# Where to find the built c-ares static library
+-ARES_BLD_DIR = ..
+-AUTOMAKE_OPTIONS = foreign
+-ACLOCAL_AMFLAGS = -I ../m4
+-GMOCK_DIR = gmock-1.8.0
++ARES_BLD_DIR = $(top_builddir)/..
++ARES_SRC_DIR = $(top_srcdir)/..
++
++AUTOMAKE_OPTIONS = foreign subdir-objects nostdinc 1.9.6
++ACLOCAL_AMFLAGS = -I ../m4 --install
++
+ # Note use of -isystem to force use of local gMock/gTest even if there's an installed version.
+-CPPFLAGS += -I$(ARES_SRC_DIR) -isystem $(GMOCK_DIR)
++CPPFLAGS += -I$(ARES_BLD_DIR)/include \
++            -I$(ARES_BLD_DIR)/src/lib \
++            -I$(ARES_SRC_DIR)/include \
++            -I$(ARES_SRC_DIR)/src/lib \
++            -I$(top_builddir)         \
++            -isystem $(srcdir)/gmock-1.8.0
+ CXXFLAGS += -Wall $(PTHREAD_CFLAGS)
+ 
+ # Makefile.inc provides the various *SOURCES and *HEADERS defines
+@@ -14,31 +18,34 @@ include Makefile.inc
+ 
+ TESTS = arestest fuzzcheck.sh
+ 
++noinst_LTLIBRARIES = libgmock.la
++
++libgmock_la_SOURCES = \
++  gmock-1.8.0/gmock-gtest-all.cc	\
++  gmock-1.8.0/gmock/gmock.h		\
++  gmock-1.8.0/gtest/gtest.h
++
++libgmock_la_CPPFLAGS = -isystem $(srcdir)/gmock-1.8.0
++
++
+ noinst_PROGRAMS = arestest aresfuzz aresfuzzname dnsdump
+-EXTRA_DIST = fuzzcheck.sh CMakeLists.txt
++EXTRA_DIST = fuzzcheck.sh CMakeLists.txt Makefile.m32 Makefile.msvc README.md buildconf
+ arestest_SOURCES = $(TESTSOURCES) $(TESTHEADERS)
+-arestest_LDADD = libgmock.la $(ARES_BLD_DIR)/libcares.la $(PTHREAD_LIBS)
++arestest_LDADD = libgmock.la $(ARES_BLD_DIR)/src/lib/libcares.la $(PTHREAD_LIBS)
+ 
+ # Not interested in coverage of test code, but linking the test binary needs the coverage option
+ @CODE_COVERAGE_RULES@
+ arestest_LDFLAGS = $(CODE_COVERAGE_LDFLAGS)
+ 
+-noinst_LTLIBRARIES = libgmock.la
+-
+-libgmock_la_SOURCES = \
+-  $(GMOCK_DIR)/gmock-gtest-all.cc	\
+-  $(GMOCK_DIR)/gmock/gmock.h		\
+-  $(GMOCK_DIR)/gtest/gtest.h
+ 
+-libgmock_la_CPPFLAGS = -isystem $(GMOCK_DIR)
+ 
+ aresfuzz_SOURCES = $(FUZZSOURCES)
+-aresfuzz_LDADD = $(ARES_BLD_DIR)/libcares.la
++aresfuzz_LDADD = $(ARES_BLD_DIR)/src/lib/libcares.la
+ 
+ aresfuzzname_SOURCES = $(FUZZNAMESOURCES)
+-aresfuzzname_LDADD = $(ARES_BLD_DIR)/libcares.la
++aresfuzzname_LDADD = $(ARES_BLD_DIR)/src/lib/libcares.la
+ 
+ dnsdump_SOURCES = $(DUMPSOURCES)
+-dnsdump_LDADD = $(ARES_BLD_DIR)/libcares.la
++dnsdump_LDADD = $(ARES_BLD_DIR)/src/lib/libcares.la
+ 
+ test: check
+diff --git a/test/Makefile.m32 b/test/Makefile.m32
+index f1eaca89eee7ab72f7ad63517dbeabec95aeb6b3..1b308c44180ba165ca9f2bf35b43ef45f410d999 100644
+--- a/test/Makefile.m32
++++ b/test/Makefile.m32
+@@ -12,9 +12,9 @@ LD = g++
+ ARES_SRC_DIR = ..
+ # Where to find the built c-ares static library
+ ARES_BLD_DIR = ..
+-ARESLIB = $(ARES_BLD_DIR)/libcares.a
++ARESLIB = $(ARES_BLD_DIR)/src/lib/libcares.a
+ GMOCK_DIR = gmock-1.8.0
+-CPPFLAGS = -I$(ARES_SRC_DIR) -I$(GMOCK_DIR) -DCARES_STATICLIB
++CPPFLAGS = -I$(ARES_SRC_DIR)/include -I$(ARES_SRC_DIR)/src/lib -I$(GMOCK_DIR) -DCARES_STATICLIB
+ CXXFLAGS = -Wall $(PTHREAD_CFLAGS) -std=gnu++11
+ LDFLAGS =
+ LDLIBS = -lwsock32
+@@ -30,16 +30,16 @@ DNSDUMPOBJS := $(patsubst %.cc,%.o,$(strip $(DUMPSOURCES)))
+ all: arestest.exe aresfuzz.exe aresfuzzname.exe dnsdump.exe
+ 
+ arestest.exe: $(OBJS) gmock-gtest-all.o
+-	$(LD) $(LDFLAGS) -o $@ $^  -L$(ARES_BLD_DIR) -lcares $(LDLIBS)
++	$(LD) $(LDFLAGS) -o $@ $^  -L$(ARES_BLD_DIR)/src/lib -lcares $(LDLIBS)
+ 
+ aresfuzz.exe: $(FUZZOBJS)
+-	$(LD) $(LDFLAGS) -o $@ $^  -L$(ARES_BLD_DIR) -lcares $(LDLIBS)
++	$(LD) $(LDFLAGS) -o $@ $^  -L$(ARES_BLD_DIR)/src/lib -lcares $(LDLIBS)
+ 
+ aresfuzzname.exe: $(FUZZNAMEOBJS)
+-	$(LD) $(LDFLAGS) -o $@ $^  -L$(ARES_BLD_DIR) -lcares $(LDLIBS)
++	$(LD) $(LDFLAGS) -o $@ $^  -L$(ARES_BLD_DIR)/src/lib -lcares $(LDLIBS)
+ 
+ dnsdump.exe: $(DNSDUMPOBJS)
+-	$(LD) $(LDFLAGS) -o $@ $^  -L$(ARES_BLD_DIR) -lcares $(LDLIBS)
++	$(LD) $(LDFLAGS) -o $@ $^  -L$(ARES_BLD_DIR)/src/lib -lcares $(LDLIBS)
+ 
+ $(OBJS): $(TESTHEADERS)
+ 
+diff --git a/test/Makefile.msvc b/test/Makefile.msvc
+index cd50d72d159f1e50cd76d458c2cdff542f695564..e0337db3e81f219eda404b5c333e606c7e322abe 100644
+--- a/test/Makefile.msvc
++++ b/test/Makefile.msvc
+@@ -68,7 +68,7 @@ RTLIBD = /MTd
+ # Verify that current subdir is below the c-ares source one
+ # ---------------------------------------------------------
+ 
+-!IF ! EXIST(..\ares_init.c)
++!IF ! EXIST(..\src\lib\ares_init.c)
+ !  MESSAGE Can not process Makefile.msvc from outside of c-ares test subdirectory.
+ !  MESSAGE Change to the subdirectory where Makefile.msvc is found, and try again.
+ !  ERROR   See previous message.
+@@ -167,7 +167,7 @@ RT_ERROR_CHECKING = /RTCsu
+ 
+ CC_CMD_REL = cl.exe /nologo $(RTLIB) /DNDEBUG /O2 /D_CRT_NONSTDC_NO_DEPRECATE /D_CRT_SECURE_NO_WARNINGS
+ CC_CMD_DBG = cl.exe /nologo $(RTLIBD) /D_DEBUG /Od /Zi /D_CRT_NONSTDC_NO_DEPRECATE /D_CRT_SECURE_NO_WARNINGS $(RT_ERROR_CHECKING)
+-CC_CFLAGS  = $(CFLAGS) /I. /I.. /I $(GMOCK_DIR) /W3 /EHsc /FD
++CC_CFLAGS  = $(CFLAGS) /I. /I../src/lib /I../include /I $(GMOCK_DIR) /W3 /EHsc /FD
+ 
+ RC_CMD_REL = rc.exe /l 0x409 /d "NDEBUG"
+ RC_CMD_DBG = rc.exe /l 0x409 /d "_DEBUG"
+diff --git a/travis/build.sh b/travis/build.sh
+index 4ade0ae3f252dca935789396bcd8dbf01edde88f..6526591b2fb10b224ff5db531023d899d129991b 100755
+--- a/travis/build.sh
++++ b/travis/build.sh
+@@ -3,7 +3,9 @@ set -e
+ 
+ if [ "$BUILD_TYPE" != "cmake" -a "$BUILD_TYPE" != "valgrind" ]; then
+     ./buildconf
+-    $SCAN_WRAP ./configure --disable-symbol-hiding --enable-expose-statics --enable-maintainer-mode --enable-debug $CONFIG_OPTS
++    mkdir atoolsbld
++    cd atoolsbld
++    $SCAN_WRAP ../configure --disable-symbol-hiding --enable-expose-statics --enable-maintainer-mode --enable-debug $CONFIG_OPTS
+     $SCAN_WRAP make
+ else
+     # Use cmake for valgrind to prevent libtool script wrapping of tests that interfere with valgrind
+diff --git a/travis/distcheck.sh b/travis/distcheck.sh
+index 893336281e84ccea59ea1f68d91a9b9162d578df..b15781bfb697b7effe1bc45534f160b13529621e 100755
+--- a/travis/distcheck.sh
++++ b/travis/distcheck.sh
+@@ -7,11 +7,8 @@ if [ "$BUILD_TYPE" = "normal" -a "$TRAVIS_OS_NAME" = "linux" ]; then
+     cd c-ares-99.98.97
+     ./configure --disable-symbol-hiding --enable-expose-statics --enable-maintainer-mode --enable-debug
+     make
+-
+     cd test
+-    make
+     $TEST_WRAP ./arestest -4 -v $TEST_FILTER
+     cd ..
+-
+     cd ..
+ fi
+diff --git a/travis/test.sh b/travis/test.sh
+index d8f91f66c3baf6ba043d27194ddaa77184c3391a..5ea4c87cf0f3d3f0f220afbdba9eda58c0c14a12 100755
+--- a/travis/test.sh
++++ b/travis/test.sh
+@@ -5,27 +5,34 @@ set -e
+ # Note res_ninit() and /etc/resolv.conf actually have different configs, bad Travis
+ [ -z "$TEST_FILTER" ] && export TEST_FILTER="--gtest_filter=-*LiveSearchANY*"
+ 
+-if [ "$BUILD_TYPE" != "ios" -a "$BUILD_TYPE" != "analyse" -a "$BUILD_TYPE" != "cmake" -a "$BUILD_TYPE" != "valgrind" ]; then
+-    $TEST_WRAP ./adig www.google.com
+-    $TEST_WRAP ./acountry www.google.com
+-    $TEST_WRAP ./ahost www.google.com
+-    cd test
+-    make
+-    $TEST_WRAP ./arestest -4 -v $TEST_FILTER
+-    ./fuzzcheck.sh
+-    ./dnsdump  fuzzinput/answer_a fuzzinput/answer_aaaa
+-    cd ..
+-elif [ "$BUILD_TYPE" = "cmake" -o "$BUILD_TYPE" = "valgrind" ] ; then
+-    # We need to use cmake for valgrind because otehrwise the executables are bash
+-    # scripts created by libtool.
+-    TESTDIR=../../test/
+-    cd cmakebld/bin
+-    $TEST_WRAP ./adig www.google.com
+-    $TEST_WRAP ./acountry www.google.com
+-    $TEST_WRAP ./ahost www.google.com
+-    $TEST_WRAP ./arestest -4 -v $TEST_FILTER
+-    ./aresfuzz $TESTDIR/fuzzinput/*
+-    ./aresfuzzname $TESTDIR/fuzznames/*
+-    ./dnsdump $TESTDIR/fuzzinput/answer_a $TESTDIR/fuzzinput/answer_aaaa
+-    cd ../..
++# No tests for ios as it is a cross-compile
++if [ "$BUILD_TYPE" = "ios" ] ; then
++    exit 0
+ fi
++
++# Analyze tests don't need runtime, its static analysis
++if [ "$BUILD_TYPE" = "analyze" ] ; then
++    exit 0
++fi
++
++PWD=`pwd`
++TESTDIR="${PWD}/test"
++
++if [ "$BUILD_TYPE" = "cmake" -o "$BUILD_TYPE" = "valgrind" ] ; then
++    TOOLSBIN="${PWD}/cmakebld/bin"
++    TESTSBIN="${PWD}/cmakebld/bin"
++else
++    TOOLSBIN="${PWD}/atoolsbld/src/tools"
++    TESTSBIN="${PWD}/atoolsbld/test"
++fi
++
++$TEST_WRAP "${TOOLSBIN}/adig" www.google.com
++$TEST_WRAP "${TOOLSBIN}/acountry" www.google.com
++$TEST_WRAP "${TOOLSBIN}/ahost" www.google.com
++cd "${TESTSBIN}"
++$TEST_WRAP ./arestest -4 -v $TEST_FILTER
++./aresfuzz "${TESTDIR}/fuzzinput/*"
++./aresfuzzname "${TESTDIR}/fuzznames/*"
++./dnsdump "${TESTDIR}/fuzzinput/answer_a" "${TESTDIR}/fuzzinput/answer_aaaa"
++cd "${PWD}"
++
+diff --git a/vc/acountry/vc6acountry.dsp b/vc/acountry/vc6acountry.dsp
+deleted file mode 100644
+index 99035ea2db5855bd17f64be3cbaa82477e3e5632..0000000000000000000000000000000000000000
+--- a/vc/acountry/vc6acountry.dsp
++++ /dev/null
+@@ -1,190 +0,0 @@
+-# Microsoft Developer Studio Project File - Name="acountry" - Package Owner=<4>
+-# Microsoft Developer Studio Generated Build File, Format Version 6.00
+-# ** DO NOT EDIT **
+-
+-# TARGTYPE "Win32 (x86) Console Application" 0x0103
+-
+-CFG=acountry - Win32 using cares LIB Debug
+-!MESSAGE This is not a valid makefile. To build this project using NMAKE,
+-!MESSAGE use the Export Makefile command and run
+-!MESSAGE 
+-!MESSAGE NMAKE /f "vc6acountry.mak".
+-!MESSAGE 
+-!MESSAGE You can specify a configuration when running NMAKE
+-!MESSAGE by defining the macro CFG on the command line. For example:
+-!MESSAGE 
+-!MESSAGE NMAKE /f "vc6acountry.mak" CFG="acountry - Win32 using cares LIB Debug"
+-!MESSAGE 
+-!MESSAGE Possible choices for configuration are:
+-!MESSAGE 
+-!MESSAGE "acountry - Win32 using cares DLL Debug" (based on "Win32 (x86) Console Application")
+-!MESSAGE "acountry - Win32 using cares DLL Release" (based on "Win32 (x86) Console Application")
+-!MESSAGE "acountry - Win32 using cares LIB Debug" (based on "Win32 (x86) Console Application")
+-!MESSAGE "acountry - Win32 using cares LIB Release" (based on "Win32 (x86) Console Application")
+-!MESSAGE 
+-
+-# Begin Project
+-# PROP AllowPerConfigDependencies 0
+-# PROP Scc_ProjName ""
+-# PROP Scc_LocalPath ""
+-CPP=cl.exe
+-RSC=rc.exe
+-
+-!IF  "$(CFG)" == "acountry - Win32 using cares DLL Debug"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 1
+-# PROP BASE Output_Dir "dll-debug"
+-# PROP BASE Intermediate_Dir "dll-debug/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 1
+-# PROP Output_Dir "dll-debug"
+-# PROP Intermediate_Dir "dll-debug/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-# ADD BASE CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "_CONSOLE" /FD /GZ /c
+-# ADD CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "_CONSOLE" /FD /GZ /c
+-# ADD BASE RSC /l 0x409 /d "_DEBUG"
+-# ADD RSC /l 0x409 /d "_DEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 caresd.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /incremental:no /debug /machine:I386 /out:"dll-debug/acountry.exe" /pdbtype:con /libpath:"..\cares\dll-debug" /fixed:no
+-# ADD LINK32 caresd.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /incremental:no /debug /machine:I386 /out:"dll-debug/acountry.exe" /pdbtype:con /libpath:"..\cares\dll-debug" /fixed:no
+-
+-!ELSEIF  "$(CFG)" == "acountry - Win32 using cares DLL Release"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 0
+-# PROP BASE Output_Dir "dll-release"
+-# PROP BASE Intermediate_Dir "dll-release/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 0
+-# PROP Output_Dir "dll-release"
+-# PROP Intermediate_Dir "dll-release/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-# ADD BASE CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /FD /c
+-# ADD CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /FD /c
+-# ADD BASE RSC /l 0x409 /d "NDEBUG"
+-# ADD RSC /l 0x409 /d "NDEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 cares.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /pdb:none /machine:I386 /out:"dll-release/acountry.exe" /libpath:"..\cares\dll-release" /fixed:no
+-# ADD LINK32 cares.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /pdb:none /machine:I386 /out:"dll-release/acountry.exe" /libpath:"..\cares\dll-release" /fixed:no
+-
+-!ELSEIF  "$(CFG)" == "acountry - Win32 using cares LIB Debug"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 1
+-# PROP BASE Output_Dir "lib-debug"
+-# PROP BASE Intermediate_Dir "lib-debug/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 1
+-# PROP Output_Dir "lib-debug"
+-# PROP Intermediate_Dir "lib-debug/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-# ADD BASE CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "_CONSOLE" /D "CARES_STATICLIB" /FD /GZ /c
+-# ADD CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "_CONSOLE" /D "CARES_STATICLIB" /FD /GZ /c
+-# ADD BASE RSC /l 0x409 /d "_DEBUG"
+-# ADD RSC /l 0x409 /d "_DEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 libcaresd.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /incremental:no /debug /machine:I386 /out:"lib-debug/acountry.exe" /pdbtype:con /libpath:"..\cares\lib-debug" /fixed:no
+-# ADD LINK32 libcaresd.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /incremental:no /debug /machine:I386 /out:"lib-debug/acountry.exe" /pdbtype:con /libpath:"..\cares\lib-debug" /fixed:no
+-
+-!ELSEIF  "$(CFG)" == "acountry - Win32 using cares LIB Release"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 0
+-# PROP BASE Output_Dir "lib-release"
+-# PROP BASE Intermediate_Dir "lib-release/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 0
+-# PROP Output_Dir "lib-release"
+-# PROP Intermediate_Dir "lib-release/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-# ADD BASE CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /D "CARES_STATICLIB" /FD /c
+-# ADD CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /D "CARES_STATICLIB" /FD /c
+-# ADD BASE RSC /l 0x409 /d "NDEBUG"
+-# ADD RSC /l 0x409 /d "NDEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 libcares.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /pdb:none /machine:I386 /out:"lib-release/acountry.exe" /libpath:"..\cares\lib-release" /fixed:no
+-# ADD LINK32 libcares.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /pdb:none /machine:I386 /out:"lib-release/acountry.exe" /libpath:"..\cares\lib-release" /fixed:no
+-
+-!ENDIF 
+-
+-# Begin Target
+-
+-# Name "acountry - Win32 using cares DLL Debug"
+-# Name "acountry - Win32 using cares DLL Release"
+-# Name "acountry - Win32 using cares LIB Debug"
+-# Name "acountry - Win32 using cares LIB Release"
+-# Begin Group "Source Files"
+-
+-# PROP Default_Filter ""
+-# Begin Source File
+-
+-SOURCE=..\..\acountry.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_getopt.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_nowarn.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_strcasecmp.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_net_pton.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_ntop.c
+-# End Source File
+-# End Group
+-# Begin Group "Header Files"
+-
+-# PROP Default_Filter ""
+-# Begin Source File
+-
+-SOURCE=..\..\ares_getopt.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_nowarn.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_strcasecmp.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_net_pton.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_ntop.h
+-# End Source File
+-# End Group
+-# End Target
+-# End Project
+diff --git a/vc/adig/vc6adig.dsp b/vc/adig/vc6adig.dsp
+deleted file mode 100644
+index f2898d3807632909fb383e8a68e4db01a9fb42d0..0000000000000000000000000000000000000000
+--- a/vc/adig/vc6adig.dsp
++++ /dev/null
+@@ -1,190 +0,0 @@
+-# Microsoft Developer Studio Project File - Name="adig" - Package Owner=<4>
+-# Microsoft Developer Studio Generated Build File, Format Version 6.00
+-# ** DO NOT EDIT **
+-
+-# TARGTYPE "Win32 (x86) Console Application" 0x0103
+-
+-CFG=adig - Win32 using cares LIB Debug
+-!MESSAGE This is not a valid makefile. To build this project using NMAKE,
+-!MESSAGE use the Export Makefile command and run
+-!MESSAGE 
+-!MESSAGE NMAKE /f "vc6adig.mak".
+-!MESSAGE 
+-!MESSAGE You can specify a configuration when running NMAKE
+-!MESSAGE by defining the macro CFG on the command line. For example:
+-!MESSAGE 
+-!MESSAGE NMAKE /f "vc6adig.mak" CFG="adig - Win32 using cares LIB Debug"
+-!MESSAGE 
+-!MESSAGE Possible choices for configuration are:
+-!MESSAGE 
+-!MESSAGE "adig - Win32 using cares DLL Debug" (based on "Win32 (x86) Console Application")
+-!MESSAGE "adig - Win32 using cares DLL Release" (based on "Win32 (x86) Console Application")
+-!MESSAGE "adig - Win32 using cares LIB Debug" (based on "Win32 (x86) Console Application")
+-!MESSAGE "adig - Win32 using cares LIB Release" (based on "Win32 (x86) Console Application")
+-!MESSAGE 
+-
+-# Begin Project
+-# PROP AllowPerConfigDependencies 0
+-# PROP Scc_ProjName ""
+-# PROP Scc_LocalPath ""
+-CPP=cl.exe
+-RSC=rc.exe
+-
+-!IF  "$(CFG)" == "adig - Win32 using cares DLL Debug"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 1
+-# PROP BASE Output_Dir "dll-debug"
+-# PROP BASE Intermediate_Dir "dll-debug/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 1
+-# PROP Output_Dir "dll-debug"
+-# PROP Intermediate_Dir "dll-debug/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-# ADD BASE CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "_CONSOLE" /FD /GZ /c
+-# ADD CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "_CONSOLE" /FD /GZ /c
+-# ADD BASE RSC /l 0x409 /d "_DEBUG"
+-# ADD RSC /l 0x409 /d "_DEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 caresd.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /incremental:no /debug /machine:I386 /out:"dll-debug/adig.exe" /pdbtype:con /libpath:"..\cares\dll-debug" /fixed:no
+-# ADD LINK32 caresd.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /incremental:no /debug /machine:I386 /out:"dll-debug/adig.exe" /pdbtype:con /libpath:"..\cares\dll-debug" /fixed:no
+-
+-!ELSEIF  "$(CFG)" == "adig - Win32 using cares DLL Release"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 0
+-# PROP BASE Output_Dir "dll-release"
+-# PROP BASE Intermediate_Dir "dll-release/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 0
+-# PROP Output_Dir "dll-release"
+-# PROP Intermediate_Dir "dll-release/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-# ADD BASE CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /FD /c
+-# ADD CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /FD /c
+-# ADD BASE RSC /l 0x409 /d "NDEBUG"
+-# ADD RSC /l 0x409 /d "NDEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 cares.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /pdb:none /machine:I386 /out:"dll-release/adig.exe" /libpath:"..\cares\dll-release" /fixed:no
+-# ADD LINK32 cares.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /pdb:none /machine:I386 /out:"dll-release/adig.exe" /libpath:"..\cares\dll-release" /fixed:no
+-
+-!ELSEIF  "$(CFG)" == "adig - Win32 using cares LIB Debug"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 1
+-# PROP BASE Output_Dir "lib-debug"
+-# PROP BASE Intermediate_Dir "lib-debug/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 1
+-# PROP Output_Dir "lib-debug"
+-# PROP Intermediate_Dir "lib-debug/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-# ADD BASE CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "_CONSOLE" /D "CARES_STATICLIB" /FD /GZ /c
+-# ADD CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "_CONSOLE" /D "CARES_STATICLIB" /FD /GZ /c
+-# ADD BASE RSC /l 0x409 /d "_DEBUG"
+-# ADD RSC /l 0x409 /d "_DEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 libcaresd.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /incremental:no /debug /machine:I386 /out:"lib-debug/adig.exe" /pdbtype:con /libpath:"..\cares\lib-debug" /fixed:no
+-# ADD LINK32 libcaresd.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /incremental:no /debug /machine:I386 /out:"lib-debug/adig.exe" /pdbtype:con /libpath:"..\cares\lib-debug" /fixed:no
+-
+-!ELSEIF  "$(CFG)" == "adig - Win32 using cares LIB Release"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 0
+-# PROP BASE Output_Dir "lib-release"
+-# PROP BASE Intermediate_Dir "lib-release/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 0
+-# PROP Output_Dir "lib-release"
+-# PROP Intermediate_Dir "lib-release/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-# ADD BASE CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /D "CARES_STATICLIB" /FD /c
+-# ADD CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /D "CARES_STATICLIB" /FD /c
+-# ADD BASE RSC /l 0x409 /d "NDEBUG"
+-# ADD RSC /l 0x409 /d "NDEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 libcares.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /pdb:none /machine:I386 /out:"lib-release/adig.exe" /libpath:"..\cares\lib-release" /fixed:no
+-# ADD LINK32 libcares.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /pdb:none /machine:I386 /out:"lib-release/adig.exe" /libpath:"..\cares\lib-release" /fixed:no
+-
+-!ENDIF 
+-
+-# Begin Target
+-
+-# Name "adig - Win32 using cares DLL Debug"
+-# Name "adig - Win32 using cares DLL Release"
+-# Name "adig - Win32 using cares LIB Debug"
+-# Name "adig - Win32 using cares LIB Release"
+-# Begin Group "Source Files"
+-
+-# PROP Default_Filter ""
+-# Begin Source File
+-
+-SOURCE=..\..\adig.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_getopt.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_nowarn.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_strcasecmp.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_net_pton.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_ntop.c
+-# End Source File
+-# End Group
+-# Begin Group "Header Files"
+-
+-# PROP Default_Filter ""
+-# Begin Source File
+-
+-SOURCE=..\..\ares_getopt.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_nowarn.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_strcasecmp.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_net_pton.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_ntop.h
+-# End Source File
+-# End Group
+-# End Target
+-# End Project
+diff --git a/vc/ahost/vc6ahost.dsp b/vc/ahost/vc6ahost.dsp
+deleted file mode 100644
+index d10733fe8a5f5dea4eb2255fe0668431ae70fa88..0000000000000000000000000000000000000000
+--- a/vc/ahost/vc6ahost.dsp
++++ /dev/null
+@@ -1,190 +0,0 @@
+-# Microsoft Developer Studio Project File - Name="ahost" - Package Owner=<4>
+-# Microsoft Developer Studio Generated Build File, Format Version 6.00
+-# ** DO NOT EDIT **
+-
+-# TARGTYPE "Win32 (x86) Console Application" 0x0103
+-
+-CFG=ahost - Win32 using cares LIB Debug
+-!MESSAGE This is not a valid makefile. To build this project using NMAKE,
+-!MESSAGE use the Export Makefile command and run
+-!MESSAGE 
+-!MESSAGE NMAKE /f "vc6ahost.mak".
+-!MESSAGE 
+-!MESSAGE You can specify a configuration when running NMAKE
+-!MESSAGE by defining the macro CFG on the command line. For example:
+-!MESSAGE 
+-!MESSAGE NMAKE /f "vc6ahost.mak" CFG="ahost - Win32 using cares LIB Debug"
+-!MESSAGE 
+-!MESSAGE Possible choices for configuration are:
+-!MESSAGE 
+-!MESSAGE "ahost - Win32 using cares DLL Debug" (based on "Win32 (x86) Console Application")
+-!MESSAGE "ahost - Win32 using cares DLL Release" (based on "Win32 (x86) Console Application")
+-!MESSAGE "ahost - Win32 using cares LIB Debug" (based on "Win32 (x86) Console Application")
+-!MESSAGE "ahost - Win32 using cares LIB Release" (based on "Win32 (x86) Console Application")
+-!MESSAGE 
+-
+-# Begin Project
+-# PROP AllowPerConfigDependencies 0
+-# PROP Scc_ProjName ""
+-# PROP Scc_LocalPath ""
+-CPP=cl.exe
+-RSC=rc.exe
+-
+-!IF  "$(CFG)" == "ahost - Win32 using cares DLL Debug"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 1
+-# PROP BASE Output_Dir "dll-debug"
+-# PROP BASE Intermediate_Dir "dll-debug/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 1
+-# PROP Output_Dir "dll-debug"
+-# PROP Intermediate_Dir "dll-debug/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-# ADD BASE CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "_CONSOLE" /FD /GZ /c
+-# ADD CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "_CONSOLE" /FD /GZ /c
+-# ADD BASE RSC /l 0x409 /d "_DEBUG"
+-# ADD RSC /l 0x409 /d "_DEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 caresd.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /incremental:no /debug /machine:I386 /out:"dll-debug/ahost.exe" /pdbtype:con /libpath:"..\cares\dll-debug" /fixed:no
+-# ADD LINK32 caresd.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /incremental:no /debug /machine:I386 /out:"dll-debug/ahost.exe" /pdbtype:con /libpath:"..\cares\dll-debug" /fixed:no
+-
+-!ELSEIF  "$(CFG)" == "ahost - Win32 using cares DLL Release"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 0
+-# PROP BASE Output_Dir "dll-release"
+-# PROP BASE Intermediate_Dir "dll-release/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 0
+-# PROP Output_Dir "dll-release"
+-# PROP Intermediate_Dir "dll-release/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-# ADD BASE CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /FD /c
+-# ADD CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /FD /c
+-# ADD BASE RSC /l 0x409 /d "NDEBUG"
+-# ADD RSC /l 0x409 /d "NDEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 cares.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /pdb:none /machine:I386 /out:"dll-release/ahost.exe" /libpath:"..\cares\dll-release" /fixed:no
+-# ADD LINK32 cares.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /pdb:none /machine:I386 /out:"dll-release/ahost.exe" /libpath:"..\cares\dll-release" /fixed:no
+-
+-!ELSEIF  "$(CFG)" == "ahost - Win32 using cares LIB Debug"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 1
+-# PROP BASE Output_Dir "lib-debug"
+-# PROP BASE Intermediate_Dir "lib-debug/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 1
+-# PROP Output_Dir "lib-debug"
+-# PROP Intermediate_Dir "lib-debug/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-# ADD BASE CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "_CONSOLE" /D "CARES_STATICLIB" /FD /GZ /c
+-# ADD CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "_CONSOLE" /D "CARES_STATICLIB" /FD /GZ /c
+-# ADD BASE RSC /l 0x409 /d "_DEBUG"
+-# ADD RSC /l 0x409 /d "_DEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 libcaresd.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /incremental:no /debug /machine:I386 /out:"lib-debug/ahost.exe" /pdbtype:con /libpath:"..\cares\lib-debug" /fixed:no
+-# ADD LINK32 libcaresd.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /incremental:no /debug /machine:I386 /out:"lib-debug/ahost.exe" /pdbtype:con /libpath:"..\cares\lib-debug" /fixed:no
+-
+-!ELSEIF  "$(CFG)" == "ahost - Win32 using cares LIB Release"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 0
+-# PROP BASE Output_Dir "lib-release"
+-# PROP BASE Intermediate_Dir "lib-release/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 0
+-# PROP Output_Dir "lib-release"
+-# PROP Intermediate_Dir "lib-release/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-# ADD BASE CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /D "CARES_STATICLIB" /FD /c
+-# ADD CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "_CONSOLE" /D "CARES_STATICLIB" /FD /c
+-# ADD BASE RSC /l 0x409 /d "NDEBUG"
+-# ADD RSC /l 0x409 /d "NDEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 libcares.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /pdb:none /machine:I386 /out:"lib-release/ahost.exe" /libpath:"..\cares\lib-release" /fixed:no
+-# ADD LINK32 libcares.lib ws2_32.lib advapi32.lib kernel32.lib /nologo /subsystem:console /pdb:none /machine:I386 /out:"lib-release/ahost.exe" /libpath:"..\cares\lib-release" /fixed:no
+-
+-!ENDIF 
+-
+-# Begin Target
+-
+-# Name "ahost - Win32 using cares DLL Debug"
+-# Name "ahost - Win32 using cares DLL Release"
+-# Name "ahost - Win32 using cares LIB Debug"
+-# Name "ahost - Win32 using cares LIB Release"
+-# Begin Group "Source Files"
+-
+-# PROP Default_Filter ""
+-# Begin Source File
+-
+-SOURCE=..\..\ahost.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_getopt.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_nowarn.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_strcasecmp.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_net_pton.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_ntop.c
+-# End Source File
+-# End Group
+-# Begin Group "Header Files"
+-
+-# PROP Default_Filter ""
+-# Begin Source File
+-
+-SOURCE=..\..\ares_getopt.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_nowarn.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_strcasecmp.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_net_pton.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_ntop.h
+-# End Source File
+-# End Group
+-# End Target
+-# End Project
+diff --git a/vc/cares/vc6cares.dsp b/vc/cares/vc6cares.dsp
+deleted file mode 100644
+index 02a49091b5b6d6cdf51cbc214244d2a3ff1d8dae..0000000000000000000000000000000000000000
+--- a/vc/cares/vc6cares.dsp
++++ /dev/null
+@@ -1,453 +0,0 @@
+-# Microsoft Developer Studio Project File - Name="cares" - Package Owner=<4>
+-# Microsoft Developer Studio Generated Build File, Format Version 6.00
+-# ** DO NOT EDIT **
+-
+-# TARGTYPE "Win32 (x86) Dynamic-Link Library" 0x0102
+-# TARGTYPE "Win32 (x86) Static Library" 0x0104
+-
+-CFG=cares - Win32 LIB Debug
+-!MESSAGE This is not a valid makefile. To build this project using NMAKE,
+-!MESSAGE use the Export Makefile command and run
+-!MESSAGE 
+-!MESSAGE NMAKE /f "vc6cares.mak".
+-!MESSAGE 
+-!MESSAGE You can specify a configuration when running NMAKE
+-!MESSAGE by defining the macro CFG on the command line. For example:
+-!MESSAGE 
+-!MESSAGE NMAKE /f "vc6cares.mak" CFG="cares - Win32 LIB Debug"
+-!MESSAGE 
+-!MESSAGE Possible choices for configuration are:
+-!MESSAGE 
+-!MESSAGE "cares - Win32 DLL Debug" (based on "Win32 (x86) Dynamic-Link Library")
+-!MESSAGE "cares - Win32 DLL Release" (based on "Win32 (x86) Dynamic-Link Library")
+-!MESSAGE "cares - Win32 LIB Debug" (based on "Win32 (x86) Static Library")
+-!MESSAGE "cares - Win32 LIB Release" (based on "Win32 (x86) Static Library")
+-!MESSAGE 
+-
+-# Begin Project
+-# PROP AllowPerConfigDependencies 0
+-# PROP Scc_ProjName ""
+-# PROP Scc_LocalPath ""
+-
+-!IF  "$(CFG)" == "cares - Win32 DLL Debug"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 1
+-# PROP BASE Output_Dir "dll-debug"
+-# PROP BASE Intermediate_Dir "dll-debug/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 1
+-# PROP Output_Dir "dll-debug"
+-# PROP Intermediate_Dir "dll-debug/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-CPP=cl.exe
+-# ADD BASE CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "DEBUGBUILD" /D "CARES_BUILDING_LIBRARY" /FD /GZ /c
+-# ADD CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "DEBUGBUILD" /D "CARES_BUILDING_LIBRARY" /FD /GZ /c
+-MTL=midl.exe
+-# ADD BASE MTL /nologo /D "_DEBUG" /win32
+-# ADD MTL /nologo /D "_DEBUG" /win32
+-RSC=rc.exe
+-# ADD BASE RSC /l 0x409 /d "_DEBUG"
+-# ADD RSC /l 0x409 /d "_DEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 ws2_32.lib advapi32.lib kernel32.lib /nologo /dll /incremental:no /debug /machine:I386 /out:"dll-debug/caresd.dll" /implib:"dll-debug/caresd.lib" /pdbtype:con /fixed:no
+-# ADD LINK32 ws2_32.lib advapi32.lib kernel32.lib /nologo /dll /incremental:no /debug /machine:I386 /out:"dll-debug/caresd.dll" /implib:"dll-debug/caresd.lib" /pdbtype:con /fixed:no
+-
+-!ELSEIF  "$(CFG)" == "cares - Win32 DLL Release"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 0
+-# PROP BASE Output_Dir "dll-release"
+-# PROP BASE Intermediate_Dir "dll-release/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 0
+-# PROP Output_Dir "dll-release"
+-# PROP Intermediate_Dir "dll-release/obj"
+-# PROP Ignore_Export_Lib 0
+-# PROP Target_Dir ""
+-CPP=cl.exe
+-# ADD BASE CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "CARES_BUILDING_LIBRARY" /FD /c
+-# ADD CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "CARES_BUILDING_LIBRARY" /FD /c
+-MTL=midl.exe
+-# ADD BASE MTL /nologo /D "NDEBUG" /win32
+-# ADD MTL /nologo /D "NDEBUG" /win32
+-RSC=rc.exe
+-# ADD BASE RSC /l 0x409 /d "NDEBUG"
+-# ADD RSC /l 0x409 /d "NDEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LINK32=link.exe
+-# ADD BASE LINK32 ws2_32.lib advapi32.lib kernel32.lib /nologo /dll /pdb:none /machine:I386 /out:"dll-release/cares.dll" /implib:"dll-release/cares.lib" /fixed:no /release /incremental:no
+-# ADD LINK32 ws2_32.lib advapi32.lib kernel32.lib /nologo /dll /pdb:none /machine:I386 /out:"dll-release/cares.dll" /implib:"dll-release/cares.lib" /fixed:no /release /incremental:no
+-
+-!ELSEIF  "$(CFG)" == "cares - Win32 LIB Debug"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 1
+-# PROP BASE Output_Dir "lib-debug"
+-# PROP BASE Intermediate_Dir "lib-debug/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 1
+-# PROP Output_Dir "lib-debug"
+-# PROP Intermediate_Dir "lib-debug/obj"
+-# PROP Target_Dir ""
+-CPP=cl.exe
+-# ADD BASE CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "DEBUGBUILD" /D "CARES_BUILDING_LIBRARY" /D "CARES_STATICLIB" /FD /GZ /c
+-# ADD CPP /nologo /MDd /W3 /GX /Zi /Od /I "..\.." /D "_DEBUG" /D "WIN32" /D "DEBUGBUILD" /D "CARES_BUILDING_LIBRARY" /D "CARES_STATICLIB" /FD /GZ /c
+-RSC=rc.exe
+-# ADD BASE RSC /l 0x409 /d "_DEBUG"
+-# ADD RSC /l 0x409 /d "_DEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LIB32=link.exe -lib
+-# ADD BASE LIB32 /nologo /out:"lib-debug/libcaresd.lib" /machine:I386
+-# ADD LIB32 /nologo /out:"lib-debug/libcaresd.lib" /machine:I386
+-
+-!ELSEIF  "$(CFG)" == "cares - Win32 LIB Release"
+-
+-# PROP BASE Use_MFC 0
+-# PROP BASE Use_Debug_Libraries 0
+-# PROP BASE Output_Dir "lib-release"
+-# PROP BASE Intermediate_Dir "lib-release/obj"
+-# PROP BASE Target_Dir ""
+-# PROP Use_MFC 0
+-# PROP Use_Debug_Libraries 0
+-# PROP Output_Dir "lib-release"
+-# PROP Intermediate_Dir "lib-release/obj"
+-# PROP Target_Dir ""
+-CPP=cl.exe
+-# ADD BASE CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "CARES_BUILDING_LIBRARY" /D "CARES_STATICLIB" /FD /c
+-# ADD CPP /nologo /MD /W3 /GX /O2 /I "..\.." /D "NDEBUG" /D "WIN32" /D "CARES_BUILDING_LIBRARY" /D "CARES_STATICLIB" /FD /c
+-RSC=rc.exe
+-# ADD BASE RSC /l 0x409 /d "NDEBUG"
+-# ADD RSC /l 0x409 /d "NDEBUG"
+-BSC32=bscmake.exe
+-# ADD BASE BSC32 /nologo
+-# ADD BSC32 /nologo
+-LIB32=link.exe -lib
+-# ADD BASE LIB32 /nologo /out:"lib-release/libcares.lib" /machine:I386
+-# ADD LIB32 /nologo /out:"lib-release/libcares.lib" /machine:I386
+-
+-!ENDIF 
+-
+-# Begin Target
+-
+-# Name "cares - Win32 DLL Debug"
+-# Name "cares - Win32 DLL Release"
+-# Name "cares - Win32 LIB Debug"
+-# Name "cares - Win32 LIB Release"
+-# Begin Group "Source Files"
+-
+-# PROP Default_Filter ""
+-# Begin Source File
+-
+-SOURCE=..\..\ares__close_sockets.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares__get_hostent.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares__read_line.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares__timeval.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_cancel.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_create_query.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_data.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_destroy.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_expand_name.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_expand_string.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_fds.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_free_hostent.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_free_string.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_getenv.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_gethostbyaddr.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_gethostbyname.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_getnameinfo.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_getsock.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_init.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_library_init.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_llist.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_mkquery.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_nowarn.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_options.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_parse_a_reply.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_parse_aaaa_reply.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_parse_mx_reply.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_parse_naptr_reply.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_parse_ns_reply.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_parse_ptr_reply.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_parse_soa_reply.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_parse_srv_reply.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_parse_txt_reply.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_platform.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_process.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_query.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_search.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_send.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_strcasecmp.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_strdup.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_strerror.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_timeout.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_version.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_writev.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\bitncmp.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_net_pton.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_ntop.c
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\windows_port.c
+-# End Source File
+-# End Group
+-# Begin Group "Header Files"
+-
+-# PROP Default_Filter ""
+-# Begin Source File
+-
+-SOURCE=..\..\ares.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_build.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_data.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_dns.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_getenv.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_iphlpapi.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_ipv6.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_library_init.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_llist.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_nowarn.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_platform.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_private.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_rules.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_setup.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_strcasecmp.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_strdup.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_version.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\ares_writev.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\bitncmp.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\config-win32.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_net_pton.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\inet_ntop.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\nameser.h
+-# End Source File
+-# Begin Source File
+-
+-SOURCE=..\..\setup_once.h
+-# End Source File
+-# End Group
+-# Begin Group "Resource Files"
+-
+-# PROP Default_Filter ""
+-# Begin Source File
+-
+-SOURCE=..\..\cares.rc
+-# End Source File
+-# End Group
+-# End Target
+-# End Project
+diff --git a/vc/cares/vc6cares.dsw b/vc/cares/vc6cares.dsw
+deleted file mode 100644
+index 5bad37570d5e8f80465e9ac4e1626f18375df7ed..0000000000000000000000000000000000000000
+--- a/vc/cares/vc6cares.dsw
++++ /dev/null
+@@ -1,29 +0,0 @@
+-Microsoft Developer Studio Workspace File, Format Version 6.00
+-# WARNING: DO NOT EDIT OR DELETE THIS WORKSPACE FILE!
+-
+-###############################################################################
+-
+-Project: "cares"=".\vc6cares.dsp" - Package Owner=<4>
+-
+-Package=<5>
+-{{{
+-}}}
+-
+-Package=<4>
+-{{{
+-}}}
+-
+-###############################################################################
+-
+-Global:
+-
+-Package=<5>
+-{{{
+-}}}
+-
+-Package=<3>
+-{{{
+-}}}
+-
+-###############################################################################
+-
+diff --git a/vc/vc6aws.dsw b/vc/vc6aws.dsw
+deleted file mode 100644
+index 9543a5a452188a5ba6c7d3602406bbb999935896..0000000000000000000000000000000000000000
+--- a/vc/vc6aws.dsw
++++ /dev/null
+@@ -1,74 +0,0 @@
+-Microsoft Developer Studio Workspace File, Format Version 6.00
+-# WARNING: DO NOT EDIT OR DELETE THIS WORKSPACE FILE!
+-
+-###############################################################################
+-
+-Project: "cares"=".\cares\vc6cares.dsp" - Package Owner=<4>
+-
+-Package=<5>
+-{{{
+-}}}
+-
+-Package=<4>
+-{{{
+-}}}
+-
+-###############################################################################
+-
+-Project: "acountry"=".\acountry\vc6acountry.dsp" - Package Owner=<4>
+-
+-Package=<5>
+-{{{
+-}}}
+-
+-Package=<4>
+-{{{
+-    Begin Project Dependency
+-    Project_Dep_Name cares
+-    End Project Dependency
+-}}}
+-
+-###############################################################################
+-
+-Project: "adig"=".\adig\vc6adig.dsp" - Package Owner=<4>
+-
+-Package=<5>
+-{{{
+-}}}
+-
+-Package=<4>
+-{{{
+-    Begin Project Dependency
+-    Project_Dep_Name cares
+-    End Project Dependency
+-}}}
+-
+-###############################################################################
+-
+-Project: "ahost"=".\ahost\vc6ahost.dsp" - Package Owner=<4>
+-
+-Package=<5>
+-{{{
+-}}}
+-
+-Package=<4>
+-{{{
+-    Begin Project Dependency
+-    Project_Dep_Name cares
+-    End Project Dependency
+-}}}
+-
+-###############################################################################
+-
+-Global:
+-
+-Package=<5>
+-{{{
+-}}}
+-
+-Package=<3>
+-{{{
+-}}}
+-
+-###############################################################################
+-

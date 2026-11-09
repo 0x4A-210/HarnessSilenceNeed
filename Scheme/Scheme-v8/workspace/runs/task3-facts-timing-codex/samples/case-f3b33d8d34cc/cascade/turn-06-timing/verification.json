@@ -1,0 +1,110 @@
+{
+  "checked": {
+    "status": "introduced",
+    "gap": true,
+    "introduced_by_this_change": true,
+    "claims": [
+      {
+        "claim_id": "c2",
+        "status": "introduced",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Create shared memory and semaphores before InitProcess on the standalone route.",
+          "applicability": "required",
+          "harness_status": "sat",
+          "reason": "The old BaseInit calls InitCommunication before the harness calls InitProcess.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-aab7dd7b0e07e54b8de078ff",
+              "quote": "/*\n * InitProcess -- initialize a per-process data structure for this backend\n */\nvoid\nInitProcess(void)\n{\n\tPGPROC\t   *volatile *procgloballist;\n\n\t/*\n\t * ProcGlobal should be set up already (if we are a backend, we inherit\n\t * this by fork() or EXEC_BACKEND mechanism from the postmaster).\n\t */\n\tif (ProcGlobal == NULL)\n\t\telog(PANIC, \"proc header uninitialized\");\n\n"
+            },
+            {
+              "evidence_id": "loc-38c1028280e2bfdb2789d46a",
+              "quote": "\n\t/*\n\t * Set up lock manager\n\t */\n\tInitLocks();\n\n\t/*\n\t * Set up predicate lock manager\n\t */\n\tInitPredicateLocks();\n\n\t/*\n\t * Set up process table\n\t */\n\tif (!IsUnderPostmaster)\n\t\tInitProcGlobal();\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Create shared memory and semaphores before InitProcess on the standalone route.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The new BaseInit no longer calls InitCommunication. The fixed initializer calls InitProcess without a replacement shared-memory setup, and InitProcess requires ProcGlobal.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-94c26255c1a9bca50557e9bb",
+              "quote": "/*\n * InitProcess -- initialize a per-process data structure for this backend\n */\nvoid\nInitProcess(void)\n{\n\tPGPROC\t   *volatile *procgloballist;\n\n\t/*\n\t * ProcGlobal should be set up already (if we are a backend, we inherit\n\t * this by fork() or EXEC_BACKEND mechanism from the postmaster).\n\t */\n\tif (ProcGlobal == NULL)\n\t\telog(PANIC, \"proc header uninitialized\");\n\n"
+            },
+            {
+              "evidence_id": "loc-4cdcd84d9bde642011812974",
+              "quote": "/*\n * InitProcess -- initialize a per-process data structure for this backend\n */\nvoid\nInitProcess(void)\n{\n\tPGPROC\t   *volatile *procgloballist;\n\n\t/*\n\t * ProcGlobal should be set up already (if we are a backend, we inherit\n\t * this by fork() or EXEC_BACKEND mechanism from the postmaster).\n\t */\n\tif (ProcGlobal == NULL)\n\t\telog(PANIC, \"proc header uninitialized\");\n\n\tif (MyProc != NULL)\n\t\telog(ERROR, \"you already exist\");\n\n\t/* Decide which list should supply our PGPROC. */\n\tif (IsAnyAutoVacuumProcess())\n\t\tprocgloballist = &ProcGlobal->autovacFreeProcs;\n\telse if (IsBackgroundWorker)\n\t\tprocgloballist = &ProcGlobal->bgworkerFreeProcs;\n\telse if (am_walsender)\n\t\tprocgloballist = &ProcGlobal->walsenderFreeProcs;\n\telse\n\t\tprocgloballist = &ProcGlobal->freeProcs;\n\n\t/*\n\t * Try to get a proc struct from the appropriate free list.  If this\n\t * fails, we must be out of PGPROC structures (not to mention semaphores).\n\t *\n\t * While we are holding the ProcStructLock, also copy the current shared\n\t * estimate of spins_per_delay to local storage.\n\t */\n\tSpinLockAcquire(ProcStructLock);\n\n\tset_spins_per_delay(ProcGlobal->spins_per_delay);\n\n\tMyProc = *procgloballist;\n"
+            },
+            {
+              "evidence_id": "loc-c68641fbb8c56301e8dd7d92",
+              "quote": "\n\t/*\n\t * Set up lock manager\n\t */\n\tInitLocks();\n\n\t/*\n\t * Set up predicate lock manager\n\t */\n\tInitPredicateLocks();\n\n\t/*\n\t * Set up process table\n\t */\n\tif (!IsUnderPostmaster)\n\t\tInitProcGlobal();\n"
+            }
+          ]
+        },
+        "same_blocker": "no",
+        "reason": "The same harness order works through the old BaseInit setup, while the new BaseInit removes that setup. The unsatisfied shared-memory prerequisite arises after the change.",
+        "error": null,
+        "missing_information": []
+      },
+      {
+        "claim_id": "c3",
+        "status": "preexisting",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Use the default SQL query parse mode for simple-query analysis and planning.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The fixed helper passes RAW_PARSE_TYPE_NAME. The old parser maps that mode to MODE_TYPE_NAME, whose grammar returns a TypeName rather than the RawStmt produced by ordinary SQL parsing. SELECT 1 is a finite blocked query.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-15162ed6fd0bef4bbc8f813d",
+              "quote": "List *\nraw_parser(const char *str, RawParseMode mode)\n{\n\tcore_yyscan_t yyscanner;\n\tbase_yy_extra_type yyextra;\n\tint\t\t\tyyresult;\n\n\t/* initialize the flex scanner */\n\tyyscanner = scanner_init(str, &yyextra.core_yy_extra,\n\t\t\t\t\t\t\t &ScanKeywords, ScanKeywordTokens);\n\n\t/* base_yylex() only needs us to initialize the lookahead token, if any */\n\tif (mode == RAW_PARSE_DEFAULT)\n\t\tyyextra.have_lookahead = false;\n\telse\n\t{\n\t\t/* this array is indexed by RawParseMode enum */\n\t\tstatic const int mode_token[] = {\n\t\t\t0,\t\t\t\t\t/* RAW_PARSE_DEFAULT */\n\t\t\tMODE_TYPE_NAME,\t\t/* RAW_PARSE_TYPE_NAME */\n\t\t\tMODE_PLPGSQL_EXPR,\t/* RAW_PARSE_PLPGSQL_EXPR */\n\t\t\tMODE_PLPGSQL_ASSIGN1,\t/* RAW_PARSE_PLPGSQL_ASSIGN1 */\n\t\t\tMODE_PLPGSQL_ASSIGN2,\t/* RAW_PARSE_PLPGSQL_ASSIGN2 */\n\t\t\tMODE_PLPGSQL_ASSIGN3\t/* RAW_PARSE_PLPGSQL_ASSIGN3 */\n\t\t};\n\n\t\tyyextra.have_lookahead = true;\n\t\tyyextra.lookahead_token = mode_token[mode];\n\t\tyyextra.lookahead_yylloc = 0;\n"
+            },
+            {
+              "evidence_id": "loc-357a670f4fc20c8730655e41",
+              "quote": "/*\n *\tThe target production for the whole parse.\n *\n * Ordinarily we parse a list of statements, but if we see one of the\n * special MODE_XXX symbols as first token, we parse something else.\n * The options here correspond to enum RawParseMode, which see for details.\n */\nparse_toplevel:\n\t\t\tstmtmulti\n\t\t\t{\n\t\t\t\tpg_yyget_extra(yyscanner)->parsetree = $1;\n\t\t\t}\n\t\t\t| MODE_TYPE_NAME Typename\n\t\t\t{\n\t\t\t\tpg_yyget_extra(yyscanner)->parsetree = list_make1($2);\n\t\t\t}\n\t\t\t| MODE_PLPGSQL_EXPR PLpgSQL_Expr\n\t\t\t{\n\t\t\t\tpg_yyget_extra(yyscanner)->parsetree =\n\t\t\t\t\tlist_make1(makeRawStmt($2, 0));\n\t\t\t}\n\t\t\t| MODE_PLPGSQL_ASSIGN1 PLAssignStmt\n\t\t\t{\n\t\t\t\tPLAssignStmt *n = (PLAssignStmt *) $2;\n\t\t\t\tn->nnames = 1;\n\t\t\t\tpg_yyget_extra(yyscanner)->parsetree =\n\t\t\t\t\tlist_make1(makeRawStmt((Node *) n, 0));\n\t\t\t}\n\t\t\t| MODE_PLPGSQL_ASSIGN2 PLAssignStmt\n\t\t\t{\n\t\t\t\tPLAssignStmt *n = (PLAssignStmt *) $2;\n\t\t\t\tn->nnames = 2;\n\t\t\t\tpg_yyget_extra(yyscanner)->parsetree =\n\t\t\t\t\tlist_make1(makeRawStmt((Node *) n, 0));\n\t\t\t}\n\t\t\t| MODE_PLPGSQL_ASSIGN3 PLAssignStmt\n\t\t\t{\n\t\t\t\tPLAssignStmt *n = (PLAssignStmt *) $2;\n\t\t\t\tn->nnames = 3;\n\t\t\t\tpg_yyget_extra(yyscanner)->parsetree =\n\t\t\t\t\tlist_make1(makeRawStmt((Node *) n, 0));\n\t\t\t}\n\t\t;\n\n/*\n * At top level, we wrap each stmt with a RawStmt node carrying start location\n * and length of the stmt's text.  Notice that the start loc/len are driven\n * entirely from semicolon locations (@2).  It would seem natural to use\n * @1 or @3 to get the true start location of a stmt, but that doesn't work\n * for statements that can start with empty nonterminals (opt_with_clause is\n * the main offender here); as noted in the comments for YYLLOC_DEFAULT,\n * we'd get -1 for the location in such cases.\n * We also take care to discard empty statements entirely.\n */\nstmtmulti:\tstmtmulti ';' toplevel_stmt\n\t\t\t\t{\n\t\t\t\t\tif ($1 != NIL)\n\t\t\t\t\t{\n\t\t\t\t\t\t/* update length of previous stmt */\n\t\t\t\t\t\tupdateRawStmtEnd(llast_node(RawStmt, $1), @2);\n\t\t\t\t\t}\n\t\t\t\t\tif ($3 != NULL)\n\t\t\t\t\t\t$$ = lappend($1, makeRawStmt($3, @2 + 1));\n\t\t\t\t\telse\n\t\t\t\t\t\t$$ = $1;\n\t\t\t\t}\n\t\t\t| toplevel_stmt\n\t\t\t\t{\n\t\t\t\t\tif ($1 != NULL)\n\t\t\t\t\t\t$$ = list_make1(makeRawStmt($1, 0));\n\t\t\t\t\telse\n\t\t\t\t\t\t$$ = NIL;\n\t\t\t\t}\n"
+            },
+            {
+              "evidence_id": "loc-a518682aa2e142ed5903fa9e",
+              "quote": "\tparsetree_list = pg_parse_query(query_string);\n\n\t/* Log immediately if dictated by log_statement */\n\tif (check_log_statement(parsetree_list))\n\t{\n\t\tereport(LOG,\n\t\t\t\t(errmsg(\"statement: %s\", query_string),\n\t\t\t\t errhidestmt(true),\n\t\t\t\t errdetail_execute(parsetree_list)));\n\t\twas_logged = true;\n\t}\n\n\t/*\n\t * Switch back to transaction context to enter the loop.\n\t */\n\tMemoryContextSwitchTo(oldcontext);\n\n\t/*\n\t * For historical reasons, if multiple SQL statements are given in a\n\t * single \"simple Query\" message, we execute them as a single transaction,\n\t * unless explicit transaction control commands are included to make\n\t * portions of the list be separate transactions.  To represent this\n\t * behavior properly in the transaction machinery, we use an \"implicit\"\n\t * transaction block.\n\t */\n\tuse_implicit_block = (list_length(parsetree_list) > 1);\n\n\t/*\n\t * Run through the raw parsetree(s) and process each one.\n\t */\n\tforeach(parsetree_item, parsetree_list)\n\t{\n\t\tRawStmt    *parsetree = lfirst_node(RawStmt, parsetree_item);\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Use the default SQL query parse mode for simple-query analysis and planning.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The helper still passes RAW_PARSE_TYPE_NAME. The unchanged mode mapping and grammar continue to route SELECT 1 away from SQL-statement parsing.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-5182d35618797fe8d9321d81",
+              "quote": "List *\nraw_parser(const char *str, RawParseMode mode)\n{\n\tcore_yyscan_t yyscanner;\n\tbase_yy_extra_type yyextra;\n\tint\t\t\tyyresult;\n\n\t/* initialize the flex scanner */\n\tyyscanner = scanner_init(str, &yyextra.core_yy_extra,\n\t\t\t\t\t\t\t &ScanKeywords, ScanKeywordTokens);\n\n\t/* base_yylex() only needs us to initialize the lookahead token, if any */\n\tif (mode == RAW_PARSE_DEFAULT)\n\t\tyyextra.have_lookahead = false;\n\telse\n\t{\n\t\t/* this array is indexed by RawParseMode enum */\n\t\tstatic const int mode_token[] = {\n\t\t\t0,\t\t\t\t\t/* RAW_PARSE_DEFAULT */\n\t\t\tMODE_TYPE_NAME,\t\t/* RAW_PARSE_TYPE_NAME */\n\t\t\tMODE_PLPGSQL_EXPR,\t/* RAW_PARSE_PLPGSQL_EXPR */\n\t\t\tMODE_PLPGSQL_ASSIGN1,\t/* RAW_PARSE_PLPGSQL_ASSIGN1 */\n\t\t\tMODE_PLPGSQL_ASSIGN2,\t/* RAW_PARSE_PLPGSQL_ASSIGN2 */\n\t\t\tMODE_PLPGSQL_ASSIGN3\t/* RAW_PARSE_PLPGSQL_ASSIGN3 */\n\t\t};\n\n\t\tyyextra.have_lookahead = true;\n\t\tyyextra.lookahead_token = mode_token[mode];\n\t\tyyextra.lookahead_yylloc = 0;\n"
+            },
+            {
+              "evidence_id": "loc-b8ab288282fd94e2db318741",
+              "quote": "/*\n *\tThe target production for the whole parse.\n *\n * Ordinarily we parse a list of statements, but if we see one of the\n * special MODE_XXX symbols as first token, we parse something else.\n * The options here correspond to enum RawParseMode, which see for details.\n */\nparse_toplevel:\n\t\t\tstmtmulti\n\t\t\t{\n\t\t\t\tpg_yyget_extra(yyscanner)->parsetree = $1;\n\t\t\t}\n\t\t\t| MODE_TYPE_NAME Typename\n\t\t\t{\n\t\t\t\tpg_yyget_extra(yyscanner)->parsetree = list_make1($2);\n\t\t\t}\n\t\t\t| MODE_PLPGSQL_EXPR PLpgSQL_Expr\n\t\t\t{\n\t\t\t\tpg_yyget_extra(yyscanner)->parsetree =\n\t\t\t\t\tlist_make1(makeRawStmt($2, 0));\n\t\t\t}\n\t\t\t| MODE_PLPGSQL_ASSIGN1 PLAssignStmt\n\t\t\t{\n\t\t\t\tPLAssignStmt *n = (PLAssignStmt *) $2;\n\t\t\t\tn->nnames = 1;\n\t\t\t\tpg_yyget_extra(yyscanner)->parsetree =\n\t\t\t\t\tlist_make1(makeRawStmt((Node *) n, 0));\n\t\t\t}\n\t\t\t| MODE_PLPGSQL_ASSIGN2 PLAssignStmt\n\t\t\t{\n\t\t\t\tPLAssignStmt *n = (PLAssignStmt *) $2;\n\t\t\t\tn->nnames = 2;\n\t\t\t\tpg_yyget_extra(yyscanner)->parsetree =\n\t\t\t\t\tlist_make1(makeRawStmt((Node *) n, 0));\n\t\t\t}\n\t\t\t| MODE_PLPGSQL_ASSIGN3 PLAssignStmt\n\t\t\t{\n\t\t\t\tPLAssignStmt *n = (PLAssignStmt *) $2;\n\t\t\t\tn->nnames = 3;\n\t\t\t\tpg_yyget_extra(yyscanner)->parsetree =\n\t\t\t\t\tlist_make1(makeRawStmt((Node *) n, 0));\n\t\t\t}\n\t\t;\n\n/*\n * At top level, we wrap each stmt with a RawStmt node carrying start location\n * and length of the stmt's text.  Notice that the start loc/len are driven\n * entirely from semicolon locations (@2).  It would seem natural to use\n * @1 or @3 to get the true start location of a stmt, but that doesn't work\n * for statements that can start with empty nonterminals (opt_with_clause is\n * the main offender here); as noted in the comments for YYLLOC_DEFAULT,\n * we'd get -1 for the location in such cases.\n * We also take care to discard empty statements entirely.\n */\nstmtmulti:\tstmtmulti ';' toplevel_stmt\n\t\t\t\t{\n\t\t\t\t\tif ($1 != NIL)\n\t\t\t\t\t{\n\t\t\t\t\t\t/* update length of previous stmt */\n\t\t\t\t\t\tupdateRawStmtEnd(llast_node(RawStmt, $1), @2);\n\t\t\t\t\t}\n\t\t\t\t\tif ($3 != NULL)\n\t\t\t\t\t\t$$ = lappend($1, makeRawStmt($3, @2 + 1));\n\t\t\t\t\telse\n\t\t\t\t\t\t$$ = $1;\n\t\t\t\t}\n\t\t\t| toplevel_stmt\n\t\t\t\t{\n\t\t\t\t\tif ($1 != NULL)\n\t\t\t\t\t\t$$ = list_make1(makeRawStmt($1, 0));\n\t\t\t\t\telse\n\t\t\t\t\t\t$$ = NIL;\n\t\t\t\t}\n"
+            },
+            {
+              "evidence_id": "loc-ba712e4ac30865a9e2cd9aab",
+              "quote": "\tparsetree_list = pg_parse_query(query_string);\n\n\t/* Log immediately if dictated by log_statement */\n\tif (check_log_statement(parsetree_list))\n\t{\n\t\tereport(LOG,\n\t\t\t\t(errmsg(\"statement: %s\", query_string),\n\t\t\t\t errhidestmt(true),\n\t\t\t\t errdetail_execute(parsetree_list)));\n\t\twas_logged = true;\n\t}\n\n\t/*\n\t * Switch back to transaction context to enter the loop.\n\t */\n\tMemoryContextSwitchTo(oldcontext);\n\n\t/*\n\t * For historical reasons, if multiple SQL statements are given in a\n\t * single \"simple Query\" message, we execute them as a single transaction,\n\t * unless explicit transaction control commands are included to make\n\t * portions of the list be separate transactions.  To represent this\n\t * behavior properly in the transaction machinery, we use an \"implicit\"\n\t * transaction block.\n\t */\n\tuse_implicit_block = (list_length(parsetree_list) > 1);\n\n\t/*\n\t * Run through the raw parsetree(s) and process each one.\n\t */\n\tforeach(parsetree_item, parsetree_list)\n\t{\n\t\tRawStmt    *parsetree = lfirst_node(RawStmt, parsetree_item);\n"
+            }
+          ]
+        },
+        "same_blocker": "yes",
+        "reason": "The same RAW_PARSE_TYPE_NAME argument is present in the fixed harness on both sides, and the parser mode and grammar are invariant. It is the same concrete coverage blocker before and after.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": [
+      "This timing turn is limited to the two frozen obligations; it cannot establish that they exhaust obligations across all selected change groups."
+    ]
+  },
+  "citation_errors": [],
+  "missing_claims": [],
+  "preimage_errors": []
+}

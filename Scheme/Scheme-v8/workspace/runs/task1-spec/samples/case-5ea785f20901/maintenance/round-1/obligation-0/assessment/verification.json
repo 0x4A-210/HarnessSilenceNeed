@@ -1,0 +1,105 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0001",
+          "status": "unknown",
+          "reason": "The focus instruction limits substantive assessment to candidate o-74847eec6adef47a, which concerns g0002.",
+          "errors": []
+        },
+        {
+          "change_id": "g0002",
+          "status": "blocked",
+          "reason": "The changed free operation releases a saved, unattached comment, but the old entry disables comment saving and returns on a parse error before freeing the parser.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "unknown",
+          "reason": "The recipe invokes configure, make, compilation and linking, but no build result or decisive build configuration is supplied.",
+          "errors": []
+        },
+        "input": {
+          "status": "pass",
+          "reason": "The entry rejects zero-length input and passes the fuzzer bytes with their explicit nonzero length; the source uses strlen only when length is zero.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "blocked",
+          "reason": "On the focused parse-error route, the entry returns without freeing the parser or its saved, unattached comment.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "blocked",
+          "reason": "The single parser setup fixes flags at zero, and the error check exits before the only free call, so no input reaches the focused cleanup route.",
+          "errors": []
+        }
+      },
+      "errors": [],
+      "missing_information": [],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "kind": "configuration",
+        "necessary": true,
+        "established": true,
+        "requirement": "o-74847eec6adef47a: Exercise ucl_parser_free on a saved, unattached comment after a parse error.",
+        "target_route": "LLVMFuzzerTestOneInput → ucl_parser_new with UCL_PARSER_SAVE_COMMENTS → ucl_parser_add_string on a line comment followed by an unterminated quoted key → ucl_parser_free on the error path.",
+        "failure_condition": "The old entry creates its only parser with flags 0 and returns when ucl_parser_get_error is nonnull. Thus it neither saves the comment nor invokes the cleanup after the error.",
+        "alternative_paths": "The complete entry has one parser setup and one free call. Fuzzer bytes cannot change the creation flags, and the free call is reached only when the error check is false.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-7576309a3705fa5ae991cc13",
+            "quote": "\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n"
+          },
+          {
+            "evidence_id": "loc-68f091f6eaee3243444ae872",
+            "quote": "\tparser->flags = flags;\n\tparser->includepaths = NULL;\n\n\t/*\n\t * Only the depth limit is on by default: it is the one that protects\n\t * against stack growth in the recursive walks over the resulting tree,\n\t * and 1024 levels is far beyond any legitimate configuration. The\n\t * remaining budgets would break large but perfectly valid inputs (maps,\n\t * language models, big JSON replies), so callers that deal with\n\t * untrusted data opt into them explicitly via ucl_parser_set_limits().\n\t */\n\tparser->limits.max_depth = UCL_MAX_NESTING;\n\n\tif (flags & UCL_PARSER_SAVE_COMMENTS) {\n\t\tparser->comments = ucl_object_typed_new(UCL_OBJECT);\n\t}\n"
+          },
+          {
+            "evidence_id": "loc-e41426d83d433faaabeeae08",
+            "quote": "static void\nucl_save_comment(struct ucl_parser *parser, const char *begin, size_t len)\n{\n\tucl_object_t *nobj;\n\n\tif (len > 0 && begin != NULL) {\n\t\tnobj = ucl_object_fromstring_common(begin, len, 0);\n\n\t\tif (parser->last_comment) {\n\t\t\t/* We need to append data to an existing object */\n\t\t\tDL_APPEND(parser->last_comment, nobj);\n\t\t}\n\t\telse {\n\t\t\tparser->last_comment = nobj;\n\t\t}\n\t}\n}\n"
+          },
+          {
+            "evidence_id": "loc-cc9a714c6516ed25a0ea2859",
+            "quote": "\tif (chunk->remain > 0 && *p == '#') {\n\t\tif (parser->state != UCL_STATE_SCOMMENT &&\n\t\t\tparser->state != UCL_STATE_MCOMMENT) {\n\t\t\tbeg = p;\n\n\t\t\twhile (p < chunk->end) {\n\t\t\t\tif (*p == '\\n') {\n\t\t\t\t\tif (parser->flags & UCL_PARSER_SAVE_COMMENTS) {\n\t\t\t\t\t\tucl_save_comment(parser, beg, p - beg);\n\t\t\t\t\t\tbeg = NULL;\n\t\t\t\t\t}\n\n\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\n\t\t\t\t\tgoto start;\n"
+          },
+          {
+            "evidence_id": "loc-5bedae1fcd734ba8c57bc86e",
+            "quote": "\t\tucl_chunk_skipc(chunk, p);\n\t}\n\n\tucl_set_err(parser, UCL_ESYNTAX,\n\t\t\t\t\"no quote at the end of json string\",\n\t\t\t\t&parser->err);\n\treturn false;\n}\n"
+          },
+          {
+            "evidence_id": "loc-1dbc427f28d655571b15e5f9",
+            "quote": "\t\t\tgot_content = false;\n\n\t\t\tif (!ucl_parse_key(parser, chunk, &next_key, &end_of_object, &got_content)) {\n\t\t\t\tparser->prev_state = parser->state;\n\t\t\t\tparser->state = UCL_STATE_ERROR;\n\t\t\t\treturn false;\n"
+          },
+          {
+            "evidence_id": "loc-26b7128501f642d8712b24f1",
+            "quote": "const char *\nucl_parser_get_error(struct ucl_parser *parser)\n{\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tif (parser->err == NULL) {\n\t\treturn NULL;\n\t}\n\n\treturn utstring_body(parser->err);\n}\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-ac013feedc01a2d1883a7110",
+            "quote": "\tif(size==0){\n\t\treturn 0;\n\t}\n\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n"
+          }
+        ],
+        "missing_information": [],
+        "id": "o-74847eec6adef47a",
+        "change_ids": [
+          "g0002"
+        ],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

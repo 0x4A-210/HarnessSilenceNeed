@@ -1,0 +1,942 @@
+{
+  "decision": "keep",
+  "errors": [],
+  "answer": {
+    "candidate_id": "o-e7d04d07635e14e0",
+    "decision": "keep",
+    "effect": "invalid_execution",
+    "reason": "A reachable parse error makes the old harness return without freeing its parser. This is a preexisting lifecycle gap: the same input and early return apply before and after the source change.",
+    "finite_witness": "Input bytes 0x7b (\"{\"), size 1, with normal successful parser allocation. The unmatched opening brace records an error; ucl_parser_get_error is non-NULL, so the entry returns before ucl_parser_free.",
+    "scope_contract": {
+      "status": "established",
+      "reason": "The entry creates a parser, parses a string, checks its error, and owns the parser cleanup. ucl_parser_free releases the parser and owned state.",
+      "evidence": [
+        {
+          "evidence_id": "loc-f68715bd979ea811d73d27ef",
+          "quote": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n"
+        },
+        {
+          "evidence_id": "loc-5cb6e31529ee628a1fbf3cb6",
+          "quote": "\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n"
+        },
+        {
+          "evidence_id": "loc-b5377c61d2ec7c7066173dcb",
+          "quote": "bool ucl_parser_add_string(struct ucl_parser *parser, const char *data,\n\t\t\t\t\t\t   size_t len)\n{\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_string_priority(parser,\n\t\t\t\t\t\t\t\t\t\t  (const unsigned char *) data, len, parser->default_priority);\n}\n"
+        }
+      ]
+    },
+    "feasible_trigger": {
+      "status": "established",
+      "reason": "For both versions, the one-byte opening brace passes through add-string and UCL chunk parsing. It leaves a marked stack frame, causing an unmatched-brace error visible to the harness.",
+      "evidence": [
+        {
+          "evidence_id": "loc-5eb34f48535259acb2bb0f15",
+          "quote": "\tif(size==0){\n\t\treturn 0;\n\t}\n\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n"
+        },
+        {
+          "evidence_id": "loc-91fe032f1918dea0a9ae1090",
+          "quote": "bool ucl_parser_add_chunk_priority(struct ucl_parser *parser,\n\t\t\t\t\t\t\t\t   const unsigned char *data, size_t len, unsigned priority)\n{\n\t/* We dereference parser, so this check is essential */\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n"
+        },
+        {
+          "evidence_id": "loc-6d4f8a7d7f059d85c1f10179",
+          "quote": "bool ucl_parser_add_string_priority(struct ucl_parser *parser, const char *data,\n\t\t\t\t\t\t\t\t\tsize_t len, unsigned priority)\n{\n\tif (data == NULL) {\n\t\tucl_create_err(&parser->err, \"invalid string added\");\n\t\treturn false;\n\t}\n\tif (len == 0) {\n\t\tlen = strlen(data);\n\t}\n\n\treturn ucl_parser_add_chunk_priority(parser,\n\t\t\t\t\t\t\t\t\t\t (const unsigned char *) data, len, priority);\n}\n"
+        },
+        {
+          "evidence_id": "loc-89c730c85f1834de14b4864a",
+          "quote": "\t\tif (len > 0) {\n\t\t\t/* Need to parse something */\n\t\t\tswitch (parse_type) {\n\t\t\tdefault:\n\t\t\tcase UCL_PARSE_UCL:\n\t\t\t\treturn ucl_state_machine(parser);\n"
+        },
+        {
+          "evidence_id": "loc-905e734bf677d30973934581",
+          "quote": "\t\t\t\tif (p < chunk->end) {\n\t\t\t\t\tif (*p == '[') {\n\t\t\t\t\t\tparser->state = UCL_STATE_VALUE;\n\t\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\t\t\tseen_obrace = true;\n\t\t\t\t\t}\n\t\t\t\t\telse {\n\n\t\t\t\t\t\tif (*p == '{') {\n\t\t\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\t\t\t\tparser->state = UCL_STATE_KEY_OBRACE;\n\t\t\t\t\t\t\tseen_obrace = true;\n\t\t\t\t\t\t}\n\t\t\t\t\t\telse {\n\t\t\t\t\t\t\tparser->state = UCL_STATE_KEY;\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t}\n\n\t\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t\tif (parser->state == UCL_STATE_VALUE) {\n\t\t\t\t\t\tobj = ucl_parser_add_container(NULL, parser, true, 0,\n\t\t\t\t\t\t\t\t\t\t\t\t\t   seen_obrace);\n\t\t\t\t\t}\n\t\t\t\t\telse {\n\t\t\t\t\t\tobj = ucl_parser_add_container(NULL, parser, false, 0,\n\t\t\t\t\t\t\t\t\t\t\t\t\t   seen_obrace);\n\t\t\t\t\t}\n\n\t\t\t\t\tif (obj == NULL) {\n\t\t\t\t\t\treturn false;\n\t\t\t\t\t}\n\n\t\t\t\t\tparser->top_obj = obj;\n\t\t\t\t\tparser->cur_obj = obj;\n\t\t\t\t}\n\t\t\t}\n\t\t\tbreak;\n\t\tcase UCL_STATE_KEY_OBRACE:\n\t\t\tparser->stack->e.params.flags |= UCL_STACK_HAS_OBRACE | UCL_STACK_AUTOMATIC;\n"
+        },
+        {
+          "evidence_id": "loc-412a822d4d9b28afca36ed3c",
+          "quote": "\tif (parser->stack != NULL && parser->state != UCL_STATE_ERROR) {\n\t\tstruct ucl_stack *st;\n\t\tbool has_error = false;\n\n\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n"
+        },
+        {
+          "evidence_id": "loc-9928d6a58a31a1df969a3f9b",
+          "quote": "const char *\nucl_parser_get_error(struct ucl_parser *parser)\n{\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tif (parser->err == NULL) {\n\t\treturn NULL;\n\t}\n\n\treturn utstring_body(parser->err);\n}\n"
+        },
+        {
+          "evidence_id": "loc-0e500ffd30d49d48412e4179",
+          "quote": "\t\tif (len > 0) {\n\t\t\t/* Need to parse something */\n\t\t\tswitch (parse_type) {\n\t\t\tdefault:\n\t\t\tcase UCL_PARSE_UCL:\n\t\t\t\treturn ucl_state_machine(parser);\n\t\t\tcase UCL_PARSE_MSGPACK:\n\t\t\t\treturn ucl_parse_msgpack(parser);\n\t\t\tcase UCL_PARSE_CBOR:\n\t\t\t\treturn ucl_parse_cbor(parser);\n\t\t\tcase UCL_PARSE_CSEXP:\n\t\t\t\treturn ucl_parse_csexp(parser);\n\t\t\t}\n\t\t}\n\t\telse {\n\t\t\t/* Just add empty chunk and go forward */\n\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t/*\n\t\t\t\t * In case of empty object, create one to indicate that we've\n\t\t\t\t * read something\n\t\t\t\t */\n\t\t\t\tparser->top_obj = ucl_object_new_full(UCL_OBJECT, priority);\n\t\t\t}\n\n\t\t\treturn true;\n\t\t}\n\t}\n\n\tucl_create_err(&parser->err, \"a parser is in an invalid state\");\n\n\treturn false;\n}\n\nbool ucl_parser_add_chunk_priority(struct ucl_parser *parser,\n\t\t\t\t\t\t\t\t   const unsigned char *data, size_t len, unsigned priority)\n{\n\t/* We dereference parser, so this check is essential */\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n"
+        },
+        {
+          "evidence_id": "loc-723486cde18dfef4e0366cc9",
+          "quote": "\t\tstruct ucl_stack *st;\n\t\tbool has_error = false;\n\n\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n"
+        }
+      ]
+    },
+    "observable_consequence": {
+      "status": "established",
+      "reason": "On the reported-error branch, the entry returns before its only ucl_parser_free call. The allocated parser and owned state remain unreleased.",
+      "evidence": [
+        {
+          "evidence_id": "loc-f68715bd979ea811d73d27ef",
+          "quote": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n"
+        },
+        {
+          "evidence_id": "loc-5cb6e31529ee628a1fbf3cb6",
+          "quote": "\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n"
+        },
+        {
+          "evidence_id": "loc-01de77eaf09fe01ed0dc5459",
+          "quote": "struct ucl_parser *\nucl_parser_new(int flags)\n{\n\tstruct ucl_parser *parser;\n\n\tparser = UCL_ALLOC(sizeof(struct ucl_parser));\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tmemset(parser, 0, sizeof(struct ucl_parser));\n"
+        },
+        {
+          "evidence_id": "loc-bc760e0553065be4a804d5e4",
+          "quote": "const char *\nucl_parser_get_error(struct ucl_parser *parser)\n{\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tif (parser->err == NULL) {\n\t\treturn NULL;\n\t}\n\n\treturn utstring_body(parser->err);\n}\n"
+        }
+      ]
+    },
+    "alternatives_ruled_out": {
+      "status": "established",
+      "reason": "The complete entry has no cleanup after its error return. The source delegates parsing but does not transfer or release the parser; its destructor is the release route. The candidate's counterhypothesis that the add-string delegate is missing is resolved by the supplied complete parser file.",
+      "evidence": [
+        {
+          "evidence_id": "loc-760c8fa17b5ceaf69a38215d",
+          "quote": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\t// If size is 0 we need a null-terminated string.\n\t// We dont null-terminate the string and by the design\n\t// of the API passing 0 as size with non null-terminated string\n\t// gives undefined behavior. \t\n\tif(size==0){\n\t\treturn 0;\n\t}\n\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n}\n"
+        },
+        {
+          "evidence_id": "loc-f68715bd979ea811d73d27ef",
+          "quote": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n"
+        },
+        {
+          "evidence_id": "loc-80ea9cd69ffdb6f2c1f3e18e",
+          "quote": "bool ucl_parser_add_chunk_full(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t\t   size_t len, unsigned priority, enum ucl_duplicate_strategy strat,\n\t\t\t\t\t\t\t   enum ucl_parse_type parse_type)\n{\n\tstruct ucl_chunk *chunk;\n\tstruct ucl_parser_special_handler *special_handler;\n\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\tif (data == NULL && len != 0) {\n\t\tucl_create_err(&parser->err, \"invalid chunk added\");\n\t\treturn false;\n\t}\n\n\tif (parser->state != UCL_STATE_ERROR) {\n\t\tchunk = UCL_ALLOC(sizeof(struct ucl_chunk));\n\t\tif (chunk == NULL) {\n\t\t\tucl_create_err(&parser->err, \"cannot allocate chunk structure\");\n\t\t\treturn false;\n\t\t}\n\n\t\tmemset(chunk, 0, sizeof(*chunk));\n\n\t\t/* Apply all matching handlers from the first to the last */\n\t\tLL_FOREACH(parser->special_handlers, special_handler)\n\t\t{\n\t\t\tif ((special_handler->flags & UCL_SPECIAL_HANDLER_PREPROCESS_ALL) ||\n\t\t\t\t(len >= special_handler->magic_len &&\n\t\t\t\t memcmp(data, special_handler->magic, special_handler->magic_len) == 0)) {\n\t\t\t\tunsigned char *ndata = NULL;\n\t\t\t\tsize_t nlen = 0;\n\n\t\t\t\tif (!special_handler->handler(parser, data, len, &ndata, &nlen,\n\t\t\t\t\t\t\t\t\t\t\t  special_handler->user_data)) {\n\t\t\t\t\tUCL_FREE(sizeof(struct ucl_chunk), chunk);\n\t\t\t\t\tucl_create_err(&parser->err, \"call for external handler failed\");\n\n\t\t\t\t\treturn false;\n\t\t\t\t}\n\n\t\t\t\tstruct ucl_parser_special_handler_chain *nchain;\n\t\t\t\tnchain = UCL_ALLOC(sizeof(*nchain));\n\t\t\t\tnchain->begin = ndata;\n\t\t\t\tnchain->len = nlen;\n\t\t\t\tnchain->special_handler = special_handler;\n\n\t\t\t\t/* Free order is reversed */\n\t\t\t\tLL_PREPEND(chunk->special_handlers, nchain);\n\n\t\t\t\tdata = ndata;\n\t\t\t\tlen = nlen;\n\t\t\t}\n\t\t}\n\n\t\tif (parse_type == UCL_PARSE_AUTO && len > 0) {\n\t\t\t/* We need to detect parse type by the first symbol */\n\t\t\tif (len >= 3 && data[0] == 0xd9 && data[1] == 0xd9 &&\n\t\t\t\tdata[2] == 0xf7) {\n\t\t\t\t/*\n\t\t\t\t * The self-described cbor tag, 55799. Cbor and msgpack are\n\t\t\t\t * otherwise indistinguishable from their first byte - both\n\t\t\t\t * spend 0x80 to 0xbf on short containers and strings - so\n\t\t\t\t * this prefix is the only thing that tells them apart, and\n\t\t\t\t * cbor without it has to be requested explicitly.\n\t\t\t\t */\n\t\t\t\tparse_type = UCL_PARSE_CBOR;\n\t\t\t}\n\t\t\telse if ((*data & 0x80) == 0x80) {\n\t\t\t\tparse_type = UCL_PARSE_MSGPACK;\n\t\t\t}\n\t\t\telse if (*data == '(') {\n\t\t\t\tparse_type = UCL_PARSE_CSEXP;\n\t\t\t}\n\t\t\telse {\n\t\t\t\tparse_type = UCL_PARSE_UCL;\n\t\t\t}\n\t\t}\n\n\t\tchunk->begin = data;\n\t\tchunk->remain = len;\n\t\tchunk->pos = chunk->begin;\n\t\tchunk->end = chunk->begin + len;\n\t\tchunk->line = 1;\n\t\tchunk->column = 0;\n\t\tchunk->priority = priority;\n\t\tchunk->strategy = strat;\n\t\tchunk->parse_type = parse_type;\n\n\t\tif (parser->cur_file) {\n\t\t\tchunk->fname = UCL_STRDUP(parser->cur_file);\n\t\t}\n\n\t\tLL_PREPEND(parser->chunks, chunk);\n\t\tparser->recursion++;\n\n\t\tif (parser->recursion > UCL_MAX_RECURSION) {\n\t\t\tucl_create_err(&parser->err, \"maximum include nesting limit is reached: %d\",\n\t\t\t\t\t\t   parser->recursion);\n\t\t\treturn false;\n\t\t}\n\n\t\tif (len > 0) {\n\t\t\t/* Need to parse something */\n\t\t\tswitch (parse_type) {\n\t\t\tdefault:\n\t\t\tcase UCL_PARSE_UCL:\n\t\t\t\treturn ucl_state_machine(parser);\n\t\t\tcase UCL_PARSE_MSGPACK:\n\t\t\t\treturn ucl_parse_msgpack(parser);\n\t\t\tcase UCL_PARSE_CBOR:\n\t\t\t\treturn ucl_parse_cbor(parser);\n\t\t\tcase UCL_PARSE_CSEXP:\n\t\t\t\treturn ucl_parse_csexp(parser);\n\t\t\t}\n\t\t}\n\t\telse {\n\t\t\t/* Just add empty chunk and go forward */\n\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t/*\n\t\t\t\t * In case of empty object, create one to indicate that we've\n\t\t\t\t * read something\n\t\t\t\t */\n\t\t\t\tparser->top_obj = ucl_object_new_full(UCL_OBJECT, priority);\n\t\t\t}\n\n\t\t\treturn true;\n\t\t}\n\t}\n\n\tucl_create_err(&parser->err, \"a parser is in an invalid state\");\n\n\treturn false;\n}\n\nbool ucl_parser_add_chunk_priority(struct ucl_parser *parser,\n\t\t\t\t\t\t\t\t   const unsigned char *data, size_t len, unsigned priority)\n{\n\t/* We dereference parser, so this check is essential */\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n"
+        },
+        {
+          "evidence_id": "loc-5e9b13c4933bf5f285ddd8c2",
+          "quote": "bool ucl_parser_add_string_priority(struct ucl_parser *parser, const char *data,\n\t\t\t\t\t\t\t\t\tsize_t len, unsigned priority)\n{\n\tif (data == NULL) {\n\t\tucl_create_err(&parser->err, \"invalid string added\");\n\t\treturn false;\n\t}\n\tif (len == 0) {\n\t\tlen = strlen(data);\n\t}\n\n\treturn ucl_parser_add_chunk_priority(parser,\n\t\t\t\t\t\t\t\t\t\t (const unsigned char *) data, len, priority);\n}\n"
+        }
+      ]
+    },
+    "identity_preserved": {
+      "status": "established",
+      "reason": "The same obligation—freeing the parser after a reported add-string parse error—is unsatisfied by the same old-harness return on both source versions. The destructor's added last-comment release does not change that blocker.",
+      "evidence": [
+        {
+          "evidence_id": "loc-45530eb3a880fb24d72a7d65",
+          "quote": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n"
+        },
+        {
+          "evidence_id": "loc-f68715bd979ea811d73d27ef",
+          "quote": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n"
+        },
+        {
+          "evidence_id": "loc-5cb6e31529ee628a1fbf3cb6",
+          "quote": "\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n"
+        },
+        {
+          "evidence_id": "loc-ccf54c4f1500e670247d24ad",
+          "quote": "\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n"
+        },
+        {
+          "evidence_id": "loc-3ed91f69e5a0c4efeb44448c",
+          "quote": "\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n"
+        }
+      ]
+    },
+    "source_evidence": [
+      {
+        "evidence_id": "loc-45530eb3a880fb24d72a7d65",
+        "quote": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n"
+      },
+      {
+        "evidence_id": "loc-f68715bd979ea811d73d27ef",
+        "quote": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n"
+      },
+      {
+        "evidence_id": "loc-c63d5e8e0b8ef5a64e1edc9e",
+        "quote": "bool ucl_parser_add_chunk_full(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t\t   size_t len, unsigned priority, enum ucl_duplicate_strategy strat,\n\t\t\t\t\t\t\t   enum ucl_parse_type parse_type)\n{\n\tstruct ucl_chunk *chunk;\n\tstruct ucl_parser_special_handler *special_handler;\n\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\tif (data == NULL && len != 0) {\n\t\tucl_create_err(&parser->err, \"invalid chunk added\");\n\t\treturn false;\n\t}\n\n\tif (parser->state != UCL_STATE_ERROR) {\n\t\tchunk = UCL_ALLOC(sizeof(struct ucl_chunk));\n\t\tif (chunk == NULL) {\n\t\t\tucl_create_err(&parser->err, \"cannot allocate chunk structure\");\n\t\t\treturn false;\n\t\t}\n\n\t\tmemset(chunk, 0, sizeof(*chunk));\n\n\t\t/* Apply all matching handlers from the first to the last */\n\t\tLL_FOREACH(parser->special_handlers, special_handler)\n\t\t{\n\t\t\tif ((special_handler->flags & UCL_SPECIAL_HANDLER_PREPROCESS_ALL) ||\n\t\t\t\t(len >= special_handler->magic_len &&\n\t\t\t\t memcmp(data, special_handler->magic, special_handler->magic_len) == 0)) {\n\t\t\t\tunsigned char *ndata = NULL;\n\t\t\t\tsize_t nlen = 0;\n\n\t\t\t\tif (!special_handler->handler(parser, data, len, &ndata, &nlen,\n\t\t\t\t\t\t\t\t\t\t\t  special_handler->user_data)) {\n\t\t\t\t\tUCL_FREE(sizeof(struct ucl_chunk), chunk);\n\t\t\t\t\tucl_create_err(&parser->err, \"call for external handler failed\");\n\n\t\t\t\t\treturn false;\n\t\t\t\t}\n\n\t\t\t\tstruct ucl_parser_special_handler_chain *nchain;\n\t\t\t\tnchain = UCL_ALLOC(sizeof(*nchain));\n\t\t\t\tnchain->begin = ndata;\n\t\t\t\tnchain->len = nlen;\n\t\t\t\tnchain->special_handler = special_handler;\n\n\t\t\t\t/* Free order is reversed */\n\t\t\t\tLL_PREPEND(chunk->special_handlers, nchain);\n\n\t\t\t\tdata = ndata;\n\t\t\t\tlen = nlen;\n\t\t\t}\n\t\t}\n\n\t\tif (parse_type == UCL_PARSE_AUTO && len > 0) {\n\t\t\t/* We need to detect parse type by the first symbol */\n\t\t\tif (len >= 3 && data[0] == 0xd9 && data[1] == 0xd9 &&\n\t\t\t\tdata[2] == 0xf7) {\n\t\t\t\t/*\n\t\t\t\t * The self-described cbor tag, 55799. Cbor and msgpack are\n\t\t\t\t * otherwise indistinguishable from their first byte - both\n\t\t\t\t * spend 0x80 to 0xbf on short containers and strings - so\n\t\t\t\t * this prefix is the only thing that tells them apart, and\n\t\t\t\t * cbor without it has to be requested explicitly.\n\t\t\t\t */\n\t\t\t\tparse_type = UCL_PARSE_CBOR;\n\t\t\t}\n\t\t\telse if ((*data & 0x80) == 0x80) {\n\t\t\t\tparse_type = UCL_PARSE_MSGPACK;\n\t\t\t}\n\t\t\telse if (*data == '(') {\n\t\t\t\tparse_type = UCL_PARSE_CSEXP;\n\t\t\t}\n\t\t\telse {\n\t\t\t\tparse_type = UCL_PARSE_UCL;\n\t\t\t}\n\t\t}\n\n\t\tchunk->begin = data;\n\t\tchunk->remain = len;\n\t\tchunk->pos = chunk->begin;\n\t\tchunk->end = chunk->begin + len;\n\t\tchunk->line = 1;\n\t\tchunk->column = 0;\n\t\tchunk->priority = priority;\n\t\tchunk->strategy = strat;\n\t\tchunk->parse_type = parse_type;\n\n\t\tif (parser->cur_file) {\n\t\t\tchunk->fname = UCL_STRDUP(parser->cur_file);\n\t\t}\n\n\t\tLL_PREPEND(parser->chunks, chunk);\n\t\tparser->recursion++;\n\n\t\tif (parser->recursion > UCL_MAX_RECURSION) {\n\t\t\tucl_create_err(&parser->err, \"maximum include nesting limit is reached: %d\",\n\t\t\t\t\t\t   parser->recursion);\n\t\t\treturn false;\n\t\t}\n\n\t\tif (len > 0) {\n\t\t\t/* Need to parse something */\n\t\t\tswitch (parse_type) {\n\t\t\tdefault:\n\t\t\tcase UCL_PARSE_UCL:\n\t\t\t\treturn ucl_state_machine(parser);\n\t\t\tcase UCL_PARSE_MSGPACK:\n\t\t\t\treturn ucl_parse_msgpack(parser);\n\t\t\tcase UCL_PARSE_CBOR:\n\t\t\t\treturn ucl_parse_cbor(parser);\n\t\t\tcase UCL_PARSE_CSEXP:\n\t\t\t\treturn ucl_parse_csexp(parser);\n\t\t\t}\n\t\t}\n\t\telse {\n\t\t\t/* Just add empty chunk and go forward */\n\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t/*\n\t\t\t\t * In case of empty object, create one to indicate that we've\n\t\t\t\t * read something\n\t\t\t\t */\n\t\t\t\tparser->top_obj = ucl_object_new_full(UCL_OBJECT, priority);\n\t\t\t}\n\n\t\t\treturn true;\n\t\t}\n\t}\n\n\tucl_create_err(&parser->err, \"a parser is in an invalid state\");\n\n\treturn false;\n}\n\nbool ucl_parser_add_chunk_priority(struct ucl_parser *parser,\n\t\t\t\t\t\t\t\t   const unsigned char *data, size_t len, unsigned priority)\n{\n\t/* We dereference parser, so this check is essential */\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n}\n\nbool ucl_parser_add_chunk(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t  size_t len)\n{\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t parser->default_priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n}\n\nbool ucl_parser_insert_chunk(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t\t size_t len)\n{\n\tif (parser == NULL || parser->top_obj == NULL) {\n\t\treturn false;\n\t}\n\n\tbool res;\n\tstruct ucl_chunk *chunk;\n\n\tint state = parser->state;\n\tparser->state = UCL_STATE_INIT;\n\n\t/* Prevent inserted chunks from unintentionally closing the current object */\n\tif (parser->stack != NULL && parser->stack->next != NULL) {\n\t\tparser->stack->e.params.level = parser->stack->next->e.params.level;\n\t}\n\n\tres = ucl_parser_add_chunk_full(parser, data, len, parser->chunks->priority,\n\t\t\t\t\t\t\t\t\tparser->chunks->strategy, parser->chunks->parse_type);\n\n\t/* Remove chunk from the stack */\n\tchunk = parser->chunks;\n\tif (chunk != NULL) {\n\t\tparser->chunks = chunk->next;\n\t\tucl_chunk_free(chunk);\n\t\tparser->recursion--;\n\t}\n\n\tparser->state = state;\n\n\treturn res;\n}\n\nbool ucl_parser_add_string_priority(struct ucl_parser *parser, const char *data,\n\t\t\t\t\t\t\t\t\tsize_t len, unsigned priority)\n{\n\tif (data == NULL) {\n\t\tucl_create_err(&parser->err, \"invalid string added\");\n\t\treturn false;\n\t}\n\tif (len == 0) {\n\t\tlen = strlen(data);\n\t}\n\n\treturn ucl_parser_add_chunk_priority(parser,\n\t\t\t\t\t\t\t\t\t\t (const unsigned char *) data, len, priority);\n}\n"
+      },
+      {
+        "evidence_id": "loc-6cf6316dbcf1271a761c6868",
+        "quote": "bool ucl_parser_add_chunk_full(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t\t   size_t len, unsigned priority, enum ucl_duplicate_strategy strat,\n\t\t\t\t\t\t\t   enum ucl_parse_type parse_type)\n{\n\tstruct ucl_chunk *chunk;\n\tstruct ucl_parser_special_handler *special_handler;\n\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\tif (data == NULL && len != 0) {\n\t\tucl_create_err(&parser->err, \"invalid chunk added\");\n\t\treturn false;\n\t}\n\n\tif (parser->state != UCL_STATE_ERROR) {\n\t\tchunk = UCL_ALLOC(sizeof(struct ucl_chunk));\n\t\tif (chunk == NULL) {\n\t\t\tucl_create_err(&parser->err, \"cannot allocate chunk structure\");\n\t\t\treturn false;\n\t\t}\n\n\t\tmemset(chunk, 0, sizeof(*chunk));\n\n\t\t/* Apply all matching handlers from the first to the last */\n\t\tLL_FOREACH(parser->special_handlers, special_handler)\n\t\t{\n\t\t\tif ((special_handler->flags & UCL_SPECIAL_HANDLER_PREPROCESS_ALL) ||\n\t\t\t\t(len >= special_handler->magic_len &&\n\t\t\t\t memcmp(data, special_handler->magic, special_handler->magic_len) == 0)) {\n\t\t\t\tunsigned char *ndata = NULL;\n\t\t\t\tsize_t nlen = 0;\n\n\t\t\t\tif (!special_handler->handler(parser, data, len, &ndata, &nlen,\n\t\t\t\t\t\t\t\t\t\t\t  special_handler->user_data)) {\n\t\t\t\t\tUCL_FREE(sizeof(struct ucl_chunk), chunk);\n\t\t\t\t\tucl_create_err(&parser->err, \"call for external handler failed\");\n\n\t\t\t\t\treturn false;\n\t\t\t\t}\n\n\t\t\t\tstruct ucl_parser_special_handler_chain *nchain;\n\t\t\t\tnchain = UCL_ALLOC(sizeof(*nchain));\n\t\t\t\tnchain->begin = ndata;\n\t\t\t\tnchain->len = nlen;\n\t\t\t\tnchain->special_handler = special_handler;\n\n\t\t\t\t/* Free order is reversed */\n\t\t\t\tLL_PREPEND(chunk->special_handlers, nchain);\n\n\t\t\t\tdata = ndata;\n\t\t\t\tlen = nlen;\n\t\t\t}\n\t\t}\n\n\t\tif (parse_type == UCL_PARSE_AUTO && len > 0) {\n\t\t\t/* We need to detect parse type by the first symbol */\n\t\t\tif (len >= 3 && data[0] == 0xd9 && data[1] == 0xd9 &&\n\t\t\t\tdata[2] == 0xf7) {\n\t\t\t\t/*\n\t\t\t\t * The self-described cbor tag, 55799. Cbor and msgpack are\n\t\t\t\t * otherwise indistinguishable from their first byte - both\n\t\t\t\t * spend 0x80 to 0xbf on short containers and strings - so\n\t\t\t\t * this prefix is the only thing that tells them apart, and\n\t\t\t\t * cbor without it has to be requested explicitly.\n\t\t\t\t */\n\t\t\t\tparse_type = UCL_PARSE_CBOR;\n\t\t\t}\n\t\t\telse if ((*data & 0x80) == 0x80) {\n\t\t\t\tparse_type = UCL_PARSE_MSGPACK;\n\t\t\t}\n\t\t\telse if (*data == '(') {\n\t\t\t\tparse_type = UCL_PARSE_CSEXP;\n\t\t\t}\n\t\t\telse {\n\t\t\t\tparse_type = UCL_PARSE_UCL;\n\t\t\t}\n\t\t}\n\n\t\tchunk->begin = data;\n\t\tchunk->remain = len;\n\t\tchunk->pos = chunk->begin;\n\t\tchunk->end = chunk->begin + len;\n\t\tchunk->line = 1;\n\t\tchunk->column = 0;\n\t\tchunk->priority = priority;\n\t\tchunk->strategy = strat;\n\t\tchunk->parse_type = parse_type;\n\n\t\tif (parser->cur_file) {\n\t\t\tchunk->fname = UCL_STRDUP(parser->cur_file);\n\t\t}\n\n\t\tLL_PREPEND(parser->chunks, chunk);\n\t\tparser->recursion++;\n\n\t\tif (parser->recursion > UCL_MAX_RECURSION) {\n\t\t\tucl_create_err(&parser->err, \"maximum include nesting limit is reached: %d\",\n\t\t\t\t\t\t   parser->recursion);\n\t\t\treturn false;\n\t\t}\n\n\t\tif (len > 0) {\n\t\t\t/* Need to parse something */\n\t\t\tswitch (parse_type) {\n\t\t\tdefault:\n\t\t\tcase UCL_PARSE_UCL:\n\t\t\t\treturn ucl_state_machine(parser);\n\t\t\tcase UCL_PARSE_MSGPACK:\n\t\t\t\treturn ucl_parse_msgpack(parser);\n\t\t\tcase UCL_PARSE_CBOR:\n\t\t\t\treturn ucl_parse_cbor(parser);\n\t\t\tcase UCL_PARSE_CSEXP:\n\t\t\t\treturn ucl_parse_csexp(parser);\n\t\t\t}\n\t\t}\n\t\telse {\n\t\t\t/* Just add empty chunk and go forward */\n\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t/*\n\t\t\t\t * In case of empty object, create one to indicate that we've\n\t\t\t\t * read something\n\t\t\t\t */\n\t\t\t\tparser->top_obj = ucl_object_new_full(UCL_OBJECT, priority);\n\t\t\t}\n\n\t\t\treturn true;\n\t\t}\n\t}\n\n\tucl_create_err(&parser->err, \"a parser is in an invalid state\");\n\n\treturn false;\n}\n\nbool ucl_parser_add_chunk_priority(struct ucl_parser *parser,\n\t\t\t\t\t\t\t\t   const unsigned char *data, size_t len, unsigned priority)\n{\n\t/* We dereference parser, so this check is essential */\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n}\n\nbool ucl_parser_add_chunk(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t  size_t len)\n{\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t parser->default_priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n}\n\nbool ucl_parser_insert_chunk(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t\t size_t len)\n{\n\tif (parser == NULL || parser->top_obj == NULL) {\n\t\treturn false;\n\t}\n\n\tbool res;\n\tstruct ucl_chunk *chunk;\n\n\tint state = parser->state;\n\tparser->state = UCL_STATE_INIT;\n\n\t/* Prevent inserted chunks from unintentionally closing the current object */\n\tif (parser->stack != NULL && parser->stack->next != NULL) {\n\t\tparser->stack->e.params.level = parser->stack->next->e.params.level;\n\t}\n\n\tres = ucl_parser_add_chunk_full(parser, data, len, parser->chunks->priority,\n\t\t\t\t\t\t\t\t\tparser->chunks->strategy, parser->chunks->parse_type);\n\n\t/* Remove chunk from the stack */\n\tchunk = parser->chunks;\n\tif (chunk != NULL) {\n\t\tparser->chunks = chunk->next;\n\t\tucl_chunk_free(chunk);\n\t\tparser->recursion--;\n\t}\n\n\tparser->state = state;\n\n\treturn res;\n}\n\nbool ucl_parser_add_string_priority(struct ucl_parser *parser, const char *data,\n\t\t\t\t\t\t\t\t\tsize_t len, unsigned priority)\n{\n\tif (data == NULL) {\n\t\tucl_create_err(&parser->err, \"invalid string added\");\n\t\treturn false;\n\t}\n\tif (len == 0) {\n\t\tlen = strlen(data);\n\t}\n\n\treturn ucl_parser_add_chunk_priority(parser,\n\t\t\t\t\t\t\t\t\t\t (const unsigned char *) data, len, priority);\n}\n"
+      },
+      {
+        "evidence_id": "loc-56d102e4dc029dada5fc0b29",
+        "quote": "\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n"
+      },
+      {
+        "evidence_id": "loc-497241341148b4be0444fe81",
+        "quote": "\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n"
+      },
+      {
+        "evidence_id": "loc-122f18732d30fc13d00e988f",
+        "quote": "const char *\nucl_parser_get_error(struct ucl_parser *parser)\n{\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tif (parser->err == NULL) {\n\t\treturn NULL;\n\t}\n\n\treturn utstring_body(parser->err);\n}\n"
+      },
+      {
+        "evidence_id": "loc-6e5ea34a99a2a315bc01168a",
+        "quote": "const char *\nucl_parser_get_error(struct ucl_parser *parser)\n{\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tif (parser->err == NULL) {\n\t\treturn NULL;\n\t}\n\n\treturn utstring_body(parser->err);\n}\n"
+      }
+    ],
+    "harness_evidence": [
+      {
+        "evidence_id": "loc-760c8fa17b5ceaf69a38215d",
+        "quote": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\t// If size is 0 we need a null-terminated string.\n\t// We dont null-terminate the string and by the design\n\t// of the API passing 0 as size with non null-terminated string\n\t// gives undefined behavior. \t\n\tif(size==0){\n\t\treturn 0;\n\t}\n\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n}\n"
+      },
+      {
+        "evidence_id": "loc-1d21ebaa27cac6fb52590337",
+        "quote": "./autogen.sh --force && ./configure\nmake\n\n$CC $CFLAGS -c tests/fuzzers/ucl_add_string_fuzzer.c \\\n  -DHAVE_CONFIG_H -I./src -I./include src/.libs/libucl.a -I./ \\\n  -o $OUT/ucl_add_string_fuzzer.o\n\n$CXX $CXXFLAGS $LIB_FUZZING_ENGINE $OUT/ucl_add_string_fuzzer.o -DHAVE_CONFIG_H -I./src -I./include src/.libs/libucl.a -I. -o $OUT/ucl_add_string_fuzzer\n"
+      }
+    ],
+    "missing_information": [],
+    "requested_symbols": [],
+    "requested_paths": [],
+    "obligation_class": "execution_compatibility",
+    "scope_basis": "target_state_contract",
+    "trigger_basis": "current_target_execution",
+    "coverage_witness": {
+      "supported_behavior": "",
+      "required_setup": "",
+      "actual_target_setup": "",
+      "blocked_behavior": "",
+      "equivalent_routes": ""
+    }
+  },
+  "citation_errors": [],
+  "citations": [
+    {
+      "pointer": "/scope_contract/evidence/0",
+      "evidence_id": "loc-f68715bd979ea811d73d27ef",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-672fb3fb3dce0fc1c0d2",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 728,
+        "end_line": 796,
+        "unit_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a",
+        "quote_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/1",
+      "evidence_id": "loc-5cb6e31529ee628a1fbf3cb6",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+      "text": "\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-e361eddd782de83c425d",
+        "version": "harness",
+        "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+        "start_line": 14,
+        "end_line": 24,
+        "unit_sha256": "ec9232480c806b16dfbf27c029bfca494c9a582f2657975b69ecdf3a326b7f05",
+        "quote_sha256": "7070be06facc614926079da242dc3eb364fd87da107062b0ff85e88770f1f6bd"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/2",
+      "evidence_id": "loc-b5377c61d2ec7c7066173dcb",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "bool ucl_parser_add_string(struct ucl_parser *parser, const char *data,\n\t\t\t\t\t\t   size_t len)\n{\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_string_priority(parser,\n\t\t\t\t\t\t\t\t\t\t  (const unsigned char *) data, len, parser->default_priority);\n}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "Connects the entry's add-string call to parser string handling.",
+      "location": {
+        "unit_id": "u-2a428e2a1005ddd33ae5",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 3424,
+        "end_line": 3433,
+        "unit_sha256": "241f3412a766ddf75a8a638e08b5a87727ac598a13721fcb4dbce74abb9cc4e6",
+        "quote_sha256": "241f3412a766ddf75a8a638e08b5a87727ac598a13721fcb4dbce74abb9cc4e6"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/0",
+      "evidence_id": "loc-5eb34f48535259acb2bb0f15",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+      "text": "\tif(size==0){\n\t\treturn 0;\n\t}\n\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-e361eddd782de83c425d",
+        "version": "harness",
+        "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+        "start_line": 11,
+        "end_line": 20,
+        "unit_sha256": "ec9232480c806b16dfbf27c029bfca494c9a582f2657975b69ecdf3a326b7f05",
+        "quote_sha256": "c5be21bda4917f64a578bfe8a54fc8d0f6546a376c845bd11bd6d9c39e47ae75"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/1",
+      "evidence_id": "loc-91fe032f1918dea0a9ae1090",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "bool ucl_parser_add_chunk_priority(struct ucl_parser *parser,\n\t\t\t\t\t\t\t\t   const unsigned char *data, size_t len, unsigned priority)\n{\n\t/* We dereference parser, so this check is essential */\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The chunk priority helper selects UCL parsing.",
+      "location": {
+        "unit_id": "u-6b7800ed7cfb9f8ac17d",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 3352,
+        "end_line": 3361,
+        "unit_sha256": "c417f47ba42a998958a853f8bee1008b598e217c905edbfd6de7a30fade591cb",
+        "quote_sha256": "ed024178103a838543324ae294c4ebf413d0a874b70546e405b555b6325fa7d1"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/2",
+      "evidence_id": "loc-6d4f8a7d7f059d85c1f10179",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "bool ucl_parser_add_string_priority(struct ucl_parser *parser, const char *data,\n\t\t\t\t\t\t\t\t\tsize_t len, unsigned priority)\n{\n\tif (data == NULL) {\n\t\tucl_create_err(&parser->err, \"invalid string added\");\n\t\treturn false;\n\t}\n\tif (len == 0) {\n\t\tlen = strlen(data);\n\t}\n\n\treturn ucl_parser_add_chunk_priority(parser,\n\t\t\t\t\t\t\t\t\t\t (const unsigned char *) data, len, priority);\n}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "The string priority helper passes the nonempty bytes to the chunk helper.",
+      "location": {
+        "unit_id": "u-e54d97e21f4a04d27934",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 3409,
+        "end_line": 3422,
+        "unit_sha256": "691183ccafd194b3e7c22b80e1cd0f85d11ffe24133919f4e571dc9fdf1ab068",
+        "quote_sha256": "691183ccafd194b3e7c22b80e1cd0f85d11ffe24133919f4e571dc9fdf1ab068"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/3",
+      "evidence_id": "loc-89c730c85f1834de14b4864a",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\t\tif (len > 0) {\n\t\t\t/* Need to parse something */\n\t\t\tswitch (parse_type) {\n\t\t\tdefault:\n\t\t\tcase UCL_PARSE_UCL:\n\t\t\t\treturn ucl_state_machine(parser);\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "A nonempty UCL chunk invokes the state machine.",
+      "location": {
+        "unit_id": "u-6b7800ed7cfb9f8ac17d",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 3319,
+        "end_line": 3324,
+        "unit_sha256": "c417f47ba42a998958a853f8bee1008b598e217c905edbfd6de7a30fade591cb",
+        "quote_sha256": "3aaa27b13118035cc800d05dce72a1222c334cbfa11600fdc8fbf4ee780ecc32"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/4",
+      "evidence_id": "loc-905e734bf677d30973934581",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\t\t\t\tif (p < chunk->end) {\n\t\t\t\t\tif (*p == '[') {\n\t\t\t\t\t\tparser->state = UCL_STATE_VALUE;\n\t\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\t\t\tseen_obrace = true;\n\t\t\t\t\t}\n\t\t\t\t\telse {\n\n\t\t\t\t\t\tif (*p == '{') {\n\t\t\t\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\t\t\t\tparser->state = UCL_STATE_KEY_OBRACE;\n\t\t\t\t\t\t\tseen_obrace = true;\n\t\t\t\t\t\t}\n\t\t\t\t\t\telse {\n\t\t\t\t\t\t\tparser->state = UCL_STATE_KEY;\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t}\n\n\t\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t\tif (parser->state == UCL_STATE_VALUE) {\n\t\t\t\t\t\tobj = ucl_parser_add_container(NULL, parser, true, 0,\n\t\t\t\t\t\t\t\t\t\t\t\t\t   seen_obrace);\n\t\t\t\t\t}\n\t\t\t\t\telse {\n\t\t\t\t\t\tobj = ucl_parser_add_container(NULL, parser, false, 0,\n\t\t\t\t\t\t\t\t\t\t\t\t\t   seen_obrace);\n\t\t\t\t\t}\n\n\t\t\t\t\tif (obj == NULL) {\n\t\t\t\t\t\treturn false;\n\t\t\t\t\t}\n\n\t\t\t\t\tparser->top_obj = obj;\n\t\t\t\t\tparser->cur_obj = obj;\n\t\t\t\t}\n\t\t\t}\n\t\t\tbreak;\n\t\tcase UCL_STATE_KEY_OBRACE:\n\t\t\tparser->stack->e.params.flags |= UCL_STACK_HAS_OBRACE | UCL_STACK_AUTOMATIC;\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The opening brace creates the top object and marks its stack frame.",
+      "location": {
+        "unit_id": "u-d68c375c2b8c50c4dc7a",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 2690,
+        "end_line": 2729,
+        "unit_sha256": "127ecfe418bf5642e0f7266f55ef4d42bdfc92c1671b8f07b75ca4e9acfa57de",
+        "quote_sha256": "efaeb89cd9a6a9446214586b70f29743e80307716794a08ef31ac4f97bdb393f"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/5",
+      "evidence_id": "loc-412a822d4d9b28afca36ed3c",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\tif (parser->stack != NULL && parser->state != UCL_STATE_ERROR) {\n\t\tstruct ucl_stack *st;\n\t\tbool has_error = false;\n\n\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The unclosed frame records an error.",
+      "location": {
+        "unit_id": "u-d68c375c2b8c50c4dc7a",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 2970,
+        "end_line": 2997,
+        "unit_sha256": "127ecfe418bf5642e0f7266f55ef4d42bdfc92c1671b8f07b75ca4e9acfa57de",
+        "quote_sha256": "494c2985119ae5fb44b130d47cd7c7cfea4263ecbb057d20165b240893fd1518"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/6",
+      "evidence_id": "loc-9928d6a58a31a1df969a3f9b",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "const char *\nucl_parser_get_error(struct ucl_parser *parser)\n{\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tif (parser->err == NULL) {\n\t\treturn NULL;\n\t}\n\n\treturn utstring_body(parser->err);\n}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "Returns the recorded error to the harness.",
+      "location": {
+        "unit_id": "u-afbe55a23b87f08571ff",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 798,
+        "end_line": 810,
+        "unit_sha256": "187275f50892fc315ffc29130465222974bfbc0d221ef23ac22752bcd0f019be",
+        "quote_sha256": "187275f50892fc315ffc29130465222974bfbc0d221ef23ac22752bcd0f019be"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/7",
+      "evidence_id": "loc-0e500ffd30d49d48412e4179",
+      "kind": "before_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\t\tif (len > 0) {\n\t\t\t/* Need to parse something */\n\t\t\tswitch (parse_type) {\n\t\t\tdefault:\n\t\t\tcase UCL_PARSE_UCL:\n\t\t\t\treturn ucl_state_machine(parser);\n\t\t\tcase UCL_PARSE_MSGPACK:\n\t\t\t\treturn ucl_parse_msgpack(parser);\n\t\t\tcase UCL_PARSE_CBOR:\n\t\t\t\treturn ucl_parse_cbor(parser);\n\t\t\tcase UCL_PARSE_CSEXP:\n\t\t\t\treturn ucl_parse_csexp(parser);\n\t\t\t}\n\t\t}\n\t\telse {\n\t\t\t/* Just add empty chunk and go forward */\n\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t/*\n\t\t\t\t * In case of empty object, create one to indicate that we've\n\t\t\t\t * read something\n\t\t\t\t */\n\t\t\t\tparser->top_obj = ucl_object_new_full(UCL_OBJECT, priority);\n\t\t\t}\n\n\t\t\treturn true;\n\t\t}\n\t}\n\n\tucl_create_err(&parser->err, \"a parser is in an invalid state\");\n\n\treturn false;\n}\n\nbool ucl_parser_add_chunk_priority(struct ucl_parser *parser,\n\t\t\t\t\t\t\t\t   const unsigned char *data, size_t len, unsigned priority)\n{\n\t/* We dereference parser, so this check is essential */\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The before version uses the same UCL dispatch.",
+      "location": {
+        "unit_id": "u-6566ca8f4e8e16533c9b",
+        "version": "before",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 3318,
+        "end_line": 3360,
+        "unit_sha256": "2043a045ee3495b5362460215a1e9775f19e0072c9a10a4cef1b4786671695ec",
+        "quote_sha256": "8b2d1878f1327a117962132a69d1a5c8269bb2d34d20ede3344aba8d9d073d15"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/8",
+      "evidence_id": "loc-723486cde18dfef4e0366cc9",
+      "kind": "before_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\t\tstruct ucl_stack *st;\n\t\tbool has_error = false;\n\n\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The before version records the same unmatched-brace error.",
+      "location": {
+        "unit_id": "u-e26e3a3a417285f0e1d4",
+        "version": "before",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 2970,
+        "end_line": 2996,
+        "unit_sha256": "e336d9a6e232605b554303f7e29bf0ca5944696488ee50fc5a24dea8c7505d82",
+        "quote_sha256": "9f5ca01230e4c9810b47ff981ba99214cb5c5e0da440c0d3ac8572d467d9247e"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/0",
+      "evidence_id": "loc-f68715bd979ea811d73d27ef",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-672fb3fb3dce0fc1c0d2",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 728,
+        "end_line": 796,
+        "unit_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a",
+        "quote_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/1",
+      "evidence_id": "loc-5cb6e31529ee628a1fbf3cb6",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+      "text": "\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-e361eddd782de83c425d",
+        "version": "harness",
+        "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+        "start_line": 14,
+        "end_line": 24,
+        "unit_sha256": "ec9232480c806b16dfbf27c029bfca494c9a582f2657975b69ecdf3a326b7f05",
+        "quote_sha256": "7070be06facc614926079da242dc3eb364fd87da107062b0ff85e88770f1f6bd"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/2",
+      "evidence_id": "loc-01de77eaf09fe01ed0dc5459",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "struct ucl_parser *\nucl_parser_new(int flags)\n{\n\tstruct ucl_parser *parser;\n\n\tparser = UCL_ALLOC(sizeof(struct ucl_parser));\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tmemset(parser, 0, sizeof(struct ucl_parser));\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "Parser creation allocates the object that needs release.",
+      "location": {
+        "unit_id": "u-042a323ff22f8a79fa01",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 3009,
+        "end_line": 3019,
+        "unit_sha256": "7cfcabd197903de96b8823bfb4178d7311cfbbacd5f6a689adecdbe109c8f4f4",
+        "quote_sha256": "47cf0996ba14c412b751926b579146b9a9d4c30abbde3e60f73d874f4731a48c"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/3",
+      "evidence_id": "loc-bc760e0553065be4a804d5e4",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "const char *\nucl_parser_get_error(struct ucl_parser *parser)\n{\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tif (parser->err == NULL) {\n\t\treturn NULL;\n\t}\n\n\treturn utstring_body(parser->err);\n}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "The recorded error makes the entry's check non-NULL.",
+      "location": {
+        "unit_id": "u-afbe55a23b87f08571ff",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 798,
+        "end_line": 810,
+        "unit_sha256": "187275f50892fc315ffc29130465222974bfbc0d221ef23ac22752bcd0f019be",
+        "quote_sha256": "187275f50892fc315ffc29130465222974bfbc0d221ef23ac22752bcd0f019be"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/0",
+      "evidence_id": "loc-760c8fa17b5ceaf69a38215d",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+      "text": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\t// If size is 0 we need a null-terminated string.\n\t// We dont null-terminate the string and by the design\n\t// of the API passing 0 as size with non null-terminated string\n\t// gives undefined behavior. \t\n\tif(size==0){\n\t\treturn 0;\n\t}\n\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-e361eddd782de83c425d",
+        "version": "harness",
+        "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+        "start_line": 6,
+        "end_line": 25,
+        "unit_sha256": "ec9232480c806b16dfbf27c029bfca494c9a582f2657975b69ecdf3a326b7f05",
+        "quote_sha256": "dc6feedb2349706a821c5bc2d8ef009057e56b9336121b899f2b3fc437238c9e"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/1",
+      "evidence_id": "loc-f68715bd979ea811d73d27ef",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-672fb3fb3dce0fc1c0d2",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 728,
+        "end_line": 796,
+        "unit_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a",
+        "quote_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/2",
+      "evidence_id": "loc-80ea9cd69ffdb6f2c1f3e18e",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "bool ucl_parser_add_chunk_full(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t\t   size_t len, unsigned priority, enum ucl_duplicate_strategy strat,\n\t\t\t\t\t\t\t   enum ucl_parse_type parse_type)\n{\n\tstruct ucl_chunk *chunk;\n\tstruct ucl_parser_special_handler *special_handler;\n\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\tif (data == NULL && len != 0) {\n\t\tucl_create_err(&parser->err, \"invalid chunk added\");\n\t\treturn false;\n\t}\n\n\tif (parser->state != UCL_STATE_ERROR) {\n\t\tchunk = UCL_ALLOC(sizeof(struct ucl_chunk));\n\t\tif (chunk == NULL) {\n\t\t\tucl_create_err(&parser->err, \"cannot allocate chunk structure\");\n\t\t\treturn false;\n\t\t}\n\n\t\tmemset(chunk, 0, sizeof(*chunk));\n\n\t\t/* Apply all matching handlers from the first to the last */\n\t\tLL_FOREACH(parser->special_handlers, special_handler)\n\t\t{\n\t\t\tif ((special_handler->flags & UCL_SPECIAL_HANDLER_PREPROCESS_ALL) ||\n\t\t\t\t(len >= special_handler->magic_len &&\n\t\t\t\t memcmp(data, special_handler->magic, special_handler->magic_len) == 0)) {\n\t\t\t\tunsigned char *ndata = NULL;\n\t\t\t\tsize_t nlen = 0;\n\n\t\t\t\tif (!special_handler->handler(parser, data, len, &ndata, &nlen,\n\t\t\t\t\t\t\t\t\t\t\t  special_handler->user_data)) {\n\t\t\t\t\tUCL_FREE(sizeof(struct ucl_chunk), chunk);\n\t\t\t\t\tucl_create_err(&parser->err, \"call for external handler failed\");\n\n\t\t\t\t\treturn false;\n\t\t\t\t}\n\n\t\t\t\tstruct ucl_parser_special_handler_chain *nchain;\n\t\t\t\tnchain = UCL_ALLOC(sizeof(*nchain));\n\t\t\t\tnchain->begin = ndata;\n\t\t\t\tnchain->len = nlen;\n\t\t\t\tnchain->special_handler = special_handler;\n\n\t\t\t\t/* Free order is reversed */\n\t\t\t\tLL_PREPEND(chunk->special_handlers, nchain);\n\n\t\t\t\tdata = ndata;\n\t\t\t\tlen = nlen;\n\t\t\t}\n\t\t}\n\n\t\tif (parse_type == UCL_PARSE_AUTO && len > 0) {\n\t\t\t/* We need to detect parse type by the first symbol */\n\t\t\tif (len >= 3 && data[0] == 0xd9 && data[1] == 0xd9 &&\n\t\t\t\tdata[2] == 0xf7) {\n\t\t\t\t/*\n\t\t\t\t * The self-described cbor tag, 55799. Cbor and msgpack are\n\t\t\t\t * otherwise indistinguishable from their first byte - both\n\t\t\t\t * spend 0x80 to 0xbf on short containers and strings - so\n\t\t\t\t * this prefix is the only thing that tells them apart, and\n\t\t\t\t * cbor without it has to be requested explicitly.\n\t\t\t\t */\n\t\t\t\tparse_type = UCL_PARSE_CBOR;\n\t\t\t}\n\t\t\telse if ((*data & 0x80) == 0x80) {\n\t\t\t\tparse_type = UCL_PARSE_MSGPACK;\n\t\t\t}\n\t\t\telse if (*data == '(') {\n\t\t\t\tparse_type = UCL_PARSE_CSEXP;\n\t\t\t}\n\t\t\telse {\n\t\t\t\tparse_type = UCL_PARSE_UCL;\n\t\t\t}\n\t\t}\n\n\t\tchunk->begin = data;\n\t\tchunk->remain = len;\n\t\tchunk->pos = chunk->begin;\n\t\tchunk->end = chunk->begin + len;\n\t\tchunk->line = 1;\n\t\tchunk->column = 0;\n\t\tchunk->priority = priority;\n\t\tchunk->strategy = strat;\n\t\tchunk->parse_type = parse_type;\n\n\t\tif (parser->cur_file) {\n\t\t\tchunk->fname = UCL_STRDUP(parser->cur_file);\n\t\t}\n\n\t\tLL_PREPEND(parser->chunks, chunk);\n\t\tparser->recursion++;\n\n\t\tif (parser->recursion > UCL_MAX_RECURSION) {\n\t\t\tucl_create_err(&parser->err, \"maximum include nesting limit is reached: %d\",\n\t\t\t\t\t\t   parser->recursion);\n\t\t\treturn false;\n\t\t}\n\n\t\tif (len > 0) {\n\t\t\t/* Need to parse something */\n\t\t\tswitch (parse_type) {\n\t\t\tdefault:\n\t\t\tcase UCL_PARSE_UCL:\n\t\t\t\treturn ucl_state_machine(parser);\n\t\t\tcase UCL_PARSE_MSGPACK:\n\t\t\t\treturn ucl_parse_msgpack(parser);\n\t\t\tcase UCL_PARSE_CBOR:\n\t\t\t\treturn ucl_parse_cbor(parser);\n\t\t\tcase UCL_PARSE_CSEXP:\n\t\t\t\treturn ucl_parse_csexp(parser);\n\t\t\t}\n\t\t}\n\t\telse {\n\t\t\t/* Just add empty chunk and go forward */\n\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t/*\n\t\t\t\t * In case of empty object, create one to indicate that we've\n\t\t\t\t * read something\n\t\t\t\t */\n\t\t\t\tparser->top_obj = ucl_object_new_full(UCL_OBJECT, priority);\n\t\t\t}\n\n\t\t\treturn true;\n\t\t}\n\t}\n\n\tucl_create_err(&parser->err, \"a parser is in an invalid state\");\n\n\treturn false;\n}\n\nbool ucl_parser_add_chunk_priority(struct ucl_parser *parser,\n\t\t\t\t\t\t\t\t   const unsigned char *data, size_t len, unsigned priority)\n{\n\t/* We dereference parser, so this check is essential */\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Shows the delegated chunk path and its UCL dispatch.",
+      "location": {
+        "unit_id": "u-6b7800ed7cfb9f8ac17d",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 3216,
+        "end_line": 3361,
+        "unit_sha256": "c417f47ba42a998958a853f8bee1008b598e217c905edbfd6de7a30fade591cb",
+        "quote_sha256": "97bc2b2d2f6f427c90478b5a72a36c82dd47ed7e6bebeea3059a073243bcf6d9"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/3",
+      "evidence_id": "loc-5e9b13c4933bf5f285ddd8c2",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "bool ucl_parser_add_string_priority(struct ucl_parser *parser, const char *data,\n\t\t\t\t\t\t\t\t\tsize_t len, unsigned priority)\n{\n\tif (data == NULL) {\n\t\tucl_create_err(&parser->err, \"invalid string added\");\n\t\treturn false;\n\t}\n\tif (len == 0) {\n\t\tlen = strlen(data);\n\t}\n\n\treturn ucl_parser_add_chunk_priority(parser,\n\t\t\t\t\t\t\t\t\t\t (const unsigned char *) data, len, priority);\n}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "Shows add-string priority only delegates the supplied data.",
+      "location": {
+        "unit_id": "u-e54d97e21f4a04d27934",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 3409,
+        "end_line": 3422,
+        "unit_sha256": "691183ccafd194b3e7c22b80e1cd0f85d11ffe24133919f4e571dc9fdf1ab068",
+        "quote_sha256": "691183ccafd194b3e7c22b80e1cd0f85d11ffe24133919f4e571dc9fdf1ab068"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/0",
+      "evidence_id": "loc-45530eb3a880fb24d72a7d65",
+      "kind": "before_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-3aba805b0d21de46ddd2",
+        "version": "before",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 728,
+        "end_line": 791,
+        "unit_sha256": "9a3bb3b8e3ac2f3999d7522ba4d29676aa5582c13265c4fc20361307969227eb",
+        "quote_sha256": "9a3bb3b8e3ac2f3999d7522ba4d29676aa5582c13265c4fc20361307969227eb"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/1",
+      "evidence_id": "loc-f68715bd979ea811d73d27ef",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-672fb3fb3dce0fc1c0d2",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 728,
+        "end_line": 796,
+        "unit_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a",
+        "quote_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/2",
+      "evidence_id": "loc-5cb6e31529ee628a1fbf3cb6",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+      "text": "\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-e361eddd782de83c425d",
+        "version": "harness",
+        "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+        "start_line": 14,
+        "end_line": 24,
+        "unit_sha256": "ec9232480c806b16dfbf27c029bfca494c9a582f2657975b69ecdf3a326b7f05",
+        "quote_sha256": "7070be06facc614926079da242dc3eb364fd87da107062b0ff85e88770f1f6bd"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/3",
+      "evidence_id": "loc-ccf54c4f1500e670247d24ad",
+      "kind": "before_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The before version reports the unmatched brace.",
+      "location": {
+        "unit_id": "u-e26e3a3a417285f0e1d4",
+        "version": "before",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 2973,
+        "end_line": 2996,
+        "unit_sha256": "e336d9a6e232605b554303f7e29bf0ca5944696488ee50fc5a24dea8c7505d82",
+        "quote_sha256": "6ae26d7090b9bb322bff5f418db9d6e4a5a231c1d320bbec34997a07363ee58c"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/4",
+      "evidence_id": "loc-3ed91f69e5a0c4efeb44448c",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The after version reports the same unmatched brace.",
+      "location": {
+        "unit_id": "u-d68c375c2b8c50c4dc7a",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 2974,
+        "end_line": 2997,
+        "unit_sha256": "127ecfe418bf5642e0f7266f55ef4d42bdfc92c1671b8f07b75ca4e9acfa57de",
+        "quote_sha256": "6ae26d7090b9bb322bff5f418db9d6e4a5a231c1d320bbec34997a07363ee58c"
+      }
+    },
+    {
+      "pointer": "/source_evidence/0",
+      "evidence_id": "loc-45530eb3a880fb24d72a7d65",
+      "kind": "before_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-3aba805b0d21de46ddd2",
+        "version": "before",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 728,
+        "end_line": 791,
+        "unit_sha256": "9a3bb3b8e3ac2f3999d7522ba4d29676aa5582c13265c4fc20361307969227eb",
+        "quote_sha256": "9a3bb3b8e3ac2f3999d7522ba4d29676aa5582c13265c4fc20361307969227eb"
+      }
+    },
+    {
+      "pointer": "/source_evidence/1",
+      "evidence_id": "loc-f68715bd979ea811d73d27ef",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-672fb3fb3dce0fc1c0d2",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 728,
+        "end_line": 796,
+        "unit_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a",
+        "quote_sha256": "5e91f0c36940dea43d68fabf9c72d62ee3288a97285aa4405079a680844c874a"
+      }
+    },
+    {
+      "pointer": "/source_evidence/2",
+      "evidence_id": "loc-c63d5e8e0b8ef5a64e1edc9e",
+      "kind": "before_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "bool ucl_parser_add_chunk_full(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t\t   size_t len, unsigned priority, enum ucl_duplicate_strategy strat,\n\t\t\t\t\t\t\t   enum ucl_parse_type parse_type)\n{\n\tstruct ucl_chunk *chunk;\n\tstruct ucl_parser_special_handler *special_handler;\n\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\tif (data == NULL && len != 0) {\n\t\tucl_create_err(&parser->err, \"invalid chunk added\");\n\t\treturn false;\n\t}\n\n\tif (parser->state != UCL_STATE_ERROR) {\n\t\tchunk = UCL_ALLOC(sizeof(struct ucl_chunk));\n\t\tif (chunk == NULL) {\n\t\t\tucl_create_err(&parser->err, \"cannot allocate chunk structure\");\n\t\t\treturn false;\n\t\t}\n\n\t\tmemset(chunk, 0, sizeof(*chunk));\n\n\t\t/* Apply all matching handlers from the first to the last */\n\t\tLL_FOREACH(parser->special_handlers, special_handler)\n\t\t{\n\t\t\tif ((special_handler->flags & UCL_SPECIAL_HANDLER_PREPROCESS_ALL) ||\n\t\t\t\t(len >= special_handler->magic_len &&\n\t\t\t\t memcmp(data, special_handler->magic, special_handler->magic_len) == 0)) {\n\t\t\t\tunsigned char *ndata = NULL;\n\t\t\t\tsize_t nlen = 0;\n\n\t\t\t\tif (!special_handler->handler(parser, data, len, &ndata, &nlen,\n\t\t\t\t\t\t\t\t\t\t\t  special_handler->user_data)) {\n\t\t\t\t\tUCL_FREE(sizeof(struct ucl_chunk), chunk);\n\t\t\t\t\tucl_create_err(&parser->err, \"call for external handler failed\");\n\n\t\t\t\t\treturn false;\n\t\t\t\t}\n\n\t\t\t\tstruct ucl_parser_special_handler_chain *nchain;\n\t\t\t\tnchain = UCL_ALLOC(sizeof(*nchain));\n\t\t\t\tnchain->begin = ndata;\n\t\t\t\tnchain->len = nlen;\n\t\t\t\tnchain->special_handler = special_handler;\n\n\t\t\t\t/* Free order is reversed */\n\t\t\t\tLL_PREPEND(chunk->special_handlers, nchain);\n\n\t\t\t\tdata = ndata;\n\t\t\t\tlen = nlen;\n\t\t\t}\n\t\t}\n\n\t\tif (parse_type == UCL_PARSE_AUTO && len > 0) {\n\t\t\t/* We need to detect parse type by the first symbol */\n\t\t\tif (len >= 3 && data[0] == 0xd9 && data[1] == 0xd9 &&\n\t\t\t\tdata[2] == 0xf7) {\n\t\t\t\t/*\n\t\t\t\t * The self-described cbor tag, 55799. Cbor and msgpack are\n\t\t\t\t * otherwise indistinguishable from their first byte - both\n\t\t\t\t * spend 0x80 to 0xbf on short containers and strings - so\n\t\t\t\t * this prefix is the only thing that tells them apart, and\n\t\t\t\t * cbor without it has to be requested explicitly.\n\t\t\t\t */\n\t\t\t\tparse_type = UCL_PARSE_CBOR;\n\t\t\t}\n\t\t\telse if ((*data & 0x80) == 0x80) {\n\t\t\t\tparse_type = UCL_PARSE_MSGPACK;\n\t\t\t}\n\t\t\telse if (*data == '(') {\n\t\t\t\tparse_type = UCL_PARSE_CSEXP;\n\t\t\t}\n\t\t\telse {\n\t\t\t\tparse_type = UCL_PARSE_UCL;\n\t\t\t}\n\t\t}\n\n\t\tchunk->begin = data;\n\t\tchunk->remain = len;\n\t\tchunk->pos = chunk->begin;\n\t\tchunk->end = chunk->begin + len;\n\t\tchunk->line = 1;\n\t\tchunk->column = 0;\n\t\tchunk->priority = priority;\n\t\tchunk->strategy = strat;\n\t\tchunk->parse_type = parse_type;\n\n\t\tif (parser->cur_file) {\n\t\t\tchunk->fname = UCL_STRDUP(parser->cur_file);\n\t\t}\n\n\t\tLL_PREPEND(parser->chunks, chunk);\n\t\tparser->recursion++;\n\n\t\tif (parser->recursion > UCL_MAX_RECURSION) {\n\t\t\tucl_create_err(&parser->err, \"maximum include nesting limit is reached: %d\",\n\t\t\t\t\t\t   parser->recursion);\n\t\t\treturn false;\n\t\t}\n\n\t\tif (len > 0) {\n\t\t\t/* Need to parse something */\n\t\t\tswitch (parse_type) {\n\t\t\tdefault:\n\t\t\tcase UCL_PARSE_UCL:\n\t\t\t\treturn ucl_state_machine(parser);\n\t\t\tcase UCL_PARSE_MSGPACK:\n\t\t\t\treturn ucl_parse_msgpack(parser);\n\t\t\tcase UCL_PARSE_CBOR:\n\t\t\t\treturn ucl_parse_cbor(parser);\n\t\t\tcase UCL_PARSE_CSEXP:\n\t\t\t\treturn ucl_parse_csexp(parser);\n\t\t\t}\n\t\t}\n\t\telse {\n\t\t\t/* Just add empty chunk and go forward */\n\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t/*\n\t\t\t\t * In case of empty object, create one to indicate that we've\n\t\t\t\t * read something\n\t\t\t\t */\n\t\t\t\tparser->top_obj = ucl_object_new_full(UCL_OBJECT, priority);\n\t\t\t}\n\n\t\t\treturn true;\n\t\t}\n\t}\n\n\tucl_create_err(&parser->err, \"a parser is in an invalid state\");\n\n\treturn false;\n}\n\nbool ucl_parser_add_chunk_priority(struct ucl_parser *parser,\n\t\t\t\t\t\t\t\t   const unsigned char *data, size_t len, unsigned priority)\n{\n\t/* We dereference parser, so this check is essential */\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n}\n\nbool ucl_parser_add_chunk(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t  size_t len)\n{\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t parser->default_priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n}\n\nbool ucl_parser_insert_chunk(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t\t size_t len)\n{\n\tif (parser == NULL || parser->top_obj == NULL) {\n\t\treturn false;\n\t}\n\n\tbool res;\n\tstruct ucl_chunk *chunk;\n\n\tint state = parser->state;\n\tparser->state = UCL_STATE_INIT;\n\n\t/* Prevent inserted chunks from unintentionally closing the current object */\n\tif (parser->stack != NULL && parser->stack->next != NULL) {\n\t\tparser->stack->e.params.level = parser->stack->next->e.params.level;\n\t}\n\n\tres = ucl_parser_add_chunk_full(parser, data, len, parser->chunks->priority,\n\t\t\t\t\t\t\t\t\tparser->chunks->strategy, parser->chunks->parse_type);\n\n\t/* Remove chunk from the stack */\n\tchunk = parser->chunks;\n\tif (chunk != NULL) {\n\t\tparser->chunks = chunk->next;\n\t\tucl_chunk_free(chunk);\n\t\tparser->recursion--;\n\t}\n\n\tparser->state = state;\n\n\treturn res;\n}\n\nbool ucl_parser_add_string_priority(struct ucl_parser *parser, const char *data,\n\t\t\t\t\t\t\t\t\tsize_t len, unsigned priority)\n{\n\tif (data == NULL) {\n\t\tucl_create_err(&parser->err, \"invalid string added\");\n\t\treturn false;\n\t}\n\tif (len == 0) {\n\t\tlen = strlen(data);\n\t}\n\n\treturn ucl_parser_add_chunk_priority(parser,\n\t\t\t\t\t\t\t\t\t\t (const unsigned char *) data, len, priority);\n}\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Establishes the before add-string to UCL state-machine call path.",
+      "location": {
+        "unit_id": "u-6566ca8f4e8e16533c9b",
+        "version": "before",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 3215,
+        "end_line": 3421,
+        "unit_sha256": "2043a045ee3495b5362460215a1e9775f19e0072c9a10a4cef1b4786671695ec",
+        "quote_sha256": "697d54b897baca97a5f95583c278e9f40eaeccbfca30edc62e15117a6b8c83fa"
+      }
+    },
+    {
+      "pointer": "/source_evidence/3",
+      "evidence_id": "loc-6cf6316dbcf1271a761c6868",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "bool ucl_parser_add_chunk_full(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t\t   size_t len, unsigned priority, enum ucl_duplicate_strategy strat,\n\t\t\t\t\t\t\t   enum ucl_parse_type parse_type)\n{\n\tstruct ucl_chunk *chunk;\n\tstruct ucl_parser_special_handler *special_handler;\n\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\tif (data == NULL && len != 0) {\n\t\tucl_create_err(&parser->err, \"invalid chunk added\");\n\t\treturn false;\n\t}\n\n\tif (parser->state != UCL_STATE_ERROR) {\n\t\tchunk = UCL_ALLOC(sizeof(struct ucl_chunk));\n\t\tif (chunk == NULL) {\n\t\t\tucl_create_err(&parser->err, \"cannot allocate chunk structure\");\n\t\t\treturn false;\n\t\t}\n\n\t\tmemset(chunk, 0, sizeof(*chunk));\n\n\t\t/* Apply all matching handlers from the first to the last */\n\t\tLL_FOREACH(parser->special_handlers, special_handler)\n\t\t{\n\t\t\tif ((special_handler->flags & UCL_SPECIAL_HANDLER_PREPROCESS_ALL) ||\n\t\t\t\t(len >= special_handler->magic_len &&\n\t\t\t\t memcmp(data, special_handler->magic, special_handler->magic_len) == 0)) {\n\t\t\t\tunsigned char *ndata = NULL;\n\t\t\t\tsize_t nlen = 0;\n\n\t\t\t\tif (!special_handler->handler(parser, data, len, &ndata, &nlen,\n\t\t\t\t\t\t\t\t\t\t\t  special_handler->user_data)) {\n\t\t\t\t\tUCL_FREE(sizeof(struct ucl_chunk), chunk);\n\t\t\t\t\tucl_create_err(&parser->err, \"call for external handler failed\");\n\n\t\t\t\t\treturn false;\n\t\t\t\t}\n\n\t\t\t\tstruct ucl_parser_special_handler_chain *nchain;\n\t\t\t\tnchain = UCL_ALLOC(sizeof(*nchain));\n\t\t\t\tnchain->begin = ndata;\n\t\t\t\tnchain->len = nlen;\n\t\t\t\tnchain->special_handler = special_handler;\n\n\t\t\t\t/* Free order is reversed */\n\t\t\t\tLL_PREPEND(chunk->special_handlers, nchain);\n\n\t\t\t\tdata = ndata;\n\t\t\t\tlen = nlen;\n\t\t\t}\n\t\t}\n\n\t\tif (parse_type == UCL_PARSE_AUTO && len > 0) {\n\t\t\t/* We need to detect parse type by the first symbol */\n\t\t\tif (len >= 3 && data[0] == 0xd9 && data[1] == 0xd9 &&\n\t\t\t\tdata[2] == 0xf7) {\n\t\t\t\t/*\n\t\t\t\t * The self-described cbor tag, 55799. Cbor and msgpack are\n\t\t\t\t * otherwise indistinguishable from their first byte - both\n\t\t\t\t * spend 0x80 to 0xbf on short containers and strings - so\n\t\t\t\t * this prefix is the only thing that tells them apart, and\n\t\t\t\t * cbor without it has to be requested explicitly.\n\t\t\t\t */\n\t\t\t\tparse_type = UCL_PARSE_CBOR;\n\t\t\t}\n\t\t\telse if ((*data & 0x80) == 0x80) {\n\t\t\t\tparse_type = UCL_PARSE_MSGPACK;\n\t\t\t}\n\t\t\telse if (*data == '(') {\n\t\t\t\tparse_type = UCL_PARSE_CSEXP;\n\t\t\t}\n\t\t\telse {\n\t\t\t\tparse_type = UCL_PARSE_UCL;\n\t\t\t}\n\t\t}\n\n\t\tchunk->begin = data;\n\t\tchunk->remain = len;\n\t\tchunk->pos = chunk->begin;\n\t\tchunk->end = chunk->begin + len;\n\t\tchunk->line = 1;\n\t\tchunk->column = 0;\n\t\tchunk->priority = priority;\n\t\tchunk->strategy = strat;\n\t\tchunk->parse_type = parse_type;\n\n\t\tif (parser->cur_file) {\n\t\t\tchunk->fname = UCL_STRDUP(parser->cur_file);\n\t\t}\n\n\t\tLL_PREPEND(parser->chunks, chunk);\n\t\tparser->recursion++;\n\n\t\tif (parser->recursion > UCL_MAX_RECURSION) {\n\t\t\tucl_create_err(&parser->err, \"maximum include nesting limit is reached: %d\",\n\t\t\t\t\t\t   parser->recursion);\n\t\t\treturn false;\n\t\t}\n\n\t\tif (len > 0) {\n\t\t\t/* Need to parse something */\n\t\t\tswitch (parse_type) {\n\t\t\tdefault:\n\t\t\tcase UCL_PARSE_UCL:\n\t\t\t\treturn ucl_state_machine(parser);\n\t\t\tcase UCL_PARSE_MSGPACK:\n\t\t\t\treturn ucl_parse_msgpack(parser);\n\t\t\tcase UCL_PARSE_CBOR:\n\t\t\t\treturn ucl_parse_cbor(parser);\n\t\t\tcase UCL_PARSE_CSEXP:\n\t\t\t\treturn ucl_parse_csexp(parser);\n\t\t\t}\n\t\t}\n\t\telse {\n\t\t\t/* Just add empty chunk and go forward */\n\t\t\tif (parser->top_obj == NULL) {\n\t\t\t\t/*\n\t\t\t\t * In case of empty object, create one to indicate that we've\n\t\t\t\t * read something\n\t\t\t\t */\n\t\t\t\tparser->top_obj = ucl_object_new_full(UCL_OBJECT, priority);\n\t\t\t}\n\n\t\t\treturn true;\n\t\t}\n\t}\n\n\tucl_create_err(&parser->err, \"a parser is in an invalid state\");\n\n\treturn false;\n}\n\nbool ucl_parser_add_chunk_priority(struct ucl_parser *parser,\n\t\t\t\t\t\t\t\t   const unsigned char *data, size_t len, unsigned priority)\n{\n\t/* We dereference parser, so this check is essential */\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n}\n\nbool ucl_parser_add_chunk(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t  size_t len)\n{\n\tif (parser == NULL) {\n\t\treturn false;\n\t}\n\n\treturn ucl_parser_add_chunk_full(parser, data, len,\n\t\t\t\t\t\t\t\t\t parser->default_priority, UCL_DUPLICATE_APPEND, UCL_PARSE_UCL);\n}\n\nbool ucl_parser_insert_chunk(struct ucl_parser *parser, const unsigned char *data,\n\t\t\t\t\t\t\t size_t len)\n{\n\tif (parser == NULL || parser->top_obj == NULL) {\n\t\treturn false;\n\t}\n\n\tbool res;\n\tstruct ucl_chunk *chunk;\n\n\tint state = parser->state;\n\tparser->state = UCL_STATE_INIT;\n\n\t/* Prevent inserted chunks from unintentionally closing the current object */\n\tif (parser->stack != NULL && parser->stack->next != NULL) {\n\t\tparser->stack->e.params.level = parser->stack->next->e.params.level;\n\t}\n\n\tres = ucl_parser_add_chunk_full(parser, data, len, parser->chunks->priority,\n\t\t\t\t\t\t\t\t\tparser->chunks->strategy, parser->chunks->parse_type);\n\n\t/* Remove chunk from the stack */\n\tchunk = parser->chunks;\n\tif (chunk != NULL) {\n\t\tparser->chunks = chunk->next;\n\t\tucl_chunk_free(chunk);\n\t\tparser->recursion--;\n\t}\n\n\tparser->state = state;\n\n\treturn res;\n}\n\nbool ucl_parser_add_string_priority(struct ucl_parser *parser, const char *data,\n\t\t\t\t\t\t\t\t\tsize_t len, unsigned priority)\n{\n\tif (data == NULL) {\n\t\tucl_create_err(&parser->err, \"invalid string added\");\n\t\treturn false;\n\t}\n\tif (len == 0) {\n\t\tlen = strlen(data);\n\t}\n\n\treturn ucl_parser_add_chunk_priority(parser,\n\t\t\t\t\t\t\t\t\t\t (const unsigned char *) data, len, priority);\n}\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Establishes the after add-string to UCL state-machine call path.",
+      "location": {
+        "unit_id": "u-6b7800ed7cfb9f8ac17d",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 3216,
+        "end_line": 3422,
+        "unit_sha256": "c417f47ba42a998958a853f8bee1008b598e217c905edbfd6de7a30fade591cb",
+        "quote_sha256": "697d54b897baca97a5f95583c278e9f40eaeccbfca30edc62e15117a6b8c83fa"
+      }
+    },
+    {
+      "pointer": "/source_evidence/4",
+      "evidence_id": "loc-56d102e4dc029dada5fc0b29",
+      "kind": "before_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The before error producer.",
+      "location": {
+        "unit_id": "u-e26e3a3a417285f0e1d4",
+        "version": "before",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 2973,
+        "end_line": 2996,
+        "unit_sha256": "e336d9a6e232605b554303f7e29bf0ca5944696488ee50fc5a24dea8c7505d82",
+        "quote_sha256": "6ae26d7090b9bb322bff5f418db9d6e4a5a231c1d320bbec34997a07363ee58c"
+      }
+    },
+    {
+      "pointer": "/source_evidence/5",
+      "evidence_id": "loc-497241341148b4be0444fe81",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_parser.c",
+      "text": "\t\tLL_FOREACH(parser->stack, st)\n\t\t{\n\t\t\tif (st->chunk != parser->chunks) {\n\t\t\t\tbreak; /* Not our chunk, give up */\n\t\t\t}\n\t\t\tif (st->e.params.flags & UCL_STACK_HAS_OBRACE) {\n\t\t\t\tif (parser->err == NULL) {\n\t\t\t\t\tutstring_new(parser->err);\n\t\t\t\t}\n\n\t\t\t\tutstring_printf(parser->err, \"%s:%d unmatched open brace at %d; \",\n\t\t\t\t\t\t\t\tchunk->fname ? chunk->fname : \"memory\",\n\t\t\t\t\t\t\t\tparser->chunks->line,\n\t\t\t\t\t\t\t\tst->e.params.line);\n\n\t\t\t\thas_error = true;\n\t\t\t}\n\t\t}\n\n\t\tif (has_error) {\n\t\t\tparser->err_code = UCL_EUNPAIRED;\n\n\t\t\treturn false;\n\t\t}\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The after error producer.",
+      "location": {
+        "unit_id": "u-d68c375c2b8c50c4dc7a",
+        "version": "after",
+        "path": "input/source/src/ucl_parser.c",
+        "start_line": 2974,
+        "end_line": 2997,
+        "unit_sha256": "127ecfe418bf5642e0f7266f55ef4d42bdfc92c1671b8f07b75ca4e9acfa57de",
+        "quote_sha256": "6ae26d7090b9bb322bff5f418db9d6e4a5a231c1d320bbec34997a07363ee58c"
+      }
+    },
+    {
+      "pointer": "/source_evidence/6",
+      "evidence_id": "loc-122f18732d30fc13d00e988f",
+      "kind": "before_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "const char *\nucl_parser_get_error(struct ucl_parser *parser)\n{\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tif (parser->err == NULL) {\n\t\treturn NULL;\n\t}\n\n\treturn utstring_body(parser->err);\n}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "The before error accessor.",
+      "location": {
+        "unit_id": "u-654111c000543f46b656",
+        "version": "before",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 793,
+        "end_line": 805,
+        "unit_sha256": "187275f50892fc315ffc29130465222974bfbc0d221ef23ac22752bcd0f019be",
+        "quote_sha256": "187275f50892fc315ffc29130465222974bfbc0d221ef23ac22752bcd0f019be"
+      }
+    },
+    {
+      "pointer": "/source_evidence/7",
+      "evidence_id": "loc-6e5ea34a99a2a315bc01168a",
+      "kind": "after_source",
+      "path": "input/source/src/ucl_util.c",
+      "text": "const char *\nucl_parser_get_error(struct ucl_parser *parser)\n{\n\tif (parser == NULL) {\n\t\treturn NULL;\n\t}\n\n\tif (parser->err == NULL) {\n\t\treturn NULL;\n\t}\n\n\treturn utstring_body(parser->err);\n}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "The after error accessor.",
+      "location": {
+        "unit_id": "u-afbe55a23b87f08571ff",
+        "version": "after",
+        "path": "input/source/src/ucl_util.c",
+        "start_line": 798,
+        "end_line": 810,
+        "unit_sha256": "187275f50892fc315ffc29130465222974bfbc0d221ef23ac22752bcd0f019be",
+        "quote_sha256": "187275f50892fc315ffc29130465222974bfbc0d221ef23ac22752bcd0f019be"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/0",
+      "evidence_id": "loc-760c8fa17b5ceaf69a38215d",
+      "kind": "harness",
+      "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+      "text": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\t// If size is 0 we need a null-terminated string.\n\t// We dont null-terminate the string and by the design\n\t// of the API passing 0 as size with non null-terminated string\n\t// gives undefined behavior. \t\n\tif(size==0){\n\t\treturn 0;\n\t}\n\tstruct ucl_parser *parser;\n       \tparser = ucl_parser_new(0);\n\t\n\tucl_parser_add_string(parser, (char *)data, size);\n\t\n\tif (ucl_parser_get_error(parser) != NULL) {\n\t\treturn 0;\n\t}\n\n\tucl_parser_free (parser);\n        return 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-e361eddd782de83c425d",
+        "version": "harness",
+        "path": "input/harness/tests/fuzzers/ucl_add_string_fuzzer.c",
+        "start_line": 6,
+        "end_line": 25,
+        "unit_sha256": "ec9232480c806b16dfbf27c029bfca494c9a582f2657975b69ecdf3a326b7f05",
+        "quote_sha256": "dc6feedb2349706a821c5bc2d8ef009057e56b9336121b899f2b3fc437238c9e"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/1",
+      "evidence_id": "loc-1d21ebaa27cac6fb52590337",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/build.sh",
+      "text": "./autogen.sh --force && ./configure\nmake\n\n$CC $CFLAGS -c tests/fuzzers/ucl_add_string_fuzzer.c \\\n  -DHAVE_CONFIG_H -I./src -I./include src/.libs/libucl.a -I./ \\\n  -o $OUT/ucl_add_string_fuzzer.o\n\n$CXX $CXXFLAGS $LIB_FUZZING_ENGINE $OUT/ucl_add_string_fuzzer.o -DHAVE_CONFIG_H -I./src -I./include src/.libs/libucl.a -I. -o $OUT/ucl_add_string_fuzzer\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The build recipe selects this fuzz entry and links it with libucl.",
+      "location": {
+        "unit_id": "u-302db0b2ae7275bb2aad",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/build.sh",
+        "start_line": 19,
+        "end_line": 26,
+        "unit_sha256": "6349bc87855584174cf514ac795020451fb68c92ed2eb234c8e7cfc6389e527e",
+        "quote_sha256": "e975f34b3b68c331f6980c83219e405218e84809146f748ee57fa7a9bd357637"
+      }
+    }
+  ],
+  "obligation_class": "execution_compatibility"
+}

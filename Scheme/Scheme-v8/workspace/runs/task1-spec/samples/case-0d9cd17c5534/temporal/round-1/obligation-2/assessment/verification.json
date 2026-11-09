@@ -1,0 +1,65 @@
+{
+  "checked": {
+    "status": "preexisting",
+    "gap": true,
+    "introduced_by_this_change": false,
+    "claims": [
+      {
+        "claim_id": "o-32604d2a174814e5",
+        "status": "preexisting",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Streaming compression with a dictionary loaded through a supported compression-context setup must be reachable.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The before source loads a nonempty dictionary into an initialized context and passes configured dictionary state into streaming initialization. The old harness never loads or references one.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-b1ca22a46d39c4223ed8a29c",
+              "quote": "size_t ZSTD_CCtx_loadDictionary_advanced(\n        ZSTD_CCtx* cctx,\n        const void* dict, size_t dictSize,\n        ZSTD_dictLoadMethod_e dictLoadMethod,\n        ZSTD_dictContentType_e dictContentType)\n{\n    DEBUGLOG(4, \"ZSTD_CCtx_loadDictionary_advanced (size: %u)\", (U32)dictSize);\n    RETURN_ERROR_IF(cctx->streamStage != zcss_init, stage_wrong,\n                    \"Can't load a dictionary when cctx is not in init stage.\");\n    ZSTD_clearAllDicts(cctx);  /* erase any previously set dictionary */\n    if (dict == NULL || dictSize == 0)  /* no dictionary */\n        return 0;\n    if (dictLoadMethod == ZSTD_dlm_byRef) {\n        cctx->localDict.dict = dict;\n    } else {\n        /* copy dictionary content inside CCtx to own its lifetime */\n        void* dictBuffer;\n        RETURN_ERROR_IF(cctx->staticSize, memory_allocation,\n                        \"static CCtx can't allocate for an internal copy of dictionary\");\n        dictBuffer = ZSTD_customMalloc(dictSize, cctx->customMem);\n        RETURN_ERROR_IF(dictBuffer==NULL, memory_allocation,\n                        \"allocation failed for dictionary content\");\n        ZSTD_memcpy(dictBuffer, dict, dictSize);\n        cctx->localDict.dictBuffer = dictBuffer;  /* owned ptr to free */\n        cctx->localDict.dict = dictBuffer;        /* read-only reference */\n    }\n    cctx->localDict.dictSize = dictSize;\n    cctx->localDict.dictContentType = dictContentType;\n    return 0;\n}\n\nsize_t ZSTD_CCtx_loadDictionary_byReference(\n      ZSTD_CCtx* cctx, const void* dict, size_t dictSize)\n{\n    return ZSTD_CCtx_loadDictionary_advanced(\n            cctx, dict, dictSize, ZSTD_dlm_byRef, ZSTD_dct_auto);\n}\n\nsize_t ZSTD_CCtx_loadDictionary(ZSTD_CCtx* cctx, const void* dict, size_t dictSize)\n{\n    return ZSTD_CCtx_loadDictionary_advanced(\n            cctx, dict, dictSize, ZSTD_dlm_byCopy, ZSTD_dct_auto);\n}\n"
+            },
+            {
+              "evidence_id": "loc-b6198b51a2cfef941c184d9b",
+              "quote": "static size_t ZSTD_CCtx_init_compressStream2(ZSTD_CCtx* cctx,\n                                             ZSTD_EndDirective endOp,\n                                             size_t inSize)\n{\n    ZSTD_CCtx_params params = cctx->requestedParams;\n    ZSTD_prefixDict const prefixDict = cctx->prefixDict;\n    FORWARD_IF_ERROR( ZSTD_initLocalDict(cctx) , \"\"); /* Init the local dict if present. */\n    ZSTD_memset(&cctx->prefixDict, 0, sizeof(cctx->prefixDict));   /* single usage */\n    assert(prefixDict.dict==NULL || cctx->cdict==NULL);    /* only one can be set */\n    if (cctx->cdict && !cctx->localDict.cdict) {\n        /* Let the cdict's compression level take priority over the requested params.\n         * But do not take the cdict's compression level if the \"cdict\" is actually a localDict\n         * generated from ZSTD_initLocalDict().\n         */\n        params.compressionLevel = cctx->cdict->compressionLevel;\n    }\n    DEBUGLOG(4, \"ZSTD_compressStream2 : transparent init stage\");\n    if (endOp == ZSTD_e_end) cctx->pledgedSrcSizePlusOne = inSize + 1;  /* auto-determine pledgedSrcSize */\n\n    {   size_t const dictSize = prefixDict.dict\n                ? prefixDict.dictSize\n                : (cctx->cdict ? cctx->cdict->dictContentSize : 0);\n        ZSTD_cParamMode_e const mode = ZSTD_getCParamMode(cctx->cdict, &params, cctx->pledgedSrcSizePlusOne - 1);\n        params.cParams = ZSTD_getCParamsFromCCtxParams(\n                &params, cctx->pledgedSrcSizePlusOne-1,\n                dictSize, mode);\n    }\n"
+            },
+            {
+              "evidence_id": "loc-311e83bc12e8c693a91cdff6",
+              "quote": "    {   U64 const pledgedSrcSize = cctx->pledgedSrcSizePlusOne - 1;\n        assert(!ZSTD_isError(ZSTD_checkCParams(params.cParams)));\n        FORWARD_IF_ERROR( ZSTD_compressBegin_internal(cctx,\n                prefixDict.dict, prefixDict.dictSize, prefixDict.dictContentType, ZSTD_dtlm_fast,\n                cctx->cdict,\n                &params, pledgedSrcSize,\n                ZSTDb_buffered) , \"\");\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Streaming compression with a dictionary loaded through the same supported compression-context setup must remain reachable.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The after source retains dictionary loading and passes loaded dictionary state through streaming initialization. The same old harness still provides no dictionary-loading call.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-72e67171b4691623d47c7160",
+              "quote": "size_t ZSTD_CCtx_loadDictionary_advanced(\n        ZSTD_CCtx* cctx,\n        const void* dict, size_t dictSize,\n        ZSTD_dictLoadMethod_e dictLoadMethod,\n        ZSTD_dictContentType_e dictContentType)\n{\n    DEBUGLOG(4, \"ZSTD_CCtx_loadDictionary_advanced (size: %u)\", (U32)dictSize);\n    RETURN_ERROR_IF(cctx->streamStage != zcss_init, stage_wrong,\n                    \"Can't load a dictionary when cctx is not in init stage.\");\n    ZSTD_clearAllDicts(cctx);  /* erase any previously set dictionary */\n    if (dict == NULL || dictSize == 0)  /* no dictionary */\n        return 0;\n    if (dictLoadMethod == ZSTD_dlm_byRef) {\n        cctx->localDict.dict = dict;\n    } else {\n        /* copy dictionary content inside CCtx to own its lifetime */\n        void* dictBuffer;\n        RETURN_ERROR_IF(cctx->staticSize, memory_allocation,\n                        \"static CCtx can't allocate for an internal copy of dictionary\");\n        dictBuffer = ZSTD_customMalloc(dictSize, cctx->customMem);\n        RETURN_ERROR_IF(dictBuffer==NULL, memory_allocation,\n                        \"allocation failed for dictionary content\");\n        ZSTD_memcpy(dictBuffer, dict, dictSize);\n        cctx->localDict.dictBuffer = dictBuffer;  /* owned ptr to free */\n        cctx->localDict.dict = dictBuffer;        /* read-only reference */\n    }\n    cctx->localDict.dictSize = dictSize;\n    cctx->localDict.dictContentType = dictContentType;\n    return 0;\n}\n\nsize_t ZSTD_CCtx_loadDictionary_byReference(\n      ZSTD_CCtx* cctx, const void* dict, size_t dictSize)\n{\n    return ZSTD_CCtx_loadDictionary_advanced(\n            cctx, dict, dictSize, ZSTD_dlm_byRef, ZSTD_dct_auto);\n}\n\nsize_t ZSTD_CCtx_loadDictionary(ZSTD_CCtx* cctx, const void* dict, size_t dictSize)\n{\n    return ZSTD_CCtx_loadDictionary_advanced(\n            cctx, dict, dictSize, ZSTD_dlm_byCopy, ZSTD_dct_auto);\n}\n"
+            },
+            {
+              "evidence_id": "loc-422f82af6fc387bd95e55f3e",
+              "quote": "static size_t ZSTD_CCtx_init_compressStream2(ZSTD_CCtx* cctx,\n                                             ZSTD_EndDirective endOp,\n                                             size_t inSize)\n{\n    ZSTD_CCtx_params params = cctx->requestedParams;\n    ZSTD_prefixDict const prefixDict = cctx->prefixDict;\n    FORWARD_IF_ERROR( ZSTD_initLocalDict(cctx) , \"\"); /* Init the local dict if present. */\n    ZSTD_memset(&cctx->prefixDict, 0, sizeof(cctx->prefixDict));   /* single usage */\n    assert(prefixDict.dict==NULL || cctx->cdict==NULL);    /* only one can be set */\n    if (cctx->cdict && !cctx->localDict.cdict) {\n        /* Let the cdict's compression level take priority over the requested params.\n         * But do not take the cdict's compression level if the \"cdict\" is actually a localDict\n         * generated from ZSTD_initLocalDict().\n         */\n        params.compressionLevel = cctx->cdict->compressionLevel;\n    }\n    DEBUGLOG(4, \"ZSTD_compressStream2 : transparent init stage\");\n    if (endOp == ZSTD_e_end) cctx->pledgedSrcSizePlusOne = inSize + 1;  /* auto-determine pledgedSrcSize */\n\n    {   size_t const dictSize = prefixDict.dict\n                ? prefixDict.dictSize\n                : (cctx->cdict ? cctx->cdict->dictContentSize : 0);\n        ZSTD_cParamMode_e const mode = ZSTD_getCParamMode(cctx->cdict, &params, cctx->pledgedSrcSizePlusOne - 1);\n        params.cParams = ZSTD_getCParamsFromCCtxParams(\n                &params, cctx->pledgedSrcSizePlusOne-1,\n                dictSize, mode);\n    }\n"
+            },
+            {
+              "evidence_id": "loc-e39c0c60403792c11144d03e",
+              "quote": "    {   U64 const pledgedSrcSize = cctx->pledgedSrcSizePlusOne - 1;\n        assert(!ZSTD_isError(ZSTD_checkCParams(params.cParams)));\n        FORWARD_IF_ERROR( ZSTD_compressBegin_internal(cctx,\n                prefixDict.dict, prefixDict.dictSize, prefixDict.dictContentType, ZSTD_dtlm_fast,\n                cctx->cdict,\n                &params, pledgedSrcSize,\n                ZSTDb_buffered) , \"\");\n"
+            },
+            {
+              "evidence_id": "loc-9f2489b9c39c375504607261",
+              "quote": "    /* transparent initialization stage */\n    if (cctx->streamStage == zcss_init) {\n        size_t const inputSize = input->size - input->pos;  /* no obligation to start from pos==0 */\n        size_t const totalInputSize = inputSize + cctx->stableIn_notConsumed;\n        if ( (cctx->requestedParams.inBufferMode == ZSTD_bm_stable) /* input is presumed stable, across invocations */\n          && (endOp == ZSTD_e_continue)                             /* no flush requested, more input to come */\n          && (totalInputSize < ZSTD_BLOCKSIZE_MAX) ) {              /* not even reached one block yet */\n            if (cctx->stableIn_notConsumed) {  /* not the first time */\n                /* check stable source guarantees */\n                RETURN_ERROR_IF(input->src != cctx->expectedInBuffer.src, stabilityCondition_notRespected, \"stableInBuffer condition not respected: wrong src pointer\");\n                RETURN_ERROR_IF(input->pos != cctx->expectedInBuffer.size, stabilityCondition_notRespected, \"stableInBuffer condition not respected: externally modified pos\");\n            }\n            /* pretend input was consumed, to give a sense forward progress */\n            input->pos = input->size;\n            /* save stable inBuffer, for later control, and flush/end */\n            cctx->expectedInBuffer = *input;\n            /* but actually input wasn't consumed, so keep track of position from where compression shall resume */\n            cctx->stableIn_notConsumed += inputSize;\n            /* don't initialize yet, wait for the first block of flush() order, for better parameters adaptation */\n            return ZSTD_FRAMEHEADERSIZE_MIN(cctx->requestedParams.format);  /* at least some header to produce */\n        }\n        FORWARD_IF_ERROR(ZSTD_CCtx_init_compressStream2(cctx, endOp, totalInputSize), \"compressStream2 initialization failed\");\n        ZSTD_setBufferExpectations(cctx, output, input);   /* Set initial buffer expectations now that we've initialized */\n    }\n"
+            }
+          ]
+        },
+        "same_blocker": "yes",
+        "reason": "The same dictionary-loaded streaming operation is supported before and after. On both sides, the old harness lacks the required dictionary setup.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": []
+  },
+  "citation_errors": []
+}

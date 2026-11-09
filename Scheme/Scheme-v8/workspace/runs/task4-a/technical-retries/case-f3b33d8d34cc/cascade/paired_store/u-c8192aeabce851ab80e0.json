@@ -1,0 +1,19 @@
+{
+  "unit_id": "u-c8192aeabce851ab80e0",
+  "original_unit_id": "82105bc026706828730b",
+  "kind": "before_source",
+  "path": "input/source/contrib/dblink/dblink.c",
+  "version": "before",
+  "name": "materializeQueryResult",
+  "start": 1028,
+  "end": 1138,
+  "line_origin": "file",
+  "sha256": "73eb80429228fb497a37f731dd58668265d976d0e4e7db9932da54794c67b1de",
+  "text": "static void\nmaterializeQueryResult(FunctionCallInfo fcinfo,\n\t\t\t\t\t   PGconn *conn,\n\t\t\t\t\t   const char *conname,\n\t\t\t\t\t   const char *sql,\n\t\t\t\t\t   bool fail)\n{\n\tReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;\n\tPGresult   *volatile res = NULL;\n\tvolatile storeInfo sinfo = {0};\n\n\t/* prepTuplestoreResult must have been called previously */\n\tAssert(rsinfo->returnMode == SFRM_Materialize);\n\n\tsinfo.fcinfo = fcinfo;\n\n\tPG_TRY();\n\t{\n\t\t/* Create short-lived memory context for data conversions */\n\t\tsinfo.tmpcontext = AllocSetContextCreate(CurrentMemoryContext,\n\t\t\t\t\t\t\t\t\t\t\t\t \"dblink temporary context\",\n\t\t\t\t\t\t\t\t\t\t\t\t ALLOCSET_DEFAULT_SIZES);\n\n\t\t/* execute query, collecting any tuples into the tuplestore */\n\t\tres = storeQueryResult(&sinfo, conn, sql);\n\n\t\tif (!res ||\n\t\t\t(PQresultStatus(res) != PGRES_COMMAND_OK &&\n\t\t\t PQresultStatus(res) != PGRES_TUPLES_OK))\n\t\t{\n\t\t\t/*\n\t\t\t * dblink_res_error will clear the passed PGresult, so we need\n\t\t\t * this ugly dance to avoid doing so twice during error exit\n\t\t\t */\n\t\t\tPGresult   *res1 = res;\n\n\t\t\tres = NULL;\n\t\t\tdblink_res_error(conn, conname, res1, fail,\n\t\t\t\t\t\t\t \"while executing query\");\n\t\t\t/* if fail isn't set, we'll return an empty query result */\n\t\t}\n\t\telse if (PQresultStatus(res) == PGRES_COMMAND_OK)\n\t\t{\n\t\t\t/*\n\t\t\t * storeRow didn't get called, so we need to convert the command\n\t\t\t * status string to a tuple manually\n\t\t\t */\n\t\t\tTupleDesc\ttupdesc;\n\t\t\tAttInMetadata *attinmeta;\n\t\t\tTuplestorestate *tupstore;\n\t\t\tHeapTuple\ttuple;\n\t\t\tchar\t   *values[1];\n\t\t\tMemoryContext oldcontext;\n\n\t\t\t/*\n\t\t\t * need a tuple descriptor representing one TEXT column to return\n\t\t\t * the command status string as our result tuple\n\t\t\t */\n\t\t\ttupdesc = CreateTemplateTupleDesc(1);\n\t\t\tTupleDescInitEntry(tupdesc, (AttrNumber) 1, \"status\",\n\t\t\t\t\t\t\t   TEXTOID, -1, 0);\n\t\t\tattinmeta = TupleDescGetAttInMetadata(tupdesc);\n\n\t\t\toldcontext = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);\n\t\t\ttupstore = tuplestore_begin_heap(true, false, work_mem);\n\t\t\trsinfo->setResult = tupstore;\n\t\t\trsinfo->setDesc = tupdesc;\n\t\t\tMemoryContextSwitchTo(oldcontext);\n\n\t\t\tvalues[0] = PQcmdStatus(res);\n\n\t\t\t/* build the tuple and put it into the tuplestore. */\n\t\t\ttuple = BuildTupleFromCStrings(attinmeta, values);\n\t\t\ttuplestore_puttuple(tupstore, tuple);\n\n\t\t\tPQclear(res);\n\t\t\tres = NULL;\n\t\t}\n\t\telse\n\t\t{\n\t\t\tAssert(PQresultStatus(res) == PGRES_TUPLES_OK);\n\t\t\t/* storeRow should have created a tuplestore */\n\t\t\tAssert(rsinfo->setResult != NULL);\n\n\t\t\tPQclear(res);\n\t\t\tres = NULL;\n\t\t}\n\n\t\t/* clean up data conversion short-lived memory context */\n\t\tif (sinfo.tmpcontext != NULL)\n\t\t\tMemoryContextDelete(sinfo.tmpcontext);\n\t\tsinfo.tmpcontext = NULL;\n\n\t\tPQclear(sinfo.last_res);\n\t\tsinfo.last_res = NULL;\n\t\tPQclear(sinfo.cur_res);\n\t\tsinfo.cur_res = NULL;\n\t}\n\tPG_CATCH();\n\t{\n\t\t/* be sure to release any libpq result we collected */\n\t\tPQclear(res);\n\t\tPQclear(sinfo.last_res);\n\t\tPQclear(sinfo.cur_res);\n\t\t/* and clear out any pending data in libpq */\n\t\twhile ((res = PQgetResult(conn)) != NULL)\n\t\t\tPQclear(res);\n\t\tPG_RE_THROW();\n\t}\n\tPG_END_TRY();\n}\n",
+  "change_ids": [],
+  "invariant_source": true,
+  "unit_kind": "function",
+  "page_ids": [
+    "before-whole-82105bc026706828730b-0000"
+  ]
+}

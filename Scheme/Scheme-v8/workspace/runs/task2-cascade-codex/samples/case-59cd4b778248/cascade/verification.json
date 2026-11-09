@@ -1,0 +1,371 @@
+{
+  "verdict": "needs_update",
+  "status": "unknown",
+  "candidates": [
+    {
+      "candidate_id": "c1",
+      "source_id": "combined_charbound_stripcc_unreachable",
+      "origin": "discover",
+      "kind": "configuration",
+      "change_ids": [
+        "g0001",
+        "g0002"
+      ],
+      "requirement": "The target's utf8proc_map surface must reach supported UTF8PROC_CHARBOUND | UTF8PROC_STRIPCC processing of valid strings containing controls.",
+      "target_route": "A terminated input such as {0x61,0x01,0x62,0x00} passes the entry guards and reaches the target's fixed utf8proc_map calls.",
+      "failure_condition": "No map call sets both options; direct UTF-32 normalization sets STRIPCC without CHARBOUND. The combined behavior is therefore unreachable.",
+      "alternative_paths": "Natural input bytes cannot change the fixed option sets. The other map calls lack STRIPCC, and direct normalization lacks CHARBOUND; none is an equivalent route.",
+      "discovery_necessary": true,
+      "discovery_established": true
+    }
+  ],
+  "decisions": [
+    {
+      "candidate_id": "c1",
+      "decision": "keep",
+      "errors": [],
+      "obligation_class": "target_coverage",
+      "citation_errors": []
+    }
+  ],
+  "scope_complete": false,
+  "timing": {
+    "status": "unknown",
+    "gap": null,
+    "introduced_by_this_change": null,
+    "claims": [
+      {
+        "claim_id": "c1",
+        "status": "unknown",
+        "necessary": "yes",
+        "before": {
+          "requirement": "If the combined mapping behavior was supported before, the target needed a route that retained the appropriate grapheme markers while stripping controls.",
+          "applicability": "unknown",
+          "harness_status": "unknown",
+          "reason": "The before normalizer strips negative sentinels under STRIPCC, but the supplied before-source does not establish the public option contract or the map pipeline. If the behavior was required, the target's fixed options would leave it unreachable.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-7e70afe97eb337f5691525cb",
+              "quote": "UTF8PROC_DLLEXPORT utf8proc_ssize_t utf8proc_normalize_utf32(utf8proc_int32_t *buffer, utf8proc_ssize_t length, unsigned int options) {\n  /* UTF8PROC_NULLTERM option will be ignored, 'length' is never ignored */\n  if (options & (UTF8PROC_NLF2LS | UTF8PROC_NLF2PS | UTF8PROC_STRIPCC)) {\n    utf8proc_ssize_t rpos;\n    utf8proc_ssize_t wpos = 0;\n    utf8proc_int32_t uc;\n    for (rpos = 0; rpos < length; rpos++) {\n      uc = buffer[rpos];\n      if (uc == 0x000D && rpos < length-1 && buffer[rpos+1] == 0x000A) rpos++;\n      if (uc == 0x000A || uc == 0x000D || uc == 0x0085 ||\n          ((options & UTF8PROC_STRIPCC) && (uc == 0x000B || uc == 0x000C))) {\n        if (options & UTF8PROC_NLF2LS) {\n          if (options & UTF8PROC_NLF2PS) {\n            buffer[wpos++] = 0x000A;\n          } else {\n            buffer[wpos++] = 0x2028;\n          }\n        } else {\n          if (options & UTF8PROC_NLF2PS) {\n            buffer[wpos++] = 0x2029;\n          } else {\n            buffer[wpos++] = 0x0020;\n          }\n        }\n      } else if ((options & UTF8PROC_STRIPCC) &&\n          (uc < 0x0020 || (uc >= 0x007F && uc < 0x00A0))) {\n        if (uc == 0x0009) buffer[wpos++] = 0x0020;\n      } else {\n        buffer[wpos++] = uc;\n      }\n    }\n    length = wpos;\n  }\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Reach supported combined CHARBOUND and STRIPCC mapping on a valid control-containing string, retaining markers for surviving graphemes.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The after-source cases specify the behavior, and the changed normalizer handles its sentinels. The old target supplies neither combined options nor the specified two-step equivalent.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-c97f90758445a0d0f58221b3",
+              "quote": "        utf8proc_uint8_t input[][8] = {\n            {0x61,0x0a,0x62,0x01,0x63,0x00},\n            {0x61,0x09,0x62,0x00},\n            {0x61,0xc2,0x90,0x62,0x00},\n            {0x01,0x61,0x00}\n        };\n        utf8proc_uint8_t output[][9] = {\n            {0xff,0x61,0xff,0x20,0xff,0x62,0xff,0x63,0x00},\n            {0xff,0x61,0xff,0x20,0xff,0x62,0x00},\n            {0xff,0x61,0xff,0x62,0x00},\n            {0xff,0x61,0x00}\n        };\n        const char *plain[] = {\"a bc\", \"a b\", \"ab\", \"a\"};\n        size_t i;\n        for (i = 0; i < sizeof(input) / sizeof(input[0]); i++) {\n            utf8proc_ssize_t glen;\n            utf8proc_uint8_t *g;\n            glen = utf8proc_map(input[i], 0, &g, UTF8PROC_NULLTERM | UTF8PROC_CHARBOUND | UTF8PROC_STRIPCC);\n            check(glen == (utf8proc_ssize_t)strlen((char*)output[i]), \"CHARBOUND|STRIPCC returned wrong length in case %zu\", i);\n            check(!strcmp((char*)g, (char*)output[i]), \"CHARBOUND|STRIPCC dropped grapheme markers in case %zu\", i);\n            utf8proc_free(g);\n            glen = utf8proc_map(input[i], 0, &g, UTF8PROC_NULLTERM | UTF8PROC_STRIPCC);\n            check(glen == (utf8proc_ssize_t)strlen(plain[i]), \"STRIPCC returned wrong length in case %zu\", i);\n            check(!strcmp((char*)g, plain[i]), \"STRIPCC changed output in case %zu\", i);\n            {\n                utf8proc_uint8_t *separate, *combined;\n                utf8proc_ssize_t separate_len, combined_len;\n                separate_len = utf8proc_map(g, 0, &separate, UTF8PROC_NULLTERM | UTF8PROC_CHARBOUND);\n                combined_len = utf8proc_map(input[i], 0, &combined, UTF8PROC_NULLTERM | UTF8PROC_CHARBOUND | UTF8PROC_STRIPCC);\n                check(separate_len >= 0 && combined_len >= 0, \"two-step mapping failed in case %zu\", i);\n                check(separate_len == combined_len, \"two-step mapping returned different length in case %zu\", i);\n                check(!memcmp(separate, combined, (size_t)combined_len + 1), \"two-step mapping differs from combined flags in case %zu\", i);\n"
+            },
+            {
+              "evidence_id": "loc-ce9c5fcb51c4b224f87d2afb",
+              "quote": "  if (options & (UTF8PROC_NLF2LS | UTF8PROC_NLF2PS | UTF8PROC_STRIPCC)) {\n    utf8proc_ssize_t rpos;\n    utf8proc_ssize_t wpos = 0;\n    utf8proc_int32_t uc;\n    for (rpos = 0; rpos < length; rpos++) {\n      uc = buffer[rpos];\n      if (uc == 0x000D && rpos < length-1 && buffer[rpos+1] == 0x000A) rpos++;\n      if (uc == 0x000A || uc == 0x000D || uc == 0x0085 ||\n          ((options & UTF8PROC_STRIPCC) && (uc == 0x000B || uc == 0x000C))) {\n        if (options & UTF8PROC_NLF2LS) {\n          if (options & UTF8PROC_NLF2PS) {\n            buffer[wpos++] = 0x000A;\n          } else {\n            buffer[wpos++] = 0x2028;\n          }\n        } else {\n          if (options & UTF8PROC_NLF2PS) {\n            buffer[wpos++] = 0x2029;\n          } else {\n            buffer[wpos++] = 0x0020;\n          }\n        }\n      } else if ((options & UTF8PROC_STRIPCC) &&\n          /* uc < 0 is a grapheme-break sentinel from UTF8PROC_CHARBOUND,\n             not a control character, so keep it */\n          ((uc >= 0 && uc < 0x0020) || (uc >= 0x007F && uc < 0x00A0))) {\n        if (uc == 0x0009) buffer[wpos++] = 0x0020;\n        /* a removed control character is a grapheme of its own, so also\n           drop the boundary sentinel that UTF8PROC_CHARBOUND put before it */\n        else if ((options & UTF8PROC_CHARBOUND) && wpos > 0 && buffer[wpos-1] == -1) wpos--;\n      } else {\n        buffer[wpos++] = uc;\n      }\n    }\n    length = wpos;\n  }\n"
+            }
+          ]
+        },
+        "same_blocker": "unknown",
+        "reason": "The target's fixed option sets are the same on both sides. Whether their omission was already a coverage blocker depends on the before-source mapping contract, which is not supplied.",
+        "error": null,
+        "missing_information": [
+          "Before-source utf8proc_map and its relevant helpers in utf8proc.c, plus the before-source UTF8PROC_CHARBOUND and UTF8PROC_STRIPCC option contracts in utf8proc.h, are needed to determine prior applicability."
+        ]
+      }
+    ],
+    "errors": [],
+    "missing_information": [
+      "Before-source utf8proc_map and its relevant helpers in utf8proc.c, and the before-source UTF8PROC_CHARBOUND and UTF8PROC_STRIPCC option contracts in utf8proc.h."
+    ]
+  },
+  "errors": [],
+  "model_calls": [
+    {
+      "provider": "codex_cli",
+      "prompt_hash": "05ac3f034fa14280545ade99f3c4cc48e87ad5c7ea9816c500b2b19f57bd41bd",
+      "reserved_input_tokens": 40265,
+      "model": "gpt-6-sol",
+      "reasoning_effort": "high",
+      "session_in": null,
+      "fork": false,
+      "session_out": "01a1ab29-ad85-7523-95d6-e2c55a644650",
+      "compacted": false,
+      "tools_used": [],
+      "usage": {
+        "input_tokens": 21246,
+        "cached_input_tokens": 10496,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 4212,
+        "reasoning_output_tokens": 2977,
+        "raw": {
+          "input_tokens": 31742,
+          "cached_input_tokens": 10496,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 4212,
+          "reasoning_output_tokens": 2977
+        },
+        "raw_is_thread_cumulative": false
+      },
+      "error": null,
+      "argv": [
+        "codex",
+        "--no-daemon",
+        "exec",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "--model",
+        "gpt-6-sol",
+        "--json",
+        "--color",
+        "never",
+        "--output-schema",
+        "/tmp/scheme-v8-codex_cli-kk0_g156/schema-1.json",
+        "--output-last-message",
+        "/tmp/scheme-v8-codex_cli-kk0_g156/answer-1.json",
+        "--cd",
+        "/tmp/scheme-v8-codex_cli-kk0_g156",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.browser_use=false",
+        "-c",
+        "features.computer_use=false",
+        "-c",
+        "features.image_generation=false",
+        "-c",
+        "features.memories=false",
+        "-c",
+        "features.skill_search=false",
+        "-c",
+        "features.skip_host_skill_discovery=true",
+        "-c",
+        "features.unbounded_connection_retries=false",
+        "-c",
+        "web_search=\"disabled\"",
+        "-c",
+        "project_doc_max_bytes=0",
+        "-c",
+        "suppress_unstable_features_warning=true",
+        "-"
+      ],
+      "exit_code": 0,
+      "seconds": 80.046
+    },
+    {
+      "provider": "codex_cli",
+      "prompt_hash": "75cdbb6093fad4ac64181fb7627640655ea5310687ffef5e3ff76648decbd1cc",
+      "reserved_input_tokens": 20686,
+      "model": "gpt-6-sol",
+      "reasoning_effort": "high",
+      "session_in": "01a1ab29-ad85-7523-95d6-e2c55a644650",
+      "fork": false,
+      "session_out": "01a1ab29-ad85-7523-95d6-e2c55a644650",
+      "compacted": false,
+      "tools_used": [],
+      "usage": {
+        "input_tokens": 5071,
+        "cached_input_tokens": 31616,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 2894,
+        "reasoning_output_tokens": 865,
+        "raw": {
+          "input_tokens": 68429,
+          "cached_input_tokens": 42112,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 7106,
+          "reasoning_output_tokens": 3842
+        },
+        "raw_is_thread_cumulative": true
+      },
+      "error": null,
+      "argv": [
+        "codex",
+        "--no-daemon",
+        "exec",
+        "resume",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--model",
+        "gpt-6-sol",
+        "--json",
+        "--output-schema",
+        "/tmp/scheme-v8-codex_cli-kk0_g156/schema-2.json",
+        "--output-last-message",
+        "/tmp/scheme-v8-codex_cli-kk0_g156/answer-2.json",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.browser_use=false",
+        "-c",
+        "features.computer_use=false",
+        "-c",
+        "features.image_generation=false",
+        "-c",
+        "features.memories=false",
+        "-c",
+        "features.skill_search=false",
+        "-c",
+        "features.skip_host_skill_discovery=true",
+        "-c",
+        "features.unbounded_connection_retries=false",
+        "-c",
+        "web_search=\"disabled\"",
+        "-c",
+        "project_doc_max_bytes=0",
+        "-c",
+        "suppress_unstable_features_warning=true",
+        "-c",
+        "sandbox_mode=\"read-only\"",
+        "01a1ab29-ad85-7523-95d6-e2c55a644650",
+        "-"
+      ],
+      "exit_code": 0,
+      "seconds": 58.798
+    },
+    {
+      "provider": "codex_cli",
+      "prompt_hash": "ee8a713bce1c9952a50300c09004e9f7a8093b31772f12cf5bb9051315633073",
+      "reserved_input_tokens": 26588,
+      "model": "gpt-6-sol",
+      "reasoning_effort": "high",
+      "session_in": "01a1ab29-ad85-7523-95d6-e2c55a644650",
+      "fork": false,
+      "session_out": "01a1ab29-ad85-7523-95d6-e2c55a644650",
+      "compacted": false,
+      "tools_used": [],
+      "usage": {
+        "input_tokens": 9484,
+        "cached_input_tokens": 36480,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 2001,
+        "reasoning_output_tokens": 1333,
+        "raw": {
+          "input_tokens": 114393,
+          "cached_input_tokens": 78592,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 9107,
+          "reasoning_output_tokens": 5175
+        },
+        "raw_is_thread_cumulative": true
+      },
+      "error": null,
+      "argv": [
+        "codex",
+        "--no-daemon",
+        "exec",
+        "resume",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--model",
+        "gpt-6-sol",
+        "--json",
+        "--output-schema",
+        "/tmp/scheme-v8-codex_cli-kk0_g156/schema-3.json",
+        "--output-last-message",
+        "/tmp/scheme-v8-codex_cli-kk0_g156/answer-3.json",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.browser_use=false",
+        "-c",
+        "features.computer_use=false",
+        "-c",
+        "features.image_generation=false",
+        "-c",
+        "features.memories=false",
+        "-c",
+        "features.skill_search=false",
+        "-c",
+        "features.skip_host_skill_discovery=true",
+        "-c",
+        "features.unbounded_connection_retries=false",
+        "-c",
+        "web_search=\"disabled\"",
+        "-c",
+        "project_doc_max_bytes=0",
+        "-c",
+        "suppress_unstable_features_warning=true",
+        "-c",
+        "sandbox_mode=\"read-only\"",
+        "01a1ab29-ad85-7523-95d6-e2c55a644650",
+        "-"
+      ],
+      "exit_code": 0,
+      "seconds": 46.157
+    }
+  ],
+  "rounds": [
+    {
+      "turn": 1,
+      "label": "discover",
+      "session_in": null,
+      "fork": false,
+      "session_out": "01a1ab29-ad85-7523-95d6-e2c55a644650",
+      "prompt_chars": 62005
+    },
+    {
+      "turn": 2,
+      "label": "review",
+      "session_in": "01a1ab29-ad85-7523-95d6-e2c55a644650",
+      "fork": false,
+      "session_out": "01a1ab29-ad85-7523-95d6-e2c55a644650",
+      "prompt_chars": 3269
+    },
+    {
+      "turn": 3,
+      "label": "timing",
+      "session_in": "01a1ab29-ad85-7523-95d6-e2c55a644650",
+      "fork": false,
+      "session_out": "01a1ab29-ad85-7523-95d6-e2c55a644650",
+      "prompt_chars": 20974
+    }
+  ],
+  "cost": {
+    "seconds": 189.778469,
+    "deep_files": 6,
+    "deep_unique_lines": 570,
+    "indexed_files": 27,
+    "indexed_bytes": 2536344,
+    "searches": 22,
+    "search_seconds": 2.732252,
+    "llm_calls": 3,
+    "llm_input_tokens": 114393,
+    "stop_reasons": [],
+    "model_seconds": 185.001,
+    "input_tokens_uncached": 35801,
+    "input_tokens_cached": 78592,
+    "input_tokens_cache_write": 0,
+    "output_tokens": 9107,
+    "input_tokens_total": 114393
+  }
+}

@@ -1,0 +1,499 @@
+{
+  "decision": "uncertain",
+  "errors": [],
+  "answer": {
+    "candidate_id": "o-da411dc31cb44734",
+    "decision": "uncertain",
+    "effect": "unclear",
+    "reason": "The old harness parses into a local XMLDocument, and g0001 changes XMLNode descendant cleanup. The supplied packet establishes the cleanup obligation but neither a failure nor safe completion of that cleanup.",
+    "finite_witness": "",
+    "scope_contract": {
+      "status": "established",
+      "reason": "The entry parses into a local document, so releasing its parsed descendants is part of its lifecycle.",
+      "evidence": [
+        {
+          "evidence_id": "loc-16cdf5716933802ca2decf49",
+          "quote": "// Entry point for LibFuzzer.\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\tstd::string data_string(reinterpret_cast<const char*>(data), size);\n\tXMLDocument doc;\n\tdoc.Parse( data_string.c_str() );\n\n\treturn 0;\n}\n"
+        },
+        {
+          "evidence_id": "loc-c54c894367e3c305d8deb7a6",
+          "quote": "XMLNode::~XMLNode()\r\n{\r\n    // Fast path: this node is dying, so maintaining _firstChild/_lastChild and\r\n    // sibling _prev/_next links is unnecessary. Only _parent must be zeroed to\r\n    // satisfy the MarkInUse assertion inside DeleteNode.\r\n    XMLNode *currentChild = _firstChild;\r\n    while (currentChild != NULL) {\r\n        XMLNode *next = currentChild->_next;\r\n        currentChild->_parent = 0;\r\n        DeleteNode(currentChild);\r\n        currentChild = next;\r\n    }\r\n\r\n    if ( _parent ) {\r\n        _parent->Unlink( this );\r\n    }\r\n}\r\n"
+        }
+      ]
+    },
+    "feasible_trigger": {
+      "status": "unknown",
+      "reason": "The entry can supply XML text to Parse, which calls ParseDeep, but the supplied code does not trace a child-bearing parsed tree through destruction.",
+      "evidence": [
+        {
+          "evidence_id": "loc-16cdf5716933802ca2decf49",
+          "quote": "// Entry point for LibFuzzer.\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\tstd::string data_string(reinterpret_cast<const char*>(data), size);\n\tXMLDocument doc;\n\tdoc.Parse( data_string.c_str() );\n\n\treturn 0;\n}\n"
+        },
+        {
+          "evidence_id": "loc-8b3b067b4a7d6414d18ad063",
+          "quote": "void XMLDocument::Parse()\r\n{\r\n    TIXMLASSERT( NoChildren() ); // Clear() must have been called previously\r\n    TIXMLASSERT( _charBuffer );\r\n    _parseCurLineNum = 1;\r\n    _parseLineNum = 1;\r\n    char* p = _charBuffer;\r\n    p = XMLUtil::SkipWhiteSpace( p, &_parseCurLineNum );\r\n    p = const_cast<char*>( XMLUtil::ReadBOM( p, &_writeBOM ) );\r\n    if ( !*p ) {\r\n        SetError( XML_ERROR_EMPTY_DOCUMENT, 0, 0 );\r\n        return;\r\n    }\r\n    ParseDeep(p, 0, &_parseCurLineNum );\r\n}\r\n"
+        }
+      ]
+    },
+    "observable_consequence": {
+      "status": "unknown",
+      "reason": "The new destructor calls XMLNode::DeleteNode for each child, but its implementation and the document destruction path are not supplied. No cleanup failure is established.",
+      "evidence": [
+        {
+          "evidence_id": "loc-c54c894367e3c305d8deb7a6",
+          "quote": "XMLNode::~XMLNode()\r\n{\r\n    // Fast path: this node is dying, so maintaining _firstChild/_lastChild and\r\n    // sibling _prev/_next links is unnecessary. Only _parent must be zeroed to\r\n    // satisfy the MarkInUse assertion inside DeleteNode.\r\n    XMLNode *currentChild = _firstChild;\r\n    while (currentChild != NULL) {\r\n        XMLNode *next = currentChild->_next;\r\n        currentChild->_parent = 0;\r\n        DeleteNode(currentChild);\r\n        currentChild = next;\r\n    }\r\n\r\n    if ( _parent ) {\r\n        _parent->Unlink( this );\r\n    }\r\n}\r\n"
+        },
+        {
+          "evidence_id": "loc-5c3e0992ed571c2b16983eb9",
+          "quote": "// Entry point for LibFuzzer.\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\tstd::string data_string(reinterpret_cast<const char*>(data), size);\n\tXMLDocument doc;\n\tdoc.Parse( data_string.c_str() );\n\n\treturn 0;\n}\n"
+        }
+      ]
+    },
+    "alternatives_ruled_out": {
+      "status": "unknown",
+      "reason": "The supplied XMLDocument::DeleteNode body calls XMLNode::DeleteNode; it does not show what the destructor's XMLNode::DeleteNode call does. The old DeleteChildren path likewise delegates to an unsupplied DeleteChild body.",
+      "evidence": [
+        {
+          "evidence_id": "loc-38728a54f14af818b2ecc38f",
+          "quote": "    XMLNode *currentChild = _firstChild;\r\n    while (currentChild != NULL) {\r\n        XMLNode *next = currentChild->_next;\r\n        currentChild->_parent = 0;\r\n        DeleteNode(currentChild);\r\n        currentChild = next;\r\n"
+        },
+        {
+          "evidence_id": "loc-111fce021ce0f18699074f43",
+          "quote": "void XMLDocument::DeleteNode( XMLNode* node )\t{   \r\n    if(node == 0) {\r\n        return; // check for null pointer\r\n    }\r\n    TIXMLASSERT(node->_document == this);\r\n    if (node->_parent) {\r\n        node->_parent->DeleteChild( node );\r\n    }\r\n    else {\r\n        // Isn't in the tree.\r\n        // Use the parent delete.\r\n        // Also, we need to mark it tracked: we 'know'\r\n        // it was never used.\r\n        node->_memPool->SetTracked();\r\n        // Call the static XMLNode version:\r\n        XMLNode::DeleteNode(node);\r\n    }\r\n}\r\n"
+        },
+        {
+          "evidence_id": "loc-2e96cf112087fa6ff3b0351a",
+          "quote": "void XMLNode::DeleteChildren()\n{\n    while( _firstChild ) {\n        TIXMLASSERT( _lastChild );\n        DeleteChild( _firstChild );\n    }\n    _firstChild = _lastChild = 0;\n}\n"
+        }
+      ]
+    },
+    "identity_preserved": {
+      "status": "established",
+      "reason": "Both versions are assessed against the same obligation: safe descendant cleanup when the old entry's parsed local document is released.",
+      "evidence": [
+        {
+          "evidence_id": "loc-16cdf5716933802ca2decf49",
+          "quote": "// Entry point for LibFuzzer.\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\tstd::string data_string(reinterpret_cast<const char*>(data), size);\n\tXMLDocument doc;\n\tdoc.Parse( data_string.c_str() );\n\n\treturn 0;\n}\n"
+        },
+        {
+          "evidence_id": "loc-67f03eada50adda369abd3c6",
+          "quote": "XMLNode::~XMLNode()\n{\n    DeleteChildren();\n    if ( _parent ) {\n        _parent->Unlink( this );\n    }\n}\n"
+        },
+        {
+          "evidence_id": "loc-c54c894367e3c305d8deb7a6",
+          "quote": "XMLNode::~XMLNode()\r\n{\r\n    // Fast path: this node is dying, so maintaining _firstChild/_lastChild and\r\n    // sibling _prev/_next links is unnecessary. Only _parent must be zeroed to\r\n    // satisfy the MarkInUse assertion inside DeleteNode.\r\n    XMLNode *currentChild = _firstChild;\r\n    while (currentChild != NULL) {\r\n        XMLNode *next = currentChild->_next;\r\n        currentChild->_parent = 0;\r\n        DeleteNode(currentChild);\r\n        currentChild = next;\r\n    }\r\n\r\n    if ( _parent ) {\r\n        _parent->Unlink( this );\r\n    }\r\n}\r\n"
+        }
+      ]
+    },
+    "source_evidence": [
+      {
+        "evidence_id": "loc-67f03eada50adda369abd3c6",
+        "quote": "XMLNode::~XMLNode()\n{\n    DeleteChildren();\n    if ( _parent ) {\n        _parent->Unlink( this );\n    }\n}\n"
+      },
+      {
+        "evidence_id": "loc-c54c894367e3c305d8deb7a6",
+        "quote": "XMLNode::~XMLNode()\r\n{\r\n    // Fast path: this node is dying, so maintaining _firstChild/_lastChild and\r\n    // sibling _prev/_next links is unnecessary. Only _parent must be zeroed to\r\n    // satisfy the MarkInUse assertion inside DeleteNode.\r\n    XMLNode *currentChild = _firstChild;\r\n    while (currentChild != NULL) {\r\n        XMLNode *next = currentChild->_next;\r\n        currentChild->_parent = 0;\r\n        DeleteNode(currentChild);\r\n        currentChild = next;\r\n    }\r\n\r\n    if ( _parent ) {\r\n        _parent->Unlink( this );\r\n    }\r\n}\r\n"
+      },
+      {
+        "evidence_id": "loc-d148473e28d10e81a58de03c",
+        "quote": "void XMLNode::DeleteChildren()\n{\n    while( _firstChild ) {\n        TIXMLASSERT( _lastChild );\n        DeleteChild( _firstChild );\n    }\n    _firstChild = _lastChild = 0;\n}\n"
+      },
+      {
+        "evidence_id": "loc-2f4bb664a0fcbfcc807c85db",
+        "quote": "void XMLDocument::DeleteNode( XMLNode* node )\t{   \r\n    if(node == 0) {\r\n        return; // check for null pointer\r\n    }\r\n    TIXMLASSERT(node->_document == this);\r\n    if (node->_parent) {\r\n        node->_parent->DeleteChild( node );\r\n    }\r\n    else {\r\n        // Isn't in the tree.\r\n        // Use the parent delete.\r\n        // Also, we need to mark it tracked: we 'know'\r\n        // it was never used.\r\n        node->_memPool->SetTracked();\r\n        // Call the static XMLNode version:\r\n        XMLNode::DeleteNode(node);\r\n    }\r\n}\r\n"
+      }
+    ],
+    "harness_evidence": [
+      {
+        "evidence_id": "loc-16cdf5716933802ca2decf49",
+        "quote": "// Entry point for LibFuzzer.\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\tstd::string data_string(reinterpret_cast<const char*>(data), size);\n\tXMLDocument doc;\n\tdoc.Parse( data_string.c_str() );\n\n\treturn 0;\n}\n"
+      }
+    ],
+    "missing_information": [
+      "The document destruction and parsed-child construction paths are needed to establish a finite child-bearing cleanup execution.",
+      "The deletion implementations are needed to determine whether either cleanup path fails."
+    ],
+    "requested_symbols": [
+      "XMLDocument::~XMLDocument",
+      "XMLNode::DeleteNode",
+      "XMLNode::DeleteChild",
+      "XMLNode::Unlink",
+      "XMLNode::ParseDeep"
+    ],
+    "requested_paths": [
+      "tinyxml2.cpp"
+    ],
+    "obligation_class": "execution_compatibility",
+    "scope_basis": "target_state_contract",
+    "trigger_basis": "current_target_execution",
+    "coverage_witness": {
+      "supported_behavior": "",
+      "required_setup": "",
+      "actual_target_setup": "",
+      "blocked_behavior": "",
+      "equivalent_routes": ""
+    }
+  },
+  "citation_errors": [],
+  "citations": [
+    {
+      "pointer": "/scope_contract/evidence/0",
+      "evidence_id": "loc-16cdf5716933802ca2decf49",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/xmltest.cpp",
+      "text": "// Entry point for LibFuzzer.\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\tstd::string data_string(reinterpret_cast<const char*>(data), size);\n\tXMLDocument doc;\n\tdoc.Parse( data_string.c_str() );\n\n\treturn 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-c9a646719ff8f19a9090",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/xmltest.cpp",
+        "start_line": 21,
+        "end_line": 28,
+        "unit_sha256": "5980713c2055377c0aa0ece695dd1f063316c688aaa4ab4c789af04509f313bb",
+        "quote_sha256": "c073c3b20c9cfd9fa49857b508a300da933c07aa844c80d32f553976e81c5745"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/1",
+      "evidence_id": "loc-c54c894367e3c305d8deb7a6",
+      "kind": "after_source",
+      "path": "input/source/tinyxml2.cpp",
+      "text": "XMLNode::~XMLNode()\r\n{\r\n    // Fast path: this node is dying, so maintaining _firstChild/_lastChild and\r\n    // sibling _prev/_next links is unnecessary. Only _parent must be zeroed to\r\n    // satisfy the MarkInUse assertion inside DeleteNode.\r\n    XMLNode *currentChild = _firstChild;\r\n    while (currentChild != NULL) {\r\n        XMLNode *next = currentChild->_next;\r\n        currentChild->_parent = 0;\r\n        DeleteNode(currentChild);\r\n        currentChild = next;\r\n    }\r\n\r\n    if ( _parent ) {\r\n        _parent->Unlink( this );\r\n    }\r\n}\r\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-45bd9f93d35daa1911b6",
+        "version": "after",
+        "path": "input/source/tinyxml2.cpp",
+        "start_line": 835,
+        "end_line": 851,
+        "unit_sha256": "f8bf0012c37a7b3b9ecfdaf0001dd108077ef125bf69a558424eac923d407cef",
+        "quote_sha256": "f8bf0012c37a7b3b9ecfdaf0001dd108077ef125bf69a558424eac923d407cef"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/0",
+      "evidence_id": "loc-16cdf5716933802ca2decf49",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/xmltest.cpp",
+      "text": "// Entry point for LibFuzzer.\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\tstd::string data_string(reinterpret_cast<const char*>(data), size);\n\tXMLDocument doc;\n\tdoc.Parse( data_string.c_str() );\n\n\treturn 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-c9a646719ff8f19a9090",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/xmltest.cpp",
+        "start_line": 21,
+        "end_line": 28,
+        "unit_sha256": "5980713c2055377c0aa0ece695dd1f063316c688aaa4ab4c789af04509f313bb",
+        "quote_sha256": "c073c3b20c9cfd9fa49857b508a300da933c07aa844c80d32f553976e81c5745"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/1",
+      "evidence_id": "loc-8b3b067b4a7d6414d18ad063",
+      "kind": "after_source",
+      "path": "input/source/tinyxml2.cpp",
+      "text": "void XMLDocument::Parse()\r\n{\r\n    TIXMLASSERT( NoChildren() ); // Clear() must have been called previously\r\n    TIXMLASSERT( _charBuffer );\r\n    _parseCurLineNum = 1;\r\n    _parseLineNum = 1;\r\n    char* p = _charBuffer;\r\n    p = XMLUtil::SkipWhiteSpace( p, &_parseCurLineNum );\r\n    p = const_cast<char*>( XMLUtil::ReadBOM( p, &_writeBOM ) );\r\n    if ( !*p ) {\r\n        SetError( XML_ERROR_EMPTY_DOCUMENT, 0, 0 );\r\n        return;\r\n    }\r\n    ParseDeep(p, 0, &_parseCurLineNum );\r\n}\r\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Parse delegates tree construction to ParseDeep.",
+      "location": {
+        "unit_id": "u-47f1026c88d965eab147",
+        "version": "after",
+        "path": "input/source/tinyxml2.cpp",
+        "start_line": 2586,
+        "end_line": 2600,
+        "unit_sha256": "fe1f1533378e45c8e39a03f9096b29e406531316756b4a402df1d762f6d79efe",
+        "quote_sha256": "fe1f1533378e45c8e39a03f9096b29e406531316756b4a402df1d762f6d79efe"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/0",
+      "evidence_id": "loc-c54c894367e3c305d8deb7a6",
+      "kind": "after_source",
+      "path": "input/source/tinyxml2.cpp",
+      "text": "XMLNode::~XMLNode()\r\n{\r\n    // Fast path: this node is dying, so maintaining _firstChild/_lastChild and\r\n    // sibling _prev/_next links is unnecessary. Only _parent must be zeroed to\r\n    // satisfy the MarkInUse assertion inside DeleteNode.\r\n    XMLNode *currentChild = _firstChild;\r\n    while (currentChild != NULL) {\r\n        XMLNode *next = currentChild->_next;\r\n        currentChild->_parent = 0;\r\n        DeleteNode(currentChild);\r\n        currentChild = next;\r\n    }\r\n\r\n    if ( _parent ) {\r\n        _parent->Unlink( this );\r\n    }\r\n}\r\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-45bd9f93d35daa1911b6",
+        "version": "after",
+        "path": "input/source/tinyxml2.cpp",
+        "start_line": 835,
+        "end_line": 851,
+        "unit_sha256": "f8bf0012c37a7b3b9ecfdaf0001dd108077ef125bf69a558424eac923d407cef",
+        "quote_sha256": "f8bf0012c37a7b3b9ecfdaf0001dd108077ef125bf69a558424eac923d407cef"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/1",
+      "evidence_id": "loc-5c3e0992ed571c2b16983eb9",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/xmltest.cpp",
+      "text": "// Entry point for LibFuzzer.\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\tstd::string data_string(reinterpret_cast<const char*>(data), size);\n\tXMLDocument doc;\n\tdoc.Parse( data_string.c_str() );\n\n\treturn 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The local document's lifetime ends when the entry returns.",
+      "location": {
+        "unit_id": "u-c9a646719ff8f19a9090",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/xmltest.cpp",
+        "start_line": 21,
+        "end_line": 28,
+        "unit_sha256": "5980713c2055377c0aa0ece695dd1f063316c688aaa4ab4c789af04509f313bb",
+        "quote_sha256": "c073c3b20c9cfd9fa49857b508a300da933c07aa844c80d32f553976e81c5745"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/0",
+      "evidence_id": "loc-38728a54f14af818b2ecc38f",
+      "kind": "after_source",
+      "path": "input/source/tinyxml2.cpp",
+      "text": "    XMLNode *currentChild = _firstChild;\r\n    while (currentChild != NULL) {\r\n        XMLNode *next = currentChild->_next;\r\n        currentChild->_parent = 0;\r\n        DeleteNode(currentChild);\r\n        currentChild = next;\r\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-45bd9f93d35daa1911b6",
+        "version": "after",
+        "path": "input/source/tinyxml2.cpp",
+        "start_line": 840,
+        "end_line": 845,
+        "unit_sha256": "f8bf0012c37a7b3b9ecfdaf0001dd108077ef125bf69a558424eac923d407cef",
+        "quote_sha256": "a57890cb3679b676ff2c6bb77300d9b2479a8fa4fc1d34e3c5f05916df125658"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/1",
+      "evidence_id": "loc-111fce021ce0f18699074f43",
+      "kind": "after_source",
+      "path": "input/source/tinyxml2.cpp",
+      "text": "void XMLDocument::DeleteNode( XMLNode* node )\t{   \r\n    if(node == 0) {\r\n        return; // check for null pointer\r\n    }\r\n    TIXMLASSERT(node->_document == this);\r\n    if (node->_parent) {\r\n        node->_parent->DeleteChild( node );\r\n    }\r\n    else {\r\n        // Isn't in the tree.\r\n        // Use the parent delete.\r\n        // Also, we need to mark it tracked: we 'know'\r\n        // it was never used.\r\n        node->_memPool->SetTracked();\r\n        // Call the static XMLNode version:\r\n        XMLNode::DeleteNode(node);\r\n    }\r\n}\r\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "This is XMLDocument::DeleteNode, which delegates to the distinct XMLNode::DeleteNode function.",
+      "location": {
+        "unit_id": "u-5d66086aab6853971f81",
+        "version": "after",
+        "path": "input/source/tinyxml2.cpp",
+        "start_line": 2360,
+        "end_line": 2377,
+        "unit_sha256": "0fa629699a2055831341b9bf3c272f01db6ac465dc933213a893c5333b9ca8c6",
+        "quote_sha256": "0fa629699a2055831341b9bf3c272f01db6ac465dc933213a893c5333b9ca8c6"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/2",
+      "evidence_id": "loc-2e96cf112087fa6ff3b0351a",
+      "kind": "before_source",
+      "path": "input/source/tinyxml2.cpp",
+      "text": "void XMLNode::DeleteChildren()\n{\n    while( _firstChild ) {\n        TIXMLASSERT( _lastChild );\n        DeleteChild( _firstChild );\n    }\n    _firstChild = _lastChild = 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The old cleanup path delegates to DeleteChild.",
+      "location": {
+        "unit_id": "u-cecb3a06902f5d8952f3",
+        "version": "before",
+        "path": "input/source/tinyxml2.cpp",
+        "start_line": 902,
+        "end_line": 909,
+        "unit_sha256": "ec8a9c9c9e6d4a02c14b366b38fe0e33935633b083ad750a396965e7bee80b9a",
+        "quote_sha256": "ec8a9c9c9e6d4a02c14b366b38fe0e33935633b083ad750a396965e7bee80b9a"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/0",
+      "evidence_id": "loc-16cdf5716933802ca2decf49",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/xmltest.cpp",
+      "text": "// Entry point for LibFuzzer.\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\tstd::string data_string(reinterpret_cast<const char*>(data), size);\n\tXMLDocument doc;\n\tdoc.Parse( data_string.c_str() );\n\n\treturn 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-c9a646719ff8f19a9090",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/xmltest.cpp",
+        "start_line": 21,
+        "end_line": 28,
+        "unit_sha256": "5980713c2055377c0aa0ece695dd1f063316c688aaa4ab4c789af04509f313bb",
+        "quote_sha256": "c073c3b20c9cfd9fa49857b508a300da933c07aa844c80d32f553976e81c5745"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/1",
+      "evidence_id": "loc-67f03eada50adda369abd3c6",
+      "kind": "before_source",
+      "path": "input/source/tinyxml2.cpp",
+      "text": "XMLNode::~XMLNode()\n{\n    DeleteChildren();\n    if ( _parent ) {\n        _parent->Unlink( this );\n    }\n}\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-12d952baa5b4ae87134c",
+        "version": "before",
+        "path": "input/source/tinyxml2.cpp",
+        "start_line": 835,
+        "end_line": 841,
+        "unit_sha256": "1d6661b3e38f8a418cfe701f880b6db67ea8aac45a885a1d380844b4cf4c8096",
+        "quote_sha256": "1d6661b3e38f8a418cfe701f880b6db67ea8aac45a885a1d380844b4cf4c8096"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/2",
+      "evidence_id": "loc-c54c894367e3c305d8deb7a6",
+      "kind": "after_source",
+      "path": "input/source/tinyxml2.cpp",
+      "text": "XMLNode::~XMLNode()\r\n{\r\n    // Fast path: this node is dying, so maintaining _firstChild/_lastChild and\r\n    // sibling _prev/_next links is unnecessary. Only _parent must be zeroed to\r\n    // satisfy the MarkInUse assertion inside DeleteNode.\r\n    XMLNode *currentChild = _firstChild;\r\n    while (currentChild != NULL) {\r\n        XMLNode *next = currentChild->_next;\r\n        currentChild->_parent = 0;\r\n        DeleteNode(currentChild);\r\n        currentChild = next;\r\n    }\r\n\r\n    if ( _parent ) {\r\n        _parent->Unlink( this );\r\n    }\r\n}\r\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-45bd9f93d35daa1911b6",
+        "version": "after",
+        "path": "input/source/tinyxml2.cpp",
+        "start_line": 835,
+        "end_line": 851,
+        "unit_sha256": "f8bf0012c37a7b3b9ecfdaf0001dd108077ef125bf69a558424eac923d407cef",
+        "quote_sha256": "f8bf0012c37a7b3b9ecfdaf0001dd108077ef125bf69a558424eac923d407cef"
+      }
+    },
+    {
+      "pointer": "/source_evidence/0",
+      "evidence_id": "loc-67f03eada50adda369abd3c6",
+      "kind": "before_source",
+      "path": "input/source/tinyxml2.cpp",
+      "text": "XMLNode::~XMLNode()\n{\n    DeleteChildren();\n    if ( _parent ) {\n        _parent->Unlink( this );\n    }\n}\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-12d952baa5b4ae87134c",
+        "version": "before",
+        "path": "input/source/tinyxml2.cpp",
+        "start_line": 835,
+        "end_line": 841,
+        "unit_sha256": "1d6661b3e38f8a418cfe701f880b6db67ea8aac45a885a1d380844b4cf4c8096",
+        "quote_sha256": "1d6661b3e38f8a418cfe701f880b6db67ea8aac45a885a1d380844b4cf4c8096"
+      }
+    },
+    {
+      "pointer": "/source_evidence/1",
+      "evidence_id": "loc-c54c894367e3c305d8deb7a6",
+      "kind": "after_source",
+      "path": "input/source/tinyxml2.cpp",
+      "text": "XMLNode::~XMLNode()\r\n{\r\n    // Fast path: this node is dying, so maintaining _firstChild/_lastChild and\r\n    // sibling _prev/_next links is unnecessary. Only _parent must be zeroed to\r\n    // satisfy the MarkInUse assertion inside DeleteNode.\r\n    XMLNode *currentChild = _firstChild;\r\n    while (currentChild != NULL) {\r\n        XMLNode *next = currentChild->_next;\r\n        currentChild->_parent = 0;\r\n        DeleteNode(currentChild);\r\n        currentChild = next;\r\n    }\r\n\r\n    if ( _parent ) {\r\n        _parent->Unlink( this );\r\n    }\r\n}\r\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-45bd9f93d35daa1911b6",
+        "version": "after",
+        "path": "input/source/tinyxml2.cpp",
+        "start_line": 835,
+        "end_line": 851,
+        "unit_sha256": "f8bf0012c37a7b3b9ecfdaf0001dd108077ef125bf69a558424eac923d407cef",
+        "quote_sha256": "f8bf0012c37a7b3b9ecfdaf0001dd108077ef125bf69a558424eac923d407cef"
+      }
+    },
+    {
+      "pointer": "/source_evidence/2",
+      "evidence_id": "loc-d148473e28d10e81a58de03c",
+      "kind": "before_source",
+      "path": "input/source/tinyxml2.cpp",
+      "text": "void XMLNode::DeleteChildren()\n{\n    while( _firstChild ) {\n        TIXMLASSERT( _lastChild );\n        DeleteChild( _firstChild );\n    }\n    _firstChild = _lastChild = 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Shows the old destructor's delegated child cleanup.",
+      "location": {
+        "unit_id": "u-cecb3a06902f5d8952f3",
+        "version": "before",
+        "path": "input/source/tinyxml2.cpp",
+        "start_line": 902,
+        "end_line": 909,
+        "unit_sha256": "ec8a9c9c9e6d4a02c14b366b38fe0e33935633b083ad750a396965e7bee80b9a",
+        "quote_sha256": "ec8a9c9c9e6d4a02c14b366b38fe0e33935633b083ad750a396965e7bee80b9a"
+      }
+    },
+    {
+      "pointer": "/source_evidence/3",
+      "evidence_id": "loc-2f4bb664a0fcbfcc807c85db",
+      "kind": "after_source",
+      "path": "input/source/tinyxml2.cpp",
+      "text": "void XMLDocument::DeleteNode( XMLNode* node )\t{   \r\n    if(node == 0) {\r\n        return; // check for null pointer\r\n    }\r\n    TIXMLASSERT(node->_document == this);\r\n    if (node->_parent) {\r\n        node->_parent->DeleteChild( node );\r\n    }\r\n    else {\r\n        // Isn't in the tree.\r\n        // Use the parent delete.\r\n        // Also, we need to mark it tracked: we 'know'\r\n        // it was never used.\r\n        node->_memPool->SetTracked();\r\n        // Call the static XMLNode version:\r\n        XMLNode::DeleteNode(node);\r\n    }\r\n}\r\n",
+      "change_ids": [
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Distinguishes XMLDocument::DeleteNode from the unsupplied XMLNode::DeleteNode body.",
+      "location": {
+        "unit_id": "u-5d66086aab6853971f81",
+        "version": "after",
+        "path": "input/source/tinyxml2.cpp",
+        "start_line": 2360,
+        "end_line": 2377,
+        "unit_sha256": "0fa629699a2055831341b9bf3c272f01db6ac465dc933213a893c5333b9ca8c6",
+        "quote_sha256": "0fa629699a2055831341b9bf3c272f01db6ac465dc933213a893c5333b9ca8c6"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/0",
+      "evidence_id": "loc-16cdf5716933802ca2decf49",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/xmltest.cpp",
+      "text": "// Entry point for LibFuzzer.\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n\tstd::string data_string(reinterpret_cast<const char*>(data), size);\n\tXMLDocument doc;\n\tdoc.Parse( data_string.c_str() );\n\n\treturn 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-c9a646719ff8f19a9090",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/xmltest.cpp",
+        "start_line": 21,
+        "end_line": 28,
+        "unit_sha256": "5980713c2055377c0aa0ece695dd1f063316c688aaa4ab4c789af04509f313bb",
+        "quote_sha256": "c073c3b20c9cfd9fa49857b508a300da933c07aa844c80d32f553976e81c5745"
+      }
+    }
+  ],
+  "obligation_class": "execution_compatibility"
+}

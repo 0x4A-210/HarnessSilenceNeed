@@ -1,0 +1,89 @@
+{
+  "checked": {
+    "status": "unknown",
+    "gap": null,
+    "introduced_by_this_change": null,
+    "claims": [
+      {
+        "claim_id": "o-1fa0d1dd00c60ce9",
+        "status": "not_necessary",
+        "necessary": "no",
+        "before": {
+          "requirement": "Destroy a parsed XMLDocument containing child nodes and safely release nested descendants.",
+          "applicability": "required",
+          "harness_status": "sat",
+          "reason": "Document destruction calls Clear, which deletes document children. The old XMLNode destructor deletes each descendant through DeleteChildren; DeleteChild unlinks the child before deletion.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-67f03eada50adda369abd3c6",
+              "quote": "XMLNode::~XMLNode()\n{\n    DeleteChildren();\n    if ( _parent ) {\n        _parent->Unlink( this );\n    }\n}\n"
+            },
+            {
+              "evidence_id": "loc-bcfff6a29ff29f7b4b7d001e",
+              "quote": "XMLDocument::~XMLDocument()\n{\n    Clear();\n}\n"
+            },
+            {
+              "evidence_id": "loc-e9304bcd36b791deb1f6678e",
+              "quote": "void XMLDocument::Clear()\n{\n    DeleteChildren();\n\twhile( _unlinked.Size()) {\n\t\tDeleteNode(_unlinked[0]);\t// Will remove from _unlinked as part of delete.\n\t}\n"
+            },
+            {
+              "evidence_id": "loc-486dd8be0c844c8710f7e0db",
+              "quote": "void XMLNode::DeleteChildren()\n{\n    while( _firstChild ) {\n        TIXMLASSERT( _lastChild );\n        DeleteChild( _firstChild );\n    }\n    _firstChild = _lastChild = 0;\n}\n"
+            },
+            {
+              "evidence_id": "loc-3a12cd83758f7cab077b7326",
+              "quote": "void XMLNode::DeleteChild( XMLNode* node )\n{\n    TIXMLASSERT( node );\n    TIXMLASSERT( node->_document == _document );\n    TIXMLASSERT( node->_parent == this );\n    Unlink( node );\n\tTIXMLASSERT(node->_prev == 0);\n\tTIXMLASSERT(node->_next == 0);\n\tTIXMLASSERT(node->_parent == 0);\n    DeleteNode( node );\n}\n"
+            },
+            {
+              "evidence_id": "loc-a58b16cb4e4763f8e895099e",
+              "quote": "/*static*/ void XMLNode::DeleteNode( XMLNode* node )\n{\n    if ( node == 0 ) {\n        return;\n    }\n\tTIXMLASSERT(node->_document);\n\tif (!node->ToDocument()) {\n\t\tnode->_document->MarkInUse(node);\n\t}\n\n    MemPool* pool = node->_memPool;\n    node->~XMLNode();\n    pool->Free( node );\n}\n"
+            },
+            {
+              "evidence_id": "loc-f9ca893093d60112c01c8a03",
+              "quote": "            else {\n                if ( ele->ClosingType() != XMLElement::OPEN ) {\n                    mismatch = true;\n                }\n                else if ( !XMLUtil::StringEqual( endTag.GetStr(), ele->Name() ) ) {\n                    mismatch = true;\n                }\n            }\n            if ( mismatch ) {\n                _document->SetError( XML_ERROR_MISMATCHED_ELEMENT, initialLineNum, \"XMLElement name=%s\", ele->Name());\n                _document->DeleteNode( node );\n                break;\n            }\n        }\n        InsertEndChild( node );\n    }\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Destroy a parsed XMLDocument containing child nodes and safely release nested descendants.",
+          "applicability": "required",
+          "harness_status": "sat",
+          "reason": "Document destruction still calls Clear. The changed XMLNode destructor saves each next sibling, clears the child's parent, and deletes it; static DeleteNode then recursively destroys descendants and frees the child.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-c54c894367e3c305d8deb7a6",
+              "quote": "XMLNode::~XMLNode()\r\n{\r\n    // Fast path: this node is dying, so maintaining _firstChild/_lastChild and\r\n    // sibling _prev/_next links is unnecessary. Only _parent must be zeroed to\r\n    // satisfy the MarkInUse assertion inside DeleteNode.\r\n    XMLNode *currentChild = _firstChild;\r\n    while (currentChild != NULL) {\r\n        XMLNode *next = currentChild->_next;\r\n        currentChild->_parent = 0;\r\n        DeleteNode(currentChild);\r\n        currentChild = next;\r\n    }\r\n\r\n    if ( _parent ) {\r\n        _parent->Unlink( this );\r\n    }\r\n}\r\n"
+            },
+            {
+              "evidence_id": "loc-b907ab83f569bdbd56c978b9",
+              "quote": "XMLDocument::~XMLDocument()\r\n{\r\n    Clear();\r\n}\r\n"
+            },
+            {
+              "evidence_id": "loc-712d3832fb45838c5254db63",
+              "quote": "void XMLDocument::Clear()\r\n{\r\n    DeleteChildren();\r\n\twhile( _unlinked.Size()) {\r\n\t\tDeleteNode(_unlinked[0]);\t// Will remove from _unlinked as part of delete.\r\n\t}\r\n"
+            },
+            {
+              "evidence_id": "loc-5fc563778c09dcd5866eb1e7",
+              "quote": "/*static*/ void XMLNode::DeleteNode( XMLNode* node )\r\n{\r\n    if ( node == 0 ) {\r\n        return;\r\n    }\r\n\tTIXMLASSERT(node->_document);\r\n\tif (!node->ToDocument()) {\r\n\t\tnode->_document->MarkInUse(node);\r\n\t}\r\n\r\n    MemPool* pool = node->_memPool;\r\n    node->~XMLNode();\r\n    pool->Free( node );\r\n}\r\n"
+            },
+            {
+              "evidence_id": "loc-db6ba5cc15cb129ecc135d73",
+              "quote": "void XMLDocument::MarkInUse(const XMLNode* const node)\r\n{\r\n\tTIXMLASSERT(node);\r\n\tTIXMLASSERT(node->_parent == 0);\r\n\r\n\tfor (size_t i = 0; i < _unlinked.Size(); ++i) {\r\n\t\tif (node == _unlinked[i]) {\r\n\t\t\t_unlinked.SwapRemove(i);\r\n\t\t\tbreak;\r\n\t\t}\r\n\t}\r\n"
+            },
+            {
+              "evidence_id": "loc-0f8f0d937277c347f10a1842",
+              "quote": "            else {\r\n                if ( ele->ClosingType() != XMLElement::OPEN ) {\r\n                    mismatch = true;\r\n                }\r\n                else if ( !XMLUtil::StringEqual( endTag.GetStr(), ele->Name() ) ) {\r\n                    mismatch = true;\r\n                }\r\n            }\r\n            if ( mismatch ) {\r\n                _document->SetError( XML_ERROR_MISMATCHED_ELEMENT, initialLineNum, \"XMLElement name=%s\", ele->Name());\r\n                _document->DeleteNode( node );\r\n                break;\r\n            }\r\n        }\r\n        InsertEndChild( node );\r\n    }\r\n"
+            }
+          ]
+        },
+        "same_blocker": "not_applicable",
+        "reason": "The same local-document destruction path is exercised on both sides by nested XML input, and neither version needs another harness capability for descendant cleanup.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": []
+  },
+  "citation_errors": []
+}

@@ -1,0 +1,128 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0001",
+          "status": "blocked",
+          "reason": "The out-of-range UTF-32 preservation behavior is on the target's normalization surface, but every direct call has length zero. The CHARBOUND combinations are separately reached by the target's map calls.",
+          "errors": []
+        },
+        {
+          "change_id": "g0002",
+          "status": "not_target_relevant",
+          "reason": "This change adds an issue-reference link in NEWS.md and changes no operation used by the target.",
+          "errors": []
+        },
+        {
+          "change_id": "g0003",
+          "status": "covered",
+          "reason": "The added test exercises CHARBOUND with COMPOSE and DECOMPOSE; the target calls utf8proc_map with both combinations, and the test's terminated input satisfies the target's input guards.",
+          "errors": []
+        },
+        {
+          "change_id": "g0004",
+          "status": "blocked",
+          "reason": "The added tests establish a supported nonempty COMPOSE case containing 0x110000. The target never invokes direct UTF-32 normalization on a nonempty buffer.",
+          "errors": []
+        },
+        {
+          "change_id": "g0005",
+          "status": "blocked",
+          "reason": "The changed normalization branch preserves out-of-range UTF-32 elements and clears composition state, but the target's direct normalization calls all receive zero elements.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "unknown",
+          "reason": "The supplied build script delegates the actual build to test/ossfuzz.sh, whose contents were not supplied.",
+          "errors": []
+        },
+        "input": {
+          "status": "pass",
+          "reason": "A finite NUL-terminated input such as bytes 0x41,0x00 passes the entry guards and yields a valid codepoint through utf8proc_iterate.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "unknown",
+          "reason": "The target frees normalization and map results, and utf8proc_free accepts a pointer, but the supplied packet lacks utf8proc_map's output-pointer behavior on failure.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "blocked",
+          "reason": "For size at least four, the target skips direct UTF-32 normalization; for smaller sizes it divides size by four before every such call, making the length zero.",
+          "errors": []
+        }
+      },
+      "errors": [],
+      "missing_information": [
+        "The contents of test/ossfuzz.sh are needed to assess the build foundation.",
+        "The complete utf8proc_map contract is needed to assess cleanup after map failures."
+      ],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "id": "b-utf32-nonempty",
+        "change_ids": [
+          "g0001",
+          "g0004",
+          "g0005"
+        ],
+        "kind": "call",
+        "necessary": true,
+        "established": true,
+        "requirement": "For the direct utf8proc_normalize_utf32 operation, reach a nonempty UTF-32 buffer containing an out-of-range element with UTF8PROC_COMPOSE, so preservation and the composition boundary can be exercised.",
+        "target_route": "LLVMFuzzerTestOneInput allocates copy, copies input into it, then invokes utf8proc_normalize_utf32 with selected options.",
+        "failure_condition": "If input size is at least four, copy is NULL and the calls are skipped. Otherwise size is divided by four, so every call has length zero. None of their options includes UTF8PROC_COMPOSE.",
+        "alternative_paths": "The other entry calls operate on decoded codepoints or UTF-8 byte strings. utf8proc_iterate rejects encodings above U+10FFFF, and these calls do not expose the direct UTF-32 buffer behavior with 0x110000.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-7893090918b42614d0ae2e68",
+            "quote": "UTF8PROC_DLLEXPORT utf8proc_ssize_t utf8proc_normalize_utf32(utf8proc_int32_t *buffer, utf8proc_ssize_t length, unsigned int options) {\n  /* UTF8PROC_NULLTERM option will be ignored, 'length' is never ignored */\n  if (options & (UTF8PROC_NLF2LS | UTF8PROC_NLF2PS | UTF8PROC_STRIPCC)) {\n"
+          },
+          {
+            "evidence_id": "loc-0f6d74a318092c44f57f78b1",
+            "quote": "  if (options & UTF8PROC_COMPOSE) {\n    utf8proc_int32_t *starter = NULL;\n    const utf8proc_property_t *starter_property = NULL;\n    utf8proc_propval_t max_combining_class = -1;\n    utf8proc_ssize_t rpos;\n    utf8proc_ssize_t wpos = 0;\n    for (rpos = 0; rpos < length; rpos++) {\n      utf8proc_int32_t current_char = buffer[rpos];\n      if (current_char < 0 || current_char >= 0x110000) {\n        /* grapheme-break sentinel or out-of-range codepoint: pass it through\n           unchanged, but never compose across it, since we cannot inspect it\n           (unsafe_get_property would OOB on utf8proc_stage1table, idx = uc >> 8).\n           utf8proc_reencode drops what cannot be encoded, so this is invisible\n           to utf8proc_map. */\n        buffer[wpos++] = current_char;\n        starter = NULL;\n        starter_property = NULL;\n        max_combining_class = -1;\n        continue;\n      }\n"
+          },
+          {
+            "evidence_id": "loc-92d10e91d72529ff08cc3206",
+            "quote": "    /* an out-of-range codepoint is preserved, and blocks composition across it\n       (unsafe_get_property would read past utf8proc_stage1table) */\n    {\n        utf8proc_int32_t input[] = {0x0041, 0x110000, 0x0301};\n        check_normalize_utf32(\"out-of-range codepoint\", input, 3, input, 3);\n    }\n\n    /* likewise the grapheme-break sentinel written by utf8proc_decompose_char */\n    {\n        utf8proc_int32_t input[] = {0x0041, -1, 0x0301};\n        check_normalize_utf32(\"grapheme-break sentinel\", input, 3, input, 3);\n"
+          },
+          {
+            "evidence_id": "loc-0d6c3fe1cb330e79ee4a0b91",
+            "quote": "  // 4-byte sequence\n  // Must have 3 valid continuation characters\n  if ((str + 2 >= end) || !utf_cont(*str) || !utf_cont(str[1]) || !utf_cont(str[2]))\n     return UTF8PROC_ERROR_INVALIDUTF8;\n  // Make sure in correct range (0x10000 - 0x10ffff)\n  if (uc == 0xf0) {\n    if (*str < 0x90) return UTF8PROC_ERROR_INVALIDUTF8;\n  } else if (uc == 0xf4) {\n    if (*str > 0x8f) return UTF8PROC_ERROR_INVALIDUTF8;\n  }\n  *dst = ((uc & 7)<<18) | ((*str & 0x3f)<<12) | ((str[1] & 0x3f)<<6) | (str[2] & 0x3f);\n  return 4;\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-b8eff675ef9108291a8caf03",
+            "quote": "int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)\n{\n    if(size < 1) return 0;\n\n    /* Avoid timeout with long inputs */\n    if(size > (64 * 1024)) return 0;\n\n    if(data[size-1] != '\\0') return 0;\n\n    const uint8_t* ptr = data;\n    utf8proc_int32_t c = 0, c_prev = 0, state = 0;\n    unsigned int options;\n    utf8proc_ssize_t ret, bytes = 0;\n    utf8proc_uint8_t *str = NULL;\n    size_t len = strlen((const char*)data);\n"
+          },
+          {
+            "evidence_id": "loc-348676609b82d7c3d9487733",
+            "quote": "    while(bytes != len)\n    {\n        ret = utf8proc_iterate(ptr, -1, &c);\n\n        if(ret < 0 || ret == 0) break;\n\n        bytes += ret;\n        ptr += ret;\n\n        utf8proc_tolower(c);\n        utf8proc_toupper(c);\n        utf8proc_totitle(c);\n        utf8proc_islower(c);\n        utf8proc_isupper(c);\n        utf8proc_charwidth(c);\n        utf8proc_category(c);\n        utf8proc_category_string(c);\n        utf8proc_codepoint_valid(c);\n\n        utf8proc_grapheme_break(c_prev, c);\n        utf8proc_grapheme_break_stateful(c_prev, c, &state);\n\n        c_prev = c;\n    }\n"
+          },
+          {
+            "evidence_id": "loc-82c9f65bb6fcd0175e9400d4",
+            "quote": "    utf8proc_int32_t *copy = size >= 4 ? NULL : malloc(size);\n\n    if(copy)\n    {\n        size /= 4;\n\n        options = UTF8PROC_STRIPCC | UTF8PROC_NLF2LS | UTF8PROC_NLF2PS;\n        memcpy(copy, data, size);\n        utf8proc_normalize_utf32(copy, size, options);\n\n        options = UTF8PROC_STRIPCC | UTF8PROC_NLF2LS;\n        memcpy(copy, data, size);\n        utf8proc_normalize_utf32(copy, size, options);\n\n        options = UTF8PROC_STRIPCC | UTF8PROC_NLF2PS;\n        memcpy(copy, data, size);\n        utf8proc_normalize_utf32(copy, size, options);\n\n        options = UTF8PROC_STRIPCC;\n        memcpy(copy, data, size);\n        utf8proc_normalize_utf32(copy, size, options);\n\n        options = UTF8PROC_LUMP;\n        memcpy(copy, data, size);\n        utf8proc_normalize_utf32(copy, size, options);\n\n        options = 0;\n        memcpy(copy, data, size);\n        utf8proc_normalize_utf32(copy, size, options);\n\n        free(copy);\n"
+          },
+          {
+            "evidence_id": "loc-4e83ee75f74ee12f839e184b",
+            "quote": "    utf8proc_free(utf8proc_NFD(data));\n    utf8proc_free(utf8proc_NFC(data));\n    utf8proc_free(utf8proc_NFKD(data));\n    utf8proc_free(utf8proc_NFKC(data));\n    utf8proc_free(utf8proc_NFKC_Casefold(data));\n\n    utf8proc_map(data, len, &str, UTF8PROC_CHARBOUND | UTF8PROC_STRIPNA);\n    utf8proc_free(str);\n\n    utf8proc_map(data, len, &str, UTF8PROC_LUMP | UTF8PROC_NLF2LS | UTF8PROC_NLF2PS);\n    utf8proc_free(str);\n\n    utf8proc_map(data, len, &str, UTF8PROC_COMPOSE | UTF8PROC_STRIPMARK);\n    utf8proc_free(str);\n\n    utf8proc_map(data, len, &str, UTF8PROC_CHARBOUND | UTF8PROC_DECOMPOSE);\n    utf8proc_free(str);\n\n    utf8proc_map(data, len, &str, UTF8PROC_CHARBOUND | UTF8PROC_COMPOSE);\n    utf8proc_free(str);\n"
+          }
+        ],
+        "missing_information": [],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

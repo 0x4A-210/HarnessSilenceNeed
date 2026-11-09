@@ -1,0 +1,107 @@
+{
+  "checked": {
+    "verdict": "unknown",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0001",
+          "status": "unknown",
+          "reason": "The new array print depth guard is unreachable through a parsed tree if parsing and printing use the same limit. The frozen candidate specifically requires the limit to be 1000; the unread delegated build configuration could override it.",
+          "errors": []
+        },
+        {
+          "change_id": "g0002",
+          "status": "unknown",
+          "reason": "The object print guard lies on a harness print route, but this review is restricted to the frozen array candidate. Its coverage is unresolved.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "unknown",
+          "reason": "The supplied build script delegates to fuzzing/ossfuzz.sh, whose contents are not supplied; its compiler definitions cannot be determined.",
+          "errors": []
+        },
+        "input": {
+          "status": "pass",
+          "reason": "A finite input with four binary flag bytes and a NUL-terminated JSON payload passes the entry guards and reaches the parser, which derives its length from that terminator.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "pass",
+          "reason": "On the normal allocation route, the entry frees printed text and its minify copy, then deletes the parsed tree; the print implementations release their buffers on failure.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "unknown",
+          "reason": "All selected print variants dispatch through print_value to the array guard, but the parser rejects a container at the same limit. Whether the frozen depth-1000 condition applies under the delegated build remains unknown.",
+          "errors": []
+        }
+      },
+      "errors": [],
+      "missing_information": [
+        "The effective CJSON_NESTING_LIMIT under the delegated fuzz build is needed to establish the frozen depth-1000 witness."
+      ],
+      "semantic_proof": false
+    },
+    "accepted": [],
+    "rejected": [
+      {
+        "kind": "state",
+        "necessary": true,
+        "established": false,
+        "requirement": "Make the supported rejection of a constructible array at print depth 1000 reachable from the read target, if that is the effective configured limit.",
+        "target_route": "Four valid flag bytes and a NUL-terminated JSON payload → cJSON_ParseWithOpts → selected print variant → print_value → print_array.",
+        "failure_condition": "A constructed chain of 1001 arrays would reach the print_array depth-1000 rejection if the effective limit is 1000. The old entry prints only its parser result, and parsing rejects the 1001st container at that limit.",
+        "alternative_paths": "The selected print variants share print_value. The entry does not construct or deepen a tree; its later minify operation works on a copy of the input text. The effective build limit is still unknown.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-51d20a61f3de939f3004e4b1",
+            "quote": "static cJSON_bool print_array(const cJSON * const item, printbuffer * const output_buffer)\n{\n    unsigned char *output_pointer = NULL;\n    size_t length = 0;\n    cJSON *current_element = item->child;\n\n    if (output_buffer == NULL)\n    {\n        return false;\n    }\n\n    if (output_buffer->depth >= CJSON_NESTING_LIMIT)\n    {\n        return false; /* nesting is too deep */\n    }\n\n    /* Compose the output array. */\n    /* opening square bracket */\n    output_pointer = ensure(output_buffer, 1);\n    if (output_pointer == NULL)\n    {\n        return false;\n    }\n\n    *output_pointer = '[';\n    output_buffer->offset++;\n    output_buffer->depth++;\n\n    while (current_element != NULL)\n    {\n        if (!print_value(current_element, output_buffer))\n        {\n            return false;\n        }\n"
+          },
+          {
+            "evidence_id": "loc-61e91c7d4bc247d6819e9429",
+            "quote": "CJSON_PUBLIC(cJSON *) cJSON_CreateArray(void)\n{\n    cJSON *item = cJSON_New_Item(&global_hooks);\n    if(item)\n    {\n        item->type=cJSON_Array;\n    }\n\n    return item;\n}\n"
+          },
+          {
+            "evidence_id": "loc-933c47a2a2ddd237f13cba0a",
+            "quote": "static cJSON_bool add_item_to_array(cJSON *array, cJSON *item)\n{\n    cJSON *child = NULL;\n\n    if ((item == NULL) || (array == NULL) || (array == item))\n    {\n        return false;\n    }\n\n    child = array->child;\n    /*\n     * To find the last item in array quickly, we use prev in array\n     */\n    if (child == NULL)\n    {\n        /* list is empty, start new one */\n        array->child = item;\n        item->prev = item;\n        item->next = NULL;\n    }\n    else\n    {\n        /* append to the end */\n        if (child->prev)\n        {\n            suffix_object(child->prev, item);\n            array->child->prev = item;\n        }\n    }\n\n    return true;\n}\n\n/* Add item to array/object. */\nCJSON_PUBLIC(cJSON_bool) cJSON_AddItemToArray(cJSON *array, cJSON *item)\n{\n    return add_item_to_array(array, item);\n}\n"
+          },
+          {
+            "evidence_id": "loc-92e5144fd76d14b6dc4f6882",
+            "quote": "static cJSON_bool parse_array(cJSON * const item, parse_buffer * const input_buffer)\n{\n    cJSON *head = NULL; /* head of the linked list */\n    cJSON *current_item = NULL;\n\n    if (input_buffer->depth >= CJSON_NESTING_LIMIT)\n    {\n        return false; /* to deeply nested */\n    }\n    input_buffer->depth++;\n"
+          },
+          {
+            "evidence_id": "loc-cddadda3be812280fa10dea4",
+            "quote": "        case cJSON_String:\n            return print_string(item, output_buffer);\n\n        case cJSON_Array:\n            return print_array(item, output_buffer);\n\n        case cJSON_Object:\n            return print_object(item, output_buffer);\n\n"
+          },
+          {
+            "evidence_id": "loc-43d0e944cb18b4c4b898b03b",
+            "quote": "#define CJSON_NESTING_LIMIT 1000\n#endif\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-63bbc19aeb781ae4ddde71d2",
+            "quote": "    if(size <= offset) return 0;\n    if(data[size-1] != '\\0') return 0;\n    if(data[0] != '1' && data[0] != '0') return 0;\n    if(data[1] != '1' && data[1] != '0') return 0;\n    if(data[2] != '1' && data[2] != '0') return 0;\n    if(data[3] != '1' && data[3] != '0') return 0;\n\n    minify              = data[0] == '1' ? 1 : 0;\n    require_termination = data[1] == '1' ? 1 : 0;\n    formatted           = data[2] == '1' ? 1 : 0;\n    buffered            = data[3] == '1' ? 1 : 0;\n\n    json = cJSON_ParseWithOpts((const char*)data + offset, NULL, require_termination);\n\n    if(json == NULL) return 0;\n\n    if(buffered)\n    {\n        printed_json = cJSON_PrintBuffered(json, 1, formatted);\n    }\n    else\n    {\n        /* unbuffered printing */\n        if(formatted)\n        {\n            printed_json = cJSON_Print(json);\n        }\n        else\n        {\n            printed_json = cJSON_PrintUnformatted(json);\n        }\n    }\n\n    if(printed_json != NULL) free(printed_json);\n\n    if(minify)\n    {\n        copied = (unsigned char*)malloc(size);\n        if(copied == NULL) return 0;\n\n        memcpy(copied, data, size);\n\n        cJSON_Minify((char*)copied + offset);\n\n        free(copied);\n    }\n\n    cJSON_Delete(json);\n"
+          }
+        ],
+        "missing_information": [
+          "The effective CJSON_NESTING_LIMIT under fuzzing/ossfuzz.sh."
+        ],
+        "id": "o-5f14dac16a8f17b9",
+        "change_ids": [
+          "g0001"
+        ],
+        "errors": [
+          "unproven_or_optional_blocker"
+        ]
+      }
+    ],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

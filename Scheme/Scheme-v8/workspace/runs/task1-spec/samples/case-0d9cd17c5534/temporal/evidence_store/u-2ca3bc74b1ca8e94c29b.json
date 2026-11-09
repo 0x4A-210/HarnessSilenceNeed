@@ -1,0 +1,19 @@
+{
+  "unit_id": "u-2ca3bc74b1ca8e94c29b",
+  "original_unit_id": "9b6b049dd601bae13b24",
+  "kind": "after_source",
+  "path": "input/source/contrib/pzstd/Pzstd.cpp",
+  "version": "after",
+  "name": "decompress",
+  "start": 429,
+  "end": 496,
+  "line_origin": "file",
+  "sha256": "921b8b277f288ca9d80fbc42973b9c4adb57a7d210414faabc4673e6b2058efe",
+  "text": "static void decompress(\n    SharedState& state,\n    std::shared_ptr<BufferWorkQueue> in,\n    std::shared_ptr<BufferWorkQueue> out) {\n  auto& errorHolder = state.errorHolder;\n  auto guard = makeScopeGuard([&] { out->finish(); });\n  // Initialize the DCtx\n  auto ctx = state.dStreamPool->get();\n  if (!errorHolder.check(ctx != nullptr, \"Failed to allocate ZSTD_DStream\")) {\n    return;\n  }\n  {\n    auto err = ZSTD_DCtx_reset(ctx.get(), ZSTD_reset_session_only);\n    if (!errorHolder.check(!ZSTD_isError(err), ZSTD_getErrorName(err))) {\n      return;\n    }\n  }\n\n  const size_t outSize = ZSTD_DStreamOutSize();\n  Buffer inBuffer;\n  size_t returnCode = 0;\n  // Read a buffer in from the input queue\n  while (in->pop(inBuffer) && !errorHolder.hasError()) {\n    auto zstdInBuffer = makeZstdInBuffer(inBuffer);\n    // Decompress the whole buffer and send it to the output queue\n    while (!inBuffer.empty() && !errorHolder.hasError()) {\n      // Allocate a buffer with at least outSize bytes.\n      Buffer outBuffer(outSize);\n      auto zstdOutBuffer = makeZstdOutBuffer(outBuffer);\n      // Decompress\n      returnCode =\n          ZSTD_decompressStream(ctx.get(), &zstdOutBuffer, &zstdInBuffer);\n      if (!errorHolder.check(\n              !ZSTD_isError(returnCode), ZSTD_getErrorName(returnCode))) {\n        return;\n      }\n      // Pass the buffer with the decompressed data to the output queue\n      out->push(split(outBuffer, zstdOutBuffer));\n      // Advance past the input we already read\n      advance(inBuffer, zstdInBuffer);\n      if (returnCode == 0) {\n        // The frame is over, prepare to (maybe) start a new frame\n        ZSTD_initDStream(ctx.get());\n      }\n    }\n  }\n  if (!errorHolder.check(returnCode <= 1, \"Incomplete block\")) {\n    return;\n  }\n  // We've given ZSTD_decompressStream all of our data, but there may still\n  // be data to read.\n  while (returnCode == 1) {\n    // Allocate a buffer with at least outSize bytes.\n    Buffer outBuffer(outSize);\n    auto zstdOutBuffer = makeZstdOutBuffer(outBuffer);\n    // Pass in no input.\n    ZSTD_inBuffer zstdInBuffer{nullptr, 0, 0};\n    // Decompress\n    returnCode =\n        ZSTD_decompressStream(ctx.get(), &zstdOutBuffer, &zstdInBuffer);\n    if (!errorHolder.check(\n            !ZSTD_isError(returnCode), ZSTD_getErrorName(returnCode))) {\n      return;\n    }\n    // Pass the buffer with the decompressed data to the output queue\n    out->push(split(outBuffer, zstdOutBuffer));\n  }\n}\n",
+  "change_ids": [],
+  "invariant_source": true,
+  "unit_kind": "function",
+  "page_ids": [
+    "after-whole-9b6b049dd601bae13b24-0000"
+  ]
+}

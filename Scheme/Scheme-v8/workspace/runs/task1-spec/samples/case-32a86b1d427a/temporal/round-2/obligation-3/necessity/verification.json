@@ -1,0 +1,656 @@
+{
+  "decision": "uncertain",
+  "errors": [],
+  "answer": {
+    "candidate_id": "o-0a27122f2b8c8ffd",
+    "decision": "uncertain",
+    "effect": "unclear",
+    "reason": "The after source clears gzhead during reset, and the complete old entry has no sequence that installs a custom gzip header and then resets that stream. The packet does not establish whether gzip support is enabled by the supplied build or whether this gzip reset sequence belongs to this entry’s flush and sync operational surface.",
+    "finite_witness": "",
+    "scope_contract": {
+      "status": "unknown",
+      "reason": "The entry compresses with deflate and recovers with inflateSync, but the supplied contract evidence does not settle whether customized gzip stream resets are part of that target surface.",
+      "evidence": [
+        {
+          "evidence_id": "loc-648c8a2b2e4e07fc1438b83d",
+          "quote": "int test_flush(unsigned char *compr, z_size_t *comprLen) {\n  z_stream c_stream; /* compression stream */\n  int err;\n  unsigned int len = dataLen;\n\n  c_stream.zalloc = zalloc;\n  c_stream.zfree = zfree;\n  c_stream.opaque = (void *)0;\n\n  err = deflateInit(&c_stream, Z_DEFAULT_COMPRESSION);\n  CHECK_ERR(err, \"deflateInit\");\n\n  c_stream.next_in = (Bytef *)data;\n  c_stream.next_out = compr;\n  c_stream.avail_in = 3;\n  c_stream.avail_out = (unsigned int)*comprLen;\n  err = deflate(&c_stream, Z_FULL_FLUSH);\n  CHECK_ERR(err, \"deflate flush 1\");\n\n  compr[3]++; /* force an error in first compressed block */\n  c_stream.avail_in = len - 3;\n\n  err = deflate(&c_stream, Z_FINISH);\n  if (err != Z_STREAM_END) {\n    CHECK_ERR(err, \"deflate flush 2\");\n  }\n  err = deflateEnd(&c_stream);\n  CHECK_ERR(err, \"deflateEnd\");\n\n  *comprLen = (z_size_t)c_stream.total_out;\n\n  return 0;\n}\n\n/* ===========================================================================\n * Test inflateSync()\n */\nint test_sync(unsigned char *compr, size_t comprLen, unsigned char *uncompr,\n               size_t uncomprLen) {\n  int err;\n  z_stream d_stream; /* decompression stream */\n\n  d_stream.zalloc = zalloc;\n  d_stream.zfree = zfree;\n  d_stream.opaque = (void *)0;\n\n  d_stream.next_in = compr;\n  d_stream.avail_in = 2; /* just read the zlib header */\n\n  err = inflateInit(&d_stream);\n  CHECK_ERR(err, \"inflateInit\");\n\n  d_stream.next_out = uncompr;\n  d_stream.avail_out = (unsigned int)uncomprLen;\n\n  err = inflate(&d_stream, Z_NO_FLUSH);\n  CHECK_ERR(err, \"inflate\");\n\n  d_stream.avail_in = (unsigned int)comprLen - 2; /* read all compressed data */\n  err = inflateSync(&d_stream); /* but skip the damaged part */\n  CHECK_ERR(err, \"inflateSync\");\n\n  err = inflate(&d_stream, Z_FINISH);\n  if (err != Z_DATA_ERROR && err != Z_STREAM_END) {\n    fprintf(stderr, \"inflate should report DATA_ERROR or Z_STREAM_END\\n\");\n    /* v1.1.11= reports DATA_ERROR because of incorrect adler32. v1.1.12+ reports Z_STREAM END because it skips the adler32 check. */\n    return 0;\n  }\n  err = inflateEnd(&d_stream);\n  CHECK_ERR(err, \"inflateEnd\");\n  return 0;\n"
+        },
+        {
+          "evidence_id": "loc-5277c5508ff9219480f97d20",
+          "quote": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    s->gzhead = Z_NULL;\n\n    _tr_init(s);\n\n    return Z_OK;\n"
+        },
+        {
+          "evidence_id": "loc-1c36dad9179989dc2465dc1d",
+          "quote": "int ZEXPORT deflateSetHeader(z_streamp strm, gz_headerp head) {\n    if (deflateStateCheck(strm) || strm->state->wrap != 2)\n        return Z_STREAM_ERROR;\n    strm->state->gzhead = head;\n    return Z_OK;\n}\n"
+        }
+      ]
+    },
+    "feasible_trigger": {
+      "status": "unknown",
+      "reason": "A customized gzip stream followed by deflateResetKeep is supported by the shown conditional code, but the effective GZIP build definition is not established.",
+      "evidence": [
+        {
+          "evidence_id": "loc-144f8b8b762c4fba35d0a0d7",
+          "quote": "    if (windowBits < 0) { /* suppress zlib wrapper */\n        wrap = 0;\n        if (windowBits < -15)\n            return Z_STREAM_ERROR;\n        windowBits = -windowBits;\n    }\n#ifdef GZIP\n    else if (windowBits > 15) {\n        wrap = 2;       /* write gzip wrapper instead */\n        windowBits -= 16;\n    }\n#endif\n    if (memLevel < 1 || memLevel > MAX_MEM_LEVEL || method != Z_DEFLATED ||\n        windowBits < 8 || windowBits > 15 || level < 0 || level > 9 ||\n        strategy < 0 || strategy > Z_FIXED || (windowBits == 8 && wrap != 1)) {\n        return Z_STREAM_ERROR;\n"
+        },
+        {
+          "evidence_id": "loc-07c9fdf0a4ce92263fdec9ee",
+          "quote": "int ZEXPORT deflateSetHeader(z_streamp strm, gz_headerp head) {\n    if (deflateStateCheck(strm) || strm->state->wrap != 2)\n        return Z_STREAM_ERROR;\n    strm->state->gzhead = head;\n    return Z_OK;\n}\n"
+        },
+        {
+          "evidence_id": "loc-6615d1843cc9876a2a1c60f6",
+          "quote": "#  define GZIP\n#endif\n"
+        },
+        {
+          "evidence_id": "loc-dc064b1bdb001affc9fe5615",
+          "quote": "if ! ./configure; then\n    cat configure.log\n    exit 1\nfi\n\nmake -j$(nproc) clean\nmake -j$(nproc) all\n"
+        }
+      ]
+    },
+    "observable_consequence": {
+      "status": "unknown",
+      "reason": "If gzip is enabled and the reset sequence is in scope, clearing gzhead makes the next deflate emit the default gzip header, while the old entry cannot reach that sequence. Those prerequisites remain unresolved.",
+      "evidence": [
+        {
+          "evidence_id": "loc-5277c5508ff9219480f97d20",
+          "quote": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    s->gzhead = Z_NULL;\n\n    _tr_init(s);\n\n    return Z_OK;\n"
+        },
+        {
+          "evidence_id": "loc-6aa138fdfaccb05804d9bae9",
+          "quote": "#ifdef GZIP\n    if (s->status == GZIP_STATE) {\n        /* gzip header */\n        strm->adler = crc32(0L, Z_NULL, 0);\n        put_byte(s, 31);\n        put_byte(s, 139);\n        put_byte(s, 8);\n        if (s->gzhead == Z_NULL) {\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, s->level == 9 ? 2 :\n                     (s->strategy >= Z_HUFFMAN_ONLY || s->level < 2 ?\n                      4 : 0));\n            put_byte(s, OS_CODE);\n            s->status = BUSY_STATE;\n\n            /* Compression must start with an empty pending buffer */\n            flush_pending(strm);\n            if (s->pending != 0) {\n                s->last_flush = -1;\n                return Z_OK;\n            }\n        }\n        else {\n            put_byte(s, (s->gzhead->text ? 1 : 0) +\n"
+        },
+        {
+          "evidence_id": "loc-30f0b2ffa97f365476559a1c",
+          "quote": "int test_flush(unsigned char *compr, z_size_t *comprLen) {\n  z_stream c_stream; /* compression stream */\n  int err;\n  unsigned int len = dataLen;\n\n  c_stream.zalloc = zalloc;\n  c_stream.zfree = zfree;\n  c_stream.opaque = (void *)0;\n\n  err = deflateInit(&c_stream, Z_DEFAULT_COMPRESSION);\n  CHECK_ERR(err, \"deflateInit\");\n\n  c_stream.next_in = (Bytef *)data;\n  c_stream.next_out = compr;\n  c_stream.avail_in = 3;\n  c_stream.avail_out = (unsigned int)*comprLen;\n  err = deflate(&c_stream, Z_FULL_FLUSH);\n  CHECK_ERR(err, \"deflate flush 1\");\n\n  compr[3]++; /* force an error in first compressed block */\n  c_stream.avail_in = len - 3;\n\n  err = deflate(&c_stream, Z_FINISH);\n  if (err != Z_STREAM_END) {\n    CHECK_ERR(err, \"deflate flush 2\");\n  }\n  err = deflateEnd(&c_stream);\n  CHECK_ERR(err, \"deflateEnd\");\n\n  *comprLen = (z_size_t)c_stream.total_out;\n\n  return 0;\n}\n"
+        }
+      ]
+    },
+    "alternatives_ruled_out": {
+      "status": "established",
+      "reason": "The complete old entry contains no header installation or reset. Fresh initialization can start with a null gzhead, but cannot exercise clearing a previously installed custom header; that counterexample is a different state sequence.",
+      "evidence": [
+        {
+          "evidence_id": "loc-6d9409829ff2869d3a0fa15a",
+          "quote": "/* Copyright 2022 Google LLC\nLicensed under the Apache License, Version 2.0 (the \"License\");\nyou may not use this file except in compliance with the License.\nYou may obtain a copy of the License at\n      http://www.apache.org/licenses/LICENSE-2.0\nUnless required by applicable law or agreed to in writing, software\ndistributed under the License is distributed on an \"AS IS\" BASIS,\nWITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\nSee the License for the specific language governing permissions and\nlimitations under the License.\n*/\n\n#include <stdio.h>\n#include <stddef.h>\n#include <stdint.h>\n#include <string.h>\n#include <assert.h>\n#include <stdlib.h>\n#include <inttypes.h>\n#include \"zlib.h\"\n\n#define CHECK_ERR(err, msg) { \\\n    if (err != Z_OK) { \\\n        fprintf(stderr, \"%s error: %d\\n\", msg, err); \\\n        return 0; \\\n    } \\\n}\n\nstatic const uint8_t *data;\nstatic size_t dataLen;\nstatic alloc_func zalloc = NULL;\nstatic free_func zfree = NULL;\n\n/* ===========================================================================\n * Test deflate() with full flush\n */\nint test_flush(unsigned char *compr, z_size_t *comprLen) {\n  z_stream c_stream; /* compression stream */\n  int err;\n  unsigned int len = dataLen;\n\n  c_stream.zalloc = zalloc;\n  c_stream.zfree = zfree;\n  c_stream.opaque = (void *)0;\n\n  err = deflateInit(&c_stream, Z_DEFAULT_COMPRESSION);\n  CHECK_ERR(err, \"deflateInit\");\n\n  c_stream.next_in = (Bytef *)data;\n  c_stream.next_out = compr;\n  c_stream.avail_in = 3;\n  c_stream.avail_out = (unsigned int)*comprLen;\n  err = deflate(&c_stream, Z_FULL_FLUSH);\n  CHECK_ERR(err, \"deflate flush 1\");\n\n  compr[3]++; /* force an error in first compressed block */\n  c_stream.avail_in = len - 3;\n\n  err = deflate(&c_stream, Z_FINISH);\n  if (err != Z_STREAM_END) {\n    CHECK_ERR(err, \"deflate flush 2\");\n  }\n  err = deflateEnd(&c_stream);\n  CHECK_ERR(err, \"deflateEnd\");\n\n  *comprLen = (z_size_t)c_stream.total_out;\n\n  return 0;\n}\n\n/* ===========================================================================\n * Test inflateSync()\n */\nint test_sync(unsigned char *compr, size_t comprLen, unsigned char *uncompr,\n               size_t uncomprLen) {\n  int err;\n  z_stream d_stream; /* decompression stream */\n\n  d_stream.zalloc = zalloc;\n  d_stream.zfree = zfree;\n  d_stream.opaque = (void *)0;\n\n  d_stream.next_in = compr;\n  d_stream.avail_in = 2; /* just read the zlib header */\n\n  err = inflateInit(&d_stream);\n  CHECK_ERR(err, \"inflateInit\");\n\n  d_stream.next_out = uncompr;\n  d_stream.avail_out = (unsigned int)uncomprLen;\n\n  err = inflate(&d_stream, Z_NO_FLUSH);\n  CHECK_ERR(err, \"inflate\");\n\n  d_stream.avail_in = (unsigned int)comprLen - 2; /* read all compressed data */\n  err = inflateSync(&d_stream); /* but skip the damaged part */\n  CHECK_ERR(err, \"inflateSync\");\n\n  err = inflate(&d_stream, Z_FINISH);\n  if (err != Z_DATA_ERROR && err != Z_STREAM_END) {\n    fprintf(stderr, \"inflate should report DATA_ERROR or Z_STREAM_END\\n\");\n    /* v1.1.11= reports DATA_ERROR because of incorrect adler32. v1.1.12+ reports Z_STREAM END because it skips the adler32 check. */\n    return 0;\n  }\n  err = inflateEnd(&d_stream);\n  CHECK_ERR(err, \"inflateEnd\");\n  return 0;\n}\n\nint LLVMFuzzerTestOneInput(const uint8_t *d, size_t size) {\n  size_t comprLen = 100 + 2 * compressBound(size);\n  size_t uncomprLen = size;\n  uint8_t *compr, *uncompr;\n\n  /* Discard inputs larger than 1Mb. */\n  static size_t kMaxSize = 1024 * 1024;\n\n  // This test requires at least 3 bytes of input data.\n  if (size <= 3 || size > kMaxSize)\n    return 0;\n\n  data = d;\n  dataLen = size;\n  compr = (uint8_t *)calloc(1, comprLen);\n  uncompr = (uint8_t *)calloc(1, uncomprLen);\n\n  test_flush(compr, &comprLen);\n  test_sync(compr, comprLen, uncompr, uncomprLen);\n\n  free(compr);\n  free(uncompr);\n\n  /* This function must return 0. */\n  return 0;\n}\n"
+        },
+        {
+          "evidence_id": "loc-9a8a921c36d7ab817ef6c92a",
+          "quote": "    s = (deflate_state *) ZALLOC(strm, 1, sizeof(deflate_state));\n    if (s == Z_NULL) return Z_MEM_ERROR;\n    zmemzero(s, sizeof(deflate_state));\n    strm->state = (struct internal_state FAR *)s;\n    s->strm = strm;\n    s->status = INIT_STATE;     /* to pass state test in deflateReset() */\n\n    s->wrap = wrap;\n    s->w_bits = (uInt)windowBits;\n"
+        },
+        {
+          "evidence_id": "loc-41d42fda4a5d9768705995f3",
+          "quote": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    s->gzhead = Z_NULL;\n\n    _tr_init(s);\n\n    return Z_OK;\n"
+        }
+      ]
+    },
+    "identity_preserved": {
+      "status": "established",
+      "reason": "The comparison concerns the same tuple: a custom gzip header installed on a stream, deflateResetKeep clearing it, then deflate emitting the default header. The before reset body lacks the clearing assignment; the after body contains it.",
+      "evidence": [
+        {
+          "evidence_id": "loc-2c8597583cb631a362265f55",
+          "quote": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    _tr_init(s);\n\n    return Z_OK;\n}\n"
+        },
+        {
+          "evidence_id": "loc-5277c5508ff9219480f97d20",
+          "quote": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    s->gzhead = Z_NULL;\n\n    _tr_init(s);\n\n    return Z_OK;\n"
+        },
+        {
+          "evidence_id": "loc-1692a183c0d54650577bf762",
+          "quote": "int ZEXPORT deflateSetHeader(z_streamp strm, gz_headerp head) {\n    if (deflateStateCheck(strm) || strm->state->wrap != 2)\n        return Z_STREAM_ERROR;\n    strm->state->gzhead = head;\n    return Z_OK;\n}\n"
+        },
+        {
+          "evidence_id": "loc-8cb07343851d065a51ccace6",
+          "quote": "int test_flush(unsigned char *compr, z_size_t *comprLen) {\n  z_stream c_stream; /* compression stream */\n  int err;\n  unsigned int len = dataLen;\n\n  c_stream.zalloc = zalloc;\n  c_stream.zfree = zfree;\n  c_stream.opaque = (void *)0;\n\n  err = deflateInit(&c_stream, Z_DEFAULT_COMPRESSION);\n  CHECK_ERR(err, \"deflateInit\");\n\n  c_stream.next_in = (Bytef *)data;\n  c_stream.next_out = compr;\n  c_stream.avail_in = 3;\n  c_stream.avail_out = (unsigned int)*comprLen;\n  err = deflate(&c_stream, Z_FULL_FLUSH);\n  CHECK_ERR(err, \"deflate flush 1\");\n\n  compr[3]++; /* force an error in first compressed block */\n  c_stream.avail_in = len - 3;\n\n  err = deflate(&c_stream, Z_FINISH);\n  if (err != Z_STREAM_END) {\n    CHECK_ERR(err, \"deflate flush 2\");\n  }\n  err = deflateEnd(&c_stream);\n  CHECK_ERR(err, \"deflateEnd\");\n\n  *comprLen = (z_size_t)c_stream.total_out;\n\n  return 0;\n}\n"
+        }
+      ]
+    },
+    "source_evidence": [
+      {
+        "evidence_id": "loc-2c8597583cb631a362265f55",
+        "quote": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    _tr_init(s);\n\n    return Z_OK;\n}\n"
+      },
+      {
+        "evidence_id": "loc-5277c5508ff9219480f97d20",
+        "quote": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    s->gzhead = Z_NULL;\n\n    _tr_init(s);\n\n    return Z_OK;\n"
+      },
+      {
+        "evidence_id": "loc-f456395486673c1b0653015a",
+        "quote": "    if (windowBits < 0) { /* suppress zlib wrapper */\n        wrap = 0;\n        if (windowBits < -15)\n            return Z_STREAM_ERROR;\n        windowBits = -windowBits;\n    }\n#ifdef GZIP\n    else if (windowBits > 15) {\n        wrap = 2;       /* write gzip wrapper instead */\n        windowBits -= 16;\n    }\n#endif\n    if (memLevel < 1 || memLevel > MAX_MEM_LEVEL || method != Z_DEFLATED ||\n        windowBits < 8 || windowBits > 15 || level < 0 || level > 9 ||\n        strategy < 0 || strategy > Z_FIXED || (windowBits == 8 && wrap != 1)) {\n        return Z_STREAM_ERROR;\n"
+      },
+      {
+        "evidence_id": "loc-20b14c0718821263cb5fadba",
+        "quote": "#ifdef GZIP\n    if (s->status == GZIP_STATE) {\n        /* gzip header */\n        strm->adler = crc32(0L, Z_NULL, 0);\n        put_byte(s, 31);\n        put_byte(s, 139);\n        put_byte(s, 8);\n        if (s->gzhead == Z_NULL) {\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, s->level == 9 ? 2 :\n                     (s->strategy >= Z_HUFFMAN_ONLY || s->level < 2 ?\n                      4 : 0));\n            put_byte(s, OS_CODE);\n            s->status = BUSY_STATE;\n\n            /* Compression must start with an empty pending buffer */\n            flush_pending(strm);\n            if (s->pending != 0) {\n                s->last_flush = -1;\n                return Z_OK;\n            }\n        }\n        else {\n            put_byte(s, (s->gzhead->text ? 1 : 0) +\n"
+      }
+    ],
+    "harness_evidence": [
+      {
+        "evidence_id": "loc-6d9409829ff2869d3a0fa15a",
+        "quote": "/* Copyright 2022 Google LLC\nLicensed under the Apache License, Version 2.0 (the \"License\");\nyou may not use this file except in compliance with the License.\nYou may obtain a copy of the License at\n      http://www.apache.org/licenses/LICENSE-2.0\nUnless required by applicable law or agreed to in writing, software\ndistributed under the License is distributed on an \"AS IS\" BASIS,\nWITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\nSee the License for the specific language governing permissions and\nlimitations under the License.\n*/\n\n#include <stdio.h>\n#include <stddef.h>\n#include <stdint.h>\n#include <string.h>\n#include <assert.h>\n#include <stdlib.h>\n#include <inttypes.h>\n#include \"zlib.h\"\n\n#define CHECK_ERR(err, msg) { \\\n    if (err != Z_OK) { \\\n        fprintf(stderr, \"%s error: %d\\n\", msg, err); \\\n        return 0; \\\n    } \\\n}\n\nstatic const uint8_t *data;\nstatic size_t dataLen;\nstatic alloc_func zalloc = NULL;\nstatic free_func zfree = NULL;\n\n/* ===========================================================================\n * Test deflate() with full flush\n */\nint test_flush(unsigned char *compr, z_size_t *comprLen) {\n  z_stream c_stream; /* compression stream */\n  int err;\n  unsigned int len = dataLen;\n\n  c_stream.zalloc = zalloc;\n  c_stream.zfree = zfree;\n  c_stream.opaque = (void *)0;\n\n  err = deflateInit(&c_stream, Z_DEFAULT_COMPRESSION);\n  CHECK_ERR(err, \"deflateInit\");\n\n  c_stream.next_in = (Bytef *)data;\n  c_stream.next_out = compr;\n  c_stream.avail_in = 3;\n  c_stream.avail_out = (unsigned int)*comprLen;\n  err = deflate(&c_stream, Z_FULL_FLUSH);\n  CHECK_ERR(err, \"deflate flush 1\");\n\n  compr[3]++; /* force an error in first compressed block */\n  c_stream.avail_in = len - 3;\n\n  err = deflate(&c_stream, Z_FINISH);\n  if (err != Z_STREAM_END) {\n    CHECK_ERR(err, \"deflate flush 2\");\n  }\n  err = deflateEnd(&c_stream);\n  CHECK_ERR(err, \"deflateEnd\");\n\n  *comprLen = (z_size_t)c_stream.total_out;\n\n  return 0;\n}\n\n/* ===========================================================================\n * Test inflateSync()\n */\nint test_sync(unsigned char *compr, size_t comprLen, unsigned char *uncompr,\n               size_t uncomprLen) {\n  int err;\n  z_stream d_stream; /* decompression stream */\n\n  d_stream.zalloc = zalloc;\n  d_stream.zfree = zfree;\n  d_stream.opaque = (void *)0;\n\n  d_stream.next_in = compr;\n  d_stream.avail_in = 2; /* just read the zlib header */\n\n  err = inflateInit(&d_stream);\n  CHECK_ERR(err, \"inflateInit\");\n\n  d_stream.next_out = uncompr;\n  d_stream.avail_out = (unsigned int)uncomprLen;\n\n  err = inflate(&d_stream, Z_NO_FLUSH);\n  CHECK_ERR(err, \"inflate\");\n\n  d_stream.avail_in = (unsigned int)comprLen - 2; /* read all compressed data */\n  err = inflateSync(&d_stream); /* but skip the damaged part */\n  CHECK_ERR(err, \"inflateSync\");\n\n  err = inflate(&d_stream, Z_FINISH);\n  if (err != Z_DATA_ERROR && err != Z_STREAM_END) {\n    fprintf(stderr, \"inflate should report DATA_ERROR or Z_STREAM_END\\n\");\n    /* v1.1.11= reports DATA_ERROR because of incorrect adler32. v1.1.12+ reports Z_STREAM END because it skips the adler32 check. */\n    return 0;\n  }\n  err = inflateEnd(&d_stream);\n  CHECK_ERR(err, \"inflateEnd\");\n  return 0;\n}\n\nint LLVMFuzzerTestOneInput(const uint8_t *d, size_t size) {\n  size_t comprLen = 100 + 2 * compressBound(size);\n  size_t uncomprLen = size;\n  uint8_t *compr, *uncompr;\n\n  /* Discard inputs larger than 1Mb. */\n  static size_t kMaxSize = 1024 * 1024;\n\n  // This test requires at least 3 bytes of input data.\n  if (size <= 3 || size > kMaxSize)\n    return 0;\n\n  data = d;\n  dataLen = size;\n  compr = (uint8_t *)calloc(1, comprLen);\n  uncompr = (uint8_t *)calloc(1, uncomprLen);\n\n  test_flush(compr, &comprLen);\n  test_sync(compr, comprLen, uncompr, uncomprLen);\n\n  free(compr);\n  free(uncompr);\n\n  /* This function must return 0. */\n  return 0;\n}\n"
+      },
+      {
+        "evidence_id": "loc-fbca73a5548ef1ae809bc14b",
+        "quote": "if ! ./configure; then\n    cat configure.log\n    exit 1\nfi\n\nmake -j$(nproc) clean\nmake -j$(nproc) all\n\n# Skip make check for memory sanitizer - zlib's tests have uninitialized memory issues\nif [ \"$SANITIZER\" != \"memory\" ]; then\n    make -j$(nproc) check\nfi\n\nfor f in $(find $SRC -name '*_fuzzer.cc'); do\n    b=$(basename -s .cc $f)\n    $CXX $CXXFLAGS -std=c++11 -I. $f -o $OUT/$b $LIB_FUZZING_ENGINE ./libz.a\ndone\n\nzip $OUT/seed_corpus.zip *.*\n\nfor f in $(find $SRC -name '*_fuzzer.c'); do\n    b=$(basename -s .c $f)\n    $CC $CFLAGS -I. $f -c -o /tmp/$b.o\n    $CXX $CXXFLAGS -o $OUT/$b /tmp/$b.o -stdlib=libc++ $LIB_FUZZING_ENGINE ./libz.a\n    rm -f /tmp/$b.o\n    ln -sf $OUT/seed_corpus.zip $OUT/${b}_seed_corpus.zip\ndone\n"
+      }
+    ],
+    "missing_information": [
+      "Provide deflate.h lines containing the opening guard for GZIP, plus the effective GZIP definitions from configure and Makefile.in under this build recipe.",
+      "Provide the zlib.h contracts for deflateResetKeep, deflateSetHeader, deflateInit2, inflateInit, and inflateSync to resolve whether the frozen state and format sequence belongs to this target's operational surface and whether the same reset behavior was required before."
+    ],
+    "requested_symbols": [
+      "GZIP",
+      "deflateResetKeep",
+      "deflateSetHeader",
+      "deflateInit2",
+      "inflateInit",
+      "inflateSync"
+    ],
+    "requested_paths": [
+      "input/source/deflate.h",
+      "input/source/configure",
+      "input/source/Makefile.in",
+      "input/source/zlib.h"
+    ],
+    "obligation_class": "target_coverage",
+    "scope_basis": "unknown",
+    "trigger_basis": "unknown",
+    "coverage_witness": {
+      "supported_behavior": "Conditionally, reset clears a previously installed custom gzip header and the next deflate emits the default gzip header.",
+      "required_setup": "Enable GZIP, initialize a gzip wrapper stream, install a custom header, reset that same stream, then call deflate.",
+      "actual_target_setup": "The old entry initializes one fresh default stream, performs a full flush and finish, and then calls inflateSync on its output.",
+      "blocked_behavior": "No fuzzer input can make this fixed entry install a custom header and reset that stream.",
+      "equivalent_routes": "Fresh initialization starts without a prior custom header and does not exercise the same reset transition; the complete entry shows no other route."
+    }
+  },
+  "citation_errors": [],
+  "citations": [
+    {
+      "pointer": "/scope_contract/evidence/0",
+      "evidence_id": "loc-648c8a2b2e4e07fc1438b83d",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/example_flush_fuzzer.c",
+      "text": "int test_flush(unsigned char *compr, z_size_t *comprLen) {\n  z_stream c_stream; /* compression stream */\n  int err;\n  unsigned int len = dataLen;\n\n  c_stream.zalloc = zalloc;\n  c_stream.zfree = zfree;\n  c_stream.opaque = (void *)0;\n\n  err = deflateInit(&c_stream, Z_DEFAULT_COMPRESSION);\n  CHECK_ERR(err, \"deflateInit\");\n\n  c_stream.next_in = (Bytef *)data;\n  c_stream.next_out = compr;\n  c_stream.avail_in = 3;\n  c_stream.avail_out = (unsigned int)*comprLen;\n  err = deflate(&c_stream, Z_FULL_FLUSH);\n  CHECK_ERR(err, \"deflate flush 1\");\n\n  compr[3]++; /* force an error in first compressed block */\n  c_stream.avail_in = len - 3;\n\n  err = deflate(&c_stream, Z_FINISH);\n  if (err != Z_STREAM_END) {\n    CHECK_ERR(err, \"deflate flush 2\");\n  }\n  err = deflateEnd(&c_stream);\n  CHECK_ERR(err, \"deflateEnd\");\n\n  *comprLen = (z_size_t)c_stream.total_out;\n\n  return 0;\n}\n\n/* ===========================================================================\n * Test inflateSync()\n */\nint test_sync(unsigned char *compr, size_t comprLen, unsigned char *uncompr,\n               size_t uncomprLen) {\n  int err;\n  z_stream d_stream; /* decompression stream */\n\n  d_stream.zalloc = zalloc;\n  d_stream.zfree = zfree;\n  d_stream.opaque = (void *)0;\n\n  d_stream.next_in = compr;\n  d_stream.avail_in = 2; /* just read the zlib header */\n\n  err = inflateInit(&d_stream);\n  CHECK_ERR(err, \"inflateInit\");\n\n  d_stream.next_out = uncompr;\n  d_stream.avail_out = (unsigned int)uncomprLen;\n\n  err = inflate(&d_stream, Z_NO_FLUSH);\n  CHECK_ERR(err, \"inflate\");\n\n  d_stream.avail_in = (unsigned int)comprLen - 2; /* read all compressed data */\n  err = inflateSync(&d_stream); /* but skip the damaged part */\n  CHECK_ERR(err, \"inflateSync\");\n\n  err = inflate(&d_stream, Z_FINISH);\n  if (err != Z_DATA_ERROR && err != Z_STREAM_END) {\n    fprintf(stderr, \"inflate should report DATA_ERROR or Z_STREAM_END\\n\");\n    /* v1.1.11= reports DATA_ERROR because of incorrect adler32. v1.1.12+ reports Z_STREAM END because it skips the adler32 check. */\n    return 0;\n  }\n  err = inflateEnd(&d_stream);\n  CHECK_ERR(err, \"inflateEnd\");\n  return 0;\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-648caf6fa702e20715a5",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/example_flush_fuzzer.c",
+        "start_line": 37,
+        "end_line": 107,
+        "unit_sha256": "633781c7d594fd147ccd2afaf1a5f928682f58d6234f7abca863bab7bd0330da",
+        "quote_sha256": "ff8633903cfcda927452addfb8ae1828ed4bba38477a0815a62695fd07934c32"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/1",
+      "evidence_id": "loc-5277c5508ff9219480f97d20",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    s->gzhead = Z_NULL;\n\n    _tr_init(s);\n\n    return Z_OK;\n",
+      "change_ids": [
+        "g0001",
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-479953096f65c855820a",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 643,
+        "end_line": 677,
+        "unit_sha256": "f424a1b02cd3d7ef3145773e6486a2261f65e44e9d297b1188fa561b72f3f757",
+        "quote_sha256": "31e1dc57bcac17c6abd786aeba394a88648faa70f8a225a3346e567ed5d3d62b"
+      }
+    },
+    {
+      "pointer": "/scope_contract/evidence/2",
+      "evidence_id": "loc-1c36dad9179989dc2465dc1d",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "int ZEXPORT deflateSetHeader(z_streamp strm, gz_headerp head) {\n    if (deflateStateCheck(strm) || strm->state->wrap != 2)\n        return Z_STREAM_ERROR;\n    strm->state->gzhead = head;\n    return Z_OK;\n}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "This call installs the custom gzip header required by the frozen tuple.",
+      "location": {
+        "unit_id": "u-8c8ca597ec9841765092",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 715,
+        "end_line": 720,
+        "unit_sha256": "c77027ce6b5509f1a84c7354597e22609d7ce6e7ae25ad74c6598754812ed6a5",
+        "quote_sha256": "c77027ce6b5509f1a84c7354597e22609d7ce6e7ae25ad74c6598754812ed6a5"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/0",
+      "evidence_id": "loc-144f8b8b762c4fba35d0a0d7",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "    if (windowBits < 0) { /* suppress zlib wrapper */\n        wrap = 0;\n        if (windowBits < -15)\n            return Z_STREAM_ERROR;\n        windowBits = -windowBits;\n    }\n#ifdef GZIP\n    else if (windowBits > 15) {\n        wrap = 2;       /* write gzip wrapper instead */\n        windowBits -= 16;\n    }\n#endif\n    if (memLevel < 1 || memLevel > MAX_MEM_LEVEL || method != Z_DEFLATED ||\n        windowBits < 8 || windowBits > 15 || level < 0 || level > 9 ||\n        strategy < 0 || strategy > Z_FIXED || (windowBits == 8 && wrap != 1)) {\n        return Z_STREAM_ERROR;\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-51d488ea72828b02628a",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 422,
+        "end_line": 437,
+        "unit_sha256": "a16b65f92c608da9ca6ef60dcd61f0894e6f1b603dccbbc8d141097f0a854fba",
+        "quote_sha256": "c7b96b92e8cd619c0eab809db285be09557d070e3340810dfc187c98ea44127d"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/1",
+      "evidence_id": "loc-07c9fdf0a4ce92263fdec9ee",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "int ZEXPORT deflateSetHeader(z_streamp strm, gz_headerp head) {\n    if (deflateStateCheck(strm) || strm->state->wrap != 2)\n        return Z_STREAM_ERROR;\n    strm->state->gzhead = head;\n    return Z_OK;\n}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "It installs the header needed before reset.",
+      "location": {
+        "unit_id": "u-8c8ca597ec9841765092",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 715,
+        "end_line": 720,
+        "unit_sha256": "c77027ce6b5509f1a84c7354597e22609d7ce6e7ae25ad74c6598754812ed6a5",
+        "quote_sha256": "c77027ce6b5509f1a84c7354597e22609d7ce6e7ae25ad74c6598754812ed6a5"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/2",
+      "evidence_id": "loc-6615d1843cc9876a2a1c60f6",
+      "kind": "after_source",
+      "path": "input/source/deflate.h",
+      "text": "#  define GZIP\n#endif\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "The supplied GZIP definition lacks its opening conditional guard.",
+      "location": {
+        "unit_id": "u-0330addca7748161a575",
+        "version": "after",
+        "path": "input/source/deflate.h",
+        "start_line": 23,
+        "end_line": 24,
+        "unit_sha256": "0ea29d438dd40007d1acfb856704b76f4d86cc580e4925f41bcc2c1a0074986d",
+        "quote_sha256": "0ea29d438dd40007d1acfb856704b76f4d86cc580e4925f41bcc2c1a0074986d"
+      }
+    },
+    {
+      "pointer": "/feasible_trigger/evidence/3",
+      "evidence_id": "loc-dc064b1bdb001affc9fe5615",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/build.sh",
+      "text": "if ! ./configure; then\n    cat configure.log\n    exit 1\nfi\n\nmake -j$(nproc) clean\nmake -j$(nproc) all\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The build delegates configuration to configure and make.",
+      "location": {
+        "unit_id": "u-870c59bcd92cc159b3c7",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/build.sh",
+        "start_line": 18,
+        "end_line": 24,
+        "unit_sha256": "38ace4831ff3937bc8576f00cae1005627564fb819eb50823d0423b0d8d211a4",
+        "quote_sha256": "e84a290ffe3a4fb8ed5d5eabe8a176309e50314eba49e2b48950012752a098ea"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/0",
+      "evidence_id": "loc-5277c5508ff9219480f97d20",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    s->gzhead = Z_NULL;\n\n    _tr_init(s);\n\n    return Z_OK;\n",
+      "change_ids": [
+        "g0001",
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-479953096f65c855820a",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 643,
+        "end_line": 677,
+        "unit_sha256": "f424a1b02cd3d7ef3145773e6486a2261f65e44e9d297b1188fa561b72f3f757",
+        "quote_sha256": "31e1dc57bcac17c6abd786aeba394a88648faa70f8a225a3346e567ed5d3d62b"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/1",
+      "evidence_id": "loc-6aa138fdfaccb05804d9bae9",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "#ifdef GZIP\n    if (s->status == GZIP_STATE) {\n        /* gzip header */\n        strm->adler = crc32(0L, Z_NULL, 0);\n        put_byte(s, 31);\n        put_byte(s, 139);\n        put_byte(s, 8);\n        if (s->gzhead == Z_NULL) {\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, s->level == 9 ? 2 :\n                     (s->strategy >= Z_HUFFMAN_ONLY || s->level < 2 ?\n                      4 : 0));\n            put_byte(s, OS_CODE);\n            s->status = BUSY_STATE;\n\n            /* Compression must start with an empty pending buffer */\n            flush_pending(strm);\n            if (s->pending != 0) {\n                s->last_flush = -1;\n                return Z_OK;\n            }\n        }\n        else {\n            put_byte(s, (s->gzhead->text ? 1 : 0) +\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "A null gzhead selects default gzip header emission when GZIP is enabled.",
+      "location": {
+        "unit_id": "u-7df4d360ce112928cd5e",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 1066,
+        "end_line": 1093,
+        "unit_sha256": "17b81a2a6f49050388e66a9d905826b59ae4a8988371725b34aa619f18dd72c1",
+        "quote_sha256": "b5f57ac3a65bd0458c024170b53e9dac9cc8cbeb0bdc43c578d397202ba86932"
+      }
+    },
+    {
+      "pointer": "/observable_consequence/evidence/2",
+      "evidence_id": "loc-30f0b2ffa97f365476559a1c",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/example_flush_fuzzer.c",
+      "text": "int test_flush(unsigned char *compr, z_size_t *comprLen) {\n  z_stream c_stream; /* compression stream */\n  int err;\n  unsigned int len = dataLen;\n\n  c_stream.zalloc = zalloc;\n  c_stream.zfree = zfree;\n  c_stream.opaque = (void *)0;\n\n  err = deflateInit(&c_stream, Z_DEFAULT_COMPRESSION);\n  CHECK_ERR(err, \"deflateInit\");\n\n  c_stream.next_in = (Bytef *)data;\n  c_stream.next_out = compr;\n  c_stream.avail_in = 3;\n  c_stream.avail_out = (unsigned int)*comprLen;\n  err = deflate(&c_stream, Z_FULL_FLUSH);\n  CHECK_ERR(err, \"deflate flush 1\");\n\n  compr[3]++; /* force an error in first compressed block */\n  c_stream.avail_in = len - 3;\n\n  err = deflate(&c_stream, Z_FINISH);\n  if (err != Z_STREAM_END) {\n    CHECK_ERR(err, \"deflate flush 2\");\n  }\n  err = deflateEnd(&c_stream);\n  CHECK_ERR(err, \"deflateEnd\");\n\n  *comprLen = (z_size_t)c_stream.total_out;\n\n  return 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The entry's compression helper creates one fresh stream and does not reset it.",
+      "location": {
+        "unit_id": "u-648caf6fa702e20715a5",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/example_flush_fuzzer.c",
+        "start_line": 37,
+        "end_line": 69,
+        "unit_sha256": "633781c7d594fd147ccd2afaf1a5f928682f58d6234f7abca863bab7bd0330da",
+        "quote_sha256": "e82aa76005e62be0a8fee8d53828a2226295bd90db3d498c5af1c7f3006d05c0"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/0",
+      "evidence_id": "loc-6d9409829ff2869d3a0fa15a",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/example_flush_fuzzer.c",
+      "text": "/* Copyright 2022 Google LLC\nLicensed under the Apache License, Version 2.0 (the \"License\");\nyou may not use this file except in compliance with the License.\nYou may obtain a copy of the License at\n      http://www.apache.org/licenses/LICENSE-2.0\nUnless required by applicable law or agreed to in writing, software\ndistributed under the License is distributed on an \"AS IS\" BASIS,\nWITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\nSee the License for the specific language governing permissions and\nlimitations under the License.\n*/\n\n#include <stdio.h>\n#include <stddef.h>\n#include <stdint.h>\n#include <string.h>\n#include <assert.h>\n#include <stdlib.h>\n#include <inttypes.h>\n#include \"zlib.h\"\n\n#define CHECK_ERR(err, msg) { \\\n    if (err != Z_OK) { \\\n        fprintf(stderr, \"%s error: %d\\n\", msg, err); \\\n        return 0; \\\n    } \\\n}\n\nstatic const uint8_t *data;\nstatic size_t dataLen;\nstatic alloc_func zalloc = NULL;\nstatic free_func zfree = NULL;\n\n/* ===========================================================================\n * Test deflate() with full flush\n */\nint test_flush(unsigned char *compr, z_size_t *comprLen) {\n  z_stream c_stream; /* compression stream */\n  int err;\n  unsigned int len = dataLen;\n\n  c_stream.zalloc = zalloc;\n  c_stream.zfree = zfree;\n  c_stream.opaque = (void *)0;\n\n  err = deflateInit(&c_stream, Z_DEFAULT_COMPRESSION);\n  CHECK_ERR(err, \"deflateInit\");\n\n  c_stream.next_in = (Bytef *)data;\n  c_stream.next_out = compr;\n  c_stream.avail_in = 3;\n  c_stream.avail_out = (unsigned int)*comprLen;\n  err = deflate(&c_stream, Z_FULL_FLUSH);\n  CHECK_ERR(err, \"deflate flush 1\");\n\n  compr[3]++; /* force an error in first compressed block */\n  c_stream.avail_in = len - 3;\n\n  err = deflate(&c_stream, Z_FINISH);\n  if (err != Z_STREAM_END) {\n    CHECK_ERR(err, \"deflate flush 2\");\n  }\n  err = deflateEnd(&c_stream);\n  CHECK_ERR(err, \"deflateEnd\");\n\n  *comprLen = (z_size_t)c_stream.total_out;\n\n  return 0;\n}\n\n/* ===========================================================================\n * Test inflateSync()\n */\nint test_sync(unsigned char *compr, size_t comprLen, unsigned char *uncompr,\n               size_t uncomprLen) {\n  int err;\n  z_stream d_stream; /* decompression stream */\n\n  d_stream.zalloc = zalloc;\n  d_stream.zfree = zfree;\n  d_stream.opaque = (void *)0;\n\n  d_stream.next_in = compr;\n  d_stream.avail_in = 2; /* just read the zlib header */\n\n  err = inflateInit(&d_stream);\n  CHECK_ERR(err, \"inflateInit\");\n\n  d_stream.next_out = uncompr;\n  d_stream.avail_out = (unsigned int)uncomprLen;\n\n  err = inflate(&d_stream, Z_NO_FLUSH);\n  CHECK_ERR(err, \"inflate\");\n\n  d_stream.avail_in = (unsigned int)comprLen - 2; /* read all compressed data */\n  err = inflateSync(&d_stream); /* but skip the damaged part */\n  CHECK_ERR(err, \"inflateSync\");\n\n  err = inflate(&d_stream, Z_FINISH);\n  if (err != Z_DATA_ERROR && err != Z_STREAM_END) {\n    fprintf(stderr, \"inflate should report DATA_ERROR or Z_STREAM_END\\n\");\n    /* v1.1.11= reports DATA_ERROR because of incorrect adler32. v1.1.12+ reports Z_STREAM END because it skips the adler32 check. */\n    return 0;\n  }\n  err = inflateEnd(&d_stream);\n  CHECK_ERR(err, \"inflateEnd\");\n  return 0;\n}\n\nint LLVMFuzzerTestOneInput(const uint8_t *d, size_t size) {\n  size_t comprLen = 100 + 2 * compressBound(size);\n  size_t uncomprLen = size;\n  uint8_t *compr, *uncompr;\n\n  /* Discard inputs larger than 1Mb. */\n  static size_t kMaxSize = 1024 * 1024;\n\n  // This test requires at least 3 bytes of input data.\n  if (size <= 3 || size > kMaxSize)\n    return 0;\n\n  data = d;\n  dataLen = size;\n  compr = (uint8_t *)calloc(1, comprLen);\n  uncompr = (uint8_t *)calloc(1, uncomprLen);\n\n  test_flush(compr, &comprLen);\n  test_sync(compr, comprLen, uncompr, uncomprLen);\n\n  free(compr);\n  free(uncompr);\n\n  /* This function must return 0. */\n  return 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-648caf6fa702e20715a5",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/example_flush_fuzzer.c",
+        "start_line": 1,
+        "end_line": 135,
+        "unit_sha256": "633781c7d594fd147ccd2afaf1a5f928682f58d6234f7abca863bab7bd0330da",
+        "quote_sha256": "633781c7d594fd147ccd2afaf1a5f928682f58d6234f7abca863bab7bd0330da"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/1",
+      "evidence_id": "loc-9a8a921c36d7ab817ef6c92a",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "    s = (deflate_state *) ZALLOC(strm, 1, sizeof(deflate_state));\n    if (s == Z_NULL) return Z_MEM_ERROR;\n    zmemzero(s, sizeof(deflate_state));\n    strm->state = (struct internal_state FAR *)s;\n    s->strm = strm;\n    s->status = INIT_STATE;     /* to pass state test in deflateReset() */\n\n    s->wrap = wrap;\n    s->w_bits = (uInt)windowBits;\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Fresh initialization zeroes the new state and sets its wrapper; it does not carry a previously installed header.",
+      "location": {
+        "unit_id": "u-51d488ea72828b02628a",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 440,
+        "end_line": 448,
+        "unit_sha256": "a16b65f92c608da9ca6ef60dcd61f0894e6f1b603dccbbc8d141097f0a854fba",
+        "quote_sha256": "51f3034a18b0bd9160ad79610c9addd66ecd013ab596d69b7a7860d5301f90b6"
+      }
+    },
+    {
+      "pointer": "/alternatives_ruled_out/evidence/2",
+      "evidence_id": "loc-41d42fda4a5d9768705995f3",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    s->gzhead = Z_NULL;\n\n    _tr_init(s);\n\n    return Z_OK;\n",
+      "change_ids": [
+        "g0001",
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The changed clearing operation is specifically in reset.",
+      "location": {
+        "unit_id": "u-479953096f65c855820a",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 643,
+        "end_line": 677,
+        "unit_sha256": "f424a1b02cd3d7ef3145773e6486a2261f65e44e9d297b1188fa561b72f3f757",
+        "quote_sha256": "31e1dc57bcac17c6abd786aeba394a88648faa70f8a225a3346e567ed5d3d62b"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/0",
+      "evidence_id": "loc-2c8597583cb631a362265f55",
+      "kind": "before_source",
+      "path": "input/source/deflate.c",
+      "text": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    _tr_init(s);\n\n    return Z_OK;\n}\n",
+      "change_ids": [
+        "g0001",
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-40eaf2150e5514208bf1",
+        "version": "before",
+        "path": "input/source/deflate.c",
+        "start_line": 644,
+        "end_line": 677,
+        "unit_sha256": "8244ed0d9b791d6da527eeca10cc920418ae6d440e0cdb4f9e1974188539496e",
+        "quote_sha256": "5146ab0c1b11abdce8a8a69e4f3ff0595380ae2fe86d1ba8984b755ad61cb8d5"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/1",
+      "evidence_id": "loc-5277c5508ff9219480f97d20",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    s->gzhead = Z_NULL;\n\n    _tr_init(s);\n\n    return Z_OK;\n",
+      "change_ids": [
+        "g0001",
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-479953096f65c855820a",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 643,
+        "end_line": 677,
+        "unit_sha256": "f424a1b02cd3d7ef3145773e6486a2261f65e44e9d297b1188fa561b72f3f757",
+        "quote_sha256": "31e1dc57bcac17c6abd786aeba394a88648faa70f8a225a3346e567ed5d3d62b"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/2",
+      "evidence_id": "loc-1692a183c0d54650577bf762",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "int ZEXPORT deflateSetHeader(z_streamp strm, gz_headerp head) {\n    if (deflateStateCheck(strm) || strm->state->wrap != 2)\n        return Z_STREAM_ERROR;\n    strm->state->gzhead = head;\n    return Z_OK;\n}\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "It identifies the custom-header state in both versions.",
+      "location": {
+        "unit_id": "u-8c8ca597ec9841765092",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 715,
+        "end_line": 720,
+        "unit_sha256": "c77027ce6b5509f1a84c7354597e22609d7ce6e7ae25ad74c6598754812ed6a5",
+        "quote_sha256": "c77027ce6b5509f1a84c7354597e22609d7ce6e7ae25ad74c6598754812ed6a5"
+      }
+    },
+    {
+      "pointer": "/identity_preserved/evidence/3",
+      "evidence_id": "loc-8cb07343851d065a51ccace6",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/example_flush_fuzzer.c",
+      "text": "int test_flush(unsigned char *compr, z_size_t *comprLen) {\n  z_stream c_stream; /* compression stream */\n  int err;\n  unsigned int len = dataLen;\n\n  c_stream.zalloc = zalloc;\n  c_stream.zfree = zfree;\n  c_stream.opaque = (void *)0;\n\n  err = deflateInit(&c_stream, Z_DEFAULT_COMPRESSION);\n  CHECK_ERR(err, \"deflateInit\");\n\n  c_stream.next_in = (Bytef *)data;\n  c_stream.next_out = compr;\n  c_stream.avail_in = 3;\n  c_stream.avail_out = (unsigned int)*comprLen;\n  err = deflate(&c_stream, Z_FULL_FLUSH);\n  CHECK_ERR(err, \"deflate flush 1\");\n\n  compr[3]++; /* force an error in first compressed block */\n  c_stream.avail_in = len - 3;\n\n  err = deflate(&c_stream, Z_FINISH);\n  if (err != Z_STREAM_END) {\n    CHECK_ERR(err, \"deflate flush 2\");\n  }\n  err = deflateEnd(&c_stream);\n  CHECK_ERR(err, \"deflateEnd\");\n\n  *comprLen = (z_size_t)c_stream.total_out;\n\n  return 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "The same fixed old compression helper is assessed on both versions.",
+      "location": {
+        "unit_id": "u-648caf6fa702e20715a5",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/example_flush_fuzzer.c",
+        "start_line": 37,
+        "end_line": 69,
+        "unit_sha256": "633781c7d594fd147ccd2afaf1a5f928682f58d6234f7abca863bab7bd0330da",
+        "quote_sha256": "e82aa76005e62be0a8fee8d53828a2226295bd90db3d498c5af1c7f3006d05c0"
+      }
+    },
+    {
+      "pointer": "/source_evidence/0",
+      "evidence_id": "loc-2c8597583cb631a362265f55",
+      "kind": "before_source",
+      "path": "input/source/deflate.c",
+      "text": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    _tr_init(s);\n\n    return Z_OK;\n}\n",
+      "change_ids": [
+        "g0001",
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-40eaf2150e5514208bf1",
+        "version": "before",
+        "path": "input/source/deflate.c",
+        "start_line": 644,
+        "end_line": 677,
+        "unit_sha256": "8244ed0d9b791d6da527eeca10cc920418ae6d440e0cdb4f9e1974188539496e",
+        "quote_sha256": "5146ab0c1b11abdce8a8a69e4f3ff0595380ae2fe86d1ba8984b755ad61cb8d5"
+      }
+    },
+    {
+      "pointer": "/source_evidence/1",
+      "evidence_id": "loc-5277c5508ff9219480f97d20",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "int ZEXPORT deflateResetKeep(z_streamp strm) {\n    deflate_state *s;\n\n    if (deflateStateCheck(strm)) {\n        return Z_STREAM_ERROR;\n    }\n\n    strm->total_in = strm->total_out = 0;\n    strm->msg = Z_NULL; /* use zfree if we ever allocate msg dynamically */\n    strm->data_type = Z_UNKNOWN;\n\n    s = (deflate_state *)strm->state;\n    s->pending = 0;\n    s->pending_out = s->pending_buf;\n\n    if (s->wrap < 0) {\n        s->wrap = -s->wrap; /* was made negative by deflate(..., Z_FINISH); */\n    }\n    s->status =\n#ifdef GZIP\n        s->wrap == 2 ? GZIP_STATE :\n#endif\n        INIT_STATE;\n    strm->adler =\n#ifdef GZIP\n        s->wrap == 2 ? crc32(0L, Z_NULL, 0) :\n#endif\n        adler32(0L, Z_NULL, 0);\n    s->last_flush = -2;\n\n    s->gzhead = Z_NULL;\n\n    _tr_init(s);\n\n    return Z_OK;\n",
+      "change_ids": [
+        "g0001",
+        "g0002"
+      ],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-479953096f65c855820a",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 643,
+        "end_line": 677,
+        "unit_sha256": "f424a1b02cd3d7ef3145773e6486a2261f65e44e9d297b1188fa561b72f3f757",
+        "quote_sha256": "31e1dc57bcac17c6abd786aeba394a88648faa70f8a225a3346e567ed5d3d62b"
+      }
+    },
+    {
+      "pointer": "/source_evidence/2",
+      "evidence_id": "loc-f456395486673c1b0653015a",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "    if (windowBits < 0) { /* suppress zlib wrapper */\n        wrap = 0;\n        if (windowBits < -15)\n            return Z_STREAM_ERROR;\n        windowBits = -windowBits;\n    }\n#ifdef GZIP\n    else if (windowBits > 15) {\n        wrap = 2;       /* write gzip wrapper instead */\n        windowBits -= 16;\n    }\n#endif\n    if (memLevel < 1 || memLevel > MAX_MEM_LEVEL || method != Z_DEFLATED ||\n        windowBits < 8 || windowBits > 15 || level < 0 || level > 9 ||\n        strategy < 0 || strategy > Z_FIXED || (windowBits == 8 && wrap != 1)) {\n        return Z_STREAM_ERROR;\n",
+      "change_ids": [
+        "g0001"
+      ],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "Gzip wrapper selection is conditional on GZIP.",
+      "location": {
+        "unit_id": "u-51d488ea72828b02628a",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 422,
+        "end_line": 437,
+        "unit_sha256": "a16b65f92c608da9ca6ef60dcd61f0894e6f1b603dccbbc8d141097f0a854fba",
+        "quote_sha256": "c7b96b92e8cd619c0eab809db285be09557d070e3340810dfc187c98ea44127d"
+      }
+    },
+    {
+      "pointer": "/source_evidence/3",
+      "evidence_id": "loc-20b14c0718821263cb5fadba",
+      "kind": "after_source",
+      "path": "input/source/deflate.c",
+      "text": "#ifdef GZIP\n    if (s->status == GZIP_STATE) {\n        /* gzip header */\n        strm->adler = crc32(0L, Z_NULL, 0);\n        put_byte(s, 31);\n        put_byte(s, 139);\n        put_byte(s, 8);\n        if (s->gzhead == Z_NULL) {\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, 0);\n            put_byte(s, s->level == 9 ? 2 :\n                     (s->strategy >= Z_HUFFMAN_ONLY || s->level < 2 ?\n                      4 : 0));\n            put_byte(s, OS_CODE);\n            s->status = BUSY_STATE;\n\n            /* Compression must start with an empty pending buffer */\n            flush_pending(strm);\n            if (s->pending != 0) {\n                s->last_flush = -1;\n                return Z_OK;\n            }\n        }\n        else {\n            put_byte(s, (s->gzhead->text ? 1 : 0) +\n",
+      "change_ids": [],
+      "invariant_source": true,
+      "citation_role": "dependency",
+      "dependency_reason": "It shows how gzhead controls default versus custom gzip header output.",
+      "location": {
+        "unit_id": "u-7df4d360ce112928cd5e",
+        "version": "after",
+        "path": "input/source/deflate.c",
+        "start_line": 1066,
+        "end_line": 1093,
+        "unit_sha256": "17b81a2a6f49050388e66a9d905826b59ae4a8988371725b34aa619f18dd72c1",
+        "quote_sha256": "b5f57ac3a65bd0458c024170b53e9dac9cc8cbeb0bdc43c578d397202ba86932"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/0",
+      "evidence_id": "loc-6d9409829ff2869d3a0fa15a",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/example_flush_fuzzer.c",
+      "text": "/* Copyright 2022 Google LLC\nLicensed under the Apache License, Version 2.0 (the \"License\");\nyou may not use this file except in compliance with the License.\nYou may obtain a copy of the License at\n      http://www.apache.org/licenses/LICENSE-2.0\nUnless required by applicable law or agreed to in writing, software\ndistributed under the License is distributed on an \"AS IS\" BASIS,\nWITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\nSee the License for the specific language governing permissions and\nlimitations under the License.\n*/\n\n#include <stdio.h>\n#include <stddef.h>\n#include <stdint.h>\n#include <string.h>\n#include <assert.h>\n#include <stdlib.h>\n#include <inttypes.h>\n#include \"zlib.h\"\n\n#define CHECK_ERR(err, msg) { \\\n    if (err != Z_OK) { \\\n        fprintf(stderr, \"%s error: %d\\n\", msg, err); \\\n        return 0; \\\n    } \\\n}\n\nstatic const uint8_t *data;\nstatic size_t dataLen;\nstatic alloc_func zalloc = NULL;\nstatic free_func zfree = NULL;\n\n/* ===========================================================================\n * Test deflate() with full flush\n */\nint test_flush(unsigned char *compr, z_size_t *comprLen) {\n  z_stream c_stream; /* compression stream */\n  int err;\n  unsigned int len = dataLen;\n\n  c_stream.zalloc = zalloc;\n  c_stream.zfree = zfree;\n  c_stream.opaque = (void *)0;\n\n  err = deflateInit(&c_stream, Z_DEFAULT_COMPRESSION);\n  CHECK_ERR(err, \"deflateInit\");\n\n  c_stream.next_in = (Bytef *)data;\n  c_stream.next_out = compr;\n  c_stream.avail_in = 3;\n  c_stream.avail_out = (unsigned int)*comprLen;\n  err = deflate(&c_stream, Z_FULL_FLUSH);\n  CHECK_ERR(err, \"deflate flush 1\");\n\n  compr[3]++; /* force an error in first compressed block */\n  c_stream.avail_in = len - 3;\n\n  err = deflate(&c_stream, Z_FINISH);\n  if (err != Z_STREAM_END) {\n    CHECK_ERR(err, \"deflate flush 2\");\n  }\n  err = deflateEnd(&c_stream);\n  CHECK_ERR(err, \"deflateEnd\");\n\n  *comprLen = (z_size_t)c_stream.total_out;\n\n  return 0;\n}\n\n/* ===========================================================================\n * Test inflateSync()\n */\nint test_sync(unsigned char *compr, size_t comprLen, unsigned char *uncompr,\n               size_t uncomprLen) {\n  int err;\n  z_stream d_stream; /* decompression stream */\n\n  d_stream.zalloc = zalloc;\n  d_stream.zfree = zfree;\n  d_stream.opaque = (void *)0;\n\n  d_stream.next_in = compr;\n  d_stream.avail_in = 2; /* just read the zlib header */\n\n  err = inflateInit(&d_stream);\n  CHECK_ERR(err, \"inflateInit\");\n\n  d_stream.next_out = uncompr;\n  d_stream.avail_out = (unsigned int)uncomprLen;\n\n  err = inflate(&d_stream, Z_NO_FLUSH);\n  CHECK_ERR(err, \"inflate\");\n\n  d_stream.avail_in = (unsigned int)comprLen - 2; /* read all compressed data */\n  err = inflateSync(&d_stream); /* but skip the damaged part */\n  CHECK_ERR(err, \"inflateSync\");\n\n  err = inflate(&d_stream, Z_FINISH);\n  if (err != Z_DATA_ERROR && err != Z_STREAM_END) {\n    fprintf(stderr, \"inflate should report DATA_ERROR or Z_STREAM_END\\n\");\n    /* v1.1.11= reports DATA_ERROR because of incorrect adler32. v1.1.12+ reports Z_STREAM END because it skips the adler32 check. */\n    return 0;\n  }\n  err = inflateEnd(&d_stream);\n  CHECK_ERR(err, \"inflateEnd\");\n  return 0;\n}\n\nint LLVMFuzzerTestOneInput(const uint8_t *d, size_t size) {\n  size_t comprLen = 100 + 2 * compressBound(size);\n  size_t uncomprLen = size;\n  uint8_t *compr, *uncompr;\n\n  /* Discard inputs larger than 1Mb. */\n  static size_t kMaxSize = 1024 * 1024;\n\n  // This test requires at least 3 bytes of input data.\n  if (size <= 3 || size > kMaxSize)\n    return 0;\n\n  data = d;\n  dataLen = size;\n  compr = (uint8_t *)calloc(1, comprLen);\n  uncompr = (uint8_t *)calloc(1, uncomprLen);\n\n  test_flush(compr, &comprLen);\n  test_sync(compr, comprLen, uncompr, uncomprLen);\n\n  free(compr);\n  free(uncompr);\n\n  /* This function must return 0. */\n  return 0;\n}\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "primary",
+      "dependency_reason": "",
+      "location": {
+        "unit_id": "u-648caf6fa702e20715a5",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/example_flush_fuzzer.c",
+        "start_line": 1,
+        "end_line": 135,
+        "unit_sha256": "633781c7d594fd147ccd2afaf1a5f928682f58d6234f7abca863bab7bd0330da",
+        "quote_sha256": "633781c7d594fd147ccd2afaf1a5f928682f58d6234f7abca863bab7bd0330da"
+      }
+    },
+    {
+      "pointer": "/harness_evidence/1",
+      "evidence_id": "loc-fbca73a5548ef1ae809bc14b",
+      "kind": "harness",
+      "path": "input/harness/oss-fuzz/build.sh",
+      "text": "if ! ./configure; then\n    cat configure.log\n    exit 1\nfi\n\nmake -j$(nproc) clean\nmake -j$(nproc) all\n\n# Skip make check for memory sanitizer - zlib's tests have uninitialized memory issues\nif [ \"$SANITIZER\" != \"memory\" ]; then\n    make -j$(nproc) check\nfi\n\nfor f in $(find $SRC -name '*_fuzzer.cc'); do\n    b=$(basename -s .cc $f)\n    $CXX $CXXFLAGS -std=c++11 -I. $f -o $OUT/$b $LIB_FUZZING_ENGINE ./libz.a\ndone\n\nzip $OUT/seed_corpus.zip *.*\n\nfor f in $(find $SRC -name '*_fuzzer.c'); do\n    b=$(basename -s .c $f)\n    $CC $CFLAGS -I. $f -c -o /tmp/$b.o\n    $CXX $CXXFLAGS -o $OUT/$b /tmp/$b.o -stdlib=libc++ $LIB_FUZZING_ENGINE ./libz.a\n    rm -f /tmp/$b.o\n    ln -sf $OUT/seed_corpus.zip $OUT/${b}_seed_corpus.zip\ndone\n",
+      "change_ids": [],
+      "invariant_source": false,
+      "citation_role": "dependency",
+      "dependency_reason": "It establishes the delegated build and compilation route for this target.",
+      "location": {
+        "unit_id": "u-870c59bcd92cc159b3c7",
+        "version": "harness",
+        "path": "input/harness/oss-fuzz/build.sh",
+        "start_line": 18,
+        "end_line": 44,
+        "unit_sha256": "38ace4831ff3937bc8576f00cae1005627564fb819eb50823d0423b0d8d211a4",
+        "quote_sha256": "1373c5f950b29f1544a06ef1f9d523c11854b4038093b894e03678309eca67dd"
+      }
+    }
+  ],
+  "obligation_class": "target_coverage"
+}

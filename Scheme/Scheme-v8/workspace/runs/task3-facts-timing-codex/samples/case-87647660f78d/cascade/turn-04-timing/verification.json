@@ -1,0 +1,75 @@
+{
+  "checked": {
+    "status": "introduced",
+    "gap": true,
+    "introduced_by_this_change": true,
+    "claims": [
+      {
+        "claim_id": "c1",
+        "status": "introduced",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Decode supported zstd frames through the streaming decoder; magicless decoding was not a supported format for this operation.",
+          "applicability": "not_applicable",
+          "harness_status": "not_applicable",
+          "reason": "The before stream calls a header parser that requires the ordinary magic number. The supplied before contract does not offer the magicless format or a format setter.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-e425c76012c8c3e4412094a5",
+              "quote": "size_t ZSTD_getFrameHeader(ZSTD_frameHeader* zfhPtr, const void* src, size_t srcSize)\n{\n    const BYTE* ip = (const BYTE*)src;\n    if (srcSize < ZSTD_frameHeaderSize_prefix) return ZSTD_frameHeaderSize_prefix;\n\n    if (MEM_readLE32(src) != ZSTD_MAGICNUMBER) {\n        if ((MEM_readLE32(src) & 0xFFFFFFF0U) == ZSTD_MAGIC_SKIPPABLE_START) {\n            /* skippable frame */\n            if (srcSize < ZSTD_skippableHeaderSize)\n                return ZSTD_skippableHeaderSize; /* magic number + frame length */\n            memset(zfhPtr, 0, sizeof(*zfhPtr));\n            zfhPtr->frameContentSize = MEM_readLE32((const char *)src + 4);\n            zfhPtr->frameType = ZSTD_skippableFrame;\n            return 0;\n        }\n        return ERROR(prefix_unknown);\n    }\n\n    /* ensure there is enough `srcSize` to fully read/decode frame header */\n    {   size_t const fhsize = ZSTD_frameHeaderSize(src, srcSize);\n        if (srcSize < fhsize) return fhsize;\n        zfhPtr->headerSize = (U32)fhsize;\n    }\n\n    {   BYTE const fhdByte = ip[4];\n        size_t pos = 5;\n"
+            },
+            {
+              "evidence_id": "loc-1ac629d3e66c0a8a2d9698ae",
+              "quote": "    while (someMoreWork) {\n        switch(zds->streamStage)\n        {\n        case zdss_init :\n            ZSTD_resetDStream(zds);   /* transparent reset on starting decoding a new frame */\n            /* fall-through */\n\n        case zdss_loadHeader :\n            {   size_t const hSize = ZSTD_getFrameHeader(&zds->fParams, zds->headerBuffer, zds->lhSize);\n                if (ZSTD_isError(hSize)) {\n#if defined(ZSTD_LEGACY_SUPPORT) && (ZSTD_LEGACY_SUPPORT>=1)\n                    U32 const legacyVersion = ZSTD_isLegacy(istart, iend-istart);\n                    if (legacyVersion) {\n                        const void* const dict = zds->ddict ? zds->ddict->dictContent : NULL;\n                        size_t const dictSize = zds->ddict ? zds->ddict->dictSize : 0;\n                        /* legacy support is incompatible with static dctx */\n                        if (zds->staticSize) return ERROR(memory_allocation);\n                        CHECK_F(ZSTD_initLegacyStream(&zds->legacyContext,\n                                    zds->previousLegacyVersion, legacyVersion,\n                                    dict, dictSize));\n                        zds->legacyVersion = zds->previousLegacyVersion = legacyVersion;\n                        return ZSTD_decompressLegacyStream(zds->legacyContext, legacyVersion, output, input);\n                    }\n#endif\n                    return hSize; /* error */\n"
+            },
+            {
+              "evidence_id": "loc-f4edcd9390c23b9b82292fdf",
+              "quote": "/*===   New advanced API (experimental, and compression only)  ===*/\n *   In this proposal, parameters are pushed one by one into an existing CCtx,\n *   It stands a good chance to become \"stable\",\n *   after a reasonable testing period.\n *   It feels clearer in light of potential variants :\n *   ZSTD_DCtx_setParameter()  (rather than ZSTD_setDCtxParameter() )\n *   Left variant feels easier to distinguish.\n * All enum will be manually set to explicit values before reaching \"stable API\" status */"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Select ZSTD_f_zstd1_magicless before streaming a magicless frame.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The after contract requires an explicit format instruction. Context creation defaults to ZSTD_f_zstd1, and the stream passes that format to the parser; the harness never calls the setter.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-bb4d3ac2c0190283705db946",
+              "quote": "/*! ZSTD_DCtx_setFormat() :\n *  Instruct the decoder context about what kind of data to decode next.\n *  This instruction is mandatory to decode data without a fully-formed header,\n *  such ZSTD_f_zstd1_magicless for example.\n * @return : 0, or an error code (which can be tested using ZSTD_isError()).\n */\nZSTDLIB_API size_t ZSTD_DCtx_setFormat(ZSTD_DCtx* dctx, ZSTD_format_e format);\n"
+            },
+            {
+              "evidence_id": "loc-00d3dd7b8eb7d67b406aae1c",
+              "quote": "    ZSTD_f_zstd1 = 0,        /* zstd frame format, specified in zstd_compression_format.md (default) */\n    ZSTD_f_zstd1_magicless,  /* Variant of zstd frame format, without initial 4-bytes magic number.\n                              * Useful to save 4 bytes per generated frame.\n                              * Decoder cannot recognise automatically this format, requiring instructions. */\n} ZSTD_format_e;\n"
+            },
+            {
+              "evidence_id": "loc-2f014dd37b55cca625fa3554",
+              "quote": "static void ZSTD_initDCtx_internal(ZSTD_DCtx* dctx)\n{\n    dctx->format = ZSTD_f_zstd1;  /* ZSTD_decompressBegin() invokes ZSTD_startingInputLength() with argument dctx->format */\n    dctx->staticSize  = 0;\n    dctx->maxWindowSize = ZSTD_MAXWINDOWSIZE_DEFAULT;\n    dctx->ddict       = NULL;\n    dctx->ddictLocal  = NULL;\n    dctx->inBuff      = NULL;\n    dctx->inBuffSize  = 0;\n    dctx->outBuffSize = 0;\n    dctx->streamStage = zdss_init;\n"
+            },
+            {
+              "evidence_id": "loc-a9b0a3cdf12d868eb480e289",
+              "quote": "    while (someMoreWork) {\n        switch(zds->streamStage)\n        {\n        case zdss_init :\n            ZSTD_resetDStream(zds);   /* transparent reset on starting decoding a new frame */\n            /* fall-through */\n\n        case zdss_loadHeader :\n            DEBUGLOG(5, \"stage zdss_loadHeader (srcSize : %u)\", (U32)(iend - ip));\n            {   size_t const hSize = ZSTD_getFrameHeader_internal(&zds->fParams, zds->headerBuffer, zds->lhSize, zds->format);\n                DEBUGLOG(5, \"header size : %u\", (U32)hSize);\n                if (ZSTD_isError(hSize)) {\n#if defined(ZSTD_LEGACY_SUPPORT) && (ZSTD_LEGACY_SUPPORT>=1)\n                    U32 const legacyVersion = ZSTD_isLegacy(istart, iend-istart);\n                    if (legacyVersion) {\n                        const void* const dict = zds->ddict ? zds->ddict->dictContent : NULL;\n                        size_t const dictSize = zds->ddict ? zds->ddict->dictSize : 0;\n                        /* legacy support is incompatible with static dctx */\n                        if (zds->staticSize) return ERROR(memory_allocation);\n                        CHECK_F(ZSTD_initLegacyStream(&zds->legacyContext,\n                                    zds->previousLegacyVersion, legacyVersion,\n                                    dict, dictSize));\n                        zds->legacyVersion = zds->previousLegacyVersion = legacyVersion;\n                        return ZSTD_decompressLegacyStream(zds->legacyContext, legacyVersion, output, input);\n                    }\n#endif\n                    return hSize; /* error */\n"
+            },
+            {
+              "evidence_id": "loc-0d9c409954ecc911b33a07ca",
+              "quote": "static size_t ZSTD_getFrameHeader_internal(ZSTD_frameHeader* zfhPtr, const void* src, size_t srcSize, ZSTD_format_e format)\n{\n    const BYTE* ip = (const BYTE*)src;\n    size_t const minInputSize = ZSTD_startingInputLength(format);\n\n    if (srcSize < minInputSize) return minInputSize;\n\n    if ( (format != ZSTD_f_zstd1_magicless)\n      && (MEM_readLE32(src) != ZSTD_MAGICNUMBER) ) {\n        if ((MEM_readLE32(src) & 0xFFFFFFF0U) == ZSTD_MAGIC_SKIPPABLE_START) {\n            /* skippable frame */\n            if (srcSize < ZSTD_skippableHeaderSize)\n                return ZSTD_skippableHeaderSize; /* magic number + frame length */\n            memset(zfhPtr, 0, sizeof(*zfhPtr));\n            zfhPtr->frameContentSize = MEM_readLE32((const char *)src + ZSTD_frameIdSize);\n            zfhPtr->frameType = ZSTD_skippableFrame;\n            return 0;\n        }\n        return ERROR(prefix_unknown);\n    }\n\n    /* ensure there is enough `srcSize` to fully read/decode frame header */\n    {   size_t const fhsize = ZSTD_frameHeaderSize_internal(src, srcSize, format);\n        if (srcSize < fhsize) return fhsize;\n        zfhPtr->headerSize = (U32)fhsize;\n    }\n\n    {   BYTE const fhdByte = ip[minInputSize-1];\n        size_t pos = minInputSize;\n"
+            },
+            {
+              "evidence_id": "loc-015423ed9540a9db7fbfc5f1",
+              "quote": "size_t ZSTD_DCtx_setFormat(ZSTD_DCtx* dctx, ZSTD_format_e format)\n{\n    DEBUGLOG(4, \"ZSTD_DCtx_setFormat : %u\", (unsigned)format);\n    ZSTD_STATIC_ASSERT((unsigned)zdss_loadHeader >= (unsigned)zdss_init);\n    if ((unsigned)dctx->streamStage > (unsigned)zdss_loadHeader)\n        return ERROR(stage_wrong);\n    dctx->format = format;\n    return 0;\n}\n"
+            }
+          ]
+        },
+        "same_blocker": "not_applicable",
+        "reason": "The same old harness is assessed on both sides. Before, the ordinary-magic parser did not support the magicless format; after, explicit format selection enables it, but the harness has no such setup.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": []
+  },
+  "citation_errors": [],
+  "missing_claims": [],
+  "preimage_errors": []
+}

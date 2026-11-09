@@ -1,0 +1,103 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0001",
+          "status": "not_target_relevant",
+          "reason": "The added check rejects a non-32-bit unsigned int in the fallback type definitions. That platform adaptation does not apply to the target's supplied architectures.",
+          "errors": []
+        },
+        {
+          "change_id": "g0002",
+          "status": "not_target_relevant",
+          "reason": "The change replaces unsigned accumulators with U32 in the raw-block length reader. On the supplied architectures, both are 32-bit unsigned integer types; it adds no distinct behavior to the frame target's operational surface.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "unknown",
+          "reason": "The build file delegates to ossfuzz/ossfuzz.sh, whose contents are not supplied; the target's compile and link commands cannot be assessed.",
+          "errors": []
+        },
+        "input": {
+          "status": "blocked",
+          "reason": "For a one-byte input, LZ4_compressBound returns 17. The producer records 17 as its size; its first four-byte retrieval during preference generation reads data[13], beyond the one-byte input.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "pass",
+          "reason": "On the target's normal return path, allocated buffers and the producer are freed; frame compression and the round-trip helper also release their contexts.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "pass",
+          "reason": "After preference and capacity setup, the entry invokes frame compression and conditionally decompresses successful output; the input foundation blocks safe execution before that route.",
+          "errors": []
+        }
+      },
+      "errors": [],
+      "missing_information": [],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "id": "producer_size_exceeds_input",
+        "change_ids": [],
+        "kind": "input",
+        "necessary": true,
+        "established": true,
+        "requirement": "Initialize the data producer with the number of bytes actually supplied to the fuzz entry, so preference generation reads only within that input.",
+        "target_route": "LLVMFuzzerTestOneInput → LZ4_compressBound(size) → FUZZ_dataProducer_create(data, bound) → FUZZ_dataProducer_preferences → FUZZ_dataProducer_retrieve32.",
+        "failure_condition": "A one-byte input produces bound 17; the first retrieval reads data[13] before any frame operation.",
+        "alternative_paths": "The complete entry calls preference generation unconditionally, and the producer has no bound-to-input check. No later frame path avoids the earlier read.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-4fe09672cc650f333dfa3e13",
+            "quote": "#define LZ4_COMPRESSBOUND(isize)  ((unsigned)(isize) > (unsigned)LZ4_MAX_INPUT_SIZE ? 0 : (isize) + ((isize)/255) + 16)\n"
+          },
+          {
+            "evidence_id": "loc-62252008e0b994994604866c",
+            "quote": "FUZZ_dataProducer_t *FUZZ_dataProducer_create(const uint8_t *data, size_t size) {\n  FUZZ_dataProducer_t *producer = malloc(sizeof(FUZZ_dataProducer_t));\n\n  FUZZ_ASSERT(producer != NULL);\n\n  producer->data = data;\n  producer->size = size;\n  return producer;\n}\n"
+          },
+          {
+            "evidence_id": "loc-2fed839fc46bde97ab3aff3e",
+            "quote": "uint32_t FUZZ_dataProducer_retrieve32(FUZZ_dataProducer_t *producer) {\n    const uint8_t* data = producer->data;\n    const size_t size = producer->size;\n    if (size == 0) {\n        return 0;\n    } else if (size < 4) {\n        producer->size -= 1;\n        return (uint32_t)data[size - 1];\n    } else {\n        producer->size -= 4;\n        return *(data + size - 4);\n    }\n}\n"
+          },
+          {
+            "evidence_id": "loc-44d1a056492d054d2eb17bed",
+            "quote": "int LZ4_compressBound(int isize)  { return LZ4_COMPRESSBOUND(isize); }\n"
+          },
+          {
+            "evidence_id": "loc-a2bcd8d4503a6b8d74c71efa",
+            "quote": "LZ4F_preferences_t FUZZ_dataProducer_preferences(FUZZ_dataProducer_t* producer)\n{\n    LZ4F_preferences_t prefs = LZ4F_INIT_PREFERENCES;\n    prefs.frameInfo = FUZZ_dataProducer_frameInfo(producer);\n    prefs.compressionLevel = FUZZ_dataProducer_range32(producer, 0, LZ4HC_CLEVEL_MAX + 3) - 3;\n    prefs.autoFlush = FUZZ_dataProducer_range32(producer, 0, 1);\n    prefs.favorDecSpeed = FUZZ_dataProducer_range32(producer, 0, 1);\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-289b380c9ff3b16ffe313461",
+            "quote": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)\n{\n    FUZZ_dataProducer_t *producer = FUZZ_dataProducer_create(data, LZ4_compressBound(size));\n    LZ4F_preferences_t const prefs = FUZZ_dataProducer_preferences(producer);\n    size_t const dstCapacitySeed = FUZZ_dataProducer_retrieve32(producer);\n    size = FUZZ_dataProducer_remainingBytes(producer);\n\n    size_t const compressBound = LZ4F_compressFrameBound(size, &prefs);\n"
+          },
+          {
+            "evidence_id": "loc-cfae31dfc0493ef13f80dcdb",
+            "quote": "LZ4F_preferences_t FUZZ_dataProducer_preferences(FUZZ_dataProducer_t* producer)\n{\n    LZ4F_preferences_t prefs = LZ4F_INIT_PREFERENCES;\n    prefs.frameInfo = FUZZ_dataProducer_frameInfo(producer);\n    prefs.compressionLevel = FUZZ_dataProducer_range32(producer, 0, LZ4HC_CLEVEL_MAX + 3) - 3;\n    prefs.autoFlush = FUZZ_dataProducer_range32(producer, 0, 1);\n    prefs.favorDecSpeed = FUZZ_dataProducer_range32(producer, 0, 1);\n"
+          },
+          {
+            "evidence_id": "loc-d02e071072ebc3548c8d2e09",
+            "quote": "uint32_t FUZZ_dataProducer_retrieve32(FUZZ_dataProducer_t *producer) {\n    const uint8_t* data = producer->data;\n    const size_t size = producer->size;\n    if (size == 0) {\n        return 0;\n    } else if (size < 4) {\n        producer->size -= 1;\n        return (uint32_t)data[size - 1];\n    } else {\n        producer->size -= 4;\n        return *(data + size - 4);\n    }\n}\n"
+          }
+        ],
+        "missing_information": [],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

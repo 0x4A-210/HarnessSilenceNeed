@@ -1,0 +1,531 @@
+{
+  "verdict": "needs_update",
+  "status": "introduced",
+  "candidates": [
+    {
+      "candidate_id": "c1",
+      "source_id": "saved_comment_error_cleanup_unreachable",
+      "origin": "review-1",
+      "kind": "configuration",
+      "change_ids": [
+        "g0002"
+      ],
+      "requirement": "Exercise parser_free with an unattached saved comment after a parse error, using the supported UCL_PARSER_SAVE_COMMENTS setup.",
+      "target_route": "Create a parser with UCL_PARSER_SAVE_COMMENTS; add the finite byte input `/*c*/ @`; the comment is saved, parsing rejects `@`, and parser_free releases last_comment.",
+      "failure_condition": "The fixed entry creates its parser with flags 0 and returns on a nonnull error before parser_free, so this changed cleanup behavior is unreachable.",
+      "alternative_paths": "Input bytes cannot change the constructor flags. All supplied save_comment calls are flag guarded; the entry has no other parser setup or error cleanup route.",
+      "discovery_necessary": true,
+      "discovery_established": true
+    },
+    {
+      "candidate_id": "c2",
+      "source_id": "parser_leaked_on_syntax_error",
+      "origin": "review-1",
+      "kind": "lifecycle",
+      "change_ids": [],
+      "requirement": "Release the parser after add_string reports a syntax error.",
+      "target_route": "For the finite byte input `:`, parser_new succeeds under the normal allocator; add_string delegates to UCL parsing, which records a syntax error for an invalid initial key.",
+      "failure_condition": "get_error is nonnull and the entry returns before its only parser_free call, leaving the allocated parser and its state unreleased.",
+      "alternative_paths": "The complete entry contains no cleanup on its error return. parser_free is called only after the error check.",
+      "discovery_necessary": true,
+      "discovery_established": true
+    }
+  ],
+  "decisions": [
+    {
+      "candidate_id": "c1",
+      "decision": "keep",
+      "errors": [],
+      "obligation_class": "target_coverage",
+      "citation_errors": []
+    },
+    {
+      "candidate_id": "c2",
+      "decision": "keep",
+      "errors": [],
+      "obligation_class": "execution_compatibility",
+      "citation_errors": []
+    }
+  ],
+  "scope_complete": false,
+  "timing": {
+    "status": "introduced",
+    "gap": true,
+    "introduced_by_this_change": true,
+    "claims": [
+      {
+        "claim_id": "c1",
+        "status": "introduced",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Exercise parser_free releasing an unattached saved comment after a parse error.",
+          "applicability": "not_applicable",
+          "harness_status": "not_applicable",
+          "reason": "The before-version parser_free has no last_comment release. This specific release capability was not yet present.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-1e0d4cbacd6a87d8850a9e19",
+              "quote": "\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n"
+            },
+            {
+              "evidence_id": "loc-f97e434960a1c28557ea4b13",
+              "quote": "static void\nucl_save_comment(struct ucl_parser *parser, const char *begin, size_t len)\n{\n\tucl_object_t *nobj;\n\n\tif (len > 0 && begin != NULL) {\n\t\tnobj = ucl_object_fromstring_common(begin, len, 0);\n\n\t\tif (parser->last_comment) {\n\t\t\t/* We need to append data to an existing object */\n\t\t\tDL_APPEND(parser->last_comment, nobj);\n\t\t}\n\t\telse {\n\t\t\tparser->last_comment = nobj;\n\t\t}\n\t}\n}\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Exercise parser_free releasing an unattached saved comment after a parse error.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The new release applies to a saved comment followed by a syntax error, but the fixed entry uses flags 0 and returns before parser_free on error.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-d8252c6f4b1f823628e46077",
+              "quote": "\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n}\n"
+            },
+            {
+              "evidence_id": "loc-6323f7f7a8106dc9faeb18ed",
+              "quote": "\telse if (chunk->remain >= 2 && *p == '/' && p[1] == '*') {\n\t\tbeg = p;\n\t\tcomments_nested++;\n\t\tucl_chunk_skipc(chunk, p);\n\t\tucl_chunk_skipc(chunk, p);\n\t\twhile (p < chunk->end) {\n\t\t\tif (*p == '\"' && *(p - 1) != '\\\\') {\n\t\t\t\t/* begin or end double-quoted string */\n\t\t\t\tquoted = !quoted;\n\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t}\n\t\t\telse if (quoted) {\n\t\t\t\t/* quoted character */\n\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t}\n\t\t\telse if (chunk->remain >= 2 && *p == '*' && p[1] == '/') {\n\t\t\t\t/* end of comment */\n\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\tucl_chunk_skipc(chunk, p);\n\t\t\t\tcomments_nested--;\n\t\t\t\tif (comments_nested == 0) {\n\t\t\t\t\tif (parser->flags & UCL_PARSER_SAVE_COMMENTS) {\n\t\t\t\t\t\tucl_save_comment(parser, beg, p - beg + 1);\n\t\t\t\t\t\tbeg = NULL;\n\t\t\t\t\t}\n\t\t\t\t\tgoto start;\n"
+            },
+            {
+              "evidence_id": "loc-74865994f865b1f2717f4bb1",
+              "quote": "\t\t\telse {\n\t\t\t\t/* Invalid identifier */\n\t\t\t\tucl_set_err(parser, UCL_ESYNTAX, \"key must begin with a letter\",\n\t\t\t\t\t\t\t&parser->err);\n\t\t\t\treturn false;\n\t\t\t}\n"
+            }
+          ]
+        },
+        "same_blocker": "not_applicable",
+        "reason": "The before-version function lacks this release capability; after the addition, the old entry cannot reach it. The separate parser lifetime failure is assessed in c2.",
+        "error": null,
+        "missing_information": []
+      },
+      {
+        "claim_id": "c2",
+        "status": "preexisting",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Release the parser after add_string reports a syntax error.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The finite input `:` reaches the before-version invalid-key error, and the entry returns before its only parser_free call.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-6a6c02a154e8690142f34dda",
+              "quote": "\t\t\telse {\n\t\t\t\t/* Invalid identifier */\n\t\t\t\tucl_set_err(parser, UCL_ESYNTAX, \"key must begin with a letter\",\n\t\t\t\t\t\t\t&parser->err);\n\t\t\t\treturn false;\n\t\t\t}\n"
+            },
+            {
+              "evidence_id": "loc-bf587ad7de27b1c90949215e",
+              "quote": "\t\tif (len > 0) {\n\t\t\t/* Need to parse something */\n\t\t\tswitch (parse_type) {\n\t\t\tdefault:\n\t\t\tcase UCL_PARSE_UCL:\n\t\t\t\treturn ucl_state_machine(parser);\n\t\t\tcase UCL_PARSE_MSGPACK:\n"
+            },
+            {
+              "evidence_id": "loc-a46d52df893b4f956e4395a1",
+              "quote": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Release the parser after add_string reports a syntax error.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The same input reaches the after-version invalid-key error, and the unchanged entry still skips parser_free.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-aa3c38c015421c4fd129ef67",
+              "quote": "\t\t\telse {\n\t\t\t\t/* Invalid identifier */\n\t\t\t\tucl_set_err(parser, UCL_ESYNTAX, \"key must begin with a letter\",\n\t\t\t\t\t\t\t&parser->err);\n\t\t\t\treturn false;\n\t\t\t}\n"
+            },
+            {
+              "evidence_id": "loc-a55f2e5fb81c65f08c55386e",
+              "quote": "\t\tif (len > 0) {\n\t\t\t/* Need to parse something */\n\t\t\tswitch (parse_type) {\n\t\t\tdefault:\n\t\t\tcase UCL_PARSE_UCL:\n\t\t\t\treturn ucl_state_machine(parser);\n\t\t\tcase UCL_PARSE_MSGPACK:\n"
+            },
+            {
+              "evidence_id": "loc-dcb678d07fc48f6bcebd2906",
+              "quote": "void ucl_parser_free(struct ucl_parser *parser)\n{\n\tstruct ucl_stack *stack, *stmp;\n\tstruct ucl_macro *macro, *mtmp;\n\tstruct ucl_chunk *chunk, *ctmp;\n\tstruct ucl_pubkey *key, *ktmp;\n\tstruct ucl_variable *var, *vtmp;\n\tucl_object_t *tr, *trtmp;\n\n\tif (parser == NULL) {\n\t\treturn;\n\t}\n\n\tif (parser->top_obj != NULL) {\n\t\tucl_object_unref(parser->top_obj);\n\t}\n\n\tif (parser->includepaths != NULL) {\n\t\tucl_object_unref(parser->includepaths);\n\t}\n\n\tLL_FOREACH_SAFE(parser->stack, stack, stmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_stack), stack);\n\t}\n\tHASH_ITER(hh, parser->macroes, macro, mtmp)\n\t{\n\t\tUCL_FREE(strlen(macro->name) + 1, macro->name);\n\t\tHASH_DEL(parser->macroes, macro);\n\t\tUCL_FREE(sizeof(struct ucl_macro), macro);\n\t}\n\tLL_FOREACH_SAFE(parser->chunks, chunk, ctmp)\n\t{\n\t\tucl_chunk_free(chunk);\n\t}\n\tLL_FOREACH_SAFE(parser->keys, key, ktmp)\n\t{\n\t\tUCL_FREE(sizeof(struct ucl_pubkey), key);\n\t}\n\tLL_FOREACH_SAFE(parser->variables, var, vtmp)\n\t{\n\t\tUCL_FREE(var->value_len + 1, var->value);\n\t\tUCL_FREE(var->var_len + 1, var->var);\n\t\tUCL_FREE(sizeof(struct ucl_variable), var);\n\t}\n\tLL_FOREACH_SAFE(parser->trash_objs, tr, trtmp)\n\t{\n\t\tucl_object_free_shallow(tr);\n\t}\n\n\tif (parser->err != NULL) {\n\t\tutstring_free(parser->err);\n\t}\n\n\tif (parser->cur_file) {\n\t\tUCL_FREE(strlen(parser->cur_file) + 1, parser->cur_file);\n\t}\n\n\tif (parser->comments) {\n\t\tucl_object_unref(parser->comments);\n\t}\n\n\tif (parser->last_comment) {\n\t\t/* saved but never attached: parsing stopped with an error */\n\t\tucl_object_unref(parser->last_comment);\n\t}\n\n\tUCL_FREE(sizeof(struct ucl_parser), parser);\n"
+            }
+          ]
+        },
+        "same_blocker": "yes",
+        "reason": "The same syntax error and the same early return omit parser_free on both versions; the added last_comment cleanup does not alter that constraint.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": []
+  },
+  "errors": [],
+  "model_calls": [
+    {
+      "provider": "codex_cli",
+      "prompt_hash": "d662d6d66737d73b49e7378558ff7be37a12f7ecddd7062c979679b4f40e6dfa",
+      "reserved_input_tokens": 42252,
+      "model": "gpt-6-sol",
+      "reasoning_effort": "high",
+      "session_in": null,
+      "fork": false,
+      "session_out": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "compacted": false,
+      "tools_used": [],
+      "usage": {
+        "input_tokens": 24405,
+        "cached_input_tokens": 10496,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 3282,
+        "reasoning_output_tokens": 1934,
+        "raw": {
+          "input_tokens": 34901,
+          "cached_input_tokens": 10496,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 3282,
+          "reasoning_output_tokens": 1934
+        },
+        "raw_is_thread_cumulative": false
+      },
+      "error": null,
+      "argv": [
+        "codex",
+        "--no-daemon",
+        "exec",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "read-only",
+        "--model",
+        "gpt-6-sol",
+        "--json",
+        "--color",
+        "never",
+        "--output-schema",
+        "/tmp/scheme-v8-codex_cli-rs64bz4p/schema-1.json",
+        "--output-last-message",
+        "/tmp/scheme-v8-codex_cli-rs64bz4p/answer-1.json",
+        "--cd",
+        "/tmp/scheme-v8-codex_cli-rs64bz4p",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.browser_use=false",
+        "-c",
+        "features.computer_use=false",
+        "-c",
+        "features.image_generation=false",
+        "-c",
+        "features.memories=false",
+        "-c",
+        "features.skill_search=false",
+        "-c",
+        "features.skip_host_skill_discovery=true",
+        "-c",
+        "features.unbounded_connection_retries=false",
+        "-c",
+        "web_search=\"disabled\"",
+        "-c",
+        "project_doc_max_bytes=0",
+        "-c",
+        "suppress_unstable_features_warning=true",
+        "-"
+      ],
+      "exit_code": 0,
+      "seconds": 64.148
+    },
+    {
+      "provider": "codex_cli",
+      "prompt_hash": "2279a3499695eeb84fccd9e474d47d177ee88b5ab41158e9bdabfc73dbbd0ac6",
+      "reserved_input_tokens": 83586,
+      "model": "gpt-6-sol",
+      "reasoning_effort": "high",
+      "session_in": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "fork": false,
+      "session_out": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "compacted": false,
+      "tools_used": [],
+      "usage": {
+        "input_tokens": 76202,
+        "cached_input_tokens": 34688,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 4365,
+        "reasoning_output_tokens": 2070,
+        "raw": {
+          "input_tokens": 145791,
+          "cached_input_tokens": 45184,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 7647,
+          "reasoning_output_tokens": 4004
+        },
+        "raw_is_thread_cumulative": true
+      },
+      "error": null,
+      "argv": [
+        "codex",
+        "--no-daemon",
+        "exec",
+        "resume",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--model",
+        "gpt-6-sol",
+        "--json",
+        "--output-schema",
+        "/tmp/scheme-v8-codex_cli-rs64bz4p/schema-2.json",
+        "--output-last-message",
+        "/tmp/scheme-v8-codex_cli-rs64bz4p/answer-2.json",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.browser_use=false",
+        "-c",
+        "features.computer_use=false",
+        "-c",
+        "features.image_generation=false",
+        "-c",
+        "features.memories=false",
+        "-c",
+        "features.skill_search=false",
+        "-c",
+        "features.skip_host_skill_discovery=true",
+        "-c",
+        "features.unbounded_connection_retries=false",
+        "-c",
+        "web_search=\"disabled\"",
+        "-c",
+        "project_doc_max_bytes=0",
+        "-c",
+        "suppress_unstable_features_warning=true",
+        "-c",
+        "sandbox_mode=\"read-only\"",
+        "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+        "-"
+      ],
+      "exit_code": 0,
+      "seconds": 81.454
+    },
+    {
+      "provider": "codex_cli",
+      "prompt_hash": "24705624d7b1cf16ef4d5cd86b1fdc963eb5ed21f75c29c8fe2bab88c8eb7763",
+      "reserved_input_tokens": 20940,
+      "model": "gpt-6-sol",
+      "reasoning_effort": "high",
+      "session_in": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "fork": false,
+      "session_out": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "compacted": false,
+      "tools_used": [],
+      "usage": {
+        "input_tokens": 5413,
+        "cached_input_tokens": 110720,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 4700,
+        "reasoning_output_tokens": 1338,
+        "raw": {
+          "input_tokens": 261924,
+          "cached_input_tokens": 155904,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 12347,
+          "reasoning_output_tokens": 5342
+        },
+        "raw_is_thread_cumulative": true
+      },
+      "error": null,
+      "argv": [
+        "codex",
+        "--no-daemon",
+        "exec",
+        "resume",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--model",
+        "gpt-6-sol",
+        "--json",
+        "--output-schema",
+        "/tmp/scheme-v8-codex_cli-rs64bz4p/schema-3.json",
+        "--output-last-message",
+        "/tmp/scheme-v8-codex_cli-rs64bz4p/answer-3.json",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.browser_use=false",
+        "-c",
+        "features.computer_use=false",
+        "-c",
+        "features.image_generation=false",
+        "-c",
+        "features.memories=false",
+        "-c",
+        "features.skill_search=false",
+        "-c",
+        "features.skip_host_skill_discovery=true",
+        "-c",
+        "features.unbounded_connection_retries=false",
+        "-c",
+        "web_search=\"disabled\"",
+        "-c",
+        "project_doc_max_bytes=0",
+        "-c",
+        "suppress_unstable_features_warning=true",
+        "-c",
+        "sandbox_mode=\"read-only\"",
+        "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+        "-"
+      ],
+      "exit_code": 0,
+      "seconds": 87.883
+    },
+    {
+      "provider": "codex_cli",
+      "prompt_hash": "83e03b2c2bdf72b66ec698684283d3bf7bc99e27f54262ff758035cb78761f65",
+      "reserved_input_tokens": 105077,
+      "model": "gpt-6-sol",
+      "reasoning_effort": "high",
+      "session_in": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "fork": false,
+      "session_out": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "compacted": false,
+      "tools_used": [],
+      "usage": {
+        "input_tokens": 104586,
+        "cached_input_tokens": 115968,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 1875,
+        "reasoning_output_tokens": 674,
+        "raw": {
+          "input_tokens": 482478,
+          "cached_input_tokens": 271872,
+          "cache_write_input_tokens": 0,
+          "output_tokens": 14222,
+          "reasoning_output_tokens": 6016
+        },
+        "raw_is_thread_cumulative": true
+      },
+      "error": null,
+      "argv": [
+        "codex",
+        "--no-daemon",
+        "exec",
+        "resume",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--model",
+        "gpt-6-sol",
+        "--json",
+        "--output-schema",
+        "/tmp/scheme-v8-codex_cli-rs64bz4p/schema-4.json",
+        "--output-last-message",
+        "/tmp/scheme-v8-codex_cli-rs64bz4p/answer-4.json",
+        "-c",
+        "model_reasoning_effort=\"high\"",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.browser_use=false",
+        "-c",
+        "features.computer_use=false",
+        "-c",
+        "features.image_generation=false",
+        "-c",
+        "features.memories=false",
+        "-c",
+        "features.skill_search=false",
+        "-c",
+        "features.skip_host_skill_discovery=true",
+        "-c",
+        "features.unbounded_connection_retries=false",
+        "-c",
+        "web_search=\"disabled\"",
+        "-c",
+        "project_doc_max_bytes=0",
+        "-c",
+        "suppress_unstable_features_warning=true",
+        "-c",
+        "sandbox_mode=\"read-only\"",
+        "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+        "-"
+      ],
+      "exit_code": 0,
+      "seconds": 44.09
+    }
+  ],
+  "rounds": [
+    {
+      "turn": 1,
+      "label": "discover",
+      "session_in": null,
+      "fork": false,
+      "session_out": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "prompt_chars": 67965
+    },
+    {
+      "turn": 2,
+      "label": "review",
+      "session_in": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "fork": false,
+      "session_out": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "prompt_chars": 191969
+    },
+    {
+      "turn": 3,
+      "label": "review-new1",
+      "session_in": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "fork": false,
+      "session_out": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "prompt_chars": 4030
+    },
+    {
+      "turn": 4,
+      "label": "timing",
+      "session_in": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "fork": false,
+      "session_out": "01a1ab29-dfad-76f3-9a20-946a27cb2a43",
+      "prompt_chars": 256442
+    }
+  ],
+  "cost": {
+    "seconds": 286.575587,
+    "deep_files": 18,
+    "deep_unique_lines": 5962,
+    "indexed_files": 65,
+    "indexed_bytes": 903947,
+    "searches": 16,
+    "search_seconds": 4.825277,
+    "llm_calls": 4,
+    "llm_input_tokens": 482478,
+    "stop_reasons": [],
+    "model_seconds": 277.575,
+    "input_tokens_uncached": 210606,
+    "input_tokens_cached": 271872,
+    "input_tokens_cache_write": 0,
+    "output_tokens": 14222,
+    "input_tokens_total": 482478
+  }
+}

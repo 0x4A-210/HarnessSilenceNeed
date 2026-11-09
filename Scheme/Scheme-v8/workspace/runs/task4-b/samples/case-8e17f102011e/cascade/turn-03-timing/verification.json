@@ -1,0 +1,69 @@
+{
+  "checked": {
+    "status": "introduced",
+    "gap": true,
+    "introduced_by_this_change": true,
+    "claims": [
+      {
+        "claim_id": "c1",
+        "status": "introduced",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Exercise the same reparse-deferral skip on a later nonfinal parse call.",
+          "applicability": "not_applicable",
+          "harness_status": "not_applicable",
+          "reason": "The verified preimage has no callProcessor definition, and both old parse routes invoke the processor directly. The skip behavior was not present.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-15d78c81d2e35aafca4af218",
+              "quote": "Verified preimage file expat/lib/xmlparse.c has no function definition named callProcessor. The entire after definition consists of added lines. This establishes absence in this file only; other implementations or equivalent paths must still be considered."
+            },
+            {
+              "evidence_id": "loc-621780b3d441f9d2516c1640",
+              "quote": "#if XML_CONTEXT_BYTES == 0\n  else if (parser->m_bufferPtr == parser->m_bufferEnd) {\n    const char *end;\n    int nLeftOver;\n    enum XML_Status result;\n    /* Detect overflow (a+b > MAX <==> b > MAX-a) */\n    if ((XML_Size)len > ((XML_Size)-1) / 2 - parser->m_parseEndByteIndex) {\n      parser->m_errorCode = XML_ERROR_NO_MEMORY;\n      parser->m_eventPtr = parser->m_eventEndPtr = NULL;\n      parser->m_processor = errorProcessor;\n      return XML_STATUS_ERROR;\n    }\n    parser->m_parseEndByteIndex += len;\n    parser->m_positionPtr = s;\n    parser->m_parsingStatus.finalBuffer = (XML_Bool)isFinal;\n\n    parser->m_errorCode\n        = parser->m_processor(parser, s, parser->m_parseEndPtr = s + len, &end);\n"
+            },
+            {
+              "evidence_id": "loc-60b296e40738243254da7c70",
+              "quote": "  start = parser->m_bufferPtr;\n  parser->m_positionPtr = start;\n  parser->m_bufferEnd += len;\n  parser->m_parseEndPtr = parser->m_bufferEnd;\n  parser->m_parseEndByteIndex += len;\n  parser->m_parsingStatus.finalBuffer = (XML_Bool)isFinal;\n\n  parser->m_errorCode = parser->m_processor(\n      parser, start, parser->m_parseEndPtr, &parser->m_bufferPtr);\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Exercise the default-enabled skip by making a later nonfinal parse call on the same parser while a partial token has insufficient new data.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The new helper contains the skip. Each fresh target parser gets only one nonfinal call, when the saved byte count is zero, followed by a final call that bypasses deferral.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-2bb778c2d173d7994e1b58b6",
+              "quote": "static enum XML_Error\ncallProcessor(XML_Parser parser, const char *start, const char *end,\n              const char **endPtr) {\n  const size_t have_now = EXPAT_SAFE_PTR_DIFF(end, start);\n\n  if (parser->m_reparseDeferralEnabled\n      && ! parser->m_parsingStatus.finalBuffer) {\n    // Heuristic: don't try to parse a partial token again until the amount of\n    // available data has increased significantly.\n    const size_t had_before = parser->m_partialTokenBytesBefore;\n    // ...but *do* try anyway if we're close to causing a reallocation.\n    size_t available_buffer\n        = EXPAT_SAFE_PTR_DIFF(parser->m_bufferPtr, parser->m_buffer);\n#if XML_CONTEXT_BYTES > 0\n    available_buffer -= EXPAT_MIN(available_buffer, XML_CONTEXT_BYTES);\n#endif\n    available_buffer\n        += EXPAT_SAFE_PTR_DIFF(parser->m_bufferLim, parser->m_bufferEnd);\n    // m_lastBufferRequestSize is never assigned a value < 0, so the cast is ok\n    const bool enough\n        = (have_now >= 2 * had_before)\n          || ((size_t)parser->m_lastBufferRequestSize > available_buffer);\n\n    if (! enough) {\n      *endPtr = start; // callers may expect this to be set\n      return XML_ERROR_NONE;\n    }\n  }\n  g_parseAttempts += 1;\n  const enum XML_Error ret = parser->m_processor(parser, start, end, endPtr);\n  if (ret == XML_ERROR_NONE) {\n    // if we consumed nothing, remember what we had on this parse attempt.\n    if (*endPtr == start) {\n      parser->m_partialTokenBytesBefore = have_now;\n    } else {\n      parser->m_partialTokenBytesBefore = 0;\n    }\n  }\n  return ret;\n}\n"
+            },
+            {
+              "evidence_id": "loc-b0432375dd4694fd190f404a",
+              "quote": "  parser->m_partialTokenBytesBefore = 0;\n  parser->m_reparseDeferralEnabled = g_reparseDeferralEnabledDefault;\n  parser->m_lastBufferRequestSize = 0;\n"
+            },
+            {
+              "evidence_id": "loc-04419054e8fe768a28934a72",
+              "quote": "#if XML_CONTEXT_BYTES == 0\n  if (parser->m_bufferPtr == parser->m_bufferEnd) {\n    const char *end;\n    int nLeftOver;\n    enum XML_Status result;\n    /* Detect overflow (a+b > MAX <==> b > MAX-a) */\n    if ((XML_Size)len > ((XML_Size)-1) / 2 - parser->m_parseEndByteIndex) {\n      parser->m_errorCode = XML_ERROR_NO_MEMORY;\n      parser->m_eventPtr = parser->m_eventEndPtr = NULL;\n      parser->m_processor = errorProcessor;\n      return XML_STATUS_ERROR;\n    }\n    // though this isn't a buffer request, we assume that `len` is the app's\n    // preferred buffer fill size, and therefore save it here.\n    parser->m_lastBufferRequestSize = len;\n    parser->m_parseEndByteIndex += len;\n    parser->m_positionPtr = s;\n    parser->m_parsingStatus.finalBuffer = (XML_Bool)isFinal;\n\n    parser->m_errorCode\n        = callProcessor(parser, s, parser->m_parseEndPtr = s + len, &end);\n"
+            },
+            {
+              "evidence_id": "loc-0a90ad04f1a10d046c759103",
+              "quote": "  start = parser->m_bufferPtr;\n  parser->m_positionPtr = start;\n  parser->m_bufferEnd += len;\n  parser->m_parseEndPtr = parser->m_bufferEnd;\n  parser->m_parseEndByteIndex += len;\n  parser->m_parsingStatus.finalBuffer = (XML_Bool)isFinal;\n\n  parser->m_errorCode = callProcessor(parser, start, parser->m_parseEndPtr,\n                                      &parser->m_bufferPtr);\n"
+            }
+          ]
+        },
+        "same_blocker": "not_applicable",
+        "reason": "The after-side unsatisfied condition is the new deferral guard. Before the change, neither parse route had that guard, so the same coverage obligation was not applicable.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": [],
+    "cascade_status": "introduced",
+    "necessity_frozen": true
+  },
+  "citation_errors": [],
+  "missing_claims": [],
+  "preimage_errors": []
+}

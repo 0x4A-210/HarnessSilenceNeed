@@ -1,0 +1,115 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0001",
+          "status": "not_target_relevant",
+          "reason": "The changelog describes readable EDE output; the target parses and scrubs packets without requesting that output.",
+          "errors": []
+        },
+        {
+          "change_id": "g0002",
+          "status": "not_target_relevant",
+          "reason": "The new EDE code names serve text rendering. The target extracts EDNS options as data and does not request their printed names.",
+          "errors": []
+        },
+        {
+          "change_id": "g0003",
+          "status": "not_target_relevant",
+          "reason": "The added function renders EDE option data as text. The target passes packet bytes through parsing and scrubbing, with no text rendering operation.",
+          "errors": []
+        },
+        {
+          "change_id": "g0004",
+          "status": "not_target_relevant",
+          "reason": "The new dispatch case is in the EDNS option printer. The target does not invoke that printer; its EDNS operation extracts options from a response.",
+          "errors": []
+        },
+        {
+          "change_id": "g0005",
+          "status": "not_target_relevant",
+          "reason": "The added declaration exposes the EDE text lookup table; the target does not use that table or request EDE text.",
+          "errors": []
+        },
+        {
+          "change_id": "g0006",
+          "status": "not_target_relevant",
+          "reason": "The added declaration exposes the EDE printer, which is outside the target’s parsing and scrubbing operations.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "unknown",
+          "reason": "The call is incompatible with the supplied function definition, but the header declaration needed to establish the compiler’s response was not supplied. The execution incompatibility is independently established.",
+          "errors": []
+        },
+        "input": {
+          "status": "pass",
+          "reason": "The entry copies generated packet bytes into a buffer, then parses the packet; accepted packets proceed to EDNS extraction.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "pass",
+          "reason": "The target creates its region and packet buffer before parsing and frees both on the shared exit path.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "blocked",
+          "reason": "After successful parsing and EDNS extraction, the target calls an eight-parameter function with seven arguments. Its iter_env pointer occupies the qstate position, and no eighth argument supplies ie.",
+          "errors": []
+        }
+      },
+      "errors": [],
+      "missing_information": [],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "id": "scrub_message_argument_mismatch",
+        "change_ids": [],
+        "kind": "call",
+        "necessary": true,
+        "established": true,
+        "requirement": "Invoke scrub_message with both a module_qstate pointer in position seven and an iter_env pointer in position eight.",
+        "target_route": "LLVMFuzzerTestOneInput copies packet bytes, calls parse_packet and parse_extract_edns_from_response_msg, then calls scrub_message when both return NOERROR.",
+        "failure_condition": "For a packet accepted by both parsers, the old call supplies seven arguments to the eight-parameter function. It passes &ie as qstate and omits ie, so the invocation is incompatible even if compilation permits it.",
+        "alternative_paths": "The complete target has one scrub_message call and no other scrubbing route; the shared cleanup follows that call.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-ad324c1a5b057c6d5af56819",
+            "quote": "int \nscrub_message(sldns_buffer* pkt, struct msg_parse* msg, \n\tstruct query_info* qinfo, uint8_t* zonename, struct regional* region,\n\tstruct module_env* env, struct module_qstate* qstate,\n\tstruct iter_env* ie)\n"
+          },
+          {
+            "evidence_id": "loc-e0444aa1587a87d30467b8f1",
+            "quote": "\t/* normalize the response, this cleans up the additional.  */\n\tif(!scrub_normalize(pkt, msg, qinfo, region, env))\n\t\treturn 0;\n\t/* delete all out-of-zone information */\n\tif(!scrub_sanitize(pkt, msg, qinfo, zonename, env, ie, qstate))\n\t\treturn 0;\n\treturn 1;\n"
+          },
+          {
+            "evidence_id": "loc-f92fa97f6465fa06e17f3ac3",
+            "quote": "int\nparse_packet(sldns_buffer* pkt, struct msg_parse* msg, struct regional* region)\n{\n\tint ret;\n\tif(sldns_buffer_remaining(pkt) < LDNS_HEADER_SIZE)\n\t\treturn LDNS_RCODE_FORMERR;\n\t/* read the header */\n\tsldns_buffer_read(pkt, &msg->id, sizeof(uint16_t));\n\tmsg->flags = sldns_buffer_read_u16(pkt);\n\tmsg->qdcount = sldns_buffer_read_u16(pkt);\n\tmsg->ancount = sldns_buffer_read_u16(pkt);\n\tmsg->nscount = sldns_buffer_read_u16(pkt);\n\tmsg->arcount = sldns_buffer_read_u16(pkt);\n\tif(msg->qdcount > 1)\n\t\treturn LDNS_RCODE_FORMERR;\n\tif((ret = parse_query_section(pkt, msg)) != 0)\n\t\treturn ret;\n\tif((ret = parse_section(pkt, msg, region, LDNS_SECTION_ANSWER,\n\t\tmsg->ancount, &msg->an_rrsets)) != 0)\n\t\treturn ret;\n\tif((ret = parse_section(pkt, msg, region, LDNS_SECTION_AUTHORITY,\n\t\tmsg->nscount, &msg->ns_rrsets)) != 0)\n\t\treturn ret;\n\tif(sldns_buffer_remaining(pkt) == 0 && msg->arcount == 1) {\n\t\t/* BIND accepts leniently that an EDNS record is missing.\n\t\t * so, we do too. */\n\t} else if((ret = parse_section(pkt, msg, region,\n\t\tLDNS_SECTION_ADDITIONAL, msg->arcount, &msg->ar_rrsets)) != 0)\n\t\treturn ret;\n\t/* if(sldns_buffer_remaining(pkt) > 0) { */\n\t\t/* there is spurious data at end of packet. ignore */\n\t/* } */\n\tmsg->rrset_count = msg->an_rrsets + msg->ns_rrsets + msg->ar_rrsets;\n\treturn 0;\n}\n"
+          },
+          {
+            "evidence_id": "loc-0e672ecaefc5fe01eb715613",
+            "quote": "int \nparse_extract_edns_from_response_msg(struct msg_parse* msg,\n\tstruct edns_data* edns, struct regional* region)\n{\n\tstruct rrset_parse* rrset = msg->rrset_first;\n\tstruct rrset_parse* prev = 0;\n\tstruct rrset_parse* found = 0;\n\tstruct rrset_parse* found_prev = 0;\n\tsize_t rdata_len;\n\tuint8_t* rdata_ptr;\n\t/* since the class encodes the UDP size, we cannot use hash table to\n\t * find the EDNS OPT record. Scan the packet. */\n\twhile(rrset) {\n\t\tif(rrset->type == LDNS_RR_TYPE_OPT) {\n\t\t\t/* only one OPT RR allowed. */\n\t\t\tif(found) return LDNS_RCODE_FORMERR;\n\t\t\t/* found it! */\n\t\t\tfound_prev = prev;\n\t\t\tfound = rrset;\n\t\t}\n\t\tprev = rrset;\n\t\trrset = rrset->rrset_all_next;\n\t}\n\tif(!found) {\n\t\tmemset(edns, 0, sizeof(*edns));\n\t\tedns->udp_size = 512;\n\t\treturn 0;\n\t}\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-0b1ac59cfce5db7ea671fb20",
+            "quote": "int LLVMFuzzerTestOneInput(const uint8_t *buf, size_t len) {\n  log_init(\"/tmp/foo\", 0, NULL);\n  char *bin = buf;\n  struct regional* reg;\n\n  struct sldns_buffer *pkt = sldns_buffer_new(1);\n  sldns_buffer_new_frm_data(pkt, bin, len);\n\n  reg = regional_create();\n\n  struct msg_parse msg;\n  struct edns_data edns;\n  memset(&msg, 0, sizeof(struct msg_parse));\n  memset(&edns, 0, sizeof(edns));\n  if (parse_packet(pkt, &msg, reg) != LDNS_RCODE_NOERROR) {    \n    goto out;\n  }\n  if (parse_extract_edns_from_response_msg(&msg, &edns, reg) != LDNS_RCODE_NOERROR) {\n    goto out;\n  }\n\n\n  struct query_info qinfo_out;\n  memset(&qinfo_out, 0, sizeof(struct query_info));\n  qinfo_out.qname = (unsigned char *) \"\\03nic\\02de\";\n  uint8_t *peter = (unsigned char *) \"\\02de\";   // zonename  \n  struct module_env env;\n  memset(&env, 0, sizeof(struct module_env));\n  struct config_file cfg;\n  memset(&cfg, 0, sizeof(struct config_file));\n  cfg.harden_glue = 1;    // crashes now, want to remove that later\n  env.cfg = &cfg;\n\n  struct iter_env ie;\n  memset(&ie, 0, sizeof(struct iter_env));\n\n  struct iter_priv priv;\n  memset(&priv, 0, sizeof(struct iter_priv));\n  ie.priv = &priv;\n  scrub_message(pkt, &msg, &qinfo_out, peter, reg, &env, &ie);   \nout:\n  regional_destroy(reg);\n  sldns_buffer_free(pkt);\n  return 0;\n"
+          }
+        ],
+        "missing_information": [],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

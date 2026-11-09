@@ -1,0 +1,173 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0001",
+          "status": "not_target_relevant",
+          "reason": "The changed argv allocation is inside parse_args. The target calls perform_an_assembly_pass directly with a fixed filename; input bytes cannot invoke parse_args.",
+          "errors": []
+        },
+        {
+          "change_id": "g0002",
+          "status": "not_target_relevant",
+          "reason": "The changed listing-filename allocation requires a command-line option parsed by parse_args, which this entry does not call.",
+          "errors": []
+        },
+        {
+          "change_id": "g0003",
+          "status": "not_target_relevant",
+          "reason": "This allocation is another parse_args listing-option branch. The target supplies only a filename to the assembly pass.",
+          "errors": []
+        },
+        {
+          "change_id": "g0004",
+          "status": "not_target_relevant",
+          "reason": "The changed include-directory and output-name allocations are option branches in parse_args. Neither is selected by the entry's fixed call.",
+          "errors": []
+        },
+        {
+          "change_id": "g0005",
+          "status": "blocked",
+          "reason": "The new notes cleanup is registered only in main. The target includes that code but invokes neither main nor free_notes while repeatedly entering its own assembly path.",
+          "errors": []
+        },
+        {
+          "change_id": "g0006",
+          "status": "blocked",
+          "reason": "The new notes initialization is in main, but the target bypasses main and calls the assembly routines directly.",
+          "errors": []
+        },
+        {
+          "change_id": "g0007",
+          "status": "blocked",
+          "reason": "read_begin no longer initializes notes. The target still uses read_begin as its initialization route before assembly, with no replacement notes initialization.",
+          "errors": []
+        },
+        {
+          "change_id": "g0008",
+          "status": "blocked",
+          "reason": "read_end now releases cond_obstack, which read_begin initializes. The target calls read_begin for each input but never calls read_end.",
+          "errors": []
+        },
+        {
+          "change_id": "g0009",
+          "status": "not_target_relevant",
+          "reason": "The changed subsegs_end body is not invoked by this entry. Its removed conditional cleanup supports the separate read_end obligation.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "unknown",
+          "reason": "The recipe shows how fuzz_as is compiled and linked, but the packet supplies no generated configuration or build result establishing success.",
+          "errors": []
+        },
+        "input": {
+          "status": "pass",
+          "reason": "Under normal filesystem operation, the entry writes supplied bytes to the filename passed to the assembly pass, which reads its filename argument.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "blocked",
+          "reason": "The entry bypasses main's notes setup and omits read_end after read_begin.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "blocked",
+          "reason": "The entry reaches the assembly pass directly while bypassing main's changed initialization and read_end's changed cleanup.",
+          "errors": []
+        }
+      },
+      "errors": [],
+      "missing_information": [],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "id": "notes_lifecycle",
+        "change_ids": [
+          "g0006",
+          "g0007"
+        ],
+        "kind": "lifecycle",
+        "necessary": true,
+        "established": true,
+        "requirement": "Initialize notes before the entry uses the assembler's notes-backed assembly state.",
+        "target_route": "LLVMFuzzerTestOneInput writes a source file, calls read_begin, then calls perform_an_assembly_pass. That pass creates sections; alloc_seginfo stores section information in notes.",
+        "failure_condition": "For an ordinary input that reaches section setup, the target has never executed the notes initialization relocated from read_begin to main.",
+        "alternative_paths": "The complete entry has no call to main or obstack_begin; read_begin initializes cond_obstack, not notes. Input bytes cannot select the bypassed setup.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-8587201b0ea8cdd5df59cfef",
+            "quote": "  obstack_begin (&notes, chunksize);\n  xatexit (free_notes);\n\n  PROGRESS (1);\n  /* Call parse_args before any of the init/begin functions\n     so that switches like --hash-size can be honored.  */\n  parse_args (&argc, &argv);\n"
+          },
+          {
+            "evidence_id": "loc-0a9821b5da9daf2e6b455a9f",
+            "quote": "void\nread_begin (void)\n{\n  const char *p;\n\n  pobegin ();\n  obj_read_begin_hook ();\n\n  obstack_begin (&cond_obstack, chunksize);\n\n#ifndef tc_line_separator_chars\n#define tc_line_separator_chars line_separator_chars\n#endif\n  /* Use machine dependent syntax.  */\n  for (p = tc_line_separator_chars; *p; p++)\n    is_end_of_line[(unsigned char) *p] = 2;\n  /* Use more.  FIXME-SOMEDAY.  */\n\n  if (flag_mri)\n    lex_type['?'] = 3;\n}\n"
+          },
+          {
+            "evidence_id": "loc-09344d425bea20c5e803a73d",
+            "quote": "#ifndef OBJ_MACH_O\n  /* Create the standard sections, and those the assembler uses\n     internally.  */\n  text_section = subseg_new (TEXT_SECTION_NAME, 0);\n  data_section = subseg_new (DATA_SECTION_NAME, 0);\n  bss_section = subseg_new (BSS_SECTION_NAME, 0);\n  /* @@ FIXME -- we're setting the RELOC flag so that sections are assumed\n     to have relocs, otherwise we don't find out in time.  */\n  applicable = bfd_applicable_section_flags (stdoutput);\n  bfd_set_section_flags (text_section,\n\t\t\t applicable & (SEC_ALLOC | SEC_LOAD | SEC_RELOC\n\t\t\t\t       | SEC_CODE | SEC_READONLY));\n  bfd_set_section_flags (data_section,\n\t\t\t applicable & (SEC_ALLOC | SEC_LOAD | SEC_RELOC\n\t\t\t\t       | SEC_DATA));\n  bfd_set_section_flags (bss_section, applicable & SEC_ALLOC);\n  seg_info (bss_section)->bss = 1;\n#endif\n  subseg_new (BFD_ABS_SECTION_NAME, 0);\n  subseg_new (BFD_UND_SECTION_NAME, 0);\n  reg_section = subseg_new (\"*GAS `reg' section*\", 0);\n  expr_section = subseg_new (\"*GAS `expr' section*\", 0);\n\n#ifndef OBJ_MACH_O\n  subseg_set (text_section, 0);\n#endif\n"
+          },
+          {
+            "evidence_id": "loc-a7edb57d9f8e507a3788274b",
+            "quote": "static void\nalloc_seginfo (segT seg)\n{\n  segment_info_type *seginfo;\n\n  seginfo = obstack_alloc (&notes, sizeof (*seginfo));\n  memset (seginfo, 0, sizeof (*seginfo));\n  seginfo->bfd_section = seg;\n  bfd_set_section_userdata (seg, seginfo);\n}\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-2a8691601205caa91167a025",
+            "quote": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);\nint LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n  char filename[256];\n  sprintf(filename, \"/tmp/libfuzzer-%d.s\", getpid());\n  FILE *fp = fopen(filename, \"wb\");\n  if (!fp) {\n    return 0;\n  }\n  fwrite(data, size, 1, fp);\n  fclose(fp);\n\n  reg_section = NULL;\n\n  const char *fakeArgv[3];\n  fakeArgv[0] = \"fuzz_objdump\";\n  fakeArgv[1] = filename; // Assemble our fake source file.\n  fakeArgv[2] = NULL;\n\n  out_file_name = \"/tmp/tmp-out\";\n\n  // as initialition. This follows the flow of ordinary main function\n  symbol_begin ();\n  frag_init ();\n  subsegs_begin ();\n  read_begin ();\n  input_scrub_begin ();\n  expr_begin ();\n  macro_init (flag_macro_alternate, flag_mri, 0, macro_expr);\n\n  output_file_create (out_file_name);\n  itbl_init ();\n  dwarf2_init ();\n  cond_finish_check (-1);\n\n  dot_symbol_init ();\n\n  // Main fuzzer target. Assemble our random data.\n  perform_an_assembly_pass (2, (char**)fakeArgv);\n\n  // Cleanup\n  cond_finish_check (-1);\n  dwarf2_finish ();\n  cfi_finish ();\n  input_scrub_end ();\n\n  unlink(filename);\n\n  return 0;\n}\n"
+          }
+        ],
+        "missing_information": [],
+        "errors": []
+      },
+      {
+        "id": "conditional_cleanup",
+        "change_ids": [
+          "g0008"
+        ],
+        "kind": "lifecycle",
+        "necessary": true,
+        "established": true,
+        "requirement": "Complete the read_begin lifecycle by invoking read_end so the changed conditional-obstack release is exercised.",
+        "target_route": "Each entry calls read_begin, assembles its file, performs partial cleanup, and returns without read_end.",
+        "failure_condition": "No input can execute the changed release in read_end through the fixed entry's call sequence.",
+        "alternative_paths": "The complete entry has no read_end call; subsegs_end no longer releases cond_obstack and is also uncalled.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-330585e7470d4a89b804ff35",
+            "quote": "void\nread_end (void)\n{\n  poend ();\n  _obstack_free (&cond_obstack, NULL);\n}\n"
+          },
+          {
+            "evidence_id": "loc-f8d91dfa719a7f14e1e864f9",
+            "quote": "  pobegin ();\n  obj_read_begin_hook ();\n\n  obstack_begin (&cond_obstack, chunksize);\n"
+          },
+          {
+            "evidence_id": "loc-c3872037de2fd517bff7b5f2",
+            "quote": "void\nsubsegs_end (struct obstack **obs)\n{\n  for (; *obs; obs++)\n    _obstack_free (*obs, NULL);\n  _obstack_free (&frchains, NULL);\n}\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-83760b69baaa3f050313fbea",
+            "quote": "  // as initialition. This follows the flow of ordinary main function\n  symbol_begin ();\n  frag_init ();\n  subsegs_begin ();\n  read_begin ();\n  input_scrub_begin ();\n  expr_begin ();\n  macro_init (flag_macro_alternate, flag_mri, 0, macro_expr);\n\n  output_file_create (out_file_name);\n  itbl_init ();\n  dwarf2_init ();\n  cond_finish_check (-1);\n\n  dot_symbol_init ();\n\n  // Main fuzzer target. Assemble our random data.\n  perform_an_assembly_pass (2, (char**)fakeArgv);\n\n  // Cleanup\n  cond_finish_check (-1);\n  dwarf2_finish ();\n  cfi_finish ();\n  input_scrub_end ();\n\n  unlink(filename);\n\n  return 0;\n}\n"
+          }
+        ],
+        "missing_information": [],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [
+      "Filesystem and allocator operations behave normally, as specified by the input model."
+    ],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

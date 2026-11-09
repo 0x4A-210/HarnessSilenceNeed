@@ -1,0 +1,121 @@
+{
+  "checked": {
+    "verdict": "unknown",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0002",
+          "status": "unknown",
+          "reason": "The new local gamma tables are guarded by the gamma flag and stored_gama. The flag definitions and input path to stored_gama are missing.",
+          "errors": []
+        },
+        {
+          "change_id": "g0003",
+          "status": "unknown",
+          "reason": "The RGBA16 table allocation is shown, but reachability from accepted PNG bytes and the distinctness of the harness flags remain unverified.",
+          "errors": []
+        },
+        {
+          "change_id": "g0004",
+          "status": "unknown",
+          "reason": "The table fill depends on the same unverified gamma trigger and format constants.",
+          "errors": []
+        },
+        {
+          "change_id": "g0005",
+          "status": "unknown",
+          "reason": "The pixel lookup is conditional on the gamma flag and stored_gama. Their relationship to the old harness input and flags is not fully supplied.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "unknown",
+          "reason": "The recipe delegates library construction to Meson, whose configuration is not supplied. No successful build result is supplied.",
+          "errors": []
+        },
+        "input": {
+          "status": "pass",
+          "reason": "Fuzzer bytes are passed to the buffer setter, which stores the buffer and size for parsing. This establishes the basic input route, though not the gAMA-specific trigger.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "pass",
+          "reason": "The harness handles context creation failure and frees the context and output on its exit path; context cleanup includes the gamma table.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "unknown",
+          "reason": "The entry reaches decode after size calculation and allocation, and the source shows the guarded gamma route. The supplied packet does not establish whether the fixed decode flag can satisfy that guard or whether accepted input can set stored_gama.",
+          "errors": []
+        }
+      },
+      "errors": [
+        "incomplete_input_scope",
+        "invalid_diff_coverage_ledger",
+        "incomplete_diff_group_selection"
+      ],
+      "missing_information": [
+        "Supply the definitions of SPNG_FMT_RGBA8, SPNG_FMT_RGBA16, SPNG_DECODE_USE_TRNS and SPNG_DECODE_USE_GAMA in src/spng.h.",
+        "Supply the complete function get_ancillary_data_first_idat in src/decode.c and its delegated gAMA parsing function, to establish whether accepted PNG bytes can set stored_gama.",
+        "Supply meson.build and any relevant meson_options.txt defaults used by the supplied build recipe."
+      ],
+      "semantic_proof": false
+    },
+    "accepted": [],
+    "rejected": [
+      {
+        "kind": "call",
+        "necessary": true,
+        "established": false,
+        "requirement": "The PNG decode operation must be able to request supported RGBA16 output with gAMA correction when accepted input supplies stored gamma data.",
+        "target_route": "Fuzzer bytes pass through spng_set_png_buffer, spng_decoded_image_size and spng_decode_image; the source conditionally allocates a 65,536-entry table, fills it, applies pixel lookups and frees it with the context.",
+        "failure_condition": "If the format constants and decode flags are distinct, the harness's fixed RGBA8 format and SPNG_DECODE_USE_TRNS flag prevent it from selecting the RGBA16 gamma route.",
+        "alternative_paths": "The complete harness has one size call and one decode call with fixed arguments. The missing constant definitions prevent a definitive ruling on whether its flag activates the gamma guard.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-1dde933843eba977a490242d",
+            "quote": "int spng_decoded_image_size(spng_ctx *ctx, int fmt, size_t *out)\n{\n    if(ctx == NULL || out == NULL) return 1;\n\n    if(!ctx->valid_state) return SPNG_EBADSTATE;\n\n    int ret = get_ancillary(ctx);\n    if(ret) return ret;\n\n    size_t res;\n    if(fmt == SPNG_FMT_RGBA8)\n    {\n        if(4 > SIZE_MAX / ctx->ihdr.width) return SPNG_EOVERFLOW;\n        res = 4 * ctx->ihdr.width;\n\n        if(res > SIZE_MAX / ctx->ihdr.height) return SPNG_EOVERFLOW;\n        res = res * ctx->ihdr.height;\n    }\n    else if(fmt == SPNG_FMT_RGBA16)\n    {\n        if(8 > SIZE_MAX / ctx->ihdr.width) return SPNG_EOVERFLOW;\n        res = 8 * ctx->ihdr.width;\n\n        if(res > SIZE_MAX / ctx->ihdr.height) return SPNG_EOVERFLOW;\n        res = res * ctx->ihdr.height;\n    }\n    else return SPNG_EFMT;\n\n    *out = res;\n\n    return 0;\n"
+          },
+          {
+            "evidence_id": "loc-99387c45a543ae2a73f5b37e",
+            "quote": "    uint16_t *gamma_lut = NULL;\n    uint16_t gamma_lut8[256];\n\n    if(flags & SPNG_DECODE_USE_GAMA && ctx->stored_gama)\n    {\n        float file_gamma = (float)ctx->gama / 100000.0f;\n        float max;\n\n        uint32_t i, lut_entries;\n\n        if(fmt == SPNG_FMT_RGBA8)\n        {\n            lut_entries = 256;\n            max = 255.0f;\n            \n            gamma_lut = gamma_lut8;\n        }\n        else /* SPNG_FMT_RGBA16 */\n        {\n            lut_entries = 65536;\n            max = 65535.0f;\n\n            ctx->gamma_lut = spng__malloc(ctx, lut_entries * sizeof(uint16_t));\n            if(ctx->gamma_lut == NULL)\n            {\n                ret = SPNG_EMEM;\n                goto decode_err;\n            }\n            gamma_lut = ctx->gamma_lut;\n        }\n        \n        for(i=0; i < lut_entries; i++)\n        {\n            float screen_gamma = 2.2f;\n            float exp = 1.0f / (file_gamma * screen_gamma);\n            float c = pow((float)i / max, exp) * max;\n\n            gamma_lut[i] = c;\n        }\n    }\n"
+          },
+          {
+            "evidence_id": "loc-009382f74d524ff3f40c1c60",
+            "quote": "                if(flags & SPNG_DECODE_USE_GAMA && ctx->stored_gama)\n                {\n                    r = gamma_lut[r];\n                    g = gamma_lut[g];\n                    b = gamma_lut[b];\n                }\n\n                /* only use *_8/16 for memcpy */\n                r_8 = r; g_8 = g; b_8 = b; a_8 = a;\n                r_16 = r; g_16 = g; b_16 = b; a_16 = a;\n                gray_8 = gray;\n                gray_16 = gray;\n\n                if(fmt == SPNG_FMT_RGBA8)\n                {\n                    pixel_size = 4;\n\n                    memcpy(pixel, &r_8, 1);\n                    memcpy(pixel + 1, &g_8, 1);\n                    memcpy(pixel + 2, &b_8, 1);\n                    memcpy(pixel + 3, &a_8, 1);\n                }\n                else if(fmt == SPNG_FMT_RGBA16)\n                {\n                    pixel_size = 8;\n\n                    memcpy(pixel, &r_16, 2);\n                    memcpy(pixel + 2, &g_16, 2);\n                    memcpy(pixel + 4, &b_16, 2);\n                    memcpy(pixel + 6, &a_16, 2);\n                }\n"
+          },
+          {
+            "evidence_id": "loc-ebde0c2bdb3d131ac0f1cfb9",
+            "quote": "void spng_ctx_free(spng_ctx *ctx)\n{\n    if(ctx == NULL) return;\n\n    if(ctx->streaming && ctx->data != NULL) spng__free(ctx, ctx->data);\n\n    if(ctx->exif.data != NULL && !ctx->user_exif) spng__free(ctx, ctx->exif.data);\n\n    if(ctx->iccp.profile != NULL && !ctx->user_iccp) spng__free(ctx, ctx->iccp.profile);\n\n    if(ctx->gamma_lut != NULL) spng__free(ctx, ctx->gamma_lut);\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-06603c551ce32e1e1b1b113d",
+            "quote": "extern \"C\" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)\n{\n    unsigned char *out = NULL;\n\n    spng_ctx *ctx = spng_ctx_new(0);\n    if(ctx == NULL) return 0;\n\n    if(spng_set_png_buffer(ctx, (void*)data, size)) goto err;\n\n    spng_set_image_limits(ctx, 200000, 200000);\n\n    spng_set_crc_action(ctx, SPNG_CRC_USE, SPNG_CRC_USE);\n\n    size_t out_size;\n    if(spng_decoded_image_size(ctx, SPNG_FMT_RGBA8, &out_size)) goto err;\n\n    if(out_size > 80000000) goto err;\n\n    out = (unsigned char*)malloc(out_size);\n    if(out == NULL) goto err;\n\n    if(spng_decode_image(ctx, out, out_size, SPNG_FMT_RGBA8, SPNG_DECODE_USE_TRNS)) goto err;\n\nerr:\n    spng_ctx_free(ctx);\n    if(out != NULL) free(out);\n\n    return 0;\n"
+          }
+        ],
+        "missing_information": [
+          "Definitions of both output-format constants and both decode flags in src/spng.h.",
+          "The complete get_ancillary_data_first_idat function and delegated gAMA parser in src/decode.c."
+        ],
+        "id": "o-62906e572345cc59",
+        "change_ids": [
+          "g0002",
+          "g0003",
+          "g0004",
+          "g0005"
+        ],
+        "errors": [
+          "unproven_or_optional_blocker"
+        ]
+      }
+    ],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

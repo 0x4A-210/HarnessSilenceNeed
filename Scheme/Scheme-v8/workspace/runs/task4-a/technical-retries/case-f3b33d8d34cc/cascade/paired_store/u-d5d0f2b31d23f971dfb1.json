@@ -1,0 +1,19 @@
+{
+  "unit_id": "u-d5d0f2b31d23f971dfb1",
+  "original_unit_id": "c1b59050b68b0f5aa6a6",
+  "kind": "after_source",
+  "path": "input/source/contrib/amcheck/verify_nbtree.c",
+  "version": "after",
+  "name": "bt_normalize_tuple",
+  "start": 2523,
+  "end": 2597,
+  "line_origin": "file",
+  "sha256": "c5382a82bccc5ed73d5a2b47365f1db121692a199034f0d509a58794c835b82e",
+  "text": "static IndexTuple\nbt_normalize_tuple(BtreeCheckState *state, IndexTuple itup)\n{\n\tTupleDesc\ttupleDescriptor = RelationGetDescr(state->rel);\n\tDatum\t\tnormalized[INDEX_MAX_KEYS];\n\tbool\t\tisnull[INDEX_MAX_KEYS];\n\tbool\t\ttoast_free[INDEX_MAX_KEYS];\n\tbool\t\tformnewtup = false;\n\tIndexTuple\treformed;\n\tint\t\t\ti;\n\n\t/* Caller should only pass \"logical\" non-pivot tuples here */\n\tAssert(!BTreeTupleIsPosting(itup) && !BTreeTupleIsPivot(itup));\n\n\t/* Easy case: It's immediately clear that tuple has no varlena datums */\n\tif (!IndexTupleHasVarwidths(itup))\n\t\treturn itup;\n\n\tfor (i = 0; i < tupleDescriptor->natts; i++)\n\t{\n\t\tForm_pg_attribute att;\n\n\t\tatt = TupleDescAttr(tupleDescriptor, i);\n\n\t\t/* Assume untoasted/already normalized datum initially */\n\t\ttoast_free[i] = false;\n\t\tnormalized[i] = index_getattr(itup, att->attnum,\n\t\t\t\t\t\t\t\t\t  tupleDescriptor,\n\t\t\t\t\t\t\t\t\t  &isnull[i]);\n\t\tif (att->attbyval || att->attlen != -1 || isnull[i])\n\t\t\tcontinue;\n\n\t\t/*\n\t\t * Callers always pass a tuple that could safely be inserted into the\n\t\t * index without further processing, so an external varlena header\n\t\t * should never be encountered here\n\t\t */\n\t\tif (VARATT_IS_EXTERNAL(DatumGetPointer(normalized[i])))\n\t\t\tereport(ERROR,\n\t\t\t\t\t(errcode(ERRCODE_INDEX_CORRUPTED),\n\t\t\t\t\t errmsg(\"external varlena datum in tuple that references heap row (%u,%u) in index \\\"%s\\\"\",\n\t\t\t\t\t\t\tItemPointerGetBlockNumber(&(itup->t_tid)),\n\t\t\t\t\t\t\tItemPointerGetOffsetNumber(&(itup->t_tid)),\n\t\t\t\t\t\t\tRelationGetRelationName(state->rel))));\n\t\telse if (VARATT_IS_COMPRESSED(DatumGetPointer(normalized[i])))\n\t\t{\n\t\t\tformnewtup = true;\n\t\t\tnormalized[i] = PointerGetDatum(PG_DETOAST_DATUM(normalized[i]));\n\t\t\ttoast_free[i] = true;\n\t\t}\n\t}\n\n\t/* Easier case: Tuple has varlena datums, none of which are compressed */\n\tif (!formnewtup)\n\t\treturn itup;\n\n\t/*\n\t * Hard case: Tuple had compressed varlena datums that necessitate\n\t * creating normalized version of the tuple from uncompressed input datums\n\t * (normalized input datums).  This is rather naive, but shouldn't be\n\t * necessary too often.\n\t *\n\t * Note that we rely on deterministic index_form_tuple() TOAST compression\n\t * of normalized input.\n\t */\n\treformed = index_form_tuple(tupleDescriptor, normalized, isnull);\n\treformed->t_tid = itup->t_tid;\n\n\t/* Cannot leak memory here */\n\tfor (i = 0; i < tupleDescriptor->natts; i++)\n\t\tif (toast_free[i])\n\t\t\tpfree(DatumGetPointer(normalized[i]));\n\n\treturn reformed;\n}\n",
+  "change_ids": [],
+  "invariant_source": true,
+  "unit_kind": "function",
+  "page_ids": [
+    "after-whole-c1b59050b68b0f5aa6a6-0000"
+  ]
+}

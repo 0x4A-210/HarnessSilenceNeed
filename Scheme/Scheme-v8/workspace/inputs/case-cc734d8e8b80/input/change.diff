@@ -1,0 +1,151 @@
+diff --git a/src/scanner.c b/src/scanner.c
+index 428e16864bbce45cc1ba19bc6e825317aef48d4b..848e8f22d4ddbab914484f6f37c2ca0fd722642d 100644
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -478,6 +478,12 @@
+ 
+ #include "yaml_private.h"
+ 
++/*
++ * Maximum nesting level (defined in parser.c).
++ */
++
++extern int MAX_NESTING_LEVEL;
++
+ /*
+  * Ensure that the buffer contains the required number of characters.
+  * Return 1 on success, 0 on failure (reader error or memory error).
+@@ -1175,6 +1181,12 @@ yaml_parser_increase_flow_level(yaml_parser_t *parser)
+         return 0;
+     }
+ 
++    if (parser->flow_level >= MAX_NESTING_LEVEL) {
++        return yaml_parser_set_scanner_error(parser,
++                "while increasing flow level", parser->mark,
++                "exceeded maximum nesting depth");
++    }
++
+     parser->flow_level++;
+ 
+     return 1;
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index be2ce399a6bf32f133c5db358081dd74b0c4b2b9..17a9c6719f043f3400831bccdd7e922921777f4f 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -16,6 +16,7 @@ foreach(name IN ITEMS
+   run-parser
+   run-parser-test-suite
+   run-scanner
++  test-nesting
+   test-reader
+   test-version
+   )
+@@ -24,4 +25,5 @@ endforeach()
+ 
+ add_test(NAME version COMMAND test-version)
+ add_test(NAME reader COMMAND test-reader)
++add_test(NAME nesting COMMAND test-nesting)
+ 
+diff --git a/tests/Makefile.am b/tests/Makefile.am
+index 9597b7fef3ef8191287323b227e6d3affb328bb8..8b8a456f99c5a89a71637f4979dd6ee5f66f1560 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -1,8 +1,8 @@
+ AM_CPPFLAGS = -I$(top_srcdir)/include -Wall
+ #AM_CFLAGS = -Wno-pointer-sign
+ LDADD = $(top_builddir)/src/libyaml.la
+-TESTS = test-version test-reader
+-check_PROGRAMS = test-version test-reader
++TESTS = test-version test-reader test-nesting
++check_PROGRAMS = test-version test-reader test-nesting
+ noinst_PROGRAMS = run-scanner run-parser run-loader run-emitter run-dumper	\
+ 				  example-reformatter example-reformatter-alt	\
+ 				  example-deconstructor example-deconstructor-alt \
+diff --git a/tests/test-nesting.c b/tests/test-nesting.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2ee68826c0c5fcd18966120f97589c3c1df18f34
+--- /dev/null
++++ b/tests/test-nesting.c
+@@ -0,0 +1,82 @@
++#include <yaml.h>
++
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++#include <assert.h>
++
++/*
++ * Test that the scanner enforces the maximum nesting depth.
++ */
++
++static int
++scan_string(const char *input, size_t length)
++{
++    yaml_parser_t parser;
++    yaml_token_t token;
++    int done = 0;
++    int error = 0;
++
++    assert(yaml_parser_initialize(&parser));
++    yaml_parser_set_input_string(&parser,
++            (const unsigned char *)input, length);
++
++    while (!done) {
++        if (!yaml_parser_scan(&parser, &token)) {
++            error = 1;
++            break;
++        }
++        done = (token.type == YAML_STREAM_END_TOKEN);
++        yaml_token_delete(&token);
++    }
++
++    yaml_parser_delete(&parser);
++    return error;
++}
++
++int
++main(void)
++{
++    char *input;
++    int i;
++
++    /* Test 1: nesting beyond the default limit (1000) must fail. */
++    {
++        int depth = 2000;
++        input = (char *)malloc(depth + 1);
++        assert(input);
++        memset(input, '[', depth);
++        input[depth] = '\0';
++
++        printf("Test 1: %d nested '[' (exceeds limit) ... ", depth);
++        fflush(stdout);
++        assert(scan_string(input, depth) == 1);
++        printf("OK (rejected)\n");
++        free(input);
++    }
++
++    /* Test 2: nesting within the limit must succeed. */
++    {
++        int depth = 500;
++        int len = depth * 2;
++        input = (char *)malloc(len + 1);
++        assert(input);
++        for (i = 0; i < depth; i++)
++            input[i] = '[';
++        for (i = 0; i < depth; i++)
++            input[depth + i] = ']';
++        input[len] = '\0';
++
++        printf("Test 2: %d nested '[]' (within limit) ... ", depth);
++        fflush(stdout);
++        assert(scan_string(input, len) == 0);
++        printf("OK (accepted)\n");
++        free(input);
++    }
++
++    return 0;
++}

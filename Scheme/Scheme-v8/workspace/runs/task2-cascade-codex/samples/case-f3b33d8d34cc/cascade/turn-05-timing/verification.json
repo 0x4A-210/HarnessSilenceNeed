@@ -1,0 +1,67 @@
+{
+  "checked": {
+    "status": "introduced",
+    "gap": true,
+    "introduced_by_this_change": true,
+    "claims": [
+      {
+        "claim_id": "c1",
+        "status": "introduced",
+        "necessary": "yes",
+        "before": {
+          "requirement": "For standalone startup, BaseInit creates shared memory through InitCommunication; InitProcess then establishes MyProc before InitPostgres.",
+          "applicability": "required",
+          "harness_status": "sat",
+          "reason": "The old harness calls BaseInit before InitProcess. On the before source, BaseInit calls InitCommunication, which creates standalone shared memory; the later InitProcess order matches PostgresMain.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-b37e52b355bbcbddb47da81c",
+              "quote": "static void\nInitCommunication(void)\n{\n\t/*\n\t * initialize shared memory and semaphores appropriately.\n\t */\n\tif (!IsUnderPostmaster)\t\t/* postmaster already did this */\n\t{\n\t\t/*\n\t\t * We're running a postgres bootstrap process or a standalone backend,\n\t\t * so we need to set up shmem.\n\t\t */\n\t\tCreateSharedMemoryAndSemaphores();\n\t}\n}\n"
+            },
+            {
+              "evidence_id": "loc-dc992fc55fa1f750d78716d5",
+              "quote": "void\nBaseInit(void)\n{\n\t/*\n\t * Attach to shared memory and semaphores, and initialize our\n\t * input/output/debugging file descriptors.\n\t */\n\tInitCommunication();\n\tDebugFileOpen();\n\n\t/* Do local initialization of file, storage and buffer managers */\n\tInitFileAccess();\n\tInitSync();\n\tsmgrinit();\n\tInitBufferPoolAccess();\n}\n"
+            },
+            {
+              "evidence_id": "loc-de255216b48474f4d1b22fe4",
+              "quote": "\t\t/* Initialize MaxBackends (if under postmaster, was done already) */\n\t\tInitializeMaxBackends();\n\t}\n\n\t/* Early initialization */\n\tBaseInit();\n\n\t/*\n\t * Create a per-backend PGPROC struct in shared memory, except in the\n\t * EXEC_BACKEND case where this was done in SubPostmasterMain. We must do\n\t * this before we can use LWLocks (and in the EXEC_BACKEND case we already\n\t * had to do some stuff with LWLocks).\n\t */\n#ifdef EXEC_BACKEND\n\tif (!IsUnderPostmaster)\n\t\tInitProcess();\n#else\n\tInitProcess();\n#endif\n\n\t/* We need to allow SIGINT, etc during the initial transaction */\n\tPG_SETMASK(&UnBlockSig);\n\n\t/*\n\t * General initialization.\n\t *\n\t * NOTE: if you are tempted to add code in this vicinity, consider putting\n\t * it inside InitPostgres() instead.  In particular, anything that\n\t * involves database access should be there, not here.\n\t */\n\tInitPostgres(dbname, InvalidOid, username, InvalidOid, NULL, false);\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "For standalone startup, create shared memory, call InitProcess to establish MyProc, then call BaseInit before InitPostgres.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The unchanged harness omits CreateSharedMemoryAndSemaphores and calls BaseInit before InitProcess. After the change, BaseInit no longer creates shared memory and requires MyProc; the source's standalone route performs the opposite order.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-97e78e594a4ca974f07a5011",
+              "quote": "\t\t/* Initialize MaxBackends (if under postmaster, was done already) */\n\t\tInitializeMaxBackends();\n\n\t\tCreateSharedMemoryAndSemaphores();\n\t}\n\n\t/*\n\t * Create a per-backend PGPROC struct in shared memory, except in the\n\t * EXEC_BACKEND case where this was done in SubPostmasterMain. We must do\n\t * this before we can use LWLocks (and in the EXEC_BACKEND case we already\n\t * had to do some stuff with LWLocks).\n\t */\n#ifdef EXEC_BACKEND\n\tif (!IsUnderPostmaster)\n\t\tInitProcess();\n#else\n\tInitProcess();\n#endif\n\n\t/* Early initialization */\n\tBaseInit();\n\n\t/* We need to allow SIGINT, etc during the initial transaction */\n\tPG_SETMASK(&UnBlockSig);\n\n\t/*\n\t * General initialization.\n\t *\n\t * NOTE: if you are tempted to add code in this vicinity, consider putting\n\t * it inside InitPostgres() instead.  In particular, anything that\n\t * involves database access should be there, not here.\n\t */\n\tInitPostgres(dbname, InvalidOid, username, InvalidOid, NULL, false);\n"
+            },
+            {
+              "evidence_id": "loc-ceb5d535b728d2bf3538de70",
+              "quote": "void\nBaseInit(void)\n{\n\tAssert(MyProc != NULL);\n\n\t/*\n\t * Initialize our input/output/debugging file descriptors.\n\t */\n\tDebugFileOpen();\n\n\t/* Do local initialization of file, storage and buffer managers */\n\tInitFileAccess();\n\tInitSync();\n\tsmgrinit();\n\tInitBufferPoolAccess();\n}\n"
+            },
+            {
+              "evidence_id": "loc-db348e3a1add915c76d68449",
+              "quote": "void\nInitBufferPoolAccess(void)\n{\n\tHASHCTL\t\thash_ctl;\n\n\tmemset(&PrivateRefCountArray, 0, sizeof(PrivateRefCountArray));\n\n\thash_ctl.keysize = sizeof(int32);\n\thash_ctl.entrysize = sizeof(PrivateRefCountEntry);\n\n\tPrivateRefCountHash = hash_create(\"PrivateRefCount\", 100, &hash_ctl,\n\t\t\t\t\t\t\t\t\t  HASH_ELEM | HASH_BLOBS);\n\n\t/*\n\t * AtProcExit_Buffers needs LWLock access, and thereby has to be called at\n\t * the corresponding phase of backend shutdown.\n\t */\n\tAssert(MyProc != NULL);\n\ton_shmem_exit(AtProcExit_Buffers, 0);\n}\n"
+            }
+          ]
+        },
+        "same_blocker": "no",
+        "reason": "The same harness order is compatible with the before BaseInit implementation and incompatible with the after implementation. The unrelated preexisting parser-mode limitation is a separate constraint and does not make this the same blocker on both sides. Coverage completeness is false because this packet does not establish build success or rule out every other obligation for the selected diff.",
+        "error": null,
+        "missing_information": [
+          "Verified build outcome and a complete exclusion of other target obligations are unavailable for a coverage-complete claim."
+        ]
+      }
+    ],
+    "errors": [],
+    "missing_information": [
+      "Verified build outcome and complete target-path coverage are needed to assert coverage_complete=true."
+    ]
+  },
+  "citation_errors": [],
+  "missing_claims": [],
+  "preimage_errors": []
+}

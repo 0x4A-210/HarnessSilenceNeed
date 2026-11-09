@@ -1,0 +1,61 @@
+{
+  "checked": {
+    "status": "introduced",
+    "gap": true,
+    "introduced_by_this_change": true,
+    "claims": [
+      {
+        "claim_id": "c1",
+        "status": "introduced",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Exercise the same deep-object dump condition; the depth-check behavior does not yet exist.",
+          "applicability": "not_applicable",
+          "harness_status": "not_applicable",
+          "reason": "The complete old do_dump body recurses into nested arrays but has no depth guard to execute.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-caa5a2af0a49ee082f1c37cb",
+              "quote": "static int do_dump(const json_t *json, size_t flags, int depth, hashtable_t *parents,\n                   json_dump_callback_t dump, void *data) {\n    int embed = flags & JSON_EMBED;\n\n    flags &= ~JSON_EMBED;\n\n    if (!json)\n        return -1;\n\n    switch (json_typeof(json)) {\n        case JSON_NULL:\n            return dump(\"null\", 4, data);\n\n        case JSON_TRUE:\n            return dump(\"true\", 4, data);\n\n        case JSON_FALSE:\n            return dump(\"false\", 5, data);\n\n        case JSON_INTEGER: {\n            char buffer[MAX_INTEGER_STR_LENGTH];\n            int size;\n\n            size = snprintf(buffer, MAX_INTEGER_STR_LENGTH, \"%\" JSON_INTEGER_FORMAT,\n                            json_integer_value(json));\n            if (size < 0 || size >= MAX_INTEGER_STR_LENGTH)\n                return -1;\n\n            return dump(buffer, size, data);\n        }\n\n        case JSON_REAL: {\n            char buffer[MAX_REAL_STR_LENGTH];\n            int size;\n            double value = json_real_value(json);\n\n            size = jsonp_dtostr(buffer, MAX_REAL_STR_LENGTH, value,\n                                FLAGS_TO_PRECISION(flags));\n            if (size < 0)\n                return -1;\n\n            return dump(buffer, size, data);\n        }\n\n        case JSON_STRING:\n            return dump_string(json_string_value(json), json_string_length(json), dump,\n                               data, flags);\n\n        case JSON_ARRAY: {\n            size_t n;\n            size_t i;\n            /* Space for \"0x\", double the sizeof a pointer for the hex and a\n             * terminator. */\n            char key[2 + (sizeof(json) * 2) + 1];\n            size_t key_len;\n\n            /* detect circular references */\n            if (jsonp_loop_check(parents, json, key, sizeof(key), &key_len))\n                return -1;\n\n            n = json_array_size(json);\n\n            if (!embed && dump(\"[\", 1, data))\n                return -1;\n            if (n == 0) {\n                hashtable_del(parents, key, key_len);\n                return embed ? 0 : dump(\"]\", 1, data);\n            }\n            if (dump_indent(flags, depth + 1, 0, dump, data))\n                return -1;\n\n            for (i = 0; i < n - 1; ++i) {\n                if (do_dump(json_array_get(json, i), flags, depth + 1, parents, dump,\n                            data))\n                    return -1;\n\n                if (dump(\",\", 1, data) || dump_indent(flags, depth + 1, 1, dump, data))\n                    return -1;\n            }\n\n            if (do_dump(json_array_get(json, i), flags, depth + 1, parents, dump, data))\n                return -1;\n            if (dump_indent(flags, depth, 0, dump, data))\n                return -1;\n\n            hashtable_del(parents, key, key_len);\n            return embed ? 0 : dump(\"]\", 1, data);\n"
+            },
+            {
+              "evidence_id": "loc-9b6d1f729e8db5eff7d74819",
+              "quote": "static json_t *parse_value(lex_t *lex, size_t flags, json_error_t *error) {\n    json_t *json;\n\n    lex->depth++;\n    if (lex->depth > JSON_PARSER_MAX_DEPTH) {\n        error_set(error, lex, json_error_stack_overflow, \"maximum parsing depth reached\");\n        return NULL;\n    }\n\n    switch (lex->token) {\n        case TOKEN_STRING: {\n            const char *value = lex->value.string.val;\n            size_t len = lex->value.string.len;\n\n            if (!(flags & JSON_ALLOW_NUL)) {\n                if (memchr(value, '\\0', len)) {\n                    error_set(error, lex, json_error_null_character,\n                              \"\\\\u0000 is not allowed without JSON_ALLOW_NUL\");\n                    return NULL;\n                }\n            }\n\n            json = jsonp_stringn_nocheck_own(value, len);\n            lex->value.string.val = NULL;\n            lex->value.string.len = 0;\n            break;\n        }\n\n        case TOKEN_INTEGER: {\n            json = json_integer(lex->value.integer);\n            break;\n        }\n\n        case TOKEN_REAL: {\n            json = json_real(lex->value.real);\n            break;\n        }\n\n        case TOKEN_TRUE:\n            json = json_true();\n            break;\n\n        case TOKEN_FALSE:\n            json = json_false();\n            break;\n\n        case TOKEN_NULL:\n            json = json_null();\n            break;\n\n        case '{':\n            json = parse_object(lex, flags, error);\n            break;\n\n        case '[':\n            json = parse_array(lex, flags, error);\n            break;\n\n        case TOKEN_INVALID:\n            error_set(error, lex, json_error_invalid_syntax, \"invalid token\");\n            return NULL;\n\n        default:\n            error_set(error, lex, json_error_invalid_syntax, \"unexpected token\");\n            return NULL;\n    }\n\n    if (!json)\n        return NULL;\n\n    lex->depth--;\n    return json;\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Exercise do_dump's new return path when depth reaches JSON_PARSER_MAX_DEPTH.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The new depth condition cannot become true for an object accepted by the unchanged parser and passed through this entry.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-d61abb9de7acc0ed6dba87b6",
+              "quote": "static int do_dump(const json_t *json, size_t flags, int depth, hashtable_t *parents,\n                   json_dump_callback_t dump, void *data) {\n    int embed = flags & JSON_EMBED;\n\n    flags &= ~JSON_EMBED;\n\n    if (!json)\n        return -1;\n\n    if (depth >= JSON_PARSER_MAX_DEPTH)\n        return -1;\n"
+            },
+            {
+              "evidence_id": "loc-10c7bf94a19ba1af6debbc3c",
+              "quote": "static json_t *parse_value(lex_t *lex, size_t flags, json_error_t *error) {\n    json_t *json;\n\n    lex->depth++;\n    if (lex->depth > JSON_PARSER_MAX_DEPTH) {\n        error_set(error, lex, json_error_stack_overflow, \"maximum parsing depth reached\");\n        return NULL;\n    }\n\n    switch (lex->token) {\n        case TOKEN_STRING: {\n            const char *value = lex->value.string.val;\n            size_t len = lex->value.string.len;\n\n            if (!(flags & JSON_ALLOW_NUL)) {\n                if (memchr(value, '\\0', len)) {\n                    error_set(error, lex, json_error_null_character,\n                              \"\\\\u0000 is not allowed without JSON_ALLOW_NUL\");\n                    return NULL;\n                }\n            }\n\n            json = jsonp_stringn_nocheck_own(value, len);\n            lex->value.string.val = NULL;\n            lex->value.string.len = 0;\n            break;\n        }\n\n        case TOKEN_INTEGER: {\n            json = json_integer(lex->value.integer);\n            break;\n        }\n\n        case TOKEN_REAL: {\n            json = json_real(lex->value.real);\n            break;\n        }\n\n        case TOKEN_TRUE:\n            json = json_true();\n            break;\n\n        case TOKEN_FALSE:\n            json = json_false();\n            break;\n\n        case TOKEN_NULL:\n            json = json_null();\n            break;\n\n        case '{':\n            json = parse_object(lex, flags, error);\n            break;\n\n        case '[':\n            json = parse_array(lex, flags, error);\n            break;\n\n        case TOKEN_INVALID:\n            error_set(error, lex, json_error_invalid_syntax, \"invalid token\");\n            return NULL;\n\n        default:\n            error_set(error, lex, json_error_invalid_syntax, \"unexpected token\");\n            return NULL;\n    }\n\n    if (!json)\n        return NULL;\n\n    lex->depth--;\n    return json;\n"
+            },
+            {
+              "evidence_id": "loc-ca8d3724662f75dde9b3229f",
+              "quote": "int json_dump_callback(const json_t *json, json_dump_callback_t callback, void *data,\n                       size_t flags) {\n    int res;\n    hashtable_t parents_set;\n\n    if (!(flags & JSON_ENCODE_ANY)) {\n        if (!json_is_array(json) && !json_is_object(json))\n            return -1;\n    }\n\n    if (hashtable_init(&parents_set))\n        return -1;\n    res = do_dump(json, flags, 0, &parents_set, callback, data);\n    hashtable_close(&parents_set);\n\n    return res;\n"
+            }
+          ]
+        },
+        "same_blocker": "not_applicable",
+        "reason": "The parser's limit and the harness's load-only setup are unchanged. For this exact coverage obligation, the innermost unsatisfied condition is the depth guard added to do_dump; it had no counterpart before the change.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": [],
+    "cascade_status": "introduced",
+    "necessity_frozen": true
+  },
+  "citation_errors": [],
+  "missing_claims": [],
+  "preimage_errors": []
+}

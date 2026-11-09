@@ -1,0 +1,65 @@
+{
+  "checked": {
+    "status": "preexisting",
+    "gap": true,
+    "introduced_by_this_change": false,
+    "claims": [
+      {
+        "claim_id": "c1",
+        "status": "preexisting",
+        "necessary": "yes",
+        "before": {
+          "requirement": "Pass each supplied .lzma input to the decoder once, in byte order.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "The decoder consumes input and advances the stream pointer, but the fixed helper refills from its original input pointer, replaying consumed bytes.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-c42242641b85da122052e708",
+              "quote": "\tsize_t in_pos = 0;\n\tsize_t out_pos = 0;\n\tlzma_ret ret = strm->internal->next.code(\n\t\t\tstrm->internal->next.coder, strm->allocator,\n\t\t\tstrm->next_in, &in_pos, strm->avail_in,\n\t\t\tstrm->next_out, &out_pos, strm->avail_out, action);\n\n\t// Updating next_in and next_out has to be skipped when they are NULL\n\t// to avoid null pointer + 0 (undefined behavior). Do this by checking\n\t// in_pos > 0 and out_pos > 0 because this way NULL + non-zero (a bug)\n\t// will get caught one way or other.\n\tif (in_pos > 0) {\n\t\tstrm->next_in += in_pos;\n\t\tstrm->avail_in -= in_pos;\n\t\tstrm->total_in += in_pos;\n\t}\n\n\tif (out_pos > 0) {\n\t\tstrm->next_out += out_pos;\n\t\tstrm->avail_out -= out_pos;\n\t\tstrm->total_out += out_pos;\n\t}\n\n\tstrm->internal->avail_in = strm->avail_in;\n"
+            },
+            {
+              "evidence_id": "loc-6d5c26d67d51a09457783571",
+              "quote": "\twhile (*out_pos < out_size\n\t\t\t&& (coder->sequence == SEQ_CODE || *in_pos < in_size))\n\tswitch (coder->sequence) {\n\tcase SEQ_PROPERTIES:\n\t\tif (lzma_lzma_lclppb_decode(&coder->options, in[*in_pos]))\n\t\t\treturn LZMA_FORMAT_ERROR;\n\n\t\tcoder->sequence = SEQ_DICTIONARY_SIZE;\n\t\t++*in_pos;\n\t\tbreak;\n\n\tcase SEQ_DICTIONARY_SIZE:\n\t\tcoder->options.dict_size\n\t\t\t\t|= (size_t)(in[*in_pos]) << (coder->pos * 8);\n\n\t\tif (++coder->pos == 4) {\n\t\t\tif (coder->picky && coder->options.dict_size\n\t\t\t\t\t!= UINT32_MAX) {\n\t\t\t\t// A hack to ditch tons of false positives:\n\t\t\t\t// We allow only dictionary sizes that are\n\t\t\t\t// 2^n or 2^n + 2^(n-1). LZMA_Alone created\n\t\t\t\t// only files with 2^n, but accepts any\n\t\t\t\t// dictionary size.\n\t\t\t\tuint32_t d = coder->options.dict_size - 1;\n\t\t\t\td |= d >> 2;\n\t\t\t\td |= d >> 3;\n\t\t\t\td |= d >> 4;\n\t\t\t\td |= d >> 8;\n\t\t\t\td |= d >> 16;\n\t\t\t\t++d;\n\n\t\t\t\tif (d != coder->options.dict_size)\n\t\t\t\t\treturn LZMA_FORMAT_ERROR;\n\t\t\t}\n\n\t\t\tcoder->pos = 0;\n\t\t\tcoder->sequence = SEQ_UNCOMPRESSED_SIZE;\n\t\t}\n\n\t\t++*in_pos;\n\t\tbreak;\n\n\tcase SEQ_UNCOMPRESSED_SIZE:\n\t\tcoder->uncompressed_size\n\t\t\t\t|= (lzma_vli)(in[*in_pos]) << (coder->pos * 8);\n\t\t++*in_pos;\n\t\tif (++coder->pos < 8)\n"
+            },
+            {
+              "evidence_id": "loc-21352d1e91c6c0bd0b618ddc",
+              "quote": "\t// Allocate and initialize the dictionary.\n\tif (coder->dict.size != alloc_size) {\n\t\tlzma_free(coder->dict.buf, allocator);\n\n\t\t// The LZ_DICT_EXTRA bytes at the end of the buffer aren't\n\t\t// included in alloc_size. These extra bytes allow\n\t\t// dict_repeat() to read and write more data than requested.\n\t\t// Otherwise this extra space is ignored.\n\t\tcoder->dict.buf = lzma_alloc(alloc_size + LZ_DICT_EXTRA,\n\t\t\t\tallocator);\n\t\tif (coder->dict.buf == NULL)\n\t\t\treturn LZMA_MEM_ERROR;\n\n\t\t// NOTE: Yes, alloc_size, not lz_options.dict_size. The way\n\t\t// coder->dict.full is updated will take care that we will\n\t\t// still reject distances larger than lz_options.dict_size.\n\t\tcoder->dict.size = alloc_size;\n"
+            }
+          ]
+        },
+        "after": {
+          "requirement": "Pass each supplied .lzma input to the decoder once, in byte order.",
+          "applicability": "required",
+          "harness_status": "unsat",
+          "reason": "Input consumption and the fixed helper's refill remain the same; the added dictionary-size reset does not advance the helper's input pointer.",
+          "source_evidence": [
+            {
+              "evidence_id": "loc-d44f93afb2ba186ddc51bd81",
+              "quote": "\tsize_t in_pos = 0;\n\tsize_t out_pos = 0;\n\tlzma_ret ret = strm->internal->next.code(\n\t\t\tstrm->internal->next.coder, strm->allocator,\n\t\t\tstrm->next_in, &in_pos, strm->avail_in,\n\t\t\tstrm->next_out, &out_pos, strm->avail_out, action);\n\n\t// Updating next_in and next_out has to be skipped when they are NULL\n\t// to avoid null pointer + 0 (undefined behavior). Do this by checking\n\t// in_pos > 0 and out_pos > 0 because this way NULL + non-zero (a bug)\n\t// will get caught one way or other.\n\tif (in_pos > 0) {\n\t\tstrm->next_in += in_pos;\n\t\tstrm->avail_in -= in_pos;\n\t\tstrm->total_in += in_pos;\n\t}\n\n\tif (out_pos > 0) {\n\t\tstrm->next_out += out_pos;\n\t\tstrm->avail_out -= out_pos;\n\t\tstrm->total_out += out_pos;\n\t}\n\n\tstrm->internal->avail_in = strm->avail_in;\n"
+            },
+            {
+              "evidence_id": "loc-c94e01aa82db9406948d187a",
+              "quote": "\twhile (*out_pos < out_size\n\t\t\t&& (coder->sequence == SEQ_CODE || *in_pos < in_size))\n\tswitch (coder->sequence) {\n\tcase SEQ_PROPERTIES:\n\t\tif (lzma_lzma_lclppb_decode(&coder->options, in[*in_pos]))\n\t\t\treturn LZMA_FORMAT_ERROR;\n\n\t\tcoder->sequence = SEQ_DICTIONARY_SIZE;\n\t\t++*in_pos;\n\t\tbreak;\n\n\tcase SEQ_DICTIONARY_SIZE:\n\t\tcoder->options.dict_size\n\t\t\t\t|= (size_t)(in[*in_pos]) << (coder->pos * 8);\n\n\t\tif (++coder->pos == 4) {\n\t\t\tif (coder->picky && coder->options.dict_size\n\t\t\t\t\t!= UINT32_MAX) {\n\t\t\t\t// A hack to ditch tons of false positives:\n\t\t\t\t// We allow only dictionary sizes that are\n\t\t\t\t// 2^n or 2^n + 2^(n-1). LZMA_Alone created\n\t\t\t\t// only files with 2^n, but accepts any\n\t\t\t\t// dictionary size.\n\t\t\t\tuint32_t d = coder->options.dict_size - 1;\n\t\t\t\td |= d >> 2;\n\t\t\t\td |= d >> 3;\n\t\t\t\td |= d >> 4;\n\t\t\t\td |= d >> 8;\n\t\t\t\td |= d >> 16;\n\t\t\t\t++d;\n\n\t\t\t\tif (d != coder->options.dict_size)\n\t\t\t\t\treturn LZMA_FORMAT_ERROR;\n\t\t\t}\n\n\t\t\tcoder->pos = 0;\n\t\t\tcoder->sequence = SEQ_UNCOMPRESSED_SIZE;\n\t\t}\n\n\t\t++*in_pos;\n\t\tbreak;\n\n\tcase SEQ_UNCOMPRESSED_SIZE:\n\t\tcoder->uncompressed_size\n\t\t\t\t|= (lzma_vli)(in[*in_pos]) << (coder->pos * 8);\n\t\t++*in_pos;\n\t\tif (++coder->pos < 8)\n"
+            },
+            {
+              "evidence_id": "loc-2d67e3cf4ceeddd2ed81acaa",
+              "quote": "\t// Allocate and initialize the dictionary.\n\tif (coder->dict.size != alloc_size) {\n\t\tcoder->dict.size = 0;\n\t\tlzma_free(coder->dict.buf, allocator);\n\n\t\t// The LZ_DICT_EXTRA bytes at the end of the buffer aren't\n\t\t// included in alloc_size. These extra bytes allow\n\t\t// dict_repeat() to read and write more data than requested.\n\t\t// Otherwise this extra space is ignored.\n\t\tcoder->dict.buf = lzma_alloc(alloc_size + LZ_DICT_EXTRA,\n\t\t\t\tallocator);\n\t\tif (coder->dict.buf == NULL)\n\t\t\treturn LZMA_MEM_ERROR;\n\n\t\t// NOTE: Yes, alloc_size, not lz_options.dict_size. The way\n\t\t// coder->dict.full is updated will take care that we will\n\t\t// still reject distances larger than lz_options.dict_size.\n\t\tcoder->dict.size = alloc_size;\n"
+            }
+          ]
+        },
+        "same_blocker": "yes",
+        "reason": "Both versions use the same lzma_code input advancement and the same old helper. The only selected change is the dictionary-size reset.",
+        "error": null,
+        "missing_information": []
+      }
+    ],
+    "errors": [],
+    "missing_information": [],
+    "cascade_status": "preexisting",
+    "necessity_frozen": true
+  },
+  "citation_errors": [],
+  "missing_claims": [],
+  "preimage_errors": []
+}

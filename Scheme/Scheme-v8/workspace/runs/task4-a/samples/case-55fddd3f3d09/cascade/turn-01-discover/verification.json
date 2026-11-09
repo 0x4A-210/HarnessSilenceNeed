@@ -1,0 +1,111 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0001",
+          "status": "unknown",
+          "reason": "The added UINT_MAX check is visible, but the supplied source omits its surrounding branch transition and the delegated build settings. Its applicability to this target cannot be settled.",
+          "errors": []
+        },
+        {
+          "change_id": "g0002",
+          "status": "not_target_relevant",
+          "reason": "The change replaces unsigned accumulators with unsigned 32-bit accumulators inside a private decoder helper. On the listed target architectures, it introduces no distinct supported frame behavior for this target to cover.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "unknown",
+          "reason": "The supplied build script delegates to ossfuzz/ossfuzz.sh, whose contents are absent.",
+          "errors": []
+        },
+        "input": {
+          "status": "blocked",
+          "reason": "For a one-byte input, LZ4_compressBound returns 17. The producer records 17 bytes for the one-byte pointer, and preference generation reads from data + 13.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "pass",
+          "reason": "On the ordinary return path, the entry frees both buffers and the producer; the frame compressor and decompression helper release their contexts.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "unknown",
+          "reason": "The entry's frame calls are shown, but the supplied source omits the complete frame compression and decompression paths needed to trace them to the changed decoder helper.",
+          "errors": []
+        }
+      },
+      "errors": [],
+      "missing_information": [
+        "Supply ossfuzz/ossfuzz.sh to establish compiler and linker settings.",
+        "Supply lib/lz4.c lines surrounding the g0001 conditional branch transition.",
+        "For a complete decoder call trace, supply LZ4F_decompress, LZ4_decompress_generic, and their relevant callers in lib/lz4frame.c and lib/lz4.c."
+      ],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "id": "input-size-overread",
+        "change_ids": [],
+        "kind": "input",
+        "necessary": true,
+        "established": true,
+        "requirement": "Initialize the producer with the actual number of bytes available from the fuzz input.",
+        "target_route": "LLVMFuzzerTestOneInput calls LZ4_compressBound(size), stores that result in the producer, then generates frame preferences through frameInfo, range32, and retrieve32.",
+        "failure_condition": "With a one-byte input, the producer records size 17 and retrieve32 reads data[13], beyond the supplied input.",
+        "alternative_paths": "Preference generation occurs before the frame operation for this input; later compression errors or cleanup cannot avoid the read.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-4fe09672cc650f333dfa3e13",
+            "quote": "#define LZ4_COMPRESSBOUND(isize)  ((unsigned)(isize) > (unsigned)LZ4_MAX_INPUT_SIZE ? 0 : (isize) + ((isize)/255) + 16)\n"
+          },
+          {
+            "evidence_id": "loc-bc9bb2e3992d867be7c89899",
+            "quote": "FUZZ_dataProducer_t *FUZZ_dataProducer_create(const uint8_t *data, size_t size) {\n  FUZZ_dataProducer_t *producer = malloc(sizeof(FUZZ_dataProducer_t));\n\n  FUZZ_ASSERT(producer != NULL);\n\n  producer->data = data;\n  producer->size = size;\n  return producer;\n}\n"
+          },
+          {
+            "evidence_id": "loc-e8d19f0c865e6a34f26b5b84",
+            "quote": "LZ4F_frameInfo_t FUZZ_dataProducer_frameInfo(FUZZ_dataProducer_t* producer)\n{\n    LZ4F_frameInfo_t info = LZ4F_INIT_FRAMEINFO;\n    info.blockSizeID = FUZZ_dataProducer_range32(producer, LZ4F_max64KB - 1, LZ4F_max4MB);\n    if (info.blockSizeID < LZ4F_max64KB) {\n        info.blockSizeID = LZ4F_default;\n    }\n    info.blockMode = FUZZ_dataProducer_range32(producer, LZ4F_blockLinked, LZ4F_blockIndependent);\n"
+          },
+          {
+            "evidence_id": "loc-4239181f3d799d284c7ce45c",
+            "quote": "uint32_t FUZZ_dataProducer_range32(FUZZ_dataProducer_t* producer,\n    uint32_t min, uint32_t max)\n{\n    size_t const seed = FUZZ_dataProducer_retrieve32(producer);\n    return FUZZ_getRange_from_uint32(seed, min, max);\n}\n"
+          },
+          {
+            "evidence_id": "loc-f89c0cf4a2623906c0e39b0b",
+            "quote": "uint32_t FUZZ_dataProducer_retrieve32(FUZZ_dataProducer_t *producer) {\n    const uint8_t* data = producer->data;\n    const size_t size = producer->size;\n    if (size == 0) {\n        return 0;\n    } else if (size < 4) {\n        producer->size -= 1;\n        return (uint32_t)data[size - 1];\n    } else {\n        producer->size -= 4;\n        return *(data + size - 4);\n    }\n}\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-e1ec6d7f4b25ac6960f7ed38",
+            "quote": "int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)\n{\n    FUZZ_dataProducer_t *producer = FUZZ_dataProducer_create(data, LZ4_compressBound(size));\n    LZ4F_preferences_t const prefs = FUZZ_dataProducer_preferences(producer);\n    size_t const dstCapacitySeed = FUZZ_dataProducer_retrieve32(producer);\n    size = FUZZ_dataProducer_remainingBytes(producer);\n"
+          },
+          {
+            "evidence_id": "loc-6e81fb9e723b2a05a0c80c33",
+            "quote": "LZ4F_frameInfo_t FUZZ_dataProducer_frameInfo(FUZZ_dataProducer_t* producer)\n{\n    LZ4F_frameInfo_t info = LZ4F_INIT_FRAMEINFO;\n    info.blockSizeID = FUZZ_dataProducer_range32(producer, LZ4F_max64KB - 1, LZ4F_max4MB);\n    if (info.blockSizeID < LZ4F_max64KB) {\n        info.blockSizeID = LZ4F_default;\n    }\n    info.blockMode = FUZZ_dataProducer_range32(producer, LZ4F_blockLinked, LZ4F_blockIndependent);\n"
+          },
+          {
+            "evidence_id": "loc-5b85c1d5012204752941c8fe",
+            "quote": "uint32_t FUZZ_dataProducer_range32(FUZZ_dataProducer_t* producer,\n    uint32_t min, uint32_t max)\n{\n    size_t const seed = FUZZ_dataProducer_retrieve32(producer);\n    return FUZZ_getRange_from_uint32(seed, min, max);\n}\n"
+          },
+          {
+            "evidence_id": "loc-046492725fa5af6209e6bb95",
+            "quote": "uint32_t FUZZ_dataProducer_retrieve32(FUZZ_dataProducer_t *producer) {\n    const uint8_t* data = producer->data;\n    const size_t size = producer->size;\n    if (size == 0) {\n        return 0;\n    } else if (size < 4) {\n        producer->size -= 1;\n        return (uint32_t)data[size - 1];\n    } else {\n        producer->size -= 4;\n        return *(data + size - 4);\n    }\n}\n"
+          }
+        ],
+        "missing_information": [],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

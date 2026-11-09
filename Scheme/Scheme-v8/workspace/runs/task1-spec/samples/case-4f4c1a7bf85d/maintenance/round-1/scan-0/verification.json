@@ -1,0 +1,87 @@
+{
+  "checked": {
+    "verdict": "needs_update",
+    "scope": {
+      "verdict": "unknown",
+      "coverage_complete": false,
+      "group_results": [
+        {
+          "change_id": "g0001",
+          "status": "covered",
+          "reason": "The added helper clears the tree selected by m_type. The target can supply a valid small zlib stream with Huffman-coded blocks; its uncompress call reaches the decoder and invokes this helper while building those trees.",
+          "errors": []
+        },
+        {
+          "change_id": "g0002",
+          "status": "covered",
+          "reason": "The replacement call executes in the Huffman tree-building loop for valid fixed or dynamic blocks supplied through the target's uncompress input. The helper it calls clears the selected complete tree array.",
+          "errors": []
+        }
+      ],
+      "foundation": {
+        "build": {
+          "status": "pass",
+          "reason": "The supplied recipe enables amalgamation and fuzzers; CMake appends miniz_tinfl.c to the amalgamated library and defines the uncompress_fuzzer target. The recipe then compiles the target against that amalgamated header and links the library. This is a static recipe assessment, not a claim of an observed build.",
+          "errors": []
+        },
+        "input": {
+          "status": "blocked",
+          "reason": "The target derives destination capacity from the first two input bytes, so its maximum is 255 × 255 = 65,025. The source accepts a larger destination length and reports insufficient output space when a valid stream needs more. A finite valid zlib stream expanding to 65,026 bytes therefore cannot complete successfully through this target.",
+          "errors": []
+        },
+        "lifecycle": {
+          "status": "pass",
+          "reason": "Each target invocation makes one uncompress call; that call initializes a fresh inflate stream and ends it on both post-inflate success and failure paths, while the target frees its destination buffer.",
+          "errors": []
+        },
+        "control_flow": {
+          "status": "pass",
+          "reason": "The harness's uncompress alias delegates through mz_uncompress2 and mz_inflate to tinfl_decompress. A valid zlib stream with a Huffman-coded block enters the tree-building loop and executes the changed clear call; the target has no guard excluding that route.",
+          "errors": []
+        }
+      },
+      "errors": [],
+      "missing_information": [],
+      "semantic_proof": false
+    },
+    "accepted": [
+      {
+        "id": "output_capacity_cap",
+        "change_ids": [],
+        "kind": "input",
+        "necessary": true,
+        "established": true,
+        "requirement": "The uncompress target must be able to complete a valid zlib stream whose decompressed output exceeds 65,025 bytes, a supported case of its primary operation.",
+        "target_route": "LLVMFuzzerTestOneInput → uncompress/mz_uncompress → mz_uncompress2 → mz_inflate(MZ_FINISH) → tinfl_decompress.",
+        "failure_condition": "For a finite valid zlib stream expanding to 65,026 bytes, buffer_length is at most 65,025 because it is the product of two input bytes. The one-shot inflate cannot reach stream completion before exhausting that destination and returns a buffer error; the harness then returns without retrying.",
+        "alternative_paths": "The complete harness makes exactly one uncompress call, has no grow or retry path, and frees the buffer. Changing the zlib header bytes cannot raise the product above 65,025, so no input spelling or delegated default supplies enough capacity.",
+        "source_evidence": [
+          {
+            "evidence_id": "loc-67483b8b1cabe00f16f68b39",
+            "quote": "int mz_uncompress2(unsigned char *pDest, mz_ulong *pDest_len, const unsigned char *pSource, mz_ulong *pSource_len)\n{\n    mz_stream stream;\n    int status;\n    memset(&stream, 0, sizeof(stream));\n\n    /* In case mz_ulong is 64-bits (argh I hate longs). */\n    if ((mz_uint64)(*pSource_len | *pDest_len) > 0xFFFFFFFFU)\n        return MZ_PARAM_ERROR;\n\n    stream.next_in = pSource;\n    stream.avail_in = (mz_uint32)*pSource_len;\n    stream.next_out = pDest;\n    stream.avail_out = (mz_uint32)*pDest_len;\n\n    status = mz_inflateInit(&stream);\n    if (status != MZ_OK)\n        return status;\n\n    status = mz_inflate(&stream, MZ_FINISH);\n    *pSource_len = *pSource_len - stream.avail_in;\n    if (status != MZ_STREAM_END)\n    {\n        mz_inflateEnd(&stream);\n        return ((status == MZ_BUF_ERROR) && (!stream.avail_in)) ? MZ_DATA_ERROR : status;\n    }\n    *pDest_len = stream.total_out;\n\n    return mz_inflateEnd(&stream);\n"
+          },
+          {
+            "evidence_id": "loc-d4b3b3bb0460a06ee83b8559",
+            "quote": "    if ((flush == MZ_FINISH) && (first_call))\n    {\n        /* MZ_FINISH on the first call implies that the input and output buffers are large enough to hold the entire compressed/decompressed file. */\n        decomp_flags |= TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;\n        in_bytes = pStream->avail_in;\n        out_bytes = pStream->avail_out;\n        status = tinfl_decompress(&pState->m_decomp, pStream->next_in, &in_bytes, pStream->next_out, pStream->next_out, &out_bytes, decomp_flags);\n        pState->m_last_status = status;\n        pStream->next_in += (mz_uint)in_bytes;\n        pStream->avail_in -= (mz_uint)in_bytes;\n        pStream->total_in += (mz_uint)in_bytes;\n        pStream->adler = tinfl_get_adler32(&pState->m_decomp);\n        pStream->next_out += (mz_uint)out_bytes;\n        pStream->avail_out -= (mz_uint)out_bytes;\n        pStream->total_out += (mz_uint)out_bytes;\n\n        if (status < 0)\n            return MZ_DATA_ERROR;\n        else if (status != TINFL_STATUS_DONE)\n        {\n            pState->m_last_status = TINFL_STATUS_FAILED;\n            return MZ_BUF_ERROR;\n        }\n        return MZ_STREAM_END;\n"
+          },
+          {
+            "evidence_id": "loc-3fe8a4c97aa83fd2a63b6ebe",
+            "quote": "            while (counter)\n            {\n                size_t n;\n                while (pOut_buf_cur >= pOut_buf_end)\n                {\n                    TINFL_CR_RETURN(9, TINFL_STATUS_HAS_MORE_OUTPUT);\n                }\n                while (pIn_buf_cur >= pIn_buf_end)\n                {\n                    TINFL_CR_RETURN(38, (decomp_flags & TINFL_FLAG_HAS_MORE_INPUT) ? TINFL_STATUS_NEEDS_MORE_INPUT : TINFL_STATUS_FAILED_CANNOT_MAKE_PROGRESS);\n                }\n                n = MZ_MIN(MZ_MIN((size_t)(pOut_buf_end - pOut_buf_cur), (size_t)(pIn_buf_end - pIn_buf_cur)), counter);\n                TINFL_MEMCPY(pOut_buf_cur, pIn_buf_cur, n);\n                pIn_buf_cur += n;\n                pOut_buf_cur += n;\n                counter -= (mz_uint)n;\n"
+          }
+        ],
+        "harness_evidence": [
+          {
+            "evidence_id": "loc-890844749db96e2a42075280",
+            "quote": "int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)\n{\n    unsigned long int buffer_length = 1;\n    unsigned char *buffer = NULL;\n    int z_status = 0;\n\n    if (size > 0)\n        buffer_length *= data[0];\n    if (size > 1)\n        buffer_length *= data[1];\n\n    buffer = (unsigned char *)malloc(buffer_length);\n\n    z_status = uncompress(buffer, &buffer_length, data, size);\n    free(buffer);\n\n    if (Z_OK != z_status)\n        return 0;\n    return 0;\n}\n"
+          }
+        ],
+        "missing_information": [],
+        "errors": []
+      }
+    ],
+    "rejected": [],
+    "assumptions": [],
+    "semantic_proof": false
+  },
+  "citation_errors": []
+}

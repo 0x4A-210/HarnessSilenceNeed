@@ -1,0 +1,19 @@
+{
+  "unit_id": "u-84a73b4f54a2e2560ad2",
+  "original_unit_id": "5877ba7b41afb68d4129",
+  "kind": "after_source",
+  "path": "input/source/lib/decompress/zstd_decompress.c",
+  "version": "after",
+  "name": "ZSTD_decompressFrame",
+  "start": 1531,
+  "end": 1608,
+  "line_origin": "file",
+  "sha256": "08c4906fa453ea5b0704fa95a6907b8f70e6bcb419af0a209cc90d8208d893f2",
+  "text": "static size_t ZSTD_decompressFrame(ZSTD_DCtx* dctx,\n                                   void* dst, size_t dstCapacity,\n                             const void** srcPtr, size_t *srcSizePtr)\n{\n    const BYTE* ip = (const BYTE*)(*srcPtr);\n    BYTE* const ostart = (BYTE* const)dst;\n    BYTE* const oend = ostart + dstCapacity;\n    BYTE* op = ostart;\n    size_t remainingSize = *srcSizePtr;\n\n    /* check */\n    if (remainingSize < ZSTD_frameHeaderSize_min+ZSTD_blockHeaderSize)\n        return ERROR(srcSize_wrong);\n\n    /* Frame Header */\n    {   size_t const frameHeaderSize = ZSTD_frameHeaderSize(ip, ZSTD_frameHeaderSize_prefix);\n        if (ZSTD_isError(frameHeaderSize)) return frameHeaderSize;\n        if (remainingSize < frameHeaderSize+ZSTD_blockHeaderSize)\n            return ERROR(srcSize_wrong);\n        CHECK_F( ZSTD_decodeFrameHeader(dctx, ip, frameHeaderSize) );\n        ip += frameHeaderSize; remainingSize -= frameHeaderSize;\n    }\n\n    /* Loop on each block */\n    while (1) {\n        size_t decodedSize;\n        blockProperties_t blockProperties;\n        size_t const cBlockSize = ZSTD_getcBlockSize(ip, remainingSize, &blockProperties);\n        if (ZSTD_isError(cBlockSize)) return cBlockSize;\n\n        ip += ZSTD_blockHeaderSize;\n        remainingSize -= ZSTD_blockHeaderSize;\n        if (cBlockSize > remainingSize) return ERROR(srcSize_wrong);\n\n        switch(blockProperties.blockType)\n        {\n        case bt_compressed:\n            decodedSize = ZSTD_decompressBlock_internal(dctx, op, oend-op, ip, cBlockSize, /* frame */ 1);\n            break;\n        case bt_raw :\n            decodedSize = ZSTD_copyRawBlock(op, oend-op, ip, cBlockSize);\n            break;\n        case bt_rle :\n            decodedSize = ZSTD_generateNxBytes(op, oend-op, *ip, blockProperties.origSize);\n            break;\n        case bt_reserved :\n        default:\n            return ERROR(corruption_detected);\n        }\n\n        if (ZSTD_isError(decodedSize)) return decodedSize;\n        if (dctx->fParams.checksumFlag)\n            XXH64_update(&dctx->xxhState, op, decodedSize);\n        op += decodedSize;\n        ip += cBlockSize;\n        remainingSize -= cBlockSize;\n        if (blockProperties.lastBlock) break;\n    }\n\n    if (dctx->fParams.frameContentSize != ZSTD_CONTENTSIZE_UNKNOWN) {\n        if ((U64)(op-ostart) != dctx->fParams.frameContentSize) {\n            return ERROR(corruption_detected);\n    }   }\n    if (dctx->fParams.checksumFlag) { /* Frame content checksum verification */\n        U32 const checkCalc = (U32)XXH64_digest(&dctx->xxhState);\n        U32 checkRead;\n        if (remainingSize<4) return ERROR(checksum_wrong);\n        checkRead = MEM_readLE32(ip);\n        if (checkRead != checkCalc) return ERROR(checksum_wrong);\n        ip += 4;\n        remainingSize -= 4;\n    }\n\n    /* Allow caller to get size read */\n    *srcPtr = ip;\n    *srcSizePtr = remainingSize;\n    return op-ostart;\n}\n",
+  "change_ids": [],
+  "invariant_source": true,
+  "unit_kind": "function",
+  "page_ids": [
+    "after-whole-5877ba7b41afb68d4129-0000"
+  ]
+}
