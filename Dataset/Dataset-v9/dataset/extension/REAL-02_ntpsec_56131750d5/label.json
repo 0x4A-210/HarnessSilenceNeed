@@ -1,0 +1,124 @@
+{
+ "schema": "3.0",
+ "id": "REAL-02",
+ "label": "positive",
+ "need_visibility": "explicit",
+ "degradation_type": "api",
+ "introduced_by_this_change": true,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/ntpsec/ntpsec",
+ "event_key": {
+  "harness": "projects/ntpsec/fuzz/setup.c",
+  "gap_signature": "sha256:77b8a248040cb944cb803359e94c40c04429a7714ce334e0417ef714a902d77e"
+ },
+ "uniqueness": {
+  "patch_id": "2f36d58f5e9df75df24a6309e028d3a5f66138f8"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "missing_symbol",
+    "detail": "M makes ntpd/nts_client.c::nts_check() call dns_take_pool(peer, &sockaddr) for the first time (previously the function existed but was never referenced); the harness setup.c only stubs dns_take_server and dns_take_status, so the link fails with an undefined reference to dns_take_pool"
+   }
+  ]
+ },
+ "evidence": [
+  "M diff (32a950f65, verified via .patch): ntpd/nts_client.c nts_check() now branches on MDF_POOL and calls dns_take_pool(peer, &sockaddr); include/ntp_dns.h adds DNS_NTS_pool to the DNS_Status enum",
+  "The dns_take_pool function body already existed before M (its hunk header appears as context in M's diff); M is what first references it from nts_client.c",
+  "h(M^1) setup.c (oss-fuzz rev aa7bc69268b9) contains zero occurrences of dns_take_pool - it only defines dns_take_server and dns_take_status",
+  "H diff (56131750d, verified via .patch) adds exactly 7 lines to projects/ntpsec/fuzz/setup.c: one declaration plus a stub definition for dns_take_pool",
+  "h(M^1) FuzzServer.c still calls nts_ke_process_receive(&buf, &aead) with 2 args, and M does not touch that signature, so the api failure in this sample is purely the missing symbol - not an argument-count change"
+ ],
+ "rationale": {
+  "zh": "M 让库第一次引用 `dns_take_pool`：`ntpd/nts_client.c` 的 `nts_check()` 新增了 `if (peer->cast_flags & MDF_POOL)` 分支，在 NTS+pool 场景下调用 `dns_take_pool(peer, &sockaddr)`（该函数体此前已存在，但无人调用），同时 `include/ntp_dns.h` 的 `DNS_Status` 枚举新增 `DNS_NTS_pool`。harness 的 `setup.c` 是专门提供 daemon 符号 stub、避免链接 `libntpd_lib.a` 的，它的符号集合只有 `dns_take_server` 和 `dns_take_status`，没有跟上这次新引用，于是链接阶段报 `dns_take_pool` 未定义。修复 H 只做一件事：在 `setup.c` 里补上 `dns_take_pool` 的声明与空实现（7 行），构建即恢复。属于本次引入的显式 api 退化（单一缺失符号，不涉及签名变更或链接顺序）。",
+  "en": "M makes the library reference dns_take_pool for the first time: ntpd/nts_client.c's nts_check() gains an MDF_POOL branch that calls dns_take_pool(peer, &sockaddr) for NTS pools (the function body already existed but had no callers), and include/ntp_dns.h adds DNS_NTS_pool to the DNS_Status enum. The harness setup.c exists specifically to stub daemon symbols so the link does not pull in libntpd_lib.a, and its stub set covers only dns_take_server and dns_take_status, so it misses the new reference and the link fails on an undefined dns_take_pool. Fix H does one thing: it adds the declaration plus an empty definition of dns_take_pool to setup.c (7 lines) and the build recovers. This is an explicit api degradation introduced by this change, a single missing symbol with no signature change and no link-order component."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "32a950f65ad6fe90d04e90c597416f0377d008e0",
+   "M_parent": "n/a（未单独验证父提交哈希）",
+   "M_on_mainline": true,
+   "harness_exists_at": [
+    "M^1",
+    "M"
+   ],
+   "H": "56131750d5491fafee3914bf8b855ab5868eddd5",
+   "H_symbols_in_diff": [
+    "dns_take_pool"
+   ]
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "aa7bc69268b9",
+    "oss_rev": "aa7bc69268b964e36371d353f0302f397980c667",
+    "mode": "make",
+    "secs": 0.093,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "fail",
+    "sha": "32a950f65",
+    "oss_rev": "aa7bc69268b964e36371d353f0302f397980c667",
+    "mode": "make",
+    "secs": 0.084,
+    "errors": [
+     "caller.c:(.text+0x39): undefined reference to `dns_take_pool'  (WSL gcc 15.2.0 最小复现实测)"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "32a950f65",
+    "oss_rev": "56131750d5491fafee3914bf8b855ab5868eddd5",
+    "mode": "make",
+    "secs": 0.088,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": "link_failure",
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "h(M^1) x lib(M^1): builds",
+    "pass": true,
+    "detail": "baseline setup.c has no dns_take_pool and M^1 does not reference it"
+   },
+   {
+    "check": "h(M^1) x lib(M): link fails on dns_take_pool",
+    "pass": true,
+    "detail": "实测复现：ld 报 undefined reference to dns_take_pool；h(M^1) setup.c 中该符号出现 0 次"
+   },
+   {
+    "check": "h(fix) x lib(M): builds",
+    "pass": true,
+    "detail": "H adds only the dns_take_pool declaration and stub to setup.c"
+   },
+   {
+    "check": "no signature/link-order component",
+    "pass": true,
+    "detail": "M does not touch nts_ke_process_receive; FuzzServer.c stays at 2 args and the old Makefile LIB order is unchanged"
+   }
+  ],
+  "budget_note": "已在 WSL 用最小复现实测三格（gcc 15.2.0）。做法：以精简 ntpd.h / 真实 ntp_dns.h 提供 sockaddr_u 与 struct peer，caller.c 精确模拟 M 之后 ntpd/nts_client.c::nts_check() 对 dns_take_pool 的引用。结果：h(M^1)xlib(M^1)=ok(0.093s)；h(M^1)xlib(M)=fail(0.084s，ld 报 undefined reference to dns_take_pool)；h(fix)xlib(M)=ok(0.088s)。未跑 ntpsec 全量 waf 构建（OSS-Fuzz Makefile 依赖 waf + openssl + libaes_siv，成本远高于本复现）。",
+  "toolchain": "gcc/clang + make (ntpsec fuzz 构建)",
+  "fuzz": {
+   "skipped": true,
+   "reason": "未跑 fuzz：本样本为 explicit 类（链接期 undefined reference），阳性判定已由 compile_matrix 的 fail 格与 explicit_signal 充分支撑；其最小复现是精简桩（精简 ntpd.h / 模拟 nts_ke_process_receive），跑 fuzz 只能证明桩自身不崩溃，证明力有限，故不纳入"
+  }
+ },
+ "urls": {
+  "M": "https://github.com/ntpsec/ntpsec/commit/32a950f65ad6fe90d04e90c597416f0377d008e0",
+  "M_parent": "https://github.com/ntpsec/ntpsec/commit/95b8bc1549ac4e6c3c8a1d5d58bbec5cfe316485",
+  "harness_oss_fuzz_rev": "https://github.com/google/oss-fuzz/commit/aa7bc69268b964e36371d353f0302f397980c667",
+  "H": "https://github.com/google/oss-fuzz/commit/56131750d5491fafee3914bf8b855ab5868eddd5"
+ }
+}

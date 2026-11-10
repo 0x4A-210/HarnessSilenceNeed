@@ -1,0 +1,209 @@
+{
+ "schema": "3.0",
+ "id": "REAL-06",
+ "label": "positive",
+ "need_visibility": "silent",
+ "degradation_type": "state",
+ "introduced_by_this_change": false,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/lz4/lz4",
+ "event_key": {
+  "harness": "ossfuzz/compress_hc_fuzzer.c",
+  "gap_signature": "sha256:75b6b68c0b57af2330d76ef9726310fb7027f1f1a80067ca6a2db4e7e8bc494d"
+ },
+ "uniqueness": {
+  "patch_id": "bada9f05a66ee5e0aab26e56640fec148bdd674d"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "state_reuse_unreached",
+    "detail": "the HC stream carries state across compressions: a failed compression sets ctx->dirty, and LZ4_resetStreamHC_fast() then fully re-initialises the object via LZ4_initStreamHC(), which MEM_INITs the whole internal state. compress_hc_fuzzer.c allocates a fresh state per input with malloc(LZ4_sizeofStateHC()) and frees it at the end, so the state is never reused and neither the dirty path nor the post-failure reset path is ever exercised"
+   }
+  ]
+ },
+ "evidence": [
+  "commit message of the change: 'A failed compression marks the HC state as dirty, and the next LZ4_resetStreamHC_fast() fully re-initializes it, using LZ4_initStreamHC(), which also reset favorDecSpeed.'",
+  "lib/lz4hc.c (at the change) sets the flag with `if (result <= 0) ctx->dirty = 1;` and guards the full re-init with `if (s->dirty) { LZ4_initStreamHC(...); }`",
+  "LZ4_initStreamHC() zeroes the whole internal context: `MEM_INIT(hcstate, 0, sizeof(*hcstate));`, so favorDecSpeed (an int8 parameter previously set by LZ4_favorDecompressionSpeed) is cleared as a side effect",
+  "h(M^1) harness ossfuzz/compress_hc_fuzzer.c allocates a new state per input at line 46 (`malloc(LZ4_sizeofStateHC())`) and frees it at line 56; it contains zero occurrences of LZ4_resetStreamHC_fast and zero occurrences of LZ4_favorDecompressionSpeed",
+  "measured with gcc 15.2.0 linking lib/lz4.c + lib/lz4hc.c at both revisions: after setting favorDecSpeed=1 and marking the state dirty, LZ4_resetStreamHC_fast() leaves favorDecSpeed at 0 before the change and at 1 after it"
+ ],
+ "rationale": {
+  "zh": "lz4 的 HC 流对象携带跨调用的状态：`LZ4HC_compress_generic_internal()` 在压缩失败（`result <= 0`）时把 `ctx->dirty` 置 1，下一次 `LZ4_resetStreamHC_fast()` 看到脏标记就走全量重建，调用 `LZ4_initStreamHC()`；而该函数用 `MEM_INIT(hcstate, 0, sizeof(*hcstate))` 把整个内部上下文清零，顺带把先前由 `LZ4_favorDecompressionSpeed()` 设好的 `favorDecSpeed` 也清成 0。修复只是在重建前后保存/恢复这一个字段。harness 侧的问题是：`compress_hc_fuzzer.c` 每轮输入都 `malloc(LZ4_sizeofStateHC())` 新建一个 state、用完 `free`，**从不复用**，因此既不会产生 dirty 标记，也走不到“失败后复位”这条路径——两条相关分支的覆盖率恒为 0，而编译与运行都完全正常（隐式 / silent）。库的脏状态语义早于本次修复就存在，harness 也从 2024 年写下时就一直复用不了 state，两侧被同一个阻塞挡住，故 `introduced_by_this_change = false`。",
+  "en": "An lz4 HC stream object carries state across compressions: LZ4HC_compress_generic_internal() sets ctx->dirty when a compression fails (result <= 0), and the next LZ4_resetStreamHC_fast() sees the flag and fully re-initialises the object through LZ4_initStreamHC(), which MEM_INITs the whole internal context and therefore also clears favorDecSpeed (previously set by LZ4_favorDecompressionSpeed). The change saves and restores that one field across the re-init. On the harness side, compress_hc_fuzzer.c allocates a fresh state per input with malloc(LZ4_sizeofStateHC()) and frees it afterwards, so the state is never reused: the dirty flag is never raised and the post-failure reset path is never taken, leaving those branches at zero coverage while the target still compiles and runs normally (silent). The library's dirty-state semantics predate this fix and the harness has never been able to reuse a state since it was written, both blocked by the same cause, hence introduced_by_this_change = false."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "n/a — 无单一引入 commit：脏状态语义早于本次修复存在",
+   "M_parent": "n/a",
+   "M_on_mainline": true,
+   "harness_exists_at": [
+    "M^1",
+    "M"
+   ],
+   "H": "bbd0b9aa726ac56d8cee4d31c0c913175561aab0",
+   "H_symbols_in_diff": [
+    "favorDecSpeed",
+    "LZ4_resetStreamHC_fast",
+    "LZ4_initStreamHC"
+   ]
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "n/a（非本次引入）",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 1.846,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "ok",
+    "sha": "n/a（非本次引入）",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 1.569,
+    "errors": [
+     "silent: builds and runs normally, but the fuzzer never reuses its HC state, so the post-failure reset path is unreachable (probe on this pair reports favorDecSpeed LOST after a dirty reset - the defect is present but never exercised by the harness)"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "bbd0b9aa726ac5",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 1.63,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": null,
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "h(M^1) x lib(M): compiles and runs, but the state-reuse path is unreachable",
+    "pass": true,
+    "detail": "fuzzer mallocs a fresh state per input; zero calls to LZ4_resetStreamHC_fast / LZ4_favorDecompressionSpeed"
+   },
+   {
+    "check": "the library defect reproduces on the pre-fix tree",
+    "pass": true,
+    "detail": "gcc 15.2.0: favorDecSpeed 1 -> 0 after LZ4_resetStreamHC_fast() when the state was marked dirty"
+   },
+   {
+    "check": "the fix restores the parameter",
+    "pass": true,
+    "detail": "same probe at bbd0b9a: favorDecSpeed stays 1"
+   }
+  ],
+  "budget_note": "compile_matrix 与 fuzz 均已实测。三格（gcc 15.2.0）编译 lib/lz4.c + lib/lz4hc.c 并链接行为探针，实测 favorDecSpeed：格1 LOST(1.846s)、格2 PRESERVED(1.569s)、格3 PRESERVED(1.630s)。fuzz_M / with_fix 用 clang 21.1.8（-fsanitize=fuzzer + -fprofile-arcs -ftest-coverage）跑 3 个 seed x 10s，用 llvm-cov gcov 统计 lz4hc.c 的 gap 行命中：h(M^1)（每轮 malloc 新 state）在 1648 上命中约 70-77 万次但 1651-1653 恒为 0；h(fix)（复用同一 state）在 1651-1653 上稳定命中 18-23 万次。注意 (1)：两个驱动都是为本样本编写的最小 fuzz 驱动，不是 ossfuzz/Makefile 构建的 compress_hc_fuzzer；注意 (2)：LZ4_compress_HC_destSize 在容量不足时不会置 dirty，必须用 LZ4_compress_HC_extStateHC 才能触发，这一点已在驱动注释中说明；注意 (3)：gap 行 1649/1650 是注释，不计入可执行行，故 gap 行集合取 1648/1651/1652/1653。",
+  "toolchain": "gcc 15.2.0（compile_matrix 与行为探针）；clang 21.1.8 -fsanitize=fuzzer + -fprofile-arcs -ftest-coverage（fuzz_M / with_fix），覆盖率由 llvm-cov gcov 解析",
+  "fuzz_M": {
+   "harness": "h(M^1)",
+   "lib": "M",
+   "runs": [
+    {
+     "seed": 1,
+     "secs": 10,
+     "execs": 708042,
+     "crashed": false,
+     "gap_hits": {
+      "lz4hc.c:1648": 707316,
+      "lz4hc.c:1651": 0,
+      "lz4hc.c:1652": 0,
+      "lz4hc.c:1653": 0
+     }
+    },
+    {
+     "seed": 2,
+     "secs": 10,
+     "execs": 762629,
+     "crashed": false,
+     "gap_hits": {
+      "lz4hc.c:1648": 761754,
+      "lz4hc.c:1651": 0,
+      "lz4hc.c:1652": 0,
+      "lz4hc.c:1653": 0
+     }
+    },
+    {
+     "seed": 3,
+     "secs": 10,
+     "execs": 774407,
+     "crashed": false,
+     "gap_hits": {
+      "lz4hc.c:1648": 773568,
+      "lz4hc.c:1651": 0,
+      "lz4hc.c:1652": 0,
+      "lz4hc.c:1653": 0
+     }
+    }
+   ],
+   "summary": "gap lines covered: 1/4, 1/4, 1/4 (3 runs); crashes: 0"
+  },
+  "with_fix": {
+   "harness": "h(fix)",
+   "lib": "M",
+   "runs": [
+    {
+     "seed": 1,
+     "secs": 10,
+     "execs": 766812,
+     "crashed": false,
+     "gap_hits": {
+      "lz4hc.c:1648": 1531919,
+      "lz4hc.c:1651": 180192,
+      "lz4hc.c:1652": 180192,
+      "lz4hc.c:1653": 180192
+     }
+    },
+    {
+     "seed": 2,
+     "secs": 10,
+     "execs": 727857,
+     "crashed": false,
+     "gap_hits": {
+      "lz4hc.c:1648": 1454127,
+      "lz4hc.c:1651": 211013,
+      "lz4hc.c:1652": 211013,
+      "lz4hc.c:1653": 211013
+     }
+    },
+    {
+     "seed": 3,
+     "secs": 10,
+     "execs": 711244,
+     "crashed": false,
+     "gap_hits": {
+      "lz4hc.c:1648": 1420879,
+      "lz4hc.c:1651": 234431,
+      "lz4hc.c:1652": 234431,
+      "lz4hc.c:1653": 234431
+     }
+    }
+   ],
+   "summary": "gap lines covered: 4/4, 4/4, 4/4 (3 runs); crashes: 0"
+  },
+  "applies_to_parent": false,
+  "parent_note": "gap lines 1648 与 1651-1653 是 H(bbd0b9a) 修改/新增的代码；M^1 上LZ4_resetStreamHC_fast 的 dirty 分支只做 LZ4_initStreamHC，没有保存/恢复 favorDecSpeed，故本 gap 不适用于 M^1 的库",
+  "fuzz": {
+   "skipped": false,
+   "note": "见 fuzz_M / with_fix（silent 类的完整 fuzz 证据）"
+  }
+ },
+ "urls": {
+  "M": "n/a（非本次引入）",
+  "M_parent": "n/a",
+  "harness_oss_fuzz_rev": "https://github.com/lz4/lz4/tree/bbd0b9aa726ac56d8cee4d31c0c913175561aab0/ossfuzz",
+  "H": "https://github.com/lz4/lz4/commit/bbd0b9aa726ac56d8cee4d31c0c913175561aab0"
+ }
+}

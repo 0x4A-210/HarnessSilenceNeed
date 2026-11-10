@@ -1,0 +1,43 @@
+From bbd0b9aa726ac56d8cee4d31c0c913175561aab0 Mon Sep 17 00:00:00 2001
+From: Yann Collet <cyan@meta.com>
+Date: Fri, 9 Oct 2026 10:04:34 -0700
+Subject: [PATCH] lz4hc: LZ4_resetStreamHC_fast() preserves favorDecSpeed after
+ a failure
+
+A failed compression marks the HC state as dirty,
+and the next LZ4_resetStreamHC_fast() fully re-initializes it,
+using LZ4_initStreamHC(), which also reset favorDecSpeed.
+Without a prior failure, favorDecSpeed is preserved.
+(The compression level is not affected : LZ4_resetStreamHC_fast() sets it.)
+
+The re-initialization now preserves favorDecSpeed.
+
+Impact on LZ4F, levels >= 10 with favorDecSpeed and independent blocks :
+favorDecSpeed is set once, at LZ4F_compressBegin(),
+then LZ4_resetStreamHC_fast() is invoked before each block.
+Since LZ4F compresses each block into srcSize-1 bytes,
+any incompressible block is a failed compression,
+so favorDecSpeed was ignored for all following blocks of the frame.
+Frames were valid, but didn't honor the requested preference.
+---
+ lib/lz4hc.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/lib/lz4hc.c b/lib/lz4hc.c
+index a55713336..45a48ed9d 100644
+--- a/lib/lz4hc.c
++++ b/lib/lz4hc.c
+@@ -1646,7 +1646,11 @@ void LZ4_resetStreamHC_fast (LZ4_streamHC_t* LZ4_streamHCPtr, int compressionLev
+     LZ4HC_CCtx_internal* const s = &LZ4_streamHCPtr->internal_donotuse;
+     DEBUGLOG(5, "LZ4_resetStreamHC_fast(%p, %d)", LZ4_streamHCPtr, compressionLevel);
+     if (s->dirty) {
++        /* a failed compression left the tables in an undefined state : start from scratch,
++         * but preserve parameters, as a reset without prior failure would */
++        LZ4_i8 const favorDecSpeed = s->favorDecSpeed;
+         LZ4_initStreamHC(LZ4_streamHCPtr, sizeof(*LZ4_streamHCPtr));
++        s->favorDecSpeed = favorDecSpeed;
+     } else {
+         assert(s->end >= s->prefixStart);
+         s->dictLimit += (U32)(s->end - s->prefixStart);
+-- 
+2.43.0

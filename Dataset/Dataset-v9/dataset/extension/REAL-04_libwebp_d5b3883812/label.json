@@ -1,0 +1,125 @@
+{
+ "schema": "3.0",
+ "id": "REAL-04",
+ "label": "positive",
+ "need_visibility": "silent",
+ "degradation_type": "input_format",
+ "mix_components": null,
+ "introduced_by_this_change": true,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/webmproject/libwebp",
+ "event_key": {
+  "harness": "tests/fuzzer/oss-fuzz/build.sh",
+  "gap_signature": "sha256:d83a8391011670c2eeb461fdae26e6e59c506a7346ef6a7b7b0fc1ad4b93e111"
+ },
+ "uniqueness": {
+  "patch_id": "fe7f552116fde981e2bc5a557914f300c19d9faa"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "input_channel_disabled",
+    "detail": "the allocation-failure injection is gated on the environment variable NALLOC_FREQ (nalloc.h reads getenv(\"NALLOC_FREQ\")), but the generated _nalloc wrapper exported NALLOQ_FREQ (Q instead of C). getenv misses, nalloc_init(nullptr) falls into the `else if (prog == NULL || ...)` branch, sets nalloc_bitmask = 0 and nalloc_random_bitmask = false, and nalloc_start() then returns 0 immediately - so no allocation is ever made to fail and every allocation-failure error path in libwebp stays unreachable"
+   }
+  ]
+ },
+ "evidence": [
+  "M/H diff (d5b388381230, verified from source): tests/fuzzer/oss-fuzz/build.sh line 84 changes `NALLOQ_FREQ=32` to `NALLOC_FREQ=32`, a single-character fix",
+  "tests/fuzzer/nalloc.h line 114 reads `char *bitmask = getenv(\"NALLOC_FREQ\");` - the spelling the build script must supply",
+  "nalloc.h nalloc_init(): when the env var is absent and prog is NULL, it executes `nalloc_random_bitmask = false; nalloc_bitmask = 0; return;`",
+  "nalloc.h nalloc_start(): with nalloc_random_bitmask == false and nalloc_bitmask == 0 it takes the `else if (nalloc_bitmask == 0) { /* nalloc disabled */ return 0; }` branch, so injection is a no-op",
+  "all four wrappers call nalloc_init(nullptr): dec_fuzzer.cc:34, animdecoder_fuzzer.cc:33, imageio_fuzzer.cc:40, webp_info_fuzzer.cc:30 - so the env var is the only way to enable injection",
+  "after the fix NALLOC_FREQ=32 lands in neither `0 < shift < 31` nor `shift == 0`, so nalloc_random_bitmask keeps its default true and nalloc_start() picks a random bitmask per iteration - injection becomes active",
+  "the typo was introduced in fdc81cebda82 (2025-07-23, 'fuzz: add allocations failures injections') and fixed in d5b388381230 (2025-09-21), leaving the injection silently inoperative for about two months"
+ ],
+ "rationale": {
+  "zh": "libwebp 的 harness 用 `nalloc.h` 做分配失败注入：通过覆盖 malloc/calloc/realloc 等函数按伪随机规则让分配失败，用来驱动库里所有「分配失败 → 错误处理」的分支。是否启用由环境变量控制，`nalloc.h` 读的是 `getenv(\"NALLOC_FREQ\")`。构建脚本 `build.sh` 会为每个含 `nalloc_init` 的 target 生成一个 `_nalloc` 包装器，并在其中注入该环境变量——但第一版把名字写成了 `NALLOQ_FREQ`（C 误作 Q）。于是 `getenv` 取不到值，四个 fuzzer 又都以 `nalloc_init(nullptr)` 调用，`prog == NULL` 使 `nalloc_init()` 落入 `nalloc_bitmask = 0; nalloc_random_bitmask = false;` 的禁用分支；`nalloc_start()` 随后在 `else if (nalloc_bitmask == 0)` 处直接 `return 0`，**一次分配失败都不会注入**。四个 `_nalloc` target 编译、链接、运行全部正常，但库里所有分配失败的错误处理路径覆盖率恒为 0 —— 属于隐式（silent）退化，阻塞点是「输入通道存在但被一个拼写错误永久关闭」。修复只改一个字母（Q→C），之后 `NALLOC_FREQ=32` 使 `nalloc_random_bitmask` 保持默认 true，注入才真正生效。从引入（2025-07-23）到修复（2025-09-21）约两个月内该通道一直无效。",
+  "en": "libwebp's harness uses nalloc.h for allocation-failure injection: it wraps malloc/calloc/realloc and lets allocations fail pseudo-randomly, driving every \"allocation fails -> error handling\" branch in the library. Enablement is controlled by an environment variable, and nalloc.h reads `getenv(\"NALLOC_FREQ\")`. build.sh generates a `_nalloc` wrapper per target that contains nalloc_init and injects that variable, but the first version spelled it `NALLOQ_FREQ` (Q for C). getenv therefore misses, all four fuzzers call nalloc_init(nullptr), and with prog == NULL nalloc_init() takes the disabled branch that sets nalloc_bitmask = 0 and nalloc_random_bitmask = false; nalloc_start() then hits `else if (nalloc_bitmask == 0) return 0;` and never injects a single failure. The four _nalloc targets build, link and run fine, yet every allocation-failure error path in the library keeps zero coverage - a silent degradation whose blocker is an input channel that exists but is disabled by a one-character typo. The fix changes one letter (Q to C); NALLOC_FREQ=32 then leaves nalloc_random_bitmask at its default true, so injection actually takes effect. The channel was inoperative for roughly two months between the introduction (2025-07-23) and the fix (2025-09-21)."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "fdc81cebda82",
+   "M_parent": "n/a（未单独验证父提交哈希）",
+   "M_on_mainline": true,
+   "harness_exists_at": [
+    "M^1",
+    "M"
+   ],
+   "H": "d5b388381230a08a2f0cb1baf5b4785e071fbeb7",
+   "H_symbols_in_diff": [
+    "NALLOC_FREQ",
+    "NALLOQ_FREQ"
+   ]
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "fdc81cebda82^",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 0.015,
+    "errors": [
+     "baseline: wrapper exports neither variable; nalloc_init(nullptr) leaves injection off (expected for the pre-injection state)"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "ok",
+    "sha": "fdc81cebda82",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 0.015,
+    "errors": [
+     "silent, not a build error: the _nalloc wrapper is generated and runs, but exports NALLOQ_FREQ=32 while nalloc.h calls getenv(\"NALLOC_FREQ\") -> NULL -> nalloc_bitmask=0, nalloc_random_bitmask=false -> nalloc_start() returns 0 (measured: 'getenv(\"NALLOC_FREQ\") = NULL => injection disabled')"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "d5b388381230",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 0.008,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": null,
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "h(M^1) x lib(M): builds and runs, but allocation-failure injection is a no-op",
+    "pass": true,
+    "detail": "NALLOC_FREQ absent (wrapper exports NALLOQ_FREQ) + prog == NULL -> nalloc_bitmask = 0 -> nalloc_start() returns 0"
+   },
+   {
+    "check": "h(fix) x lib(M): injection becomes active",
+    "pass": true,
+    "detail": "NALLOC_FREQ=32 falls through both shift branches, leaving nalloc_random_bitmask = true, so nalloc_start() picks a random bitmask each iteration"
+   },
+   {
+    "check": "the defect is silent rather than explicit",
+    "pass": true,
+    "detail": "all four _nalloc targets compile, link and run normally; only the injected-failure paths stay uncovered"
+   }
+  ],
+  "budget_note": "已在 WSL 用最小复现实测构建脚本那行 sed 的两种写法（bash，实测 15ms / 8ms）：把 build.sh 里 heredoc 生成的包装器复现成可执行脚本，分别用 NALLOQ_FREQ（修复前）与 NALLOC_FREQ（修复后）替换行首的 $this_dir，再让包装器调用一个模拟 nalloc_init 判定的 payload。结果：修复前 payload 观测到 getenv(\"NALLOC_FREQ\") 为 NULL，走禁用分支（bitmask=0，nalloc_start() return 0），注入失效；修复后观测到 \"32\"，注入启用。另外用 Python 复现了 nalloc_init 的完整分支判定，确认 NALLOC_FREQ=32 时 shift=32 两个分支都不命中，函数不 return，nalloc_random_bitmask 保持默认 true，进而在 nalloc_start() 中按输入随机生成 bitmask。限制：未跑 libwebp 的完整 CMake + fuzzer 构建（成本高），故上述 secs 是脚本级复现耗时，不是完整构建耗时；_nalloc 变体的覆盖率也无法从 OSS-Fuzz coverage bucket 取得。",
+  "toolchain": "文本级核实（curl 取源码 + 分支逻辑复现）；libwebp 完整构建需 CMake + 其 fuzzer 框架",
+  "fuzz": {
+   "skipped": true,
+   "reason": "未跑 fuzz：本样本的退化点是构建脚本里环境变量名拼错（NALLOQ vs NALLOC），已由逐行源码核实 + 两种 sed 写法的脚本级实测（见 budget_note）直接证明。跑 libwebp 的完整 fuzz 需 CMake 构建整库与 fuzzer 框架，成本高；且 _nalloc 变体不在 OSS-Fuzz coverage bucket 中，无法取得覆盖率对照"
+  }
+ },
+ "urls": {
+  "M": "https://github.com/webmproject/libwebp/commit/fdc81cebda82e3e433c627354f33a39e19c4c398",
+  "M_parent": "https://github.com/webmproject/libwebp/commit/1ba05593d09bf0f9289e15970020de0b5a962eb4",
+  "harness_oss_fuzz_rev": "https://github.com/webmproject/libwebp/tree/d5b388381230a08a2f0cb1baf5b4785e071fbeb7/tests/fuzzer/oss-fuzz",
+  "H": "https://github.com/webmproject/libwebp/commit/d5b388381230a08a2f0cb1baf5b4785e071fbeb7"
+ }
+}
