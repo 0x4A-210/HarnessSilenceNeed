@@ -1,0 +1,361 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ada8b0c374f4ca58b5b917f97afa00ca0d06bea7..964c174cb99637fc1dfeefa622ed2681db80a3b2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -88,7 +88,8 @@ option(ENABLE_RDRAND                  "Enable RDRAND Hardware RNG Hash Seed."
+ option(ENABLE_THREADING               "Enable partial threading support."                     OFF)
+ option(OVERRIDE_GET_RANDOM_SEED       "Override json_c_get_random_seed() with custom code."   OFF)
+ option(DISABLE_EXTRA_LIBS             "Avoid linking against extra libraries, such as libbsd." OFF)
+-option(DISABLE_JSON_POINTER           "Disable JSON pointer (RFC6901) support."               OFF)
++option(DISABLE_JSON_POINTER           "Disable JSON pointer (RFC6901) and JSON patch support." OFF)
++option(DISABLE_JSON_PATCH             "Disable JSON patch (RFC6902) support."                 OFF)
+ option(NEWLOCALE_NEEDS_FREELOCALE     "Work around newlocale bugs in old FreeBSD by calling freelocale"  OFF)
+ 
+ 
+@@ -429,8 +430,15 @@ if (NOT DISABLE_JSON_POINTER)
+     set(JSON_C_PUBLIC_HEADERS   ${JSON_C_PUBLIC_HEADERS}  ${PROJECT_SOURCE_DIR}/json_pointer.h)
+     set(JSON_C_SOURCES          ${JSON_C_SOURCES}         ${PROJECT_SOURCE_DIR}/json_pointer.c)
+     set(JSON_H_JSON_POINTER "#include \"json_pointer.h\"")
++
++    if (NOT DISABLE_JSON_PATCH)
++        set(JSON_C_PUBLIC_HEADERS   ${JSON_C_PUBLIC_HEADERS}  ${PROJECT_SOURCE_DIR}/json_patch.h)
++        set(JSON_C_SOURCES          ${JSON_C_SOURCES}         ${PROJECT_SOURCE_DIR}/json_patch.c)
++	set(JSON_H_JSON_PATCH "#include \"json_patch.h\"")
++    endif()
+ else()
+     set(JSON_H_JSON_POINTER "")
++    set(JSON_H_JSON_PATCH "")
+ endif()
+ 
+ configure_file(json.h.cmakein ${PROJECT_BINARY_DIR}/json.h @ONLY)
+diff --git a/json-c.sym b/json-c.sym
+index ab96eccc9036bad94ed94ee67c62c0de9449da96..9b5933b250ba446136ef8efda33af9f9f4332862 100644
+--- a/json-c.sym
++++ b/json-c.sym
+@@ -170,6 +170,7 @@ JSONC_0.15 {
+ JSONC_0.16 {
+   global:
+     json_object_array_insert_idx;
++    json_patch_apply;
+ } JSONC_0.15;
+ 
+ JSONC_0.17 {
+diff --git a/json.h.cmakein b/json.h.cmakein
+index 4fed013b31607c6aadb3c83ca14a9e3b584a205f..2271320714e658f943f6c30c70190f81962b85a4 100644
+--- a/json.h.cmakein
++++ b/json.h.cmakein
+@@ -26,6 +26,7 @@ extern "C" {
+ #include "json_c_version.h"
+ #include "json_object.h"
+ #include "json_object_iterator.h"
++@JSON_H_JSON_PATCH@
+ @JSON_H_JSON_POINTER@
+ #include "json_tokener.h"
+ #include "json_util.h"
+diff --git a/json_patch.c b/json_patch.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..296985c48fbcf9ee08956b57625c0c2dd7d8735d
+--- /dev/null
++++ b/json_patch.c
+@@ -0,0 +1,249 @@
++/*
++ * Copyright (c) 2021 Alexandru Ardelean.
++ *
++ * This is free software; you can redistribute it and/or modify
++ * it under the terms of the MIT license. See COPYING for details.
++ *
++ */
++
++#include "config.h"
++
++#include <stdlib.h>
++#include <string.h>
++#include <errno.h>
++
++#include "json_patch.h"
++#include "json_object_private.h"
++
++/**
++ * JavaScript Object Notation (JSON) Patch
++ *   RFC 6902 - https://tools.ietf.org/html/rfc6902
++ */
++
++static int json_patch_apply_test(struct json_object **res,
++                                 struct json_object *patch_elem,
++                                 const char *path)
++{
++	struct json_object *value1, *value2;
++
++	if (!json_object_object_get_ex(patch_elem, "value", &value1)) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	/* errno should be set by json_pointer_get() */
++	if (json_pointer_get(*res, path, &value2))
++		return -1;
++
++	if (!json_object_equal(value1, value2)) {
++		json_object_put(*res);
++		*res = NULL;
++		errno = ENOENT;
++		return -1;
++	}
++
++	return 0;
++}
++
++static int __json_patch_apply_remove(struct json_pointer_get_result *jpres)
++{
++	if (json_object_is_type(jpres->parent, json_type_array)) {
++		return json_object_array_del_idx(jpres->parent, jpres->id.index, 1);
++	} else if (jpres->parent && jpres->id.key) {
++		json_object_object_del(jpres->parent, jpres->id.key);
++		return 0;
++	} else {
++		return json_object_put(jpres->obj);
++	}
++}
++
++static int json_patch_apply_remove(struct json_object **res, const char *path)
++{
++	struct json_pointer_get_result jpres;
++
++	if (json_pointer_get_internal(*res, path, &jpres))
++		return -1;
++
++	return __json_patch_apply_remove(&jpres);
++}
++
++static int json_object_array_insert_idx_cb(struct json_object *parent, size_t idx,
++                                           struct json_object *value, void *priv)
++{
++	int *add = priv;
++
++	if (idx > json_object_array_length(parent))
++	{
++		errno = EINVAL;
++		return -1;
++	}
++
++	if (*add)
++		return json_object_array_insert_idx(parent, idx, value);
++	else
++		return json_object_array_put_idx(parent, idx, value);
++}
++
++static int json_patch_apply_add_replace(struct json_object **res,
++                                        struct json_object *patch_elem,
++                                        const char *path, int add)
++{
++	struct json_object *value;
++	int rc;
++
++	if (!json_object_object_get_ex(patch_elem, "value", &value)) {
++		errno = EINVAL;
++		return -1;
++	}
++	/* if this is a replace op, then we need to make sure it exists before replacing */
++	if (!add && json_pointer_get(*res, path, NULL)) {
++		errno = ENOENT;
++		return -1;
++	}
++
++	rc = json_pointer_set_with_array_cb(res, path, json_object_get(value),
++					    json_object_array_insert_idx_cb, &add);
++	if (rc)
++		json_object_put(value);
++
++	return rc;
++}
++
++static int json_object_array_move_cb(struct json_object *parent, size_t idx,
++                                     struct json_object *value, void *priv)
++{
++	struct json_pointer_get_result *from = priv;
++	size_t len = json_object_array_length(parent);
++
++	/**
++	 * If it's the same array parent, it means that we removed
++	 * and element from it, so the length is temporarily reduced
++	 * by 1, which means that if we try to move an element to
++	 * the last position, we need to check the current length + 1
++	 */
++	if (parent == from->parent)
++		len++;
++
++	if (idx > len)
++	{
++		errno = EINVAL;
++		return -1;
++	}
++
++	return json_object_array_insert_idx(parent, idx, value);
++}
++
++static int json_patch_apply_move_copy(struct json_object **res,
++                                      struct json_object *patch_elem,
++                                      const char *path, int move)
++{
++	json_pointer_array_set_cb array_set_cb;
++	struct json_pointer_get_result from;
++	struct json_object *jfrom;
++	const char *from_s;
++	size_t from_s_len;
++	int rc;
++
++	if (!json_object_object_get_ex(patch_elem, "from", &jfrom)) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	from_s = json_object_get_string(jfrom);
++
++	from_s_len = strlen(from_s);
++	if (strncmp(from_s, path, from_s_len) == 0) {
++		/**
++		 * If lengths match, it's a noop, if they don't,
++		 * then we're trying to move a parent under a child
++		 * which is not allowed as per RFC 6902 section 4.4
++		 *   The "from" location MUST NOT be a proper prefix of the "path"
++		 *   location; i.e., a location cannot be moved into one of its children.
++		 */
++		if (from_s_len == strlen(path))
++			return 0;
++		errno = EINVAL;
++		return -1;
++	}
++
++	rc = json_pointer_get_internal(*res, from_s, &from);
++	if (rc)
++		return rc;
++
++	json_object_get(from.obj);
++
++	if (!move) {
++		array_set_cb = json_object_array_insert_idx_cb;
++	} else {
++		rc = __json_patch_apply_remove(&from);
++		if (rc < 0) {
++			json_object_put(from.obj);
++			return rc;
++		}
++		array_set_cb = json_object_array_move_cb;
++	}
++
++	rc = json_pointer_set_with_array_cb(res, path, from.obj, array_set_cb, &from);
++	if (rc)
++		json_object_put(from.obj);
++
++	return rc;
++}
++
++int json_patch_apply(struct json_object *base, struct json_object *patch,
++                     struct json_object **res)
++{
++	size_t i;
++	int rc = 0;
++
++	if (!base || !json_object_is_type(patch, json_type_array)) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	/* errno should be set inside json_object_deep_copy() */
++	if (json_object_deep_copy(base, res, NULL) < 0)
++		return -1;
++
++	/* Go through all operations ; apply them on res */
++	for (i = 0; i < json_object_array_length(patch); i++) {
++		struct json_object *jop, *jpath;
++		struct json_object *patch_elem = json_object_array_get_idx(patch, i);
++		const char *op, *path;
++		if (!json_object_object_get_ex(patch_elem, "op", &jop)) {
++			errno = EINVAL;
++			rc = -1;
++			break;
++		}
++		op = json_object_get_string(jop);
++		json_object_object_get_ex(patch_elem, "path", &jpath);
++		path = json_object_get_string(jpath);
++
++		if (!strcmp(op, "test"))
++			rc = json_patch_apply_test(res, patch_elem, path);
++		else if (!strcmp(op, "remove"))
++			rc = json_patch_apply_remove(res, path);
++		else if (!strcmp(op, "add"))
++			rc = json_patch_apply_add_replace(res, patch_elem, path, 1);
++		else if (!strcmp(op, "replace"))
++			rc = json_patch_apply_add_replace(res, patch_elem, path, 0);
++		else if (!strcmp(op, "move"))
++			rc = json_patch_apply_move_copy(res, patch_elem, path, 1);
++		else if (!strcmp(op, "copy"))
++			rc = json_patch_apply_move_copy(res, patch_elem, path, 0);
++		else {
++			errno = EINVAL;
++			rc = -1;
++			break;
++		}
++		if (rc < 0)
++			break;
++	}
++
++	if (rc < 0) {
++		json_object_put(*res);
++		*res = NULL;
++	}
++
++	return rc;
++}
+diff --git a/json_patch.h b/json_patch.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..80dc8b9fdb230c41909e1bf03c12a7e7debf6775
+--- /dev/null
++++ b/json_patch.h
+@@ -0,0 +1,46 @@
++/*
++ * Copyright (c) 2021 Alexadru Ardelean.
++ *
++ * This is free software; you can redistribute it and/or modify
++ * it under the terms of the MIT license. See COPYING for details.
++ *
++ */
++
++/**
++ * @file
++ * @brief JSON Patch (RFC 6902) implementation for manipulating JSON objects
++ */
++#ifndef _json_patch_h_
++#define _json_patch_h_
++
++#include "json_pointer.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * Apply the JSON patch to the base object.
++ * The patch object must be formatted as per RFC 6902.
++ * If the patch is not correctly formatted, an error will
++ * be returned.
++ *
++ * The original `base` object will first be copied, and then
++ * the patch will be applied.
++ * If anything fails during patching, the `res` object will be
++ * NULL and the function will return a negative result.
++ *
++ * @param base the JSON object which to patch
++ * @param patch the JSON object that describes the patch to be applied
++ * @param the resulting patched JSON object
++ *
++ * @return negative if an error (or not found), or 0 if succeeded
++ */
++JSON_EXPORT int json_patch_apply(struct json_object *base, struct json_object *patch,
++                                 struct json_object **res);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif

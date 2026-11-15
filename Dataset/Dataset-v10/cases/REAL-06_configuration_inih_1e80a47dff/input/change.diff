@@ -1,0 +1,173 @@
+diff --git a/README.md b/README.md
+index dc587beb12319b6b88427385c4d1a2d3ccb8d442..ee85b1a12b490f0f16f968f6afa4c3a5156fdf37 100644
+--- a/README.md
++++ b/README.md
+@@ -35,6 +35,7 @@ You can control various aspects of inih using preprocessor defines:
+   * **Maximum line length:** The default maximum line length (for stack or heap) is 200 bytes. To override this, add something like `-DINI_MAX_LINE=1000`. Note that `INI_MAX_LINE` must be 3 more than the longest line (due to `\r`, `\n`, and the NUL).
+   * **Initial malloc size:** `INI_INITIAL_ALLOC` specifies the initial malloc size when using the heap. It defaults to 200 bytes.
+   * **Allow realloc:** By default when using the heap (`-DINI_USE_STACK=0`), inih allocates a fixed-sized buffer of `INI_INITIAL_ALLOC` bytes. To allow this to grow to `INI_MAX_LINE` bytes, doubling if needed, set `-DINI_ALLOW_REALLOC=1`.
++  * **Custom allocator:** By default when using the heap, the standard library's `malloc`, `free`, and `realloc` functions are used; to use a custom allocator, specify `-DINI_CUSTOM_ALLOCATOR=1` (and `-DINI_USE_STACK=0`). You must define and link functions named `ini_malloc`, `ini_free`, and (if `INI_ALLOW_REALLOC` is set) `ini_realloc`, which must have the same signatures as the `stdlib.h` memory allocation functions.
+ 
+ ## Simple example in C ##
+ 
+diff --git a/ini.c b/ini.c
+index 2622058c93b79680d97d34a9bdd6660b1e6ecc9e..f8a3ea3b2e3a82cefd7881bdc2857ab964f088d1 100644
+--- a/ini.c
++++ b/ini.c
+@@ -22,7 +22,17 @@ https://github.com/benhoyt/inih
+ #include "ini.h"
+ 
+ #if !INI_USE_STACK
++#if INI_CUSTOM_ALLOCATOR
++#include <stddef.h>
++void* ini_malloc(size_t size);
++void ini_free(void* ptr);
++void* ini_realloc(void* ptr, size_t size);
++#else
+ #include <stdlib.h>
++#define ini_malloc malloc
++#define ini_free free
++#define ini_realloc realloc
++#endif
+ #endif
+ 
+ #define MAX_SECTION 50
+@@ -110,7 +120,7 @@ int ini_parse_stream(ini_reader reader, void* stream, ini_handler handler,
+     int error = 0;
+ 
+ #if !INI_USE_STACK
+-    line = (char*)malloc(INI_INITIAL_ALLOC);
++    line = (char*)ini_malloc(INI_INITIAL_ALLOC);
+     if (!line) {
+         return -2;
+     }
+@@ -130,9 +140,9 @@ int ini_parse_stream(ini_reader reader, void* stream, ini_handler handler,
+             max_line *= 2;
+             if (max_line > INI_MAX_LINE)
+                 max_line = INI_MAX_LINE;
+-            new_line = realloc(line, max_line);
++            new_line = ini_realloc(line, max_line);
+             if (!new_line) {
+-                free(line);
++                ini_free(line);
+                 return -2;
+             }
+             line = new_line;
+@@ -224,7 +234,7 @@ int ini_parse_stream(ini_reader reader, void* stream, ini_handler handler,
+     }
+ 
+ #if !INI_USE_STACK
+-    free(line);
++    ini_free(line);
+ #endif
+ 
+     return error;
+diff --git a/ini.h b/ini.h
+index fa0c18cb02362b25dbb964be42c7676c04b457e2..78015d141e6878398e001790f28c480d66679edd 100644
+--- a/ini.h
++++ b/ini.h
+@@ -141,6 +141,15 @@ int ini_parse_string(const char* string, ini_handler handler, void* user);
+ #define INI_ALLOW_NO_VALUE 0
+ #endif
+ 
++/* Nonzero to use custom ini_malloc, ini_free, and ini_realloc memory
++   allocation functions (INI_USE_STACK must also be 0). These functions must
++   have the same signatures as malloc/free/realloc and behave in a similar
++   way. ini_realloc is only needed if INI_ALLOW_REALLOC is set. */
++#ifndef INI_CUSTOM_ALLOCATOR
++#define INI_CUSTOM_ALLOCATOR 0
++#endif
++
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/tests/baseline_alloc.txt b/tests/baseline_alloc.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..2567940e516d98fa8f0fcdd10bd6787d2d267c66
+--- /dev/null
++++ b/tests/baseline_alloc.txt
+@@ -0,0 +1,7 @@
++ini_malloc(12)
++... [section]
++... foo=bar;
++ini_realloc(24)
++... bazz=buzz quxx;
++ini_free()
++basic: e=0
+diff --git a/tests/unittest.bat b/tests/unittest.bat
+index b7e3e97deca1ed4ef66109cd9fa55596aaf7364c..ec7db72056e52acaf167e95a9b32c8bc9c8f334e 100644
+--- a/tests/unittest.bat
++++ b/tests/unittest.bat
+@@ -11,3 +11,4 @@
+ @call tcc ..\ini.c -I..\ -DINI_USE_STACK=0 -DINI_MAX_LINE=20 -DINI_INITIAL_ALLOC=20 -run unittest.c > baseline_heap_string.txt
+ @call tcc ..\ini.c -I..\ -DINI_CALL_HANDLER_ON_NEW_SECTION=1 -run unittest.c > baseline_call_handler_on_new_section.txt
+ @call tcc ..\ini.c -I..\ -DINI_ALLOW_NO_VALUE=1 -run unittest.c > baseline_allow_no_value.txt
++@call tcc ..\ini.c -I..\ -DINI_CUSTOM_ALLOCATOR=1 -DINI_USE_STACK=0 -DINI_ALLOW_REALLOC=1 -DINI_INITIAL_ALLOC=12 -run unittest_alloc.c > baseline_alloc.txt
+diff --git a/tests/unittest.sh b/tests/unittest.sh
+index e01f2158a12f07fa2516b83d748d215149986f01..96b17626c1e489a1907376009d199ce4e81a491d 100755
+--- a/tests/unittest.sh
++++ b/tests/unittest.sh
+@@ -55,3 +55,7 @@ rm -f unittest_call_handler_on_new_section
+ gcc ../ini.c -DINI_ALLOW_NO_VALUE=1 unittest.c -o unittest_allow_no_value
+ ./unittest_allow_no_value > baseline_allow_no_value.txt
+ rm -f unittest_allow_no_value
++
++gcc -DINI_CUSTOM_ALLOCATOR=1 -DINI_USE_STACK=0 -DINI_ALLOW_REALLOC=1 -DINI_INITIAL_ALLOC=12 ../ini.c unittest_alloc.c -o unittest_alloc
++./unittest_alloc > baseline_alloc.txt
++rm -f unittest_alloc
+diff --git a/tests/unittest_alloc.c b/tests/unittest_alloc.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..8059347429ce6d355624d58c7387930f725be082
+--- /dev/null
++++ b/tests/unittest_alloc.c
+@@ -0,0 +1,49 @@
++/* inih -- unit tests for custom memory allocator */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include "../ini.h"
++
++void* ini_malloc(size_t size) {
++    printf("ini_malloc(%d)\n", (int)size);
++    return malloc(size);
++}
++
++void ini_free(void* ptr) {
++    printf("ini_free()\n");
++    free(ptr);
++}
++
++void* ini_realloc(void* ptr, size_t size) {
++    printf("ini_realloc(%d)\n", (int)size);
++    return realloc(ptr, size);
++}
++
++char Prev_section[50];
++
++int dumper(void* user, const char* section, const char* name,
++           const char* value)
++{
++    if (strcmp(section, Prev_section)) {
++        printf("... [%s]\n", section);
++        strncpy(Prev_section, section, sizeof(Prev_section));
++        Prev_section[sizeof(Prev_section) - 1] = '\0';
++    }
++    printf("... %s=%s;\n", name, value);
++    return 1;
++}
++
++void parse(const char* name, const char* string) {
++    int e;
++
++    *Prev_section = '\0';
++    e = ini_parse_string(string, dumper, NULL);
++    printf("%s: e=%d\n", name, e);
++}
++
++int main(void)
++{
++    parse("basic", "[section]\nfoo = bar\nbazz = buzz quxx");
++    return 0;
++}
