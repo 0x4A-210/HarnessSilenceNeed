@@ -1,4 +1,4 @@
-# REAL-07 — expat @ b1d03960
+# REAL-13 — expat @ b1d03960
 
 - label: **positive** / silent / type `mix` (api + state + configuration) / introduced_by_this_change = True
 - change: https://github.com/libexpat/libexpat/commit/b1d039607d3d8a042bf0466bfcc1c0f104e353c8 (lib: Protect against billion laughs attacks)

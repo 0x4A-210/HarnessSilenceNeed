@@ -1,4 +1,4 @@
-# REAL-02 — c-ares @ 7d3591ee8a
+# REAL-08 — c-ares @ 7d3591ee8a
 
 - label: **positive** / silent / type `api` / introduced_by_this_change = True
 - change: https://github.com/c-ares/c-ares/commit/7d3591ee8a1a63e7748e68e6d880bd1763a32885 (getaddrinfo enhancements)

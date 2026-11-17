@@ -1,4 +1,4 @@
-# REAL-01 — libplist @ 429cbc660a
+# REAL-07 — libplist @ 429cbc660a
 
 - label: **positive** / silent / type `input_format` / introduced_by_this_change = True
 - change: https://github.com/libimobiledevice/libplist/commit/429cbc660ae14d4998715803b44c71abf0e4a339 (Add support for JSON format)
