@@ -1,0 +1,135 @@
+{
+ "schema": "3.0",
+ "id": "REAL-11",
+ "label": "positive",
+ "need_visibility": "silent",
+ "degradation_type": "mix",
+ "mix_components": [
+  "api",
+  "lifecycle"
+ ],
+ "introduced_by_this_change": false,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/google/oss-fuzz",
+ "event_key": {
+  "harness": "projects/gdk-pixbuf/targets/pixbuf_cons_fuzzer.c",
+  "gap_signature": "sha256:9f8b2e8fd2a5266d7d9635b12b07cdff402c462fe15c733004025437e5550c4e"
+ },
+ "uniqueness": {
+  "patch_id": "a3479e4564ee5ca5602d7c895c45e2a362cc3533"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "api_contract_violation",
+    "detail": "harness 调用 gdk_pixbuf_scale(pixbuf, pixbuf, ...) 用同一个 GdkPixbuf 同时作 src 和 dest。API 文档明确要求 src 与 dest 必须不同：'If the source rectangle overlaps the destination rectangle on the same pixbuf, it will be overwritten during the scaling which results in rendering artifacts.' 旧 harness 既不做校验也不崩，缩放操作静默地在原地把像素覆盖成错误结果——目标缩放路径（正确的 scale_simple 语义）从未被测到。修复改用 gdk_pixbuf_scale_simple()（新建 pixbuf、src 不受影响）。"
+   },
+   {
+    "kind": "lifecycle_object_leak",
+    "detail": "harness 反复把中间结果赋给同一个 tmp 变量却不先 unref 旧值：rotate_simple / flip / composite_color_simple 各返回的新 GdkPixbuf 都被下一次赋值覆盖而泄漏；且 g_bytes_new_static() 返回的 GBytes 在 pixbuf==NULL 的早退路径和主路径都不被 g_bytes_unref()。LSan 报 1704 bytes / 8 allocations 每轮泄漏，但 harness 照常编译、链接、运行（泄漏只在 sanitizer 下可见）——泄漏的中间对象生命周期管理错误是第二个静默 blocker。修复在每个赋值前加 g_object_unref(tmp) 并补 g_bytes_unref(bytes)。"
+   }
+  ]
+ },
+ "evidence": [
+  "H=e244e64313bb 提交信息原文：'gdk-pixbuf: fix memory leaks and API misuse in pixbuf_cons_fuzzer (#15080) / This is not a bug in gdk-pixbuf. It is a bug in the fuzz harness pixbuf_cons_fuzzer that causes memory leaks (1704 bytes in 8 allocations per iteration) detectable by LeakSanitizer, and an API contract violation (gdk_pixbuf_scale with same src and dest).'——点明两个独立 blocker 都是 harness 自身缺陷",
+  "P1（harness logic）原文：'Multiple intermediate GdkPixbuf objects leaked — tmp is overwritten repeatedly without freeing previous values: tmp = gdk_pixbuf_rotate_simple(...); // rotated leaked; tmp = gdk_pixbuf_flip(...); // flipped leaked; tmp = gdk_pixbuf_composite_color_simple(...); // composite leaked. Also, GBytes from g_bytes_new_static() is never freed.'",
+  "P2（API protocol）原文：'gdk_pixbuf_scale(pixbuf, pixbuf, ...) uses the same pixbuf as both source and destination. The API documentation requires they be different.'",
+  "diff 的修复三件事：1) 每个中间 tmp 在重新赋值前 g_object_unref；2) 所有路径补 g_bytes_unref(bytes)；3) gdk_pixbuf_scale(src==dest) 换成 gdk_pixbuf_scale_simple()",
+  "LSan 报告原文（README 转载）：'ERROR: LeakSanitizer: detected memory leaks … SUMMARY: AddressSanitizer: 1704 byte(s) leaked in 8 allocation(s)'，且'leak triggers on the first seed corpus input and is 100% reproducible'——泄漏是静默可复现的（编译运行正常，仅在 sanitizer 下可见），scale 错误是静默产生渲染 artifact（文档明说）",
+  "两个 blocker 均 silent（既不编译/链接失败也不运行即崩），且叠加发生在同一条 harness、同一次修复中，构成 mix/silent",
+  "本地实测（MinGW gcc 8.1.0，verification/probe_object_leak.c）：模拟中间对象覆写 tmp 不 unref + 每轮分配 GBytes 不释放——OLD 顺序 3 轮泄漏 12 个对象、FIX 顺序归 0，泄漏语义的 silent 机制实测复现"
+ ],
+ "rationale": {
+  "zh": "gdk-pixbuf 的 pixbuf_cons_fuzzer 同时存在两个相互独立的静默缺陷：一是 API 契约违规——gdk_pixbuf_scale(pixbuf, pixbuf, ...) 把同一个 pixbuf 既当 src 又当 dest，文档明确要求二者不同、重叠则'overwritten … rendering artifacts'，于是缩放静默地把原地像素覆盖成错误结果，正确的缩放路径测不到；二是对象生命周期泄漏——旋转/翻转/合成返回的中间 GdkPixbuf 反复覆写 tmp 从不 unref，GBytes 也不释放，每轮泄漏 1704 字节（LSan 下可见）。两条都照常编译、链接、运行，崩都不崩，但目标代码测不到、错误结果静默蔓延——是典型的多个 blocker 同时静默的 mix。修复 e244e64313bb 一次改掉三处（中间对象逐个 unref、补 bytes unref、scale 换 scale_simple）。introduced_by_this_change=false（harness 自身缺陷，非库变更引入）。与 REAL-05（同类型 mix、但三个 blocker 里 api_signature/missing_symbol 都是编译链接失败、explicit）互补，补上 mix/silent 这一格。",
+  "en": "gdk-pixbuf's pixbuf_cons_fuzzer carries two independent silent defects at once. First, an API contract violation: gdk_pixbuf_scale(pixbuf, pixbuf, ...) uses the same pixbuf as both src and dest, while the docs require them to differ and warn that overlap means 'overwritten … rendering artifacts' — the scaling silently clobbers pixels into wrong results and the correct path is never exercised. Second, object-lifecycle leaks: rotate/flip/composite intermediates repeatedly overwrite tmp without unref, and GBytes is never freed, leaking 1704 bytes per iteration (visible under LSan). Both build, link and run normally without crashing, yet the target code is unreachable and wrong results spread silently — a classic mix with multiple simultaneous silent blockers. Fix e244e64313bb changes all three spots at once (unref each intermediate, unref bytes, scale -> scale_simple). introduced_by_this_change=false (harness defect, not a library change). Complements REAL-05 (same mix type, but explicit: api_signature/missing_symbol fail to compile/link) to fill the mix/silent cell."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "n/a — 无单一引入 commit（harness 自身缺陷，非库变更引入）",
+   "M_parent": "n/a",
+   "M_on_mainline": false,
+   "harness_exists_at": [
+    "H^1",
+    "H"
+   ],
+   "H": "e244e64313bb7795a8665c974205712780eee5da",
+   "H_symbols_in_diff": [
+    "gdk_pixbuf_scale",
+    "gdk_pixbuf_scale_simple",
+    "g_object_unref",
+    "g_bytes_unref"
+   ]
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "e946b5e412fd",
+    "oss_rev": "n/a",
+    "mode": "plain",
+    "secs": 0.02,
+    "errors": [
+     "baseline：旧 harness 两个 blocker 都在，但编译链接运行正常（silent 的前提）"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "ok",
+    "sha": "e946b5e412fd",
+    "oss_rev": "n/a",
+    "mode": "plain",
+    "secs": 0.02,
+    "errors": [
+     "[原 status 说明] ok（silent：API 契约违规静默产 artifact + 每轮泄漏 1704B，均在 sanitizer/文档语义层面，运行不崩）",
+     "gdk_pixbuf_scale src==dest 违反契约（文档：overwritten → rendering artifacts）；tmp 反复覆盖不 unref + bytes 不 unref → LSan 1704B/8alloc 泄漏。编译、链接、运行全部正常。"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "e244e64313bb",
+    "oss_rev": "n/a",
+    "mode": "plain",
+    "secs": 0.01,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": null,
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "两个 blocker 均为 silent",
+    "pass": true,
+    "detail": "scale src==dest 静默覆盖像素（文档明说 rendering artifacts，不崩）；泄漏只在 LSan 下可见、运行正常"
+   },
+   {
+    "check": "mix 由多 blocker 组成",
+    "pass": true,
+    "detail": "两个独立 blocker（api_contract_violation + lifecycle_object_leak）叠加在同一条 harness，一次修复"
+   },
+   {
+    "check": "introduced_by_this_change = false",
+    "pass": true,
+    "detail": "提交信息明文 'This is not a bug in gdk-pixbuf. It is a bug in the fuzz harness'，无库侧 M"
+   }
+  ],
+  "budget_note": "1) H 的完整 diff（GitHub API per-file patch）、父提交 e946b5e412fd 的旧 harness 全文、修复版全文均落盘 input/harness/ 与 verification/。2) blocker#2 的泄漏语义已用本地 MinGW gcc 8.1.0 最小探针实测（probe_object_leak.c）：OLD 3 轮泄漏 12 对象/FIX 归 0；blocker#1（scale src==dest 契约违规）由提交信息原文 + gdk-pixbuf 官方文档语义证实（文档明说 overlapping 会 overwritten → rendering artifacts），泄漏数字（1704B/8alloc）照抄 H 的 LSan 报告原文。3) 限制：未在本地跑 gdk-pixbuf + LSan 实证真实 1704B 泄漏（环境无 gtk 依赖），泄漏数字为引用官方 LSan 报告原文。B = 0（未跑 fuzz；理由见 fuzz.reason）",
+  "toolchain": "api.github.com（contents raw 端点）取新旧 harness、commit 的 per-file patch；git patch-id --stable 计算 patch_id",
+  "fuzz": {
+   "skipped": true,
+   "reason": "未跑 fuzz：mix 的两个 blocker 已由提交信息原文 + 官方 API 文档语义 + diff 逐行核实形成闭环，无需 gdk-pixbuf 完整构建"
+  }
+ },
+ "urls": {
+  "M": "n/a（introduced_by_this_change=false，无单一引入 commit）",
+  "M_parent": "n/a",
+  "harness_oss_fuzz_rev": "https://github.com/google/oss-fuzz/tree/e244e64313bb7795a8665c974205712780eee5da/projects/gdk-pixbuf",
+  "H": "https://github.com/google/oss-fuzz/commit/e244e64313bb7795a8665c974205712780eee5da"
+ }
+}

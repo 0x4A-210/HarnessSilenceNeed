@@ -1,0 +1,78 @@
+From d94076d68f841419e155dad6c43e399b2824dbf3 Mon Sep 17 00:00:00 2001
+From: Ze Sheng <108382772+OwenSanzas@users.noreply.github.com>
+Date: Sat, 7 Mar 2026 15:36:11 -0600
+Subject: [PATCH] Fix libyaml_emitter_fuzzer: inverted copy_event return value check
+
+The libyaml_emitter_fuzzer has an inverted return value check that makes
+the entire emitter path dead code.
+
+Bug 1: Inverted logic in copy_event check
+
+copy_event() wraps yaml_*_event_initialize() functions, which return
+1 on success, 0 on failure (standard libyaml convention). However, the
+check on line 250 enters the error path when copy_event succeeds
+(returns 1). For every valid YAML input, the fuzzer short-circuits on
+the very first event. The following code is never reached:
+
+  - yaml_emitter_emit() -- the entire emitter path
+  - The second parser loop (re-parse emitted output and compare events)
+  - The events_equal() comparison logic
+
+Roughly 50% of the fuzzer's logic is dead code.
+
+Bug 2: Pre-increment causes UB on failure path
+
+event_number++ was inside the copy_event() call as a post-increment.
+When copy_event fails, event_number has already been incremented, but
+events[old_number] was not initialized. The cleanup loop then calls
+yaml_event_delete() on an uninitialized event -- undefined behavior.
+
+Bug 3: NULL buffer passed to yaml_parser_set_input_string
+
+When the emitter produces no output (e.g., empty YAML stream), out.buf
+remains NULL. The second parser loop passes this NULL to
+yaml_parser_set_input_string(), which has assert(input). This was masked
+by Bug 1 since the second parser loop was never reached.
+
+Coverage comparison (60 seconds, AddressSanitizer, libFuzzer fork mode):
+
+  Metric   | Original | Fixed | Change
+  Edges    | 166      | 2479  | +1393%
+  Features | 437      | 10285 | +2253%
+  Corpus   | 135      | 2258  | +1573%
+
+The ~15x edge coverage increase confirms that the emitter, write handler,
+and re-parser code paths were entirely dead in the original fuzzer.
+---
+ projects/libyaml/libyaml_emitter_fuzzer.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/projects/libyaml/libyaml_emitter_fuzzer.c b/projects/libyaml/libyaml_emitter_fuzzer.c
+index 817416123227..dc1651c92060 100644
+--- a/projects/libyaml/libyaml_emitter_fuzzer.c
++++ b/projects/libyaml/libyaml_emitter_fuzzer.c
+@@ -247,10 +247,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+       goto delete_parser;
+     }
+ 
+-    if (copy_event(&events[event_number++], &event)) {
++    if (!copy_event(&events[event_number], &event)) {
+       yaml_event_delete(&event);
+       goto delete_parser;
+     }
++    event_number++;
+ 
+     if (!yaml_emitter_emit(&emitter, &event)) {
+       goto delete_parser;
+@@ -260,6 +261,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+ 
+   yaml_parser_delete(&parser);
+ 
++  if (!out.buf || out.size == 0)
++    goto error;
++
+   done = false;
+   if (!yaml_parser_initialize(&parser))
+     goto error;
+--
+2.43.0

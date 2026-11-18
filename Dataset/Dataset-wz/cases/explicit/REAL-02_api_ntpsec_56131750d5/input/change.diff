@@ -1,0 +1,116 @@
+From 32a950f65ad6fe90d04e90c597416f0377d008e0 Mon Sep 17 00:00:00 2001
+From: Hal Murray <halmurray@sonic.net>
+Date: Wed, 25 Mar 2026 05:08:51 -0700
+Subject: [PATCH] nts now works with pool
+
+---
+ NEWS.adoc               |  2 ++
+ include/ntp_dns.h       |  2 +-
+ ntpd/ntp_proto.c        | 14 ++++++++++++++
+ ntpd/nts_client.c       |  9 +++++++--
+ tests/ntpd/nts_client.c |  7 +++++++
+ 5 files changed, 31 insertions(+), 3 deletions(-)
+
+diff --git a/NEWS.adoc b/NEWS.adoc
+index c86ffa1805..315531c5dd 100644
+--- a/NEWS.adoc
++++ b/NEWS.adoc
+@@ -12,6 +12,8 @@ on user-visible changes.
+ 
+ ## Repository Head
+ 
++  pool <serv> nts now works
++
+   maxclock now skips the POOL slots when counting servers.
+   This is relevant if you use "tos maxclock nn" in your config file.
+   (It also skips servers with noselect on the config line.)
+diff --git a/include/ntp_dns.h b/include/ntp_dns.h
+index 32033112be..212965e08e 100644
+--- a/include/ntp_dns.h
++++ b/include/ntp_dns.h
+@@ -6,7 +6,7 @@
+ 
+ #include "ntp_net.h"
+ 
+-typedef enum {DNS_good, DNS_temp, DNS_error} DNS_Status;
++typedef enum {DNS_good, DNS_NTS_pool, DNS_temp, DNS_error} DNS_Status;
+ 
+ /* start DNS query (unless busy) */
+ extern bool dns_probe(struct peer*);
+diff --git a/ntpd/ntp_proto.c b/ntpd/ntp_proto.c
+index b759d3362f..02d783d4e2 100644
+--- a/ntpd/ntp_proto.c
++++ b/ntpd/ntp_proto.c
+@@ -2516,6 +2516,15 @@ dns_take_pool(
+ 	pctl.peerkey = 0;
+ 	peer = newpeer(rmtadr, NULL, lcladr,
+ 		       MODE_CLIENT, &pctl, MDF_UCAST, false);
++	if (pool->cfg.flags & FLAG_NTS) {
++	  /* pool is in NTS mode
++	     NTS info is in pool struct
++	     copy to new peer, clean out pool struct */
++	  peer->cfg.flags |= FLAG_NTS;
++	  memcpy(&peer->nts_state, &pool->nts_state, sizeof(peer->nts_state));
++	  ZERO(pool->nts_state);
++	  pool->nts_state.count = -1;
++	}
+ 	peer_xmit(peer);
+ 	if (peer->cfg.flags & FLAG_IBURST)
+ 	  peer->retry = NTP_RETRY;
+@@ -2554,6 +2563,11 @@ void dns_take_status(struct peer* peer, DNS_Status status) {
+ 				/* pool: maybe need more */
+ 				hpoll = 8;
+ 			break;
++		case DNS_NTS_pool:
++			txt = "NTS-pool";
++			/* pool+NTS: only got one, maybe need more */
++			hpoll = 1;
++			break;
+ 		case DNS_temp:
+ 			/* DNS not working yet.  ??
+ 			 * Want to retry soon,
+diff --git a/ntpd/nts_client.c b/ntpd/nts_client.c
+index 54a58a7bc9..4039479379 100644
+--- a/ntpd/nts_client.c
++++ b/ntpd/nts_client.c
+@@ -211,8 +211,13 @@ bool nts_check(struct peer *peer) {
+ 		msyslog(LOG_INFO, "NTSc: nts_check %s, %d", errbuf, addrOK);
+ 	}
+ 	if (addrOK) {
+-		dns_take_server(peer, &sockaddr);
+-		dns_take_status(peer, DNS_good);
++		if (peer->cast_flags & MDF_POOL) {
++			dns_take_pool(peer, &sockaddr);
++			dns_take_status(peer, DNS_NTS_pool);
++		} else {
++			dns_take_server(peer, &sockaddr);
++			dns_take_status(peer, DNS_good);
++		}
+ 	} else
+ 		dns_take_status(peer, DNS_error);
+ 	return addrOK;
+diff --git a/tests/ntpd/nts_client.c b/tests/ntpd/nts_client.c
+index 0eb8db2a59..3e8f700187 100644
+--- a/tests/ntpd/nts_client.c
++++ b/tests/ntpd/nts_client.c
+@@ -9,6 +9,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++void dns_take_pool(struct peer *a, sockaddr_u *b);
+ void dns_take_server(struct peer *a, sockaddr_u *b);
+ void dns_take_status(struct peer *a, DNS_Status b);
+ 
+@@ -277,6 +278,12 @@ void setup_SIGSYS_trap(void) {
+ }
+ #endif
+ 
++void dns_take_pool(struct peer *a, sockaddr_u *b) {
++	UNUSED_ARG(a);
++	UNUSED_ARG(b);
++	return;
++}
++
+ void dns_take_server(struct peer *a, sockaddr_u *b) {
+ 	UNUSED_ARG(a);
+ 	UNUSED_ARG(b);
