@@ -1,0 +1,62 @@
+From d5b74d5cccd0601ef4f88b19ea9f32740fcb10ba Mon Sep 17 00:00:00 2001
+From: Mrmaxmeier <3913977+Mrmaxmeier@users.noreply.github.com>
+Date: Mon, 1 Jul 2024 17:34:53 +0200
+Subject: [PATCH] libarchive: fix harness and improve build setup (#12052)
+
+This fixes a major harness issue in the `libarchive` fuzzer and resolves
+a fuzzing roadblock issue related to the build setup.
+All calls after `archive_read_add_passphrase` currently exit early
+because the decoder state is marked as invalid due to incorrect API
+usage.
+
+When combined with https://github.com/libarchive/libarchive/pull/2229,
+this should improve coverage from ~15% to >45%.
+While the harness issue
+[regressed](https://github.com/google/oss-fuzz/pull/9452#issue-1538189000)
+at some point, it seems like the CRC build flag issue was always present
+in oss-fuzz's libarchive setup.
+
+Thanks!
+---
+ projects/libarchive/build.sh             | 5 +----
+ projects/libarchive/libarchive_fuzzer.cc | 4 ++--
+ 2 files changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/projects/libarchive/build.sh b/projects/libarchive/build.sh
+index 5ffb1cff2cea..368f2b0bf2fb 100755
+--- a/projects/libarchive/build.sh
++++ b/projects/libarchive/build.sh
+@@ -27,12 +27,9 @@ DEPS=/deps
+ 
+ cd $SRC/libarchive
+ 
+-sed -i 's/-Wall//g' ./CMakeLists.txt
+-sed -i 's/-Werror//g' ./CMakeLists.txt
+-
+ mkdir build2
+ cd build2
+-cmake -DCHECK_CRC_ON_SOLID_SKIP=1 -DDONT_FAIL_ON_CRC_ERROR=1 ../
++cmake -DDONT_FAIL_ON_CRC_ERROR=ON -DENABLE_WERROR=OFF ../
+ make -j$(nproc)
+ 
+ # build seed
+diff --git a/projects/libarchive/libarchive_fuzzer.cc b/projects/libarchive/libarchive_fuzzer.cc
+index c7f3ec70dfe0..097350399565 100644
+--- a/projects/libarchive/libarchive_fuzzer.cc
++++ b/projects/libarchive/libarchive_fuzzer.cc
+@@ -33,13 +33,13 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *buf, size_t len) {
+     return 0;
+   }
+ 
++  archive_read_add_passphrase(a, "secret");
++
+   if (ARCHIVE_OK != archive_read_open_memory(a, buf, len)) {
+     archive_read_free(a);
+     return 0;
+   }
+ 
+-  archive_read_add_passphrase(a, "secret");
+-
+   while(1) {
+     std::vector<uint8_t> data_buffer(getpagesize(), 0);
+     struct archive_entry *entry;

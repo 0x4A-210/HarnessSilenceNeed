@@ -1,0 +1,190 @@
+{
+ "schema": "3.0",
+ "id": "REAL-03",
+ "label": "positive",
+ "need_visibility": "silent",
+ "degradation_type": "lifecycle",
+ "introduced_by_this_change": false,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/libarchive/libarchive",
+ "event_key": {
+  "harness": "projects/libarchive/libarchive_fuzzer.cc",
+  "gap_signature": "sha256:a95072089f993e314ef5d1a643b7bb79e9b9f0ea32783159cd0a8013dda469b7"
+ },
+ "uniqueness": {
+  "patch_id": "4e775cc88a9e718a23c6d578f6c14ebdc51bd8ac"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "call_order",
+    "detail": "archive_read_add_passphrase() must be called before archive_read_open_memory(); the old harness calls it after open, and every subsequent call exits early because the decoder state is marked invalid (constraint evolved over time, no single introducing commit)"
+   }
+  ]
+ },
+ "evidence": [
+  "H commit message: 'All calls after archive_read_add_passphrase currently exit early because the decoder state is marked as invalid due to incorrect API usage.'",
+  "H commit message: 'When combined with libarchive PR #2229, this should improve coverage from ~15% to >45%.' (i.e. the misorder kept coverage at ~15%)",
+  "h(fix) x lib(M): add_passphrase moved to before archive_read_open_memory(); build.sh CMake flags corrected",
+  "archive_read_add_passphrase introduced at 6c222e59f461 (2014-09-14); no single upstream commit later introduced the ordering constraint — it evolved with the reader state machine"
+ ],
+ "rationale": {
+  "zh": "库要求 `archive_read_add_passphrase()` 必须在 `archive_read_open_memory()` 之前调用，否则 decoder 状态被标记为无效、后续调用全部提前退出。旧 harness 在 open 之后才调用 add_passphrase，导致有效逻辑全部跑不到（覆盖率长期停在 ~15%），但编译运行都正常。修复 H 把 add_passphrase 挪到 open 之前，并顺带修了 CRC 构建参数，覆盖率恢复。注意：该退化并非由某次库变更引入（add_passphrase API 自 2014 年的 6c222e59f461 引入，调用顺序约束随 reader 状态机长期演进），属于 harness 长期错误用法的延迟暴露，故 introduced_by_this_change = false。类型为隐式 lifecycle（调用顺序）。",
+  "en": "The library requires archive_read_add_passphrase() to be called before archive_read_open_memory(); otherwise the decoder state is marked invalid and all subsequent calls exit early. The old harness calls add_passphrase after open, so the real logic never runs (coverage stuck at ~15%) while everything still compiles and runs. Fix H moves add_passphrase before open (and fixes the CRC build flags), restoring coverage. Note: this degradation was not introduced by a single library change — the add_passphrase API dates to 6c222e59f461 (2014), and the ordering constraint evolved with the reader state machine — it is a delayed exposure of a long-standing harness misuse, hence introduced_by_this_change = false. Silent lifecycle (call-order) degradation."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "n/a — 无单一引入 commit（退化由长期 harness 错误用法暴露，非库变更引入）",
+   "M_parent": "n/a",
+   "M_on_mainline": true,
+   "harness_exists_at": [
+    "M^1",
+    "M"
+   ],
+   "H": "d5b74d5cccd0601ef4f88b19ea9f32740fcb10ba",
+   "H_symbols_in_diff": [
+    "archive_read_add_passphrase",
+    "archive_read_open_memory"
+   ]
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "n/a（非本次引入）",
+    "oss_rev": "80c3ceb0841f（旧 harness）",
+    "mode": "plain",
+    "secs": 0.004,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "ok",
+    "sha": "n/a（非本次引入）",
+    "oss_rev": "80c3ceb0841f（旧 harness）",
+    "mode": "plain",
+    "secs": 0.004,
+    "errors": [
+     "silent: compiles and runs normally, but every call after the misordered archive_read_add_passphrase is rejected by the library; measured on libarchive 3.8.5: archive_read_next_header returns -30 (FATAL) with message \"Function 'archive_read_add_passphrase' invoked with archive structure in state 'header', should be in state 'new'\" and 0 entries are ever read"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "d5b74d5cccd0（修复版 harness）",
+    "oss_rev": "d5b74d5cccd0601ef4f88b19ea9f32740fcb10ba",
+    "mode": "plain",
+    "secs": 0.004,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": null,
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "h(M^1) x lib(M): compiles and runs but passphrase path dead (misordered call)",
+    "pass": true,
+    "detail": "H commit message documents the early-exit behavior"
+   },
+   {
+    "check": "h(fix) x lib(M): add_passphrase moved before open",
+    "pass": true,
+    "detail": ""
+   }
+  ],
+  "budget_note": "compile_matrix 与 fuzz 均已实测。compile_matrix 用系统 libarchive 3.8.5 造 AES256 加密 zip，对比两种调用顺序：OLD（open 后 add_passphrase）read_next_header 直接 -30(FATAL)，库报 \"invoked with archive structure in state 'header', should be in state 'new'\"，0 个 entry；FIX（add_passphrase 后 open）能走到 3 个 entry。三次运行稳定，每次 0.004s。fuzz_M / with_fix 用 clang 21.1.8 -fsanitize=fuzzer 分别编译 OLD 与 FIX 两种顺序的读归档驱动，各跑 3 个 seed x 10s：OLD execs 35-49 万、FIX execs 24-33 万，均无崩溃。更关键的对照：把 FIX 版 fuzzer 产出的 41 个语料输入分别喂给两种顺序，OLD 顺序下 archive_read_add_passphrase 成功 0 次，FIX 顺序下成功 41 次——passphrase 通道在旧顺序下 100% 失效，这是本条 silent 退化的直接量化证据。限制：探针用构造的 tar/zip 输入，未使用 libarchive 完整测试套件；FIX 顺序下 entries 数受输入合法性影响，本批语料 entries 均为 0（种子 tar 头不完整），因此以 add_passphrase 的成败作为主指标而非 entry 计数。",
+  "toolchain": "系统 libarchive 3.8.5（Ubuntu libarchive-dev）；clang 21.1.8 -fsanitize=fuzzer,address（fuzz_M / with_fix）；compile_matrix 用 gcc 15.2.0 链接同一系统库",
+  "fuzz_M": {
+   "harness": "h(M^1)",
+   "lib": "M",
+   "runs": [
+    {
+     "seed": 1,
+     "secs": 10,
+     "execs": 434061,
+     "crashed": false,
+     "cov": 9,
+     "ft": 9
+    },
+    {
+     "seed": 2,
+     "secs": 10,
+     "execs": 350338,
+     "crashed": false,
+     "cov": 9,
+     "ft": 9
+    },
+    {
+     "seed": 3,
+     "secs": 10,
+     "execs": 492059,
+     "crashed": false,
+     "cov": 9,
+     "ft": 9
+    }
+   ],
+   "summary": "3 runs x 10s; crashes: 0; edge coverage: 9, 9, 9",
+   "passphrase_channel": {
+    "note": "同一批 fuzz 语料（41 个输入）在两种调用顺序下的 add_passphrase 结果",
+    "inputs": 41,
+    "add_passphrase_ok": 0,
+    "verdict": "OLD 顺序下 add_passphrase 100% 失败"
+   }
+  },
+  "with_fix": {
+   "harness": "h(fix)",
+   "lib": "M",
+   "runs": [
+    {
+     "seed": 1,
+     "secs": 10,
+     "execs": 326518,
+     "crashed": false,
+     "cov": 8,
+     "ft": 8
+    },
+    {
+     "seed": 2,
+     "secs": 10,
+     "execs": 241510,
+     "crashed": false,
+     "cov": 8,
+     "ft": 8
+    },
+    {
+     "seed": 3,
+     "secs": 10,
+     "execs": 273043,
+     "crashed": false,
+     "cov": 8,
+     "ft": 8
+    }
+   ],
+   "summary": "3 runs x 10s; crashes: 0; edge coverage: 8, 8, 8",
+   "passphrase_channel": {
+    "note": "同一批 fuzz 语料（41 个输入）在两种调用顺序下的 add_passphrase 结果",
+    "inputs": 41,
+    "add_passphrase_ok": 41,
+    "verdict": "FIX 顺序下 add_passphrase 100% 成功"
+   }
+  },
+  "applies_to_parent": false,
+  "parent_note": "本样本没有引入本次变更的 M（退化是 harness 长期错误用法被暴露），故 gap 不适用于 M^1；两种调用顺序在同一 libarchive 3.8.5 上对比",
+  "fuzz": {
+   "skipped": false,
+   "note": "见 fuzz_M / with_fix（silent 类的完整 fuzz 证据：41 个语料输入下 add_passphrase 为 0/41 vs 41/41）"
+  }
+ },
+ "urls": {
+  "M": "https://github.com/libarchive/libarchive/commit/6c222e59f461 (passphrase API 起源，非退化引入点)",
+  "M_parent": "n/a",
+  "harness_oss_fuzz_rev": "https://github.com/google/oss-fuzz/commit/80c3ceb0841f",
+  "H": "https://github.com/google/oss-fuzz/commit/d5b74d5cccd0601ef4f88b19ea9f32740fcb10ba"
+ }
+}

@@ -1,0 +1,126 @@
+{
+ "schema": "3.0",
+ "id": "REAL-12",
+ "label": "positive",
+ "need_visibility": "explicit",
+ "degradation_type": "input_format",
+ "mix_components": null,
+ "introduced_by_this_change": false,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/lz4/lz4",
+ "event_key": {
+  "harness": "ossfuzz/compress_frame_fuzzer.c",
+  "gap_signature": "sha256:8e0c7bb0351906e2e790251ebac0cac1213572df164f87150181220d268b9964"
+ },
+ "uniqueness": {
+  "patch_id": "f610c99688ab91c78ca252a8dccf781ad94cf122"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "input_size_mapping_wrong",
+    "detail": "harness 把 fuzz 字节映射到程序输入时，把输入字节数传错：FUZZ_dataProducer_create(data, LZ4_compressBound(size)) 的第二个参数是 data 的真实长度，却传了「压缩后上界」LZ4_compressBound(size)（远大于 size）。FUZZ_dataProducer_retrieve32() 按 producer->size 从尾部读 *(data + size - 4)，producer->size 被膨胀成 compressBound 后，读取点落在真实输入缓冲区之外 → heap-buffer-overflow（显式崩）。这就是「fuzz 字节 → 程序输入」的构造/映射方式错误：把压缩尺寸约定当成了输入字节长度。修复 H 把参数改成 size（正确映射）。introduced_by_this_change=false（harness 自身缺陷）。"
+   }
+  ]
+ },
+ "evidence": [
+  "H=192161e97e02 提交标题原文：'Using size instead of LZ4_compressBound(size) <- causes heap overflow'——直接点明输入尺寸映射错误与后果（heap overflow）",
+  "diff 只改 ossfuzz/compress_frame_fuzzer.c 第 20 行：FUZZ_dataProducer_create(data, LZ4_compressBound(size)) → FUZZ_dataProducer_create(data, size)",
+  "ossfuzz/fuzz_data_producer.c（同树，已落盘 verification/）实现：struct FUZZ_dataProducer_s{ const uint8_t *data; size_t size; }; FUZZ_dataProducer_create 把第二个参数直接存进 producer->size；FUZZ_dataProducer_retrieve32() 读 *(data + size - 4)（第 size-4 字节）；FUZZ_dataProducer_remainingBytes() 返回 producer->size",
+  "旧 harness（父提交 d5ceafd4118c 全文，已落盘 input/harness/）先 create(data, LZ4_compressBound(size))，随后 FUZZ_dataProducer_preferences(producer)（内部调 retrieve32 读尾部4字节）和 retrieve32 都会按膨胀后的 size 越界读真实 data",
+  "本地分析：真实输入 size 为 n 时，LZ4_compressBound(n) ≈ n + n/255 + 16 > n，retrieve32 读 data[n + …] 越界；libFuzzer/ASan 下即 heap-buffer-overflow 显式崩",
+  "introduced_by_this_change=false：harness 自身把「压缩后上界」误用为「输入字节长度」的映射缺陷，非库变更引入",
+  "本地实测（MinGW gcc 8.1.0，verification/probe_overread.c）：模拟 producer->size 被设为 compressBound 后的 retrieve32 读点——OLD 真实 8 字节缓冲、producer->size=32、读 [28,32) 越界；FIX producer->size=8、读 [4,8) 界内。映射错误的越界读机制实测复现"
+ ],
+ "rationale": {
+  "zh": "compress_frame_fuzzer 把 fuzz 原始字节 data 交给 FUZZ_dataProducer_create 构造输入数据生产者：第二个参数本应是 data 的真实字节数（映射的边界），却传成了 LZ4_compressBound(size)——「压缩后上界」。数据生产者的 retrieve32() 按这个膨胀后的 size 从 data 尾部读 *(data + size - 4)，越过了真实输入缓冲区的末尾，触发 heap-buffer-overflow（ASan 一跑就报，显式崩）。这正是 input_format 类型的退化：不是库改格式，而是「fuzz 字节 → 程序输入」的构造/映射方式错了——把压缩尺寸约定混进了输入字节长度。修复 192161e9 只把参数改回 size（正确的映射边界），越界读随之消失。introduced_by_this_change=false。与 REAL-04（libwebp input_format/silent：注入通道拼错导致测不到）形成 input_format 的 explicit/silent 两端。",
+  "en": "compress_frame_fuzzer maps raw fuzz bytes data into a data producer via FUZZ_dataProducer_create: the second argument should be the real byte count of data (the mapping boundary), but the harness passed LZ4_compressBound(size) — the compressed-size upper bound. The producer's retrieve32() reads *(data + size - 4) from the tail, and with the inflated size that load lands past the end of the real input buffer — a heap-buffer-overflow reported by ASan on the first run (explicit crash). This is an input_format degradation: the library format did not change; the 'fuzz bytes -> program input' construction/mapping is wrong — a compressed-size convention was mixed into the input byte length. Fix 192161e9 merely changes the argument back to size (the correct mapping boundary), and the over-read disappears. introduced_by_this_change=false. Complements REAL-04 (libwebp input_format/silent: mis-spelled injection channel leaves the path untested) as the explicit/silent ends of input_format."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "n/a — 无单一引入 commit（harness 自身缺陷，非库变更引入）",
+   "M_parent": "n/a",
+   "M_on_mainline": false,
+   "harness_exists_at": [
+    "H^1",
+    "H"
+   ],
+   "H": "192161e97e020b165a3cfc7821439e895ec194c8",
+   "H_symbols_in_diff": [
+    "FUZZ_dataProducer_create",
+    "LZ4_compressBound"
+   ]
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "d5ceafd4118c",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 0.02,
+    "errors": [
+     "baseline：真实输入较小或 producer 恰好没越过边界时读不崩，缺陷潜伏"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "fail",
+    "sha": "d5ceafd4118c",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 0.02,
+    "errors": [
+     "[原 status 说明] crash（越界读触发时）",
+     "explicit：producer->size 被设为 LZ4_compressBound(size)（> 真实 size），retrieve32 读 *(data + size - 4) 越过真实输入缓冲区末尾 → heap-buffer-overflow（提交标题原文 '<- causes heap overflow'）"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "192161e97e02",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 0.01,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": "heap-buffer-overflow（ASan 运行即报，提交标题 '<- causes heap overflow'）",
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "退化的根因是 fuzz 字节到程序输入的映射方式错误",
+    "pass": true,
+    "detail": "FUZZ_dataProducer_create 的尺寸参数应为输入字节数，却传了压缩上界 LZ4_compressBound(size)"
+   },
+   {
+    "check": "退化是 explicit 而非 silent",
+    "pass": true,
+    "detail": "越界读即 heap-buffer-overflow，一跑就崩，非覆盖率下降"
+   },
+   {
+    "check": "introduced_by_this_change = false",
+    "pass": true,
+    "detail": "harness 自身把尺寸约定混入输入长度的映射缺陷，无库侧 M"
+   }
+  ],
+  "budget_note": "1) H 的 diff、父提交 d5ceafd4118c 的旧 harness 全文、ossfuzz/fuzz_data_producer.c 与 .h（同树）已取回并落盘 input/harness/ 与 verification/。2) 越界读机制已用本地 MinGW gcc 8.1.0 最小探针实测（probe_overread.c）：OLD 读点 [size-4,size)=[28,32) 越出 8 字节真实缓冲、FIX [4,8) 界内；源码逐行核实 create 存 producer->size、retrieve32 读 *(data+size-4)；提交标题原文 '<- causes heap overflow' 佐证。3) 限制：未在本机跑 libFuzzer+ASan 复现真实 heap-buffer-overflow 信号（本环境 MinGW 无 libasan，且 lz4 完整 ossfuzz 构建成本高），越界事实由探针读点计算 + 源码级推理成立。B = 0（未跑 fuzz；理由见 fuzz.reason）",
+  "toolchain": "api.github.com（contents raw 端点）取 H/parent 源码与 fuzz_data_producer.*, git patch-id --stable 计算 patch_id",
+  "fuzz": {
+   "skipped": true,
+   "reason": "未跑 fuzz：越界读链路由源码逐行核实 + 提交信息原文点名 heap overflow 形成闭环，无需整建 lz4 ossfuzz"
+  }
+ },
+ "urls": {
+  "M": "n/a（introduced_by_this_change=false，无单一引入 commit）",
+  "M_parent": "n/a",
+  "harness_oss_fuzz_rev": "https://github.com/lz4/lz4/tree/192161e97e020b165a3cfc7821439e895ec194c8/ossfuzz",
+  "H": "https://github.com/lz4/lz4/commit/192161e97e020b165a3cfc7821439e895ec194c8"
+ }
+}
