@@ -1,0 +1,126 @@
+{
+ "schema": "3.0",
+ "id": "REAL-16",
+ "label": "positive",
+ "need_visibility": "explicit",
+ "degradation_type": "lifecycle",
+ "mix_components": null,
+ "introduced_by_this_change": false,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/google/oss-fuzz",
+ "event_key": {
+  "harness": "projects/binutils/fuzz_readelf.c",
+  "gap_signature": "sha256:21fa101113afdf6dade2cb8ce7c6a2e6c7e0509f08d0dd791d77a66eb2216592"
+ },
+ "uniqueness": {
+  "patch_id": "86067670f29cf7f03d6c2ebc0cbadc6a7595f502"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "cleanup_double_free",
+    "detail": "fuzz_readelf.c 在每一轮 LLVMFuzzerTestOneInput() 末尾无条件 free 三个全局指针 dump_ctf_symtab_name / dump_ctf_strtab_name / dump_ctf_parent_name，但 free 后不置 NULL。这三个指针是 binutils readelf 在解析含 CTF section 的输入时（通过 xstrdup）分配的；libFuzzer 在同一进程内反复调用 harness，遇到非 CTF 输入时 decoder 不重新分配、而 harness 又对同一个已经 free 过的指针再次 free → double free → abort（issue 27734 标题就是 'Abrt with empty stacktrace'）。修复 H 就是在三处 free 后各加一行置 NULL。属 harness 自身缺陷（introduced_by_this_change=false），生命周期（free 后未置空）错误，显式崩（Abrt）。"
+   }
+  ]
+ },
+ "evidence": [
+  "H=9de297cc736f 提交信息原文：'Issue 27734: binutils:fuzz_readelf: Abrt with empty stacktrace (#4945) / Clear static vars after freeing, to prevent a double-free on the next test iteration.'——「next test iteration」精确点出跨迭代状态复用",
+  "diff 只改 projects/binutils/fuzz_readelf.c：三处 free() 后各加 dump_ctf_symtab_name = NULL; dump_ctf_strtab_name = NULL; dump_ctf_parent_name = NULL;",
+  "旧 harness 代码（c3d69abf148c，H 的父提交）free(dump_ctf_symtab_name); free(dump_ctf_strtab_name); free(dump_ctf_parent_name); 之后直接 return 0，无置空",
+  "本地实测（MinGW gcc 8.1.0）：复现探针模拟「CTF 输入轮次 decoder 分配全局指针、非 CTF 输入轮次 decoder 不分配、harness 每轮无条件 free」——OLD 顺序（free 后不置空）第二轮 free 同一指针进程崩（exit=127，double free abort）；FIX 顺序（free 后置 NULL）free(NULL) 为 no-op，survived（exit=0）",
+  "三个指针是 binutils readelf 的全局变量（dump_ctf_symtab_name 等），非 harness 局部变量，因此 double free 的根源是 harness 的清理生命周期与 decoder 分配生命周期的错配"
+ ],
+ "rationale": {
+  "zh": "binutils 的 readelf 在解析带 CTF section 的 ELF 时会把三个全局指针 dump_ctf_symtab_name / dump_ctf_strtab_name / dump_ctf_parent_name 用 xstrdup 分配（这些是库的全局变量，归属于 readelf 的 CTF dump 逻辑）。fuzz_readelf 这个 harness 在每轮迭代末尾无条件 free 这三个指针，却从不置 NULL。libFuzzer 会在同一进程内反复调用 LLVMFuzzerTestOneInput：当上一轮是 CTF 输入（指针已被分配并 free 成悬垂）、本轮是非 CTF 输入（decoder 不重新分配）时，harness 对同一个已经 free 过的指针再次 free，触发 glibc 的 double free 检测直接 abort——崩溃栈近乎为空（issue 27734 的标题就是 'Abrt with empty stacktrace'）。这是 harness 自身缺陷（库没变、harness 从加入就有这个 bug，introduced_by_this_change=false），类型是 lifecycle（free 后未置空的清理生命周期错误），可见性是 explicit（一跑就崩）。修复 H 只在三处 free 后各加一行置 NULL，与 REAL-03（libarchive 调用顺序错导致 silent）互补，补齐了 lifecycle/explicit 这一格。",
+  "en": "binutils' readelf, when parsing an ELF with a CTF section, allocates three globals dump_ctf_symtab_name / dump_ctf_strtab_name / dump_ctf_parent_name via xstrdup (library globals owned by readelf's CTF dump logic). The fuzz_readelf harness frees these three pointers unconditionally at the end of every iteration but never nulls them. libFuzzer calls LLVMFuzzerTestOneInput repeatedly in one process: when the previous iteration was a CTF input (pointers allocated then freed, now dangling) and the current one is a non-CTF input (decoder does not re-allocate), the harness frees the same already-freed pointer again, and glibc's double-free detection aborts with an almost-empty stack (issue 27734 is literally titled 'Abrt with empty stacktrace'). This is a harness defect (the library did not change; the bug existed since the harness was added, introduced_by_this_change=false), type lifecycle (free-without-null cleanup bug), visibility explicit (crashes on run). Fix H merely adds one nulling line after each of the three frees, complementing REAL-03 (libarchive call-order -> silent) to complete the lifecycle/explicit cell."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "n/a — 无单一引入 commit（harness 自身缺陷，非库变更引入）",
+   "M_parent": "n/a",
+   "M_on_mainline": false,
+   "harness_exists_at": [
+    "H^1",
+    "H"
+   ],
+   "H": "9de297cc736fe5c2579e89d970f366d3703139dc",
+   "H_symbols_in_diff": [
+    "dump_ctf_symtab_name",
+    "dump_ctf_strtab_name",
+    "dump_ctf_parent_name",
+    "NULL"
+   ]
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "c3d69abf148c",
+    "oss_rev": "n/a",
+    "mode": "plain",
+    "secs": 0.02,
+    "errors": [
+     "baseline：旧 harness 每轮 free 三个全局指针但不置空"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "ok",
+    "sha": "c3d69abf148c",
+    "oss_rev": "n/a",
+    "mode": "plain",
+    "secs": 0.02,
+    "errors": [
+     "[原 status 说明] ok (第一轮) / crash (第二轮)",
+     "explicit：CTF 输入轮次 decoder 分配、harness free 成悬垂；下一个非 CTF 轮次 decoder 不分配、harness 再次 free 同一指针 → double free → Abrt（issue 27734 'Abrt with empty stacktrace'）"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "9de297cc736f",
+    "oss_rev": "n/a",
+    "mode": "plain",
+    "secs": 0.01,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": "double free -> abort()（exit=127 实测），对应 issue 27734 标题 'Abrt with empty stacktrace'",
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "h(M^1) x lib(M): 第二个非 CTF 迭代 double free 崩",
+    "pass": true,
+    "detail": "旧代码 free 三个全局指针后不置 NULL；libFuzzer 跨迭代复用同一进程，非 CTF 输入轮次对已 free 指针再次 free"
+   },
+   {
+    "check": "h(fix) x lib(M): 不再崩",
+    "pass": true,
+    "detail": "三处 free 后各加 = NULL，free(NULL) 是 no-op"
+   },
+   {
+    "check": "退化是 explicit 而非 silent",
+    "pass": true,
+    "detail": "崩溃（Abrt/exit=127）一眼可见，非覆盖率下降"
+   }
+  ],
+  "budget_note": "1) H 的 diff、父提交 c3d69abf148c 的旧 harness 全文、修复后 harness（在 OLD 上人工加三行 = NULL）均已落盘。2) 崩溃机制用本地 MinGW gcc 8.1.0 的最小探针实测复现（OLD exit=127 崩、FIX exit=0 survived），探针源码在 verification/probe_doublefree.c。3) 限制：未跑完整 binutils + libFuzzer 环境（需整套 binutils 构建与 ASan），崩溃复现是「同一 double-free 模式的最小等价探针」，非原始 target 二进制的实测。B = 0（未跑 fuzz；理由见 fuzz.reason）",
+  "toolchain": "api.github.com 取 H 的 diff 与父提交源码、raw.githubusercontent.com 取 harness 旧版全文、本地 MinGW gcc 8.1.0 编译最小探针实测 double free",
+  "fuzz": {
+   "skipped": true,
+   "reason": "未跑 fuzz：double free 的机制已由提交信息原文 + 源码级核实 + 最小探针实测（OLD 崩 / FIX 存活）形成闭环，无需整建 binutils"
+  }
+ },
+ "urls": {
+  "M": "n/a（introduced_by_this_change=false，无单一引入 commit）",
+  "M_parent": "n/a",
+  "harness_oss_fuzz_rev": "https://github.com/google/oss-fuzz/tree/9de297cc736fe5c2579e89d970f366d3703139dc/projects/binutils",
+  "H": "https://github.com/google/oss-fuzz/commit/9de297cc736fe5c2579e89d970f366d3703139dc"
+ }
+}

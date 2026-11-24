@@ -1,0 +1,182 @@
+{
+ "schema": "3.0",
+ "id": "REAL-21",
+ "label": "positive",
+ "need_visibility": "silent",
+ "degradation_type": "configuration",
+ "mix_components": null,
+ "introduced_by_this_change": false,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/xiph/speex",
+ "event_key": {
+  "harness": "projects/speex/build.sh",
+  "gap_signature": "sha256:04d74db3872ad079c95734bdb1ae636cf0861195be9ba51e8acf9d64230909d2"
+ },
+ "uniqueness": {
+  "patch_id": "a8d74535b7c9dea96e0d112ef1cc1c2b14366cd1"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "config_option_ineffective",
+    "detail": "build.sh 第 29 行用 ./configure --enable-fixed 构建『定点』fuzz target，但 speex 的 configure.ac （第 148 行 AC_ARG_ENABLE(fixed-point, [  --enable-fixed-point    Compile as fixed-point])）从未定义过 --enable-fixed 这个选项。autoconf 对未知选项只打一条 WARNING 就继续，configure 退出码仍是 0，config.h 里 #undef FIXED_POINT 保持原样。结果是 speex_decode_fuzzer_fixed 与 speex_decode_fuzzer_float 由同一份浮点库链接而成——两个二进制字节完全相同（sha256 4b6b639b…，2413504 字节），定点实现（libspeex 里 526 行 #ifdef FIXED_POINT 代码，分布在 filters.c/ltp.c/math_approx.h/cb_search.c/lsp.c/lpc.c/stereo.c/vq.c）根本没有被编译进任何产物。target 名字承诺覆盖定点解码器，实际覆盖恒为 0，而构建、链接、运行全都正常。"
+   }
+  ]
+ },
+ "evidence": [
+  "H=3675fa9bf6 的提交标题与 diff：'speex: fix configure option for fixed-point (#12928)'，全量变更只有一行：'-... --enable-static --disable-shared --enable-fixed' → '+... --enable-static --disable-shared --enable-fixed-point'（input/change.diff，717 字节）",
+  "configure.ac 第 148 行原文：'AC_ARG_ENABLE(fixed-point, [  --enable-fixed-point    Compile as fixed-point],' 紧随其后第 152 行 'AC_DEFINE([FIXED_POINT], , [Compile as fixed-point])' —— 真实选项名是 --enable-fixed-point，--enable-fixed 不存在",
+  "干净树上三次 configure（verification/config_option_effect.txt）：--enable-fixed → 'configure: WARNING: unrecognized options: --enable-fixed'，退出码 0，config.h 为 '/* #undef FIXED_POINT */'；--enable-fixed-point → 无警告，config.h 为 '#define FIXED_POINT /**/'；不带选项 → 与 --enable-fixed 完全一致",
+  "按 build.sh 原样两步构建（verification/same_target_sha256.txt）：A 配置下 speex_decode_fuzzer_fixed 与 speex_decode_fuzzer_float 的 sha256 同为 4b6b639bb55e07fb7d2f481bf23596840667f86bdc16d8c1867307abf5cecb31、同为 2413504 字节——字节完全相同；B 配置（H 修复后）下 fixed=61af606894f9ac8b…（2409656 字节）、float=ca42e8d73d492024…（2413504 字节），确实是两套实现",
+  "同一份非插桩构建的 .text 段逐成员指纹（verification/text_fp_A/B/C.txt）：A（--enable-fixed）与 C（不带选项）的 25 个目标文件 .text 指纹逐字节相同，B 与 C 有 13 个成员不同（cb_search 7675→6962、filters 7414→9548、lpc 492→746、lsp 2625→4081、ltp 7641→8187、math_approx、nb_celp、quant_lsp、sb_celp、speex、stereo、vq 等）",
+  "llvm-cov 行覆盖（verification/covrep_A/B.txt、cov_compare.txt，同一 702 字节真实 .spx、同一 -runs=2000 -seed=1）：A 的 filters.c 只有 342 个可执行行、B 有 540（+198）、ltp.c 377→475（+98）、math_approx.h 71→161（+90）、vq.c 18→74（+56）、cb_search.c 336→378（+42）、lsp.c 167→191（+24）、lpc.c 34→53（+19）、stereo.c 136→145（+9）：这 +526 行全部是 #ifdef FIXED_POINT 分支，在 A 的产物里根本不存在；反向 A 独有 filters_sse.h(200)/vq_sse.h(76)/ltp_sse.h(49)/cb_search_sse.h(41) 这些浮点专用 SSE 头。B 中定点实现被执行到 125 行（filters +57、math_approx +26、lsp +15、ltp +14、stereo +10、cb_search +3），A 中恒为 0",
+  "四个产物跑同一条真实输入（verification/run_four_targets.txt）：tgt_A_fixed / tgt_A_float / tgt_B_fixed / tgt_B_float 全部 rc=0、fuzzer 内报 3~5 ms、无 ASan 报告——退化不产生任何运行期错误，判 silent 的直接依据",
+  "引入点：1bc9696491（2019-06-19，'[speex] add fuzzer targets (#2529)'）的 projects/speex/build.sh 第 29 行即已是 '--enable-static --disable-shared --enable-fixed'，该提交同时新增 Dockerfile/project.yaml/build.sh 三个文件——带病 2019-06-19 → 2025-01-10（约 5 年 7 个月）"
+ ],
+ "rationale": {
+  "zh": "speex 的定点与浮点是两套完全独立的实现：configure.ac 的真实开关是 --enable-fixed-point，它 AC_DEFINE 出 FIXED_POINT，libspeex 的 filters.c / ltp.c / lpc.c / lsp.c / cb_search.c / vq.c / quant_lsp.c / stereo.c 与 math_approx.h 全部用 #ifdef FIXED_POINT 二分。oss-fuzz 在 2019-06-19 的 1bc9696491（[speex] add fuzzer targets, #2529）里新增了『定点 target + 浮点 target 各一个』的双目标结构，但那一行写成了 --enable-fixed。这个选项在 speex 的 configure.ac 里从来不存在，autoconf 的处理方式是对未识别选项打一条警告然后丢弃：configure 退出码 0，构建继续，config.h 里 FIXED_POINT 仍是 #undef。于是 speex_decode_fuzzer_fixed 实际链接的是浮点库，与 speex_decode_fuzzer_float 是同一个产物。退化因此是完全静默的：编译过、链接过、跑起来 exit 0、没有任何告警进入日志（警告只在 configure 阶段一闪而过），但『定点解码器』这一整个被承诺的覆盖面从未存在过。带病时间从 2019-06-19 到 2025-01-10，约 5 年 7 个月，期间所有针对 fixed target 的 fuzz 报告其实都是 float 实现的结果。H=3675fa9bf6（2025-01-10, speex: fix configure option for fixed-point, #12928）只改了这一行，把 --enable-fixed 改成 --enable-fixed-point，定点实现立刻进入产物。本条与 REAL-15（libjpeg-turbo configuration/silent：CMake 里漏了四个 *_SUPPORTED 宏）同为『配置项没生效』型，但触发层次不同：REAL-15 是编译宏没传，本条是 configure 选项名写错、被 autoconf 静默吞掉；也更隐蔽——REAL-15 至少有四个格式分支落 default 的间接迹象，本条连一条运行期痕迹都没有，只有把两个 target 的二进制摆在一起比对才能发现它们是同一个文件。",
+  "en": "Speex ships two fully separate implementations: the real configure switch is --enable-fixed-point, which AC_DEFINEs FIXED_POINT, and libspeex splits filters.c / ltp.c / lpc.c / lsp.c / cb_search.c / vq.c / quant_lsp.c / stereo.c and math_approx.h along #ifdef FIXED_POINT. In 1bc9696491 (2019-06-19, '[speex] add fuzzer targets', #2529) oss-fuzz introduced the twin-target layout - one fixed-point target and one floating-point target - but wrote the option as --enable-fixed. That option has never existed in speex's configure.ac, and autoconf simply prints a warning for unrecognized options and drops them: configure exits 0, the build proceeds, and config.h keeps '#undef FIXED_POINT'. speex_decode_fuzzer_fixed therefore links the floating-point library and is the very same artifact as speex_decode_fuzzer_float. The degradation is entirely silent: it compiles, links, runs and exits 0 with nothing in the log (the warning appears only during configure), yet the fixed-point decoder - the entire promised surface - never existed in any binary. The bug lived from 2019-06-19 to 2025-01-10, about 5 years 7 months, during which every fuzzing result attributed to the fixed target was in fact produced by the float implementation. H=3675fa9bf6 (2025-01-10, 'speex: fix configure option for fixed-point', #12928) changes exactly that one line from --enable-fixed to --enable-fixed-point, and the fixed-point implementation immediately enters the artifact. This sample shares the 'option never took effect' mechanism with REAL-15 (libjpeg-turbo configuration/silent: four *_SUPPORTED macros never passed to CMake) but differs in layer: REAL-15 misses compile macros, this one misspells a configure option that autoconf swallows. It is also strictly more invisible - REAL-15 at least leaves a runtime trace (inputs fall into a default branch), whereas here there is no runtime trace at all, and only comparing the two target binaries reveals they are the same file."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "n/a — 库侧无引入 commit；退化完全在 oss-fuzz 的 build.sh 里，库版本为 speex 1.2.1 release tarball",
+   "M_parent": "n/a",
+   "M_on_mainline": false,
+   "harness_exists_at": [
+    "H^1",
+    "H"
+   ],
+   "harness_introduced_at": "1bc969649190b9e46e6844ed1e9271adf397b9dc",
+   "harness_introduced_date": "2019-06-19",
+   "harness_introduce_subject": "[speex] add fuzzer targets (#2529)",
+   "harness_introduced_in_buggy_form_note": "build.sh 自 2019-06-19 引入 fixed-point 目标时就把 configure 选项写成 --enable-fixed，带病约 5 年 7 个月（2019-06-19 → 2025-01-10）",
+   "H": "3675fa9bf62d38ad00eb946e3f55d00fe5cff03a",
+   "H_symbols_in_diff": [
+    "--enable-fixed",
+    "--enable-fixed-point",
+    "fixed-point"
+   ],
+   "pre_fix_blob_sha1": "8b319ed053d971803fbad871a7ea2c41d65518fe",
+   "pre_fix_blob_matches_diff_index": true
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "1bc969649190",
+    "oss_rev": "1bc969649190b9e46e6844ed1e9271adf397b9dc",
+    "mode": "configure+make+link（与 build.sh 同构）",
+    "secs": null,
+    "errors": [
+     "2019-06-19 的原始布局：--enable-fixed 未生效，speex_decode_fuzzer_fixed 与 _float 链接同一浮点库"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "ok",
+    "sha": "b59dc2e691ee",
+    "oss_rev": "b59dc2e691ee42b5722671013214dff0fee1d8a0",
+    "mode": "configure+make+link（与 build.sh 同构）",
+    "secs": null,
+    "errors": [
+     "silent，不是构建错误：configure 退出 0、make 成功、链接成功、运行 exit 0；仅有的痕迹是 configure 阶段一条 'unrecognized options: --enable-fixed' 警告"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "3675fa9bf62d",
+    "oss_rev": "3675fa9bf62d38ad00eb946e3f55d00fe5cff03a",
+    "mode": "configure+make+link（与 build.sh 同构）",
+    "secs": null,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": null,
+  "silent_signal": "产物同一性：旧配置下 speex_decode_fuzzer_fixed 与 speex_decode_fuzzer_float 字节完全相同（sha256 4b6b639b…，2413504 B）；修复后 fixed=61af6068…（2409656 B）≠ float=ca42e8d7…（2413504 B）。代码可达性：同一 702 字节真实 .spx、同一 -runs=2000 -seed=1 预算下，定点实现的 526 行源码（filters.c+198 / ltp.c+98 / math_approx.h+90 / vq.c+56 / cb_search.c+42 / lsp.c+24 / lpc.c+19 / stereo.c+9）在旧产物中可执行行数为 0（未编译），修复后其中 125 行被执行到；旧产物另含 366 行浮点专用 SSE 头（filters_sse.h/vq_sse.h/ltp_sse.h/cb_search_sse.h）为修复后所无。运行期：四个产物跑同一条输入全部 rc=0、无 ASan 报告。",
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "退化根因是 configure 选项名写错，不是崩溃也不是库 API 变更",
+    "pass": true,
+    "detail": "H 的 diff 只有一行；configure.ac 第 148 行定义的选项名为 fixed-point，--enable-fixed 不存在"
+   },
+   {
+    "check": "autoconf 对未知选项静默吞掉，构建不失败",
+    "pass": true,
+    "detail": "verification/config_option_effect.txt：old 配置 configure 退出码 0、config.h 保持 #undef FIXED_POINT，只有一条 WARNING；new 配置无警告且 #define FIXED_POINT"
+   },
+   {
+    "check": "两个 target 在旧配置下是同一产物",
+    "pass": true,
+    "detail": "sha256 均为 4b6b639b…、均 2413504 字节；.text 逐成员指纹与『不带选项』构建逐字节相同"
+   },
+   {
+    "check": "定点实现确实从未进入旧产物",
+    "pass": true,
+    "detail": "llvm-cov 可执行行数：A 3397 / B 3557，定点独占的 526 行在 A 中为 0；A 独有 366 行浮点 SSE 头"
+   },
+   {
+    "check": "判为 silent 而非 explicit",
+    "pass": true,
+    "detail": "四个产物跑同一输入全部 rc=0、无 ASan 报告；退化不产生任何运行期输出"
+   },
+   {
+    "check": "introduced_by_this_change = false",
+    "pass": true,
+    "detail": "错误选项自 1bc9696491（2019-06-19）引入即存在，H（2025-01-10）才修；库侧无对应变更"
+   },
+   {
+    "check": "pre_fix 不是拼凑：由 H 的 build.sh 反向还原并与 diff 对齐",
+    "pass": true,
+    "detail": "verification/build.sh.pre_fix 仅把 --enable-fixed-point 换回 --enable-fixed；change.diff 的 index 旧侧 8b319ed053d9 与 H^1 原文一致"
+   }
+  ],
+  "budget_note": "1) 库版本：speex 1.2.1 release tarball（sha256 4b44d4f2b38a370a2d98a78329fefc56a0cf93d1c1be70029217baae6628feea，1043278 字节），即 oss-fuzz Dockerfile 在 H 时代 clone 的同一版本；input/source/ 为其完整解包树（238 文件），git blob sha1 见 verification/source_blob_hashes_sha1.json。2) change.diff 是 H 的全量 diff（1 文件 717 字节），git patch-id --stable 得 patch_id=a8d74535b7c9dea96e0d112ef1cc1c2b14366cd1。3) 构建完全按 build.sh 的两步结构复现（先带选项装 libspeex 并链 *_fixed，再不带选项重装并链 *_float），编译器 clang 21.1.8，flags -g -O1 -fsanitize=fuzzer,address。4) 覆盖测量用 llvm-cov 插桩版（-fprofile-instr-generate -fcoverage-mapping）单独构建，输入为 speexenc 1.2.1 从 8 kHz 单声道 440 Hz 正弦 WAV 编码出的 702 字节 .spx（verification/sample_input.spx）。5) 限制：未在 OSS-Fuzz 容器内构建（本地无 docker），全程用 release tarball + 同版本 clang 复现；compile_matrix 的 secs 留空（构建耗时受机器负载影响，不作定量结论）。6) libogg 1.3.5 作为依赖本地静态构建（--disable-crc），与 build.sh 的 ogg 步骤一致。",
+  "toolchain": "WSL Ubuntu + clang 21.1.8 + llvm-cov/llvm-profdata；speex 1.2.1 tarball；libogg 1.3.5；git patch-id、git blob sha1 校验；oss-fuzz 本地克隆取 H/H^1 与引入提交",
+  "fuzz": {
+   "skipped": false,
+   "corpus_source": "speexenc 1.2.1 编码 8 kHz 单声道正弦波得到的 702 字节 .spx（1 个种子）",
+   "corpus_size": 1,
+   "budget": {
+    "seeds": 1,
+    "seconds_each": null,
+    "note": "不用时间预算，改用确定性 -runs=2000 -seed=1，两版同参数同语料，避免调度抖动"
+   },
+   "without_fix": [
+    {
+     "seed": 1,
+     "runs": 2000,
+     "edges": 61,
+     "features": 116,
+     "exec_ok": true,
+     "note": "cov: 61 ft: 116 与修复版完全相同——因为两版是同一份浮点实现"
+    }
+   ],
+   "with_fix": [
+    {
+     "seed": 1,
+     "runs": 2000,
+     "edges": 61,
+     "features": 116,
+     "exec_ok": true,
+     "note": "libFuzzer 边覆盖相同（同一浮点前端），差异只体现在 llvm-cov 的定点实现行覆盖上"
+    }
+   ]
+  }
+ },
+ "urls": {
+  "M": "n/a（introduced_by_this_change=false，无库侧引入 commit）",
+  "M_parent": "n/a",
+  "H": "https://github.com/google/oss-fuzz/commit/3675fa9bf62d38ad00eb946e3f55d00fe5cff03a",
+  "harness_oss_fuzz_rev": "https://github.com/google/oss-fuzz/commit/3675fa9bf62d38ad00eb946e3f55d00fe5cff03a",
+  "harness_introduced_at": "https://github.com/google/oss-fuzz/commit/1bc969649190b9e46e6844ed1e9271adf397b9dc",
+  "library_rev": "https://github.com/xiph/speex/releases/tag/Speex-1.2.1"
+ }
+}

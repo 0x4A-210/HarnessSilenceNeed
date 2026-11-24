@@ -1,0 +1,129 @@
+{
+ "schema": "3.0",
+ "id": "REAL-17",
+ "label": "positive",
+ "need_visibility": "explicit",
+ "degradation_type": "state",
+ "mix_components": null,
+ "introduced_by_this_change": false,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/lz4/lz4",
+ "event_key": {
+  "harness": "ossfuzz/round_trip_stream_fuzzer.c",
+  "gap_signature": "sha256:501d912db043dc2af562c15c7639d1a1622c7baeb6483262088060a3f6632ddc"
+ },
+ "uniqueness": {
+  "patch_id": "9bc4b8ac95d870ad2f6d00f66a00295d2e2ba0c2"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "state_null_unchecked",
+    "detail": "harness 的 state_create() 为跨调用状态 state_t 依次创建 cstream / cstreamHC / dstream 三个句柄，但对 cstreamHC 的判空写了 FUZZ_ASSERT(state.cstream)（重复断言已非空的 cstream，而不是新创建的 cstreamHC）。当 OOM 注入使 LZ4_createStreamHC() 返回 NULL 时，这个错误的断言不触发，NULL 被存进 state.cstreamHC；随后同一轮扫描里 state_reset() 无条件调用 LZ4_resetStreamHC_fast(state->cstreamHC, level) 解引用 NULL → 空指针解引用崩溃（explicit）。修复 H 把断言改成 FUZZ_ASSERT(state.cstreamHC)。属 harness 自身缺陷（introduced_by_this_change=false），类型 state（跨 create→reset 阶段的状态对象空值漏检），可见性 explicit（崩）。"
+   }
+  ]
+ },
+ "evidence": [
+  "H=73ee988e95f9 提交信息原文：'ossfuzz: check cstreamHC after LZ4_createStreamHC() in the stream fuzzer / state_create() asserted state.cstream a second time instead of the new state.cstreamHC, so a failed LZ4_createStreamHC() went unnoticed and state_reset() then passed NULL to LZ4_resetStreamHC_fast(). / Fixes #1813'——「state_create」「state_reset」「passed NULL」精确点出跨阶段状态与空指针解引用",
+  "diff 只改 ossfuzz/round_trip_stream_fuzzer.c：第 75 行 FUZZ_ASSERT(state.cstream) → FUZZ_ASSERT(state.cstreamHC)",
+  "旧 harness（父提交 8aba903e7260 的 round_trip_stream_fuzzer.c，已落盘）完整代码：state_create() 里 state.cstreamHC = LZ4_createStreamHC(); 之后 FUZZ_ASSERT(state.cstream);；state_reset() 里 LZ4_resetStreamHC_fast(state->cstreamHC, state->level);；LLVMFuzzerTestOneInput 先 state_create 再循环里 state_reset",
+  "fuzz_helpers.h（同树）FUZZ_ASSERT 定义：cond 为假 → fprintf + abort()",
+  "本地实测（MinGW gcc 8.1.0，verification/probe_nullstate.c）：模拟 state_create 断言错变量 + state_reset 解引用 NULL——OLD（断言 cstream，恒真，NULL 漏过）reset 解引用 NULL→Segmentation fault exit=139；FIX（断言 cstreamHC，假→abort）输出 'Assertion `s.cstreamHC' failed' exit=3",
+  "issue #1813 是 OOM 注入（lz4 的 ossfuzz 构建启用分配失败注入，nalloc 机制）下 LZ4_createStreamHC() 失败返回 NULL 暴露的"
+ ],
+ "rationale": {
+  "zh": "lz4 的 ossfuzz target round_trip_stream_fuzzer 在 LLVMFuzzerTestOneInput 里先 state_create() 造一个跨调用状态对象 state_t（含 cstream / cstreamHC / dstream 三个库句柄），再在 for 循环里反复 state_reset() + 各种 round trip。ffufuzz 构建启用了分配失败注入：LZ4_createStreamHC() 在注入下可能返回 NULL。但 state_create() 里对 cstreamHC 的判空写的却是 FUZZ_ASSERT(state.cstream)——重复断言了早一步创建、已确认非空的 cstream，等于根本没有校验 cstreamHC。于是 NULL 被静默存进 state.cstreamHC，下一阶段 state_reset() 无条件 LZ4_resetStreamHC_fast(state->cstreamHC, level) 解引用 NULL → 空指针解引用直接崩（Segmentation fault），这正是 fuzzing 下才暴露的跨阶段状态错误：create 返回的空句柄没被拦截、reset 当成有效句柄使用。修复 73ee988 只把断言改成 FUZZ_ASSERT(state.cstreamHC)。这条与 REAL-06（同库 lz4，state/silent：harness 不复用 state 对象导致脏状态分支测不到）形成 state 的 explicit/silent 两端：REAL-06 记「复用才测得到」的隐式缺失，本条记「复用链上空句柄漏检」的显式崩溃。均 introduced_by_this_change=false。",
+  "en": "In LLVMFuzzerTestOneInput of lz4's ossfuzz target round_trip_stream_fuzzer, state_create() builds a cross-call state_t holding three library handles (cstream / cstreamHC / dstream), then a for-loop repeatedly calls state_reset() and the round trips. The ossfuzz build enables allocation-failure injection, so LZ4_createStreamHC() can return NULL. But state_create() null-checks cstreamHC with FUZZ_ASSERT(state.cstream) — asserting the earlier, already-non-NULL cstream a second time instead of the new cstreamHC. The NULL therefore sneaks into state.cstreamHC, and the next stage state_reset() unconditionally calls LZ4_resetStreamHC_fast(state->cstreamHC, level), dereferencing NULL and crashing (Segmentation fault) — a cross-stage state error only visible under fuzzing: a NULL handle returned by create is not caught and reset consumes it as valid. Fix 73ee988 merely changes the assert to FUZZ_ASSERT(state.cstreamHC). Together with REAL-06 (same repo, state/silent: harness never reuses the state object so the dirty-state branch is unreachable) this forms the explicit/silent ends of the state type. Both are introduced_by_this_change=false."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "n/a — 无单一引入 commit（harness 自身缺陷，非库变更引入）",
+   "M_parent": "n/a",
+   "M_on_mainline": false,
+   "harness_exists_at": [
+    "H^1",
+    "H"
+   ],
+   "H": "73ee988e95f95fb87efcdaa4aa8d0b20c64fad02",
+   "H_symbols_in_diff": [
+    "cstreamHC",
+    "FUZZ_ASSERT",
+    "LZ4_createStreamHC"
+   ]
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "8aba903e7260",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 0.02,
+    "errors": [
+     "baseline：无注入时 LZ4_createStreamHC() 正常返回非空，断言恒真，不暴露"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "fail",
+    "sha": "8aba903e7260",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 0.02,
+    "errors": [
+     "[原 status 说明] crash（OOM 注入下）",
+     "explicit：分配失败注入使 LZ4_createStreamHC() 返回 NULL，FUZZ_ASSERT(state.cstream)（错变量，恒真）不拦截 → state_reset() 的 LZ4_resetStreamHC_fast(NULL, level) 空指针解引用 → Segmentation fault（实测 exit=139）"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "73ee988e95f9",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 0.01,
+    "errors": [
+     "[原 status 说明] ok（assert 捕获）",
+     "FUZZ_ASSERT(state.cstreamHC) 对 NULL 为假 → 打印 'Assertion `state.cstreamHC' failed' 并 abort，不再静默滑入 reset"
+    ],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": "空指针解引用 → Segmentation fault（实测 exit=139），FIX 改为 assert 失败 exit=3",
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "h(M^1) x lib(M): state_reset 用 NULL 句柄崩",
+    "pass": true,
+    "detail": "OOM 下 LZ4_createStreamHC()=NULL 未被错误的 FUZZ_ASSERT(state.cstream) 拦截，state_reset() 解引用 NULL"
+   },
+   {
+    "check": "h(fix) x lib(M): 不再崩",
+    "pass": true,
+    "detail": "FUZZ_ASSERT(state.cstreamHC) 当场 abort（明确的 assert 失败），不滑入解引用"
+   },
+   {
+    "check": "退化是 explicit 而非 silent",
+    "pass": true,
+    "detail": "Segmentation fault 一眼可见（信号崩溃），非覆盖率下降"
+   }
+  ],
+  "budget_note": "1) H 的 diff、父提交 8aba903e7260 的旧 harness 全文（round_trip_stream_fuzzer.c）与 fuzz_helpers.h 已取得，harness 旧版/修复版均落盘 input/harness/ 与 verification/。2) 崩溃机制用本地 MinGW gcc 8.1.0 最小等价探针实测（probe_nullstate.c：OLD 断言错变量→reset 解引用 NULL→Segmentation fault exit=139；FIX 断言正确变量→abort exit=3）。3) 限制：未跑 lz4 完整 ossfuzz 构建与真实 OOM 注入（需 FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION 编译 + nalloc/libFuzzer），探针用 create 返回 NULL 直接等价模拟 OOM；崩溃输出是等价探针的信号，非原始 round_trip_stream_fuzzer 二进制的实测。B = 0（未跑 fuzz；理由见 fuzz.reason）",
+  "toolchain": "api.github.com + raw.githubusercontent.com 取 H/parent 源码、本地 MinGW gcc 8.1.0 编译最小探针实测空指针解引用",
+  "fuzz": {
+   "skipped": true,
+   "reason": "未跑 fuzz：机制已由提交信息原文（明说 passed NULL）+ 源码级核实 + 最小探针实测（OLD segfault / FIX abort）闭环，无需整建 lz4 ossfuzz"
+  }
+ },
+ "urls": {
+  "M": "n/a（introduced_by_this_change=false，无单一引入 commit）",
+  "M_parent": "n/a",
+  "harness_oss_fuzz_rev": "https://github.com/lz4/lz4/tree/73ee988e95f95fb87efcdaa4aa8d0b20c64fad02/ossfuzz",
+  "H": "https://github.com/lz4/lz4/commit/73ee988e95f95fb87efcdaa4aa8d0b20c64fad02"
+ }
+}

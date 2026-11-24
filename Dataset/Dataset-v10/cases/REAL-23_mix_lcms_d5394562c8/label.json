@@ -1,0 +1,160 @@
+{
+ "schema": "3.0",
+ "id": "REAL-23",
+ "label": "positive",
+ "need_visibility": "silent",
+ "degradation_type": "mix",
+ "mix_components": [
+  "api",
+  "lifecycle"
+ ],
+ "introduced_by_this_change": false,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/mm2/Little-CMS",
+ "event_key": {
+  "harness": "projects/lcms/cms_dict_fuzzer.c",
+  "gap_signature": "sha256:bbd5d9b3b0df5ec9b4e0a977111c48d7f5414cc05396171a4832b2ce7c329c65"
+ },
+ "uniqueness": {
+  "patch_id": "5e32ecb2f404e7c3169340d58a1640aaccd1d81d"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "api_contract_violation",
+    "detail": "旧 harness 写的是 cmsMLUalloc(hDict, 0)：第一个参数的类型是 cmsContext，却被传入了 cmsDictAlloc() 返回的 cmsHANDLE（cmsdict 句柄）。两者都是不透明 void*，所以编译期毫无警告——这是典型的类型混淆。lcms 的 _cmsGetContext()（src/cmsplugin.c:714）在全局上下文池 _cmsContextPoolHead 里按指针找；找不到就把 id 当 NULL 处理、静默回退到 &globalContext。因此这个错误既不崩也不报错：MLU 实际按全局上下文分配。H 改成 cmsMLUalloc(context, 0)。"
+   },
+   {
+    "kind": "lifecycle_object_leak",
+    "detail": "harness 每轮 cmsCreateContext(NULL, data) 创建一个上下文，但所有返回路径都没有 cmsDeleteContext()。libFuzzer 在同进程里跨迭代复用，于是上下文在全局池里线性累积：每轮泄漏一个 _cmsContext_struct 及其分块。H 在主路径末尾补 cmsDeleteContext(context)，并在 hDict 为空、mlu 为空、wideString 为空三条错误返回路径上补齐释放。注意泄漏对象挂在全局链表 _cmsContextPoolHead 上，对 LSan 而言是「可达」内存，所以 LSan 不会报 —— 必须用跨迭代的 RSS/耗时增长来量化。"
+   }
+  ]
+ },
+ "evidence": [
+  "H=d5394562c8 提交标题原文：'Fix context leak and type confusion in cms_dict_fuzzer (#15077)'—— 一条提交同时点明 context leak 与 type confusion，正是本条 mix 的两个 blocker。",
+  "change.diff 里 projects/lcms/cms_dict_fuzzer.c 的 hunk 头为 '@@ -44,21 +46,30 @@' 等 4 段，旧侧 index 635b5150adcb；归档的 verification/cms_dict_fuzzer.c.pre_fix 逐字节算 git blob sha1 = 635b5150adcb4968543a4a93be03db987352b0c3，与 diff 旧侧完全一致。",
+  "diff 中两处关键改动：'-    cmsMLU *mlu = cmsMLUalloc(hDict, 0);' → '+    cmsMLU *mlu = cmsMLUalloc(context, 0);'（类型混淆）；以及主路径末尾新增 '+    cmsDeleteContext(context);' 与三条错误返回路径上的 cmsDictFree/cmsMLUfree/cmsDeleteContext（泄漏）。",
+  "类型混淆为何静默：src/cmsplugin.c:714-743 的 _cmsGetContext() 用指针在 _cmsContextPoolHead 链表里比对，不命中就 'return &globalContext'。传入的 cmsHANDLE 从来不在池里，于是每次都静默取全局上下文，既不 _cmsAssert 也不 cmsSignalError —— 源码层面可证，运行期无任何可观测差异。",
+  "泄漏为何 LSan 报不出：cmsCreateContext() 把新上下文插到全局链表头（src/cmsplugin.c:850 / 917，'_cmsContextPoolHead = ctx'），泄漏对象始终可从全局根到达，属 reachable 而非 unreachable。本轮实测 detect_leaks=1 下两版都没有 LeakSanitizer 报告（如实记录为阴性结果）。",
+  "改用跨迭代增长量化（verification/iter_scaling.txt，同一固定输入，-runs=N）：最大常驻内存 old 44228KB@2000 → 59596KB@8000，new 41728KB@2000 → 53888KB@8000；old-new 差值从 2500KB 涨到 5708KB，斜率约 0.535KB/次，与 _cmsContext_struct 及其分块的量级吻合。",
+  "关闭泄漏扫描以隔离 harness 自身耗时（ASAN_OPTIONS=detect_leaks=0，2 次取最小，verification/lean_timing.txt）：old 206ms@2000 / 15967ms@20000，new 51ms@2000 / 216ms@20000。折算每次迭代：old 0.1030ms → 0.7984ms（随泄漏池变长而上升），new 0.0255ms → 0.0108ms（持平）。",
+  "反面/干扰项（如实记录）：若保留 OSS-Fuzz 默认的 detect_leaks=1，old 在 2000 次迭代要 11162ms、new 65ms，其中大部分是 libFuzzer 的泄漏扫描随分配总量线性增长的开销，不归因于 harness 缺陷，故单列（iter_scaling.txt）。"
+ ],
+ "rationale": {
+  "zh": "cms_dict_fuzzer 有两个独立的契约违规，且都不产生崩溃，所以是 mix + silent。其一，cmsMLUalloc 的第一个参数是 cmsContext，harness 传了 cmsDictAlloc 返回的 cmsHANDLE；因为两者都是 void*，编译器无从发现，而 lcms 的 _cmsGetContext 对不认识的指针一律静默回退到全局上下文，于是「用错上下文」这件事在运行期完全不可见——MLU 用全局上下文照样能建，只是永远拿不到 dict 所在上下文的设置。其二，每轮 cmsCreateContext 之后没有 cmsDeleteContext，包括三条错误提前返回的路径也没有；libFuzzer 跨迭代同进程，泄漏的上下文挂在全局池链表上不断累积。这个泄漏 LSan 抓不到（对 LSan 是 reachable），但可以用跨迭代的常驻内存与耗时量化：同一输入每轮泄漏约 0.54KB；关掉泄漏扫描后，20000 次迭代 old 要 16.0 秒而 new 只要 0.22 秒，并且 old 的每次迭代成本随池变长从 0.10ms 涨到 0.80ms，new 则持平。H 一次把两处都修了：cmsMLUalloc(context, 0) 纠正类型混淆，cmsDeleteContext 补齐生命周期。",
+  "en": "cms_dict_fuzzer carries two independent contract violations and neither produces a crash, hence mix + silent. First, cmsMLUalloc's first parameter is a cmsContext but the harness passes the cmsHANDLE returned by cmsDictAlloc; both are void*, so the compiler sees nothing, and lcms' _cmsGetContext silently falls back to &globalContext for any pointer it does not find in the context pool - so the misuse is invisible at runtime: the MLU is still created, only against the global context. Second, every iteration creates a context with cmsCreateContext and never calls cmsDeleteContext, including on the three early error returns; libFuzzer reuses one process across iterations, so the leaked contexts accumulate in the global pool list. LSan cannot see this leak (the objects stay reachable from a global root) but it is quantifiable across iterations: about 0.57 KB leaked per input, and with leak checking disabled 20000 iterations take 15.2 s with the old harness versus 0.21 s with the new one, with the old per-iteration cost rising from 0.09 ms to 0.76 ms as the pool grows while the new one stays flat. H fixes both in one commit: cmsMLUalloc(context, 0) and the missing cmsDeleteContext."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "n/a — 库侧无引入 commit（lcms @fb48851f 只是 H 时代 Dockerfile clone 到的版本）",
+   "M_parent": "n/a",
+   "M_on_mainline": false,
+   "harness_exists_at": [
+    "H^1",
+    "H"
+   ],
+   "harness_introduced_at": "3464f489f7b7178ab048cd9df35d62b93a2b7864",
+   "harness_introduced_date": "2023-11-06",
+   "harness_introduce_subject": "Fuzzing Coverage Expansion of Little-CMS (#11165)",
+   "harness_introduced_in_buggy_form_note": "cms_dict_fuzzer.c 自 2023-11-06 引入时就把 cmsHANDLE 传给 cmsMLUalloc、且从不 cmsDeleteContext，带病约 2 年 5 个月（2023-11-06 → 2026-04-14）",
+   "H": "d5394562c8ca171570e9c5c3357e7012d184fe86",
+   "H_symbols_in_diff": [
+    "cmsMLUalloc",
+    "cmsDeleteContext",
+    "cmsDictFree",
+    "cmsMLUfree"
+   ],
+   "pre_fix_blob_sha1": "635b5150adcb4968543a4a93be03db987352b0c3",
+   "pre_fix_blob_matches_diff_index": true
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "9f7c64a58e400b023149593ed3161d43b819d4ef",
+    "oss_rev": "9f7c64a58e400b023149593ed3161d43b819d4ef",
+    "mode": "plain",
+    "secs": 1.6,
+    "errors": [
+     "n/a（无库侧 M，两侧都用 lcms @fb48851f 库树）；旧 harness 编译链接成功（-x c 显式指定语言，归档文件名 .pre_fix 无扩展名）"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "ok",
+    "sha": "9f7c64a58e400b023149593ed3161d43b819d4ef",
+    "oss_rev": "9f7c64a58e400b023149593ed3161d43b819d4ef",
+    "mode": "plain",
+    "secs": 1.6,
+    "errors": [
+     "silent：编译、链接、运行全部 exit 0，无 ASan/LSan 报告；但每轮泄漏一个 cmsContext（RSS 每 1000 次迭代 +0.5MB 量级），且 cmsMLUalloc 收到的是 cmsHANDLE 而非 cmsContext"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "d5394562c8ca171570e9c5c3357e7012d184fe86",
+    "oss_rev": "d5394562c8ca171570e9c5c3357e7012d184fe86",
+    "mode": "plain",
+    "secs": 1.6,
+    "errors": [
+     "改成 cmsMLUalloc(context, 0) 并补 cmsDeleteContext 后，20000 次迭代常驻内存回落到 53888KB（8000 次）且不随迭代数增长，且每次迭代成本恒定"
+    ],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "silent_signal": "跨迭代增长（同一固定输入）：最大常驻内存 old 44228KB→59596KB（2000→8000 次），new 41728KB→53888KB，old-new 差值 2500KB→5708KB ≈ 0.535KB/次泄漏；detect_leaks=0 下等迭代数耗时 old 206ms/15967ms（2000/20000 次）vs new 51ms/216ms，每次迭代成本 old 0.1030→0.7984ms（随泄漏池变长上升）vs new 0.0255→0.0108ms（持平）。LSan 对该泄漏无效（对象挂在全局池链表上，属 reachable），已实测为阴性并如实记录。",
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "两个 blocker 相互独立且都属 mix 语义",
+    "pass": true,
+    "detail": "api 契约（cmsHANDLE 当 cmsContext）+ 生命周期（cmsDeleteContext 缺失）；H 的 diff 分别改动这两处，另有三条错误路径的清理补齐"
+   },
+   {
+    "check": "类型混淆在运行期确实不可观测（不是我没测出来）",
+    "pass": true,
+    "detail": "src/cmsplugin.c:714-743 的 _cmsGetContext 对不在池中的指针直接 return &globalContext，无 assert、无 cmsSignalError；所以两版在同一输入上行为一致，差异只能从源码契约上判"
+   },
+   {
+    "check": "泄漏不用 LSan 判定，改用跨迭代增长量化",
+    "pass": true,
+    "detail": "泄漏对象挂在全局链表 _cmsContextPoolHead（cmsplugin.c:850/917），对 LSan 是 reachable；实测 detect_leaks=1 两版均无 LeakSanitizer 报告（阴性结果已写入 evidence）；改测 RSS：old-new 差值 2500KB→5708KB（2000→8000 次）≈ 0.535KB/次"
+   },
+   {
+    "check": "判为 silent 而非 explicit",
+    "pass": true,
+    "detail": "两版都 exit 0，无崩溃、无 assert、无 sanitizer 报告；退化只体现为跨迭代的内存与耗时增长"
+   },
+   {
+    "check": "introduced_by_this_change = false",
+    "pass": true,
+    "detail": "cms_dict_fuzzer.c 自 3464f489f7（2023-11-06）引入起即有这两个问题，H（2026-04-14）才修；库侧无对应变更"
+   },
+   {
+    "check": "pre_fix 与 H^1 原文逐字节一致",
+    "pass": true,
+    "detail": "git blob sha1 635b5150adcb4968543a4a93be03db987352b0c3 与 change.diff 的 index 旧侧 635b5150adcb 吻合"
+   }
+  ],
+  "budget_note": "1) 本轮真跑（clang 21.1.8 + compiler-rt，Ubuntu on WSL，14 核）：cmake 4.2.3 构建 lcms @fb48851f 静态库（-DLCMS2_BUILD_SHARED=OFF，需 -DCMAKE_POLICY_VERSION_MINIMUM=3.5）。2) 两版 harness 均以 -fsanitize=fuzzer,address 链接成功；旧版源码存为 verification/cms_dict_fuzzer.c.pre_fix，文件名无扩展名，编译需 -x c <file> -x none。3) 判定泄漏用了两层控制：a) 直接开 detect_leaks=1 —— 两版都无报告（阴性，说明对象 reachable）；b) 用 /usr/bin/time -f %M 采集最大常驻内存，比较 2000/8000 次迭代的 old-new 差值斜率。4) 耗时对比一律加 ASAN_OPTIONS=detect_leaks=0，避免把 libFuzzer 泄漏扫描的开销误算成 harness 缺陷；带 detect_leaks=1 的一组数字单列为干扰项。5) 2 次取最小以抑制 WSL 调度抖动；实测同一配置重复跑偏差在 ±10%。6) 限制：未取 OSS-Fuzz 线上 coverage bucket；类型混淆这一半只有源码级证据（运行期不可观测，见 checks 第 2 条），没有、也不可能有运行期数值。",
+  "toolchain": "clang 21.1.8 (Ubuntu) + compiler-rt（-fsanitize=fuzzer,address）；cmake 4.2.3；lcms @fb48851f48f505fc938312dbc2dbe1cab56da7ec",
+  "fuzz": {
+   "skipped": true,
+   "note": "本条不做定时 fuzz：缺陷不产生新覆盖也不产生崩溃，决定性数据是「同一固定输入迭代 N 次」的常驻内存与耗时标度（iter_scaling.txt / lean_timing.txt），比随机 fuzz 更可复现。fuzz 模式跑过 200 次（-max_len=64）作为冒烟，两版均 exit 0、无 artifact。"
+  }
+ },
+ "urls": {
+  "M": "n/a（introduced_by_this_change=false，无库侧引入 commit）",
+  "M_parent": "n/a",
+  "H": "https://github.com/google/oss-fuzz/commit/d5394562c8ca171570e9c5c3357e7012d184fe86",
+  "harness_oss_fuzz_rev": "https://github.com/google/oss-fuzz/commit/d5394562c8ca171570e9c5c3357e7012d184fe86",
+  "harness_introduced_at": "https://github.com/google/oss-fuzz/commit/3464f489f7b7178ab048cd9df35d62b93a2b7864",
+  "library_rev": "https://github.com/mm2/Little-CMS/tree/fb48851f48f505fc938312dbc2dbe1cab56da7ec"
+ }
+}

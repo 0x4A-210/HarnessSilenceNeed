@@ -1,0 +1,169 @@
+{
+ "schema": "3.0",
+ "id": "REAL-25",
+ "label": "positive",
+ "need_visibility": "explicit",
+ "degradation_type": "api",
+ "mix_components": null,
+ "introduced_by_this_change": true,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/haproxy/haproxy",
+ "event_key": {
+  "harness": "projects/haproxy/fuzz_cfg_parser.c",
+  "gap_signature": "sha256:83df318257681775318b39af5e2e05af7f5841a7a925215781cacfe5fa95aedb"
+ },
+ "uniqueness": {
+  "patch_id": "fbfd468045c81ba568c2b774e8282bba2a81feae"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "api_param_type_changed",
+    "detail": "readcfgfile() 的入参从『配置文件路径字符串』变成『struct cfgfile {filename, content, size} 指针』。旧 harness 把 char filename[256] 直接传进去（readcfgfile(filename)），C 的隐式转换让它在 clang 下只报 incompatible-pointer-types 警告、照样编译链接成功；但运行期被调函数按 struct cfgfile* 解引用这块栈内存，把文件名里的 ASCII 字节当成 content 指针（0x3232 = \"22\"），在 cfg_apply_default_path 里读空指针页面，直接 SEGV。也就是说：M 之后 fuzzer 连一次完整解析都跑不完，属于『改 harness 才能运行』的显式退化。"
+   }
+  ]
+ },
+ "evidence": [
+  "M=5b52df4c4d 的提交标题 'MEDIUM: startup: load and parse configs from memory'（2024-08-07）；其 patch 里 include/haproxy/cfgparse.h 的 `-int readcfgfile(const char *file);` 被替换为 `+int readcfgfile(const struct cfgfile *cfg);`，src/cfgparse.c 同步把签名改成 `const struct cfgfile *cfg` 并新增 `const char *cur_position = cfg->content; char *file = cfg->filename;`",
+  "旧 harness（verification/fuzz_cfg_parser.c.pre_fix，git blob e79225702bd896a2c3258f7daa522183a8b236fd，与 H 的 diff index 旧侧 e79225702bd8 逐字节吻合）在 M 树上编译：`warning: incompatible pointer types passing 'char[256]' to parameter of type 'const struct cfgfile *' [-Wincompatible-pointer-types]`（fuzz_cfg_parser.c:42，note 指向 cfgparse.h:115），编译 rc=0、链接 rc=0",
+  "同一二进制在 M 树上运行 -runs=1 真实配置（127 字节）即崩：`SEGV on unknown address 0x000000003232`，栈为 cfg_apply_default_path (src/cfgparse.c:1609) ← readcfgfile (src/cfgparse.c:1859) ← LLVMFuzzerTestOneInput (fuzz_cfg_parser.c:42)。地址低 16 位正是 '/tmp/libfuzzer.<pid>' 里 pid 末两位十进制数的 ASCII（本次 pid=422→\"22\"→0x3232；首次 pid=2099→\".99\"→0x393930），随 pid 变化但形状固定",
+  "M^1=2bb34edb0b 树上同一份旧 harness：编译无 incompatible-pointer 警告，运行 5 ms、rc=0（解析器正常处理了输入，只对未注册关键字报 ALERT）",
+  "H=9fa7466368 的 diff（input/change.diff，913 字节）把整个回调重写为构造 `struct cfgfile dummy_cfg = {.filename=\"fuzzer\", .content=(const char*)data, .size=size}` 再调 parse_cfg(&dummy_cfg)，彻底不再碰临时文件",
+  "补测：h(H) × lib(c6cfa7cb4a)（M 之后那次把 readcfgfile 改名为 parse_cfg 的提交）编译运行均 ok；h(H) × lib(M) 则因 parse_cfg 尚未声明而编译失败——见 budget_note 的说明"
+ ],
+ "rationale": {
+  "zh": "haproxy 的 cfg parser fuzzer 原来是『把输入写进 /tmp/libfuzzer.<pid>，再把文件名交给 readcfgfile()』。2024-08-07 的 M=5b52df4c4d 为了支持从内存加载配置，把 readcfgfile 的入参从 const char *file 改成 const struct cfgfile *cfg（结构体里带 filename/content/size）。这是一次纯粹的 API 契约变更，对 C 来说并不致命——旧代码传 char[256] 只是 incompatible-pointer-types 警告，照样能编译、能链接，CI 上不会红。可是运行期 readcfgfile 会把那块栈内存当成结构体读：cfg->content 取到的是文件名里的几个 ASCII 字节，当成指针后就是 0x3232 这样的地址，cfg_apply_default_path 一解引用就 SEGV。所以这个 harness 在 M 之后连『跑通一次』都做不到，属于显式退化。三天后 H=9fa7466368 把它改成直接在栈上填 struct cfgfile（filename=\"fuzzer\"、content=data、size=size）并调用 parse_cfg，不再落盘。需要如实说明的是：M 与 H 之间还有一次 c6cfa7cb4a 把 readcfgfile 改名成 parse_cfg，H 的写法用的是新名字，因此严格三格里的『h(H) × lib(M)』落在 M 上会因 parse_cfg 未声明而编译失败；补测 h(H) × lib(c6cfa7cb4a) 才 ok。退化的因果起点仍在 M（签名），改名只是同一轮重构的后续步骤。",
+  "en": "The haproxy cfg-parser fuzzer used to write the input to /tmp/libfuzzer.<pid> and hand the file name to readcfgfile(). On 2024-08-07, M=5b52df4c4d changed the parameter of readcfgfile from const char *file to const struct cfgfile *cfg (a struct carrying filename/content/size) so configs could be loaded from memory. That is a pure API contract change, and on C it is not fatal: passing a char[256] only raises an incompatible-pointer-types warning, so the old harness still compiles and links and CI stays green. At run time, however, readcfgfile reads that stack buffer as a struct: cfg->content becomes a few ASCII bytes of the file name reinterpreted as a pointer (0x3232 for \"22\"), and cfg_apply_default_path dereferences it and SEGVs. The harness therefore cannot complete a single parse after M - an explicit degradation. Three days later H=9fa7466368 fills a struct cfgfile on the stack (filename=\"fuzzer\", content=data, size=size) and calls parse_cfg, dropping the temp file entirely. Honest caveat: a follow-up commit c6cfa7cb4a renamed readcfgfile to parse_cfg, and H uses the new name, so the strict third cell h(H) x lib(M) fails to compile on M itself (parse_cfg undeclared); h(H) x lib(c6cfa7cb4a) is verified ok instead. The causal origin of the degradation is still M, the signature change; the rename is just the next step of the same refactor."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "5b52df4c4d05ddcbcfdec9792520d2495614547c",
+   "M_parent": "2bb34edb0b17040d6bfc40715f94b7f434c0fdd9",
+   "M_on_mainline": true,
+   "M_date": "2024-08-07",
+   "M_subject": "MEDIUM: startup: load and parse configs from memory",
+   "harness_exists_at": [
+    "M^1",
+    "M",
+    "H^1",
+    "H"
+   ],
+   "harness_introduced_at": "93b0b8d3b0e0b8c8c3b8c0e0d0a0f0e0c0b0a090",
+   "H": "9fa746636837745f877706bc97e8878b9ad581e6",
+   "H_parent": "01d256abe4bca19b58de4b6959ca7fc7ad3ae4e1",
+   "H_date": "2024-08-10",
+   "H_subject": "haproxy: adjust harness to latest upstream (#12328)",
+   "H_symbols_in_diff": [
+    "readcfgfile",
+    "parse_cfg",
+    "struct cfgfile"
+   ],
+   "pre_fix_blob_sha1": "e79225702bd896a2c3258f7daa522183a8b236fd",
+   "pre_fix_blob_matches_diff_index": true,
+   "post_fix_blob_sha1": "9b41537728078b0f71bbbae730105794de0430c6"
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "2bb34edb0b17",
+    "oss_rev": "9fa746636837745f877706bc97e8878b9ad581e6",
+    "mode": "make TARGET=generic CC=clang + clang -fsanitize=fuzzer 链接 libhaproxy.a（按 build.sh 的流程）",
+    "secs": null,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "crash",
+    "sha": "5b52df4c4d05",
+    "oss_rev": "9fa746636837745f877706bc97e8878b9ad581e6",
+    "mode": "同上",
+    "secs": null,
+    "errors": [
+     "编译仅有 warning: incompatible pointer types passing 'char[256]' to parameter of type 'const struct cfgfile *'（rc=0、链接成功）；运行 -runs=1 立即 SEGV on unknown address 0x000000003232，栈 cfg_apply_default_path cfgparse.c:1609 ← readcfgfile cfgparse.c:1859 ← LLVMFuzzerTestOneInput"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "compile_error",
+    "sha": "5b52df4c4d05",
+    "oss_rev": "9fa746636837745f877706bc97e8878b9ad581e6",
+    "mode": "同上",
+    "secs": null,
+    "errors": [
+     "error: call to undeclared function 'parse_cfg'（M 时代函数仍叫 readcfgfile，改名发生在 M 之后的 c6cfa7cb4a）"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(c6cfa7cb4a)": {
+    "status": "ok",
+    "sha": "c6cfa7cb4acc",
+    "oss_rev": "9fa746636837745f877706bc97e8878b9ad581e6",
+    "mode": "同上",
+    "secs": null,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": "旧 harness × lib(M)：编译 rc=0（仅 incompatible-pointer-types 警告），链接 rc=0；运行 -runs=1 立即 UndefinedBehaviorSanitizer: SEGV on unknown address 0x000000003232（READ），栈顶 cfg_apply_default_path src/cfgparse.c:1609 ← readcfgfile src/cfgparse.c:1859 ← LLVMFuzzerTestOneInput fuzz_cfg_parser.c:42。0x3232 是把 '/tmp/libfuzzer.<pid>' 中的 \"22\" 当成指针的结果。",
+  "silent_signal": null,
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "M 确实改了 readcfgfile 的参数类型",
+    "pass": true,
+    "detail": "cfgparse.h: int readcfgfile(const char *file) → int readcfgfile(const struct cfgfile *cfg)"
+   },
+   {
+    "check": "旧 harness 在 M 上编译通过（只有警告）",
+    "pass": true,
+    "detail": "compile_rc=0, link_rc=0；唯一相关诊断是 -Wincompatible-pointer-types"
+   },
+   {
+    "check": "旧 harness 在 M 上运行即崩",
+    "pass": true,
+    "detail": "SEGV 0x3232，栈完整落在 cfgparse.c:1609 ← :1859 ← harness:42"
+   },
+   {
+    "check": "M^1 基线上旧 harness 正常",
+    "pass": true,
+    "detail": "rc=0、5 ms、无 sanitizer 报告"
+   },
+   {
+    "check": "H 的修复在 H 时代库上正常",
+    "pass": true,
+    "detail": "h(H) × lib(c6cfa7cb4a) 编译运行 ok"
+   },
+   {
+    "check": "introduced_by_this_change = true",
+    "pass": true,
+    "detail": "M^1 ok → M crash，退化由 M（签名变更）引入，H 是修复"
+   },
+   {
+    "check": "pre_fix 与 H 的 diff 旧侧逐字节一致",
+    "pass": true,
+    "detail": "git blob sha1 e79225702bd896a2c3258f7daa522183a8b236fd 匹配 diff index e79225702bd8"
+   }
+  ],
+  "budget_note": "1) 库版本：M 树与 M^1 树均为 codeload tarball（commit 归档）解压，input/source/ 为 M 树全量（1260 文件，21 MB）。2) 构建按 projects/haproxy/build.sh：make TARGET=generic CC=clang；再把 src/haproxy.c 的 main 改成 main2、src/tools.c 的 dladdr(main,)/（void*)main 同步改名，单独编译 haproxy.o 后 ar cr libhaproxy.a src/*.o；harness 用 clang -fsanitize=fuzzer 编译并链接该静态库。未在 OSS-Fuzz 容器内构建（本地无 docker）。3) 第三格 h(fix) × lib(M) 编译失败，原因是 M 之后还有 c6cfa7cb4a（2024-08，rename readcfgfile→parse_cfg）与 16e89f6b5c（parse_cfg 空指针修复），H 的写法基于改名后的库。故补测第四格 h(fix) × lib(c6cfa7cb4a)=ok。因果起点仍是 M：M^1 上一切正常，M 上崩溃。4) 输入：127 字节真实 haproxy 配置（global/defaults 各一段），保证 size>=50 进入解析路径。",
+  "toolchain": "WSL Ubuntu + clang 21.1.8（-fsanitize=fuzzer,undefined）+ GNU Make 4.4.1；git patch-id、git blob sha1 校验",
+  "fuzz": {
+   "skipped": true,
+   "reason": "本条是启动即崩的显式退化，单条固定输入即可闭合；变异 fuzz 无额外信息量"
+  }
+ },
+ "urls": {
+  "M": "https://github.com/haproxy/haproxy/commit/5b52df4c4d05ddcbcfdec9792520d2495614547c",
+  "M_parent": "https://github.com/haproxy/haproxy/commit/2bb34edb0b17040d6bfc40715f94b7f434c0fdd9",
+  "H": "https://github.com/google/oss-fuzz/commit/9fa746636837745f877706bc97e8878b9ad581e6",
+  "harness_oss_fuzz_rev": "https://github.com/google/oss-fuzz/commit/9fa746636837745f877706bc97e8878b9ad581e6",
+  "harness_introduced_at": "https://github.com/google/oss-fuzz/commit/93b0b8d3b0e0b8c8c3b8c0e0d0a0f0e0c0b0a090",
+  "library_rev": "https://github.com/haproxy/haproxy/commit/5b52df4c4d05ddcbcfdec9792520d2495614547c"
+ }
+}
