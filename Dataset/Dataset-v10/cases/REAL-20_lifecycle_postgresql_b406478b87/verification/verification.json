@@ -1,0 +1,109 @@
+{
+ "strict_git": {
+  "M": "b406478b87e2234c0be4ca4105eee3bb466a646b",
+  "M_parent": "0de13bbc47d19c95de132cc85c341fdab079c170",
+  "M_on_mainline": true,
+  "M_date": "2021-08-05",
+  "M_subject": "process startup: Always call Init[Auxiliary]Process() before BaseInit().",
+  "harness_exists_at": [
+   "M^1",
+   "M",
+   "H^1",
+   "H"
+  ],
+  "harness_introduced_at": "76672f3c54340bf59d3b26c3ae709438d3a71c96",
+  "H": "0ec1cb2549775c68bac6f446818668784d131ad9",
+  "H_parent": "052c88de73b82e510287412cda2b74e30a85e309",
+  "H_date": "2021-09-20",
+  "H_subject": "[PostgreSQL] Fix in FuzzerInitialize (Postgres commit b406478b87e2234c0be4ca4105eee3bb466a646b). (#6470)",
+  "H_symbols_in_diff": [
+   "BaseInit",
+   "InitProcess",
+   "CreateSharedMemoryAndSemaphores"
+  ],
+  "pre_fix_blob_sha1": "0ab9d7dcdddc4cb902c8d4fc806db06c04fd526e",
+  "pre_fix_blob_matches_diff_index": true,
+  "post_fix_blob_sha1": "33f8278b9b4308826ad6151b6717c9b608024c5b"
+ },
+ "compile_matrix": {
+  "h(M^1) x lib(M^1)": {
+   "status": "ok",
+   "sha": "0de13bbc47d1",
+   "oss_rev": "0ec1cb2549775c68bac6f446818668784d131ad9",
+   "mode": "clang -fsanitize=fuzzer-no-link,address -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION 全量 make；fuzzer 目录按 build.sh 拷入 src/backend/ 并打 add_fuzzers.diff；-fsanitize=fuzzer 链接",
+   "secs": null,
+   "errors": [],
+   "overlays": [],
+   "patches": [
+    "add_fuzzers.diff"
+   ]
+  },
+  "h(M^1) x lib(M)": {
+   "status": "crash",
+   "sha": "b406478b87e2",
+   "oss_rev": "0ec1cb2549775c68bac6f446818668784d131ad9",
+   "mode": "同上（同一份旧 fuzzer_initialize.c 重链）",
+   "secs": null,
+   "errors": [
+    "PANIC: proc header uninitialized（InitProcess → src/backend/storage/lmgr/proc.c:311 `if (ProcGlobal == NULL) elog(PANIC, ...)`），进程 SIGABRT，rc=134"
+   ],
+   "overlays": [],
+   "patches": [
+    "add_fuzzers.diff"
+   ]
+  },
+  "h(fix) x lib(M)": {
+   "status": "ok",
+   "sha": "b406478b87e2",
+   "oss_rev": "0ec1cb2549775c68bac6f446818668784d131ad9",
+   "mode": "同上（H 版 fuzzer_initialize.c 重链）",
+   "secs": null,
+   "errors": [],
+   "overlays": [],
+   "patches": [
+    "add_fuzzers.diff"
+   ]
+  }
+ },
+ "explicit_signal": "旧 harness × lib(M)：编译、链接均成功（函数签名一个没变），FuzzerInitialize 执行到 InitProcess() 时 elog(PANIC, \"proc header uninitialized\")——因为 M 之后 BaseInit() 不再调用 CreateSharedMemoryAndSemaphores()，ProcGlobal 仍是 NULL；PANIC 触发 SIGABRT，进程 rc=134。同一份二进制在 M^1 上 rc=0、cov 339。",
+ "silent_signal": null,
+ "verdict": "PASS",
+ "checks": [
+  {
+   "check": "M 确实改变了初始化顺序契约",
+   "pass": true,
+   "detail": "M 提交正文：BaseInit() cannot trigger CreateSharedMemoryAndSemaphores() anymore；InitProcess() 必须在 BaseInit() 之前"
+  },
+  {
+   "check": "旧 harness 在 M^1 上正常运行",
+   "pass": true,
+   "detail": "rc=0，cov 339，3 次执行"
+  },
+  {
+   "check": "旧 harness 在 M 上运行即失败",
+   "pass": true,
+   "detail": "PANIC: proc header uninitialized（proc.c:311），SIGABRT rc=134"
+  },
+  {
+   "check": "H 的修复在 M 的库上成立",
+   "pass": true,
+   "detail": "rc=0，cov 339"
+  },
+  {
+   "check": "introduced_by_this_change = true",
+   "pass": true,
+   "detail": "M^1 ok → M crash，退化由 M 的初始化顺序变更引入，H 是对该变更的适配"
+  },
+  {
+   "check": "pre_fix 与 H 的 diff 旧侧逐字节一致",
+   "pass": true,
+   "detail": "git blob 0ab9d7dcdddc4cb902c8d4fc806db06c04fd526e 匹配 diff index 0ab9d7dcdddc"
+  }
+ ],
+ "budget_note": "1) 库版本：M=b406478b87e2 与 M^1=0de13bbc47d1 均取 codeload tarball（commit 归档）；input/source/ 为 M 树全量（6012 文件）。2) 构建按 projects/postgresql/build.sh：把 oss-fuzz/fuzzer 拷进 src/backend/、打 add_fuzzers.diff（给 tcop/postgres.c 加 FUZZING_BUILD_MODE 分支、给 elog.c 屏蔽 EmitErrorReport），configure 用 CC=clang + CFLAGS='-O1 -g -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -fsanitize=fuzzer-no-link,address'，再在 src/backend/fuzzer 里 make fuzzer（LIB_FUZZING_ENGINE='-fsanitize=fuzzer'）。未在 OSS-Fuzz 容器内构建（本地无 docker）。3) 数据目录：build.sh 里靠 `make createdb`（dbfuzz）生成含 dbfuzz 库的 data/；我们在另一份**不带 FUZZING 宏**的干净构建里 initdb 后起 postmaster 执行 CREATE DATABASE \"dbfuzz\" TEMPLATE=template0 复现（因为带 FUZZING 宏时 ReadCommand 强制走 SocketBackend，单用户模式跑不通 initdb 的 post-bootstrap）。4) harness 里 ChangeToDataDir() 会 chdir 到数据目录，所以语料路径必须给绝对路径，否则 libFuzzer 报 'required directory \"corpus\" does not exist'。5) 为了让 PANIC 文本可见，M 树上的 elog.c 用**不带** -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION 的方式单独重编过一次（仅去掉 EmitErrorReport 的抑制，不改任何控制流）；否则进程静默 abort、日志为空。6) 语料：10 字节 'SELECT 1;'，保证进到执行阶段。",
+ "toolchain": "WSL Ubuntu + clang 21.1.8（-fsanitize=fuzzer,address）+ GNU make 4.4.1；bison 3.8.2 / flex 2.6.4（本地解包）；git patch-id、git blob sha1 校验",
+ "fuzz": {
+  "skipped": true,
+  "reason": "本条是初始化阶段即失败的生命周期退化，FuzzerInitialize 一跑就暴露，无需变异 fuzz"
+ }
+}

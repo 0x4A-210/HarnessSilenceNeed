@@ -1,0 +1,127 @@
+{
+ "schema": "3.0",
+ "id": "REAL-15",
+ "label": "positive",
+ "need_visibility": "silent",
+ "degradation_type": "configuration",
+ "mix_components": null,
+ "introduced_by_this_change": true,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/libjpeg-turbo/libjpeg-turbo",
+ "event_key": {
+  "harness": "fuzz/CMakeLists.txt",
+  "gap_signature": "sha256:6d9b3b39ac296a0e299767dc0281bbd4b0b26de1dfc779615a10cf67ed9d3224"
+ },
+ "uniqueness": {
+  "patch_id": "2ff69bb0e54fe6868968e8d5f1d8448503056b1a"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "config_macro_missing",
+    "detail": "cjpeg_fuzzer 编译时缺 BMP_SUPPORTED / GIF_SUPPORTED / PPM_SUPPORTED / TARGA_SUPPORTED 四个宏：src/cjpeg.c 的 select_file_type() 用 #ifdef 包住 'B'/'G'/'P'/TARGA 四个格式分支，缺宏时全部落入 default: ERREXIT(cinfo, JERR_UNKNOWN_FORMAT) 或 JERR_TGA_NOTCOMP —— 编译、链接、运行都正常，但 BMP/GIF/PPM/Targa 四种输入格式的 reader 永远到不了（silent）。引入者是 M=7fec5074f 的「8-bit 与 12-bit 同构构建」重构：cdn.c 拆成 cjpeg.c/cdjpeg.c、rdppm.c 拆成 wrapper/rdppm-{8,12,16}.c、编译标志改用 CDJPEG_COMPILE_FLAGS，fuzz/CMakeLists.txt 没跟上。"
+   }
+  ]
+ },
+ "evidence": [
+  "H=26553873dda0 的提交信息原文点名回归来源：'The cjpeg fuzzer wasn't actually working, because it needed to be compiled with BMP_SUPPORTED, GIF_SUPPORTED, PPM_SUPPORTED, and TARGA_SUPPORTED defined. Derp. This was a regression introduced by 7fec5074f962b20ed00b4f5da4533e1e8d4ed8ac in libjpeg-turbo 3.0 beta1.'",
+  "M=7fec5074f962b20ed00b4f5da4533e1e8d4ed8ac（2022-03-08, 'Support 8-bit & 12-bit JPEGs using the same build'）把 cdjpeg.c 的源码与源文件路径重构（cjpeg.c/cdjpeg.c 拆分、rdppm.c → wrapper/rdppm-{8,12,16}.c、编译标志改 CDJPEG_COMPILE_FLAGS），fuzz/CMakeLists.txt 在 M 之后仍用旧的源文件路径与 ${COMPILE_FLAGS}",
+  "H 的顶层 CMakeLists.txt（line 823-824）定义 set(CDJPEG_COMPILE_FLAGS \"-DBMP_SUPPORTED -DGIF_SUPPORTED -DPPM_SUPPORTED -DTARGA_SUPPORTED ${USE_SETMODE}\")，而 H 对 fuzz/CMakeLists.txt 的修复把 set_property(... COMPILE_FLAGS ${COMPILE_FLAGS}) 改成 ${CDJPEG_COMPILE_FLAGS}",
+  "src/cjpeg.c 的 select_file_type()（H 树原文）：'#ifdef BMP_SUPPORTED case 'B': return jinit_read_bmp(cinfo, TRUE); #endif'，GIF/PPM 同理，TARGA 分支用 '#ifdef TARGA_SUPPORTED ... #else ERREXIT(cinfo, JERR_TGA_NOTCOMP)' —— 缺宏即格式分支被编译掉，输入落 default: ERREXIT(JERR_UNKNOWN_FORMAT)",
+  "harness cjpeg.cc 每次都传 -targa（两组 argv 均带 '-targa'），其注释自称 'wraps cjpeg in order to test esoteric compression options as well as the GIF and Targa readers' —— 但旧 CMakeLists 下 TARGA_SUPPORTED/GIF_SUPPORTED 未定义，Targa/GIF reader 从未执行",
+  "本地实测（MinGW gcc 8.1.0）：用 #ifdef TARGA_SUPPORTED 复现 select_file_type 的宏开关，旧配置（无宏）与修复配置（-DTARGA_SUPPORTED）都能编译、都能运行且 exit=0；旧配置输出 'reader UNREACHABLE -> clean reject'，修复配置输出 'reader reached' —— 证明是 silent（能编译能跑但目标 reader 到不了），非 explicit"
+ ],
+ "rationale": {
+  "zh": "libjpeg-turbo 3.0 beta1 的 M=7fec5074f（2022-03-08）把构建重构为「8/12/16-bit 同一套构建」：cdjpeg.c 拆成 cjpeg.c/cdjpeg.c、rdppm.c 拆成 wrapper/rdppm-{8,12,16}.c，编译标志也从杂散的 ${COMPILE_FLAGS} 收敛到顶层 CMakeLists.txt 里新定义的 CDJPEG_COMPILE_FLAGS（含 -DBMP_SUPPORTED -DGIF_SUPPORTED -DPPM_SUPPORTED -DTARGA_SUPPORTED）。但 fuzz/CMakeLists.txt 没有跟上：它继续引用 ../rdbmp.c ../rdgif.c ../rdppm.c ../rdswitch.c ../rdtarga.c 的旧路径，并把 TARGET 的 COMPILE_FLAGS 设为 ${COMPILE_FLAGS}（不含四个 *_SUPPORTED 宏），而且这时的 ../rdppm.c 路径在 M 之后已经不存在（正是 H 修复时改成 ../src/rdbmp.c、../src/wrapper/rdppm-{8,12,16}.c 的原因）。结果是 cjpeg_fuzzer 照常编译、链接、运行，但 src/cjpeg.c 的 select_file_type() 里 BMP/GIF/PPM/Targa 四个格式分支被 #ifdef 编译掉，任何这类输入落入 default 分支干净报错退出——四种格式的 reader 覆盖率恒为 0。harness 每次调用都传 -targa、注释还自称要测 'GIF and Targa readers'，因此这是典型的『配置项没生效』的隐式（silent）退化，阻塞点是缺的四个配置宏。H=26553873dda0（2026-01-30）把源文件路径更新为 ../src/...，并把 COMPILE_FLAGS 换成 ${CDJPEG_COMPILE_FLAGS}，四个格式 reader 恢复可达。注意这不是 API 变更（explicit），而是 harness 的编译期配置没跟上库的构建重构；无需改 harness 源码逻辑，只改构建配置。",
+  "en": "libjpeg-turbo 3.0 beta1's M=7fec5074f (2022-03-08) restructured the build into a single 8/12/16-bit build: cdjpeg.c was split into cjpeg.c/cdjpeg.c, rdppm.c into wrapper/rdppm-{8,12,16}.c, and the compile flags were consolidated into a new CDJPEG_COMPILE_FLAGS defined in the top-level CMakeLists.txt (containing -DBMP_SUPPORTED -DGIF_SUPPORTED -DPPM_SUPPORTED -DTARGA_SUPPORTED). fuzz/CMakeLists.txt did not keep up: it kept referencing the old paths ../rdbmp.c ../rdgif.c ../rdppm.c ../rdswitch.c ../rdtarga.c and set the target's COMPILE_FLAGS to ${COMPILE_FLAGS} (which lacks the four *_SUPPORTED macros); ../rdppm.c no longer exists after M, which is exactly why H changes the paths to ../src/rdbmp.c, ../src/wrapper/rdppm-{8,12,16}.c. The result: cjpeg_fuzzer still compiles, links and runs, but the BMP/GIF/PPM/Targa branches of select_file_type() in src/cjpeg.c are compiled out by #ifdef, so any such input falls into the default branch and exits with a clean error - those four format readers keep zero coverage forever. The harness passes -targa on every invocation and its comment claims to test 'the GIF and Targa readers', so this is a textbook 'the option never took effect' silent degradation whose blocker is the four missing config macros. H=26553873dda0 (2026-01-30) updates the source paths to ../src/... and swaps COMPILE_FLAGS for ${CDJPEG_COMPILE_FLAGS}, restoring all four readers. Note this is not an API change (explicit): no harness source logic changes, only the compile-time configuration."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "7fec5074f962b20ed00b4f5da4533e1e8d4ed8ac",
+   "M_parent": "fc562d11f0574edf098047497af633b76e0974a2",
+   "M_on_mainline": true,
+   "harness_exists_at": [
+    "M^1",
+    "M"
+   ],
+   "H": "26553873dda0b588964b583df489f6c88ca6927a",
+   "H_symbols_in_diff": [
+    "BMP_SUPPORTED",
+    "GIF_SUPPORTED",
+    "PPM_SUPPORTED",
+    "TARGA_SUPPORTED",
+    "CDJPEG_COMPILE_FLAGS"
+   ]
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "fc562d11f057",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 0.02,
+    "errors": [
+     "baseline（M 之前，同构构建重构尚未发生）：cjpeg_fuzzer 用 ../cdjpeg.c ../rdbmp.c ../rdgif.c ../rdppm.c ../rdswitch.c ../rdtarga.c 编译，可构建、可运行"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "ok",
+    "sha": "7fec5074f962",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 0.02,
+    "errors": [
+     "silent，不是构建错误：M 之后顶层构建已重构，但旧 fuzz/CMakeLists.txt 引用的 ../rdppm.c 等旧路径在真实构建里会与 12-bit wrapper 布局不匹配；即便路径适配，TARGET 仍用 ${COMPILE_FLAGS}，缺四个 *_SUPPORTED 宏 → select_file_type() 的 BMP/GIF/PPM/Targa 分支被编译掉，输入落 default（JERR_UNKNOWN_FORMAT）/JERR_TGA_NOTCOMP，干净退出，目标 reader 永远到不了"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "26553873dda0",
+    "oss_rev": "n/a（harness 随库维护）",
+    "mode": "plain",
+    "secs": 0.01,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": null,
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "h(M^1) x lib(M): 构建照常，但四个格式 reader 被编译掉",
+    "pass": true,
+    "detail": "缺 BMP_SUPPORTED/GIF_SUPPORTED/PPM_SUPPORTED/TARGA_SUPPORTED（旧 CMakeLists 的 COMPILE_FLAGS 为 ${COMPILE_FLAGS}），select_file_type() 的对应 #ifdef 分支不进入"
+   },
+   {
+    "check": "h(fix) x lib(M): CDJPEG_COMPILE_FLAGS 恢复四个宏",
+    "pass": true,
+    "detail": "H 把 COMPILE_FLAGS 由 ${COMPILE_FLAGS} 改为 ${CDJPEG_COMPILE_FLAGS}，顶层 CMakeLists.txt 定义它含 -DBMP_SUPPORTED -DGIF_SUPPORTED -DPPM_SUPPORTED -DTARGA_SUPPORTED"
+   },
+   {
+    "check": "退化是 silent 而非 explicit",
+    "pass": true,
+    "detail": "cjpeg_fuzzer 全程可编译可运行（本地 gcc 探针两配置均 exit=0）；区分只在于旧配置输出 'reader UNREACHABLE -> clean reject'、新配置输出 'reader reached'"
+   }
+  ],
+  "budget_note": "1) M 完整 82 文件 diff（238908 字节）已落盘 input/change.diff，经 git patch-id --stable 计算 patch_id=2ff69bb0。2) 旧 harness fuzz/cjpeg.cc 与 fuzz/CMakeLists.txt 取自 M_parent=fc562d11f；修复后 fuzz/CMakeLists.txt 取自 H=26553873dda0，diff 已比对（源路径 ../cdjpeg.c→../src/cdjpeg.c、../rdppm.c→wrapper/rdppm-{8,12,16}.c、COMPILE_FLAGS→CDJPEG_COMPILE_FLAGS）。3) 无声证据用本地 MinGW gcc 8.1.0 实跑了一个复现 select_file_type 宏开关的探针（verification/probe_silent_reader.c）：旧配置与修复配置均成功编译、成功运行、退出码均为 0，差别只在 reader 是否可达。4) 限制：未做 libjpeg-turbo 带 SIMD/ASM 的完整 CMake 构建（本环境无 cmake/nasm），故 compile_matrix 的 secs 是脚本级复现耗时，非完整构建耗时；四种 reader 的真实覆盖率无法从 OSS-Fuzz coverage bucket 取得。B = 0（未跑 fuzz；理由见 fuzz.reason）",
+  "toolchain": "api.github.com 取 M/H commit 与 patch、raw.githubusercontent.com 取各版本源码、本地 MinGW gcc 8.1.0 编译探针复现宏开关",
+  "fuzz": {
+   "skipped": true,
+   "reason": "未跑 fuzz：退化机制已由提交信息原文（H 点名 M 引入回归）+ 源码级 #ifdef 验证 + gcc 宏开关探针构成闭环。跑 libjpeg-turbo 完整 fuzz 需 cmake + nasm + 完整构建，成本高；且 reader 覆盖率无法从 OSS-Fuzz coverage bucket 单独取得"
+  }
+ },
+ "urls": {
+  "M": "https://github.com/libjpeg-turbo/libjpeg-turbo/commit/7fec5074f962b20ed00b4f5da4533e1e8d4ed8ac",
+  "M_parent": "https://github.com/libjpeg-turbo/libjpeg-turbo/commit/fc562d11f0574edf098047497af633b76e0974a2",
+  "harness_oss_fuzz_rev": "https://github.com/libjpeg-turbo/libjpeg-turbo/tree/26553873dda0b588964b583df489f6c88ca6927a/fuzz",
+  "H": "https://github.com/libjpeg-turbo/libjpeg-turbo/commit/26553873dda0b588964b583df489f6c88ca6927a"
+ }
+}

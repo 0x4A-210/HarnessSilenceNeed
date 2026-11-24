@@ -1,0 +1,159 @@
+{
+ "schema": "3.0",
+ "id": "REAL-22",
+ "label": "positive",
+ "need_visibility": "explicit",
+ "degradation_type": "input_format",
+ "mix_components": null,
+ "introduced_by_this_change": false,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/madler/zlib",
+ "event_key": {
+  "harness": "projects/zlib/zlib_uncompress3_fuzzer.cc",
+  "gap_signature": "sha256:6bdc9a08eb538daeaf3a73950429ac97e4bdb84faba981610a96277eafef8bc7"
+ },
+ "uniqueness": {
+  "patch_id": "b678226943bf65e97bb72ce051ee2ccf1d642db8"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "declared_output_size_unbounded",
+    "detail": "zlib_uncompress3_fuzzer 把 fuzz 字节的前三个字节解释成三个乘数，buffer_length = basesz * multiplier0 * multiplier1（各字节 0..255），再用它作为 uncompress2 的destLen（入参是「目标缓冲区容量」）。但真正的目标缓冲区是文件级 static Bytef buffer[256*1024]，容量固定 262144 字节。三个字节乘起来最大 255^3 ≈ 16.6M，远超 262144：harness 对 uncompress2 声明了一个远大于真实缓冲区的容量，inflate 于是放心地往 buffer 之后写 —— ASan 报 global-buffer-overflow，越界点就在 buffer 末尾之后第 0 字节。这是「fuzz 字节 → 程序输入」的尺寸/布局约定错：把三个字节的乘积直接当成输出容量，没有和真实缓冲区尺寸对齐。修复 H 只加三行 clamp（buffer_length > sizeof(buffer) 则截到 sizeof(buffer)），越界消失。introduced_by_this_change=false：该 fuzzer 2025 年加入时就写成这样，无库侧变更。"
+   }
+  ]
+ },
+ "evidence": [
+  "H=3aa4dea668 提交标题原文：'[zlib] Fix zlib_uncompress3_fuzzer: clamp buffer_length to prevent buffer overflow'",
+  "diff 只改 projects/zlib/zlib_uncompress3_fuzzer.cc：在 buffer_length 计算后加 'if (buffer_length > sizeof(buffer)) buffer_length = sizeof(buffer);'",
+  "旧 harness 全文（verification/zlib_uncompress3_fuzzer.cc.pre_fix）：static Bytef buffer[256*1024]；uLong basesz/multiplier0/multiplier1 依次取自前三字节；uLongf buffer_length = basesz * multiplier0 * multiplier1；uncompress2(buffer, &buffer_length, data, &buf_size)",
+  "本地实测（clang 21.1.8 + ASan，zlib @1c2519c8b8）：构造 1042 字节输入（前三字节 200,200,200 + 1 MiB 零字节的 deflate 流）→ 声明的 buffer_length = 8,000,000，而 buffer 只有 262144 字节；旧 harness 立即报 AddressSanitizer: global-buffer-overflow，'0 bytes after global variable buffer ... of size 262144'，栈顶 inflate_fast inffast.c:254，调用点 zlib_uncompress3_fuzzer.cc:35（verification/asan_old_harness.log）",
+  "同一输入跑新 harness：无崩溃、正常退出（verification/run_new_harness.log）",
+  "zlib 语义：uncompress2(dest, destLen, source, sourceLen) 的 *destLen 是「可用容量」入参，inflate 以它为写上限；声明成 8,000,000 就等于告诉库「有 8 MB 可写」"
+ ],
+ "rationale": {
+  "zh": "zlib_uncompress3_fuzzer 的设计是「前三个字节当尺寸参数，其余当压缩流」，这三个字节决定 uncompress2 的 destLen。问题在于 destLen 的语义是目标缓冲区容量，而真实缓冲区是固定的 256 KiB 全局数组；三个字节相乘最大能到 1660 万，harness 却直接把这个乘积交给 uncompress2，等于向库声明「我有 8 MB 可写」。inflate 照着这个上限解压 1 MiB 数据，写到第 262145 字节就出了 buffer 边界 —— ASan 一跑就报 global-buffer-overflow，是显式崩。这正是 input_format 类型的退化：不是库改了格式，而是「fuzz 字节 → 程序输入」的尺寸约定错了，把「解压后可能多长」当成了「缓冲区有多大」，没有和真实缓冲区尺寸对齐。修复只加一次 clamp，把声明容量卡回 sizeof(buffer)，越界随即消失（代价是超出部分返回 Z_BUF_ERROR，这正是正确行为）。introduced_by_this_change=false：缺陷自 2025 年 fuzzer 引入即存在。",
+  "en": "zlib_uncompress3_fuzzer is designed so the first three bytes act as size parameters and the rest is a deflate stream; those three bytes set uncompress2's destLen. The problem is that destLen means destination capacity, while the real destination is a fixed 256 KiB global array; the product of three bytes reaches ~16.6M, and the harness hands that product straight to uncompress2 — effectively telling zlib '8 MB are writable'. inflate honours it, decompresses 1 MiB, and writes past byte 262145 of buffer: AddressSanitizer reports a global-buffer-overflow immediately (explicit crash). This is an input_format degradation: the library format did not change; the 'fuzz bytes -> program input' size convention is wrong — 'how long the output might be' was used as 'how large the buffer is'. The fix clamps the declared capacity back to sizeof(buffer) and the overflow disappears (the excess now returns Z_BUF_ERROR, which is correct). introduced_by_this_change=false: the defect exists since the fuzzer was added in 2025."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "n/a — 无库侧引入 commit（harness 自身尺寸约定错误）",
+   "M_parent": "n/a",
+   "M_on_mainline": false,
+   "harness_exists_at": [
+    "H^1",
+    "H"
+   ],
+   "H": "3aa4dea6681e006c906cbb72138bb14937422252",
+   "H_symbols_in_diff": [
+    "uncompress2",
+    "buffer_length"
+   ]
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "bc2e10e513e11e9d21c1165e73b636090273ad2d",
+    "oss_rev": "bc2e10e513e11e9d21c1165e73b636090273ad2d",
+    "mode": "plain",
+    "secs": 1.2,
+    "errors": [
+     "n/a（无库侧 M，两侧同为 zlib @1c2519c8b8）；旧 harness 编译链接成功"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "fail",
+    "sha": "bc2e10e513e11e9d21c1165e73b636090273ad2d",
+    "oss_rev": "bc2e10e513e11e9d21c1165e73b636090273ad2d",
+    "mode": "plain",
+    "secs": 1.2,
+    "errors": [
+     "explicit：AddressSanitizer: global-buffer-overflow，0 bytes after global 'buffer' (size 262144)，栈顶 inflate_fast inffast.c:254，调用点 zlib_uncompress3_fuzzer.cc:35",
+     "触发条件：前三字节乘出的声明容量（此处 200*200*200 = 8,000,000）> 262144，且压缩流解压后长度超过 262144"
+    ],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "3aa4dea6681e006c906cbb72138bb14937422252",
+    "oss_rev": "3aa4dea6681e006c906cbb72138bb14937422252",
+    "mode": "plain",
+    "secs": 1.1,
+    "errors": [
+     "clamp 后声明容量 = sizeof(buffer) = 262144，同一输入不再越界（uncompress2 返回 Z_BUF_ERROR）"
+    ],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": "AddressSanitizer: global-buffer-overflow（global 'buffer' 262144 字节，越界 0 字节）",
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "退化的根因是 fuzz 字节到输出的尺寸约定错误",
+    "pass": true,
+    "detail": "前三字节乘积被当作 uncompress2 的 destLen，未与真实 buffer 尺寸对齐"
+   },
+   {
+    "check": "退化是 explicit 而非 silent",
+    "pass": true,
+    "detail": "ASan 直接报 global-buffer-overflow，确定性复现，不依赖覆盖率"
+   },
+   {
+    "check": "introduced_by_this_change = false",
+    "pass": true,
+    "detail": "fuzzer 2025 年加入即错，无库侧 M；两侧库树同为 zlib @1c2519c8b8"
+   }
+  ],
+  "budget_note": "1) 本轮真跑（clang 21.1.8 + compiler-rt + ASan，Ubuntu）：cmake 4.2.3 构建 zlib 静态库 （-DZLIB_BUILD_EXAMPLES=OFF）。2) 崩溃是确定性复现，不靠 fuzz：手工构造 verification/sample_input_overflow.bin（1042 字节 = 0xC8,0xC8,0xC8 + 1 MiB 零字节的 deflate 流），旧 harness 一次即报 global-buffer-overflow，新 harness 同输入干净退出。3) 另跑了 30s 空语料 fuzz（verification/fuzz30_old_harness.log）：0 崩溃 —— 说明该缺陷靠随机变异在 30s 内找不到（需要「乘积 > 262144」且「解压后 > 262144」同时成立，还得先撞出合法 deflate 流），这也解释了它为什么能一直躺在 OSS-Fuzz 里而不被 fuzzing 暴露；本条的判定不依赖这段 fuzz。4) 限制：未跑 3×3600s 的完整 campaign；未测修复后 uncompress2 返回值分布。",
+  "toolchain": "clang 21.1.8 (Ubuntu) + compiler-rt（-fsanitize=fuzzer,address）；cmake 4.2.3；zlib @1c2519c8b8dab1d512a4edb04b8d99441415571d",
+  "fuzz": {
+   "skipped": false,
+   "corpus_source": "空语料；另有手工构造的确定性输入 verification/sample_input_overflow.bin",
+   "corpus_size": 0,
+   "budget": {
+    "seeds": 1,
+    "seconds_each": 30,
+    "note": "30s 探索性 fuzz 未发现崩溃（见 budget_note 第 3 点），判定以确定性构造输入为准"
+   },
+   "without_fix": [
+    {
+     "seed": 1,
+     "secs": 0,
+     "execs": 1,
+     "crash_restarts": 0,
+     "corpus_size": 0,
+     "artifacts": 1,
+     "replayed_inputs": 1,
+     "exec_ok": false,
+     "crash": "AddressSanitizer: global-buffer-overflow in inflate_fast (inffast.c:254), 0 bytes after global 'buffer' of size 262144"
+    }
+   ],
+   "with_fix": [
+    {
+     "seed": 1,
+     "secs": 0,
+     "execs": 1,
+     "crash_restarts": 0,
+     "corpus_size": 0,
+     "artifacts": 0,
+     "replayed_inputs": 1,
+     "exec_ok": true
+    }
+   ]
+  }
+ },
+ "urls": {
+  "M": "n/a（introduced_by_this_change=false，无库侧引入 commit）",
+  "M_parent": "n/a",
+  "harness_oss_fuzz_rev": "https://github.com/google/oss-fuzz/commit/3aa4dea6681e006c906cbb72138bb14937422252",
+  "H": "https://github.com/google/oss-fuzz/commit/3aa4dea6681e006c906cbb72138bb14937422252",
+  "library_rev": "https://github.com/madler/zlib/tree/1c2519c8b8dab1d512a4edb04b8d99441415571d"
+ }
+}

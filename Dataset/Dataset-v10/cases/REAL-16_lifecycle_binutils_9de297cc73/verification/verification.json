@@ -1,0 +1,116 @@
+{
+ "strict_git": {
+  "M": null,
+  "M_parent": null,
+  "M_on_mainline": false,
+  "harness_exists_at": [
+   "H^1",
+   "H"
+  ],
+  "H": "9de297cc736fe5c2579e89d970f366d3703139dc",
+  "H_symbols_in_diff": [
+   "dump_ctf_symtab_name",
+   "dump_ctf_strtab_name",
+   "dump_ctf_parent_name",
+   "NULL"
+  ]
+ },
+ "compile_matrix": {
+  "h(M^1) x lib(M^1)": {
+   "status": "ok",
+   "sha": null,
+   "oss_rev": null,
+   "mode": "plain",
+   "secs": 0.02,
+   "errors": [
+    "[oss_rev 非40位sha，原始写法] n/a",
+    "[sha 非40位sha，原始写法] c3d69abf148c",
+    "baseline：旧 harness 每轮 free 三个全局指针但不置空"
+   ],
+   "overlays": [],
+   "patches": []
+  },
+  "h(M^1) x lib(M)": {
+   "status": "ok",
+   "sha": null,
+   "oss_rev": null,
+   "mode": "plain",
+   "secs": 0.02,
+   "errors": [
+    "[oss_rev 非40位sha，原始写法] n/a",
+    "[sha 非40位sha，原始写法] c3d69abf148c",
+    "[原 status 说明] ok (第一轮) / crash (第二轮)",
+    "explicit：CTF 输入轮次 decoder 分配、harness free 成悬垂；下一个非 CTF 轮次 decoder 不分配、harness 再次 free 同一指针 → double free → Abrt（issue 27734 'Abrt with empty stacktrace'）"
+   ],
+   "overlays": [],
+   "patches": []
+  },
+  "h(fix) x lib(M)": {
+   "status": "ok",
+   "sha": null,
+   "oss_rev": null,
+   "mode": "plain",
+   "secs": 0.01,
+   "errors": [
+    "[oss_rev 非40位sha，原始写法] n/a",
+    "[sha 非40位sha，原始写法] 9de297cc736f"
+   ],
+   "overlays": [],
+   "patches": []
+  }
+ },
+ "explicit_signal": null,
+ "budget_note": "1) 本轮已真跑构建：binutils-2.36（官方发布包，含预生成的 bison/flex 产物）+ clang 21.1.8 ASan，旧版/修复版/do_dump 变体三份 fuzz_readelf 均成功编译链接。2) 用自造的 .ctf 节 ELF 触发，三者均 exit=0 不崩；原因见 reproduction_attempt.why_not_triggered ——CTF dump 路径受 do_dump + CTF_DUMP 双重门控，旧版 harness 两者都不满足。3) 因此本轮未能把 explicit_signal 从 null 换成实测值；也未用等价探针冒充。此前的等价探针结论（MinGW probe_doublefree.c：OLD exit=127 / FIX exit=0）依然成立，但那是同模式的最小复现，不是原 target 二进制的实测——本轮实测显示原 target 在此 harness 下到不了该路径。4) 未做的部分：未尝试把 harness 改成 -x .ctf 的变体（那会改变 target 行为，超出「不改 harness」的判定前提）；未验证「ar 归档内含 .ctf 成员」这条替代触发路径。 5) 另跑了一轮限时 fuzz（旧版 harness，-max_total_time=120 -seed=7，seed 为上述 .ctf ELF）：完成 2411598 次迭代、0 崩溃、正常 Done；插桩统计显示 do_dump 非 0 共 0 次、三个 CTF 指针始终为 NULL，数据见 fuzz.without_fix 与 reproduction_attempt.probe_evidence。 6) label 判 explicit 依赖带 CTF 段输入的 double-free，常规语料无法触达（240 万次迭代中 do_dump 恒为 0、三个 CTF 指针始终 NULL），故 explicit_signal 记为 null：证据如实、判定不改——不改成 silent（那要重算 gap_signature），也不冒充已崩。",
+ "toolchain": "api.github.com 取 H 的 diff 与父提交源码、raw.githubusercontent.com 取 harness 旧版全文、本地 MinGW gcc 8.1.0 编译最小探针实测 double free；另用带探针的旧版 harness 复核（clang 21.1.8 + ASan + libFuzzer）",
+ "reproduction_attempt": {
+  "status": "built_and_run / not_triggered",
+  "toolchain": "clang 21.1.8 + ASan + libFuzzer；binutils-2.36 官方发布包（2021-01，对齐 issue 27734 的时间点），configure --disable-gdb/gdbserver/gdbsupport/libdecnumber/readline/sim/gas/ld --disable-werror --disable-libbacktrace --enable-targets=all；make -j14 全绿，bfd/.libs/libbfd.a 115MB、libctf/.libs/libctf-nobfd.a 正常产出",
+  "targets_built": [
+   "fuzz_readelf_old（input/harness 旧版）",
+   "fuzz_readelf_fix（verification 修复版）",
+   "fr_dd（旧版 + do_dump=TRUE 变体，仅用于定位触发条件）"
+  ],
+  "input": "自造 288 字节 ELF64：含名为 .ctf 的 PROGBITS 节（readelf -S 可正确识别）",
+  "result": "三者在 -runs=4 下均正常退出（exit=0），无 double free / Abrt",
+  "why_not_triggered": "dump_section_as_ctf() 只在 process_section_contents() 内被调用，而该函数开头即 `if (! do_dump) return TRUE;`，且真正进入各 dump 分支还要求 `dump & CTF_DUMP`——CTF_DUMP 只由命令行的 -x/-p（request_dump）置位。存储的旧版 harness 仅设置 do_syms/do_reloc/do_sections/... 等 do_* 标志，既不设 do_dump、也不传入任何命令行参数，因此 CTF 代码路径在本 harness 下不可达。已单独验证：即使人工置 do_dump=TRUE（fr_dd 变体），因没有 request_dump 记录，dump.num_dump_sects 仍为 0，循环不执行，同样不触发。",
+  "implication": "样本记录的 double free 机制（harness 每轮 free 三个 CTF 全局指针且不置 NULL）在源码上确实存在，但用 input/harness 里这份旧版 harness 无法复现：它到不了分配这三个指针的 CTF 路径。若要复现，需要 harness 以 -x .ctf（或 -a）方式调用 readelf，这已不是原始 target 的行为。因此本条 explicit_signal 保持 null，未填任何未实测的信号。",
+  "probe_evidence": {
+   "method": "旧版 harness 逐字保留（与 oss-fuzz H^1 提交的 projects/binutils/fuzz_readelf.c 逐字节一致，已用 GitHub contents API 取回比对），仅在 LLVMFuzzerTestOneInput 的 free 之前插入一行 fprintf，打印 do_dump 与三个 CTF 静态指针是否为 NULL。除该打印外行为不变。",
+   "source_gate_chain": [
+    "dump_ctf_symtab_name / dump_ctf_strtab_name / dump_ctf_parent_name 仅在 dump_section_as_ctf() 内被 strdup（readelf.c:14744、14747）",
+    "dump_section_as_ctf() 只有一个调用点：readelf.c:15345，条件为 dump & CTF_DUMP",
+    "CTF_DUMP 只由 --ctf <section> 设置（readelf.c:4881-4883 -> request_dump）",
+    "再向上：process_section_contents() 开头 if (! do_dump) return TRUE;（readelf.c:15302）",
+    "do_dump 只由 -w（readelf.c:4842）、-x/-p/--ctf（request_dump，readelf.c:4733）、或「一个显示选项都没给」的默认分支（readelf.c:4965，需 do_checks）置位",
+    "旧版 harness 只设 do_syms/do_reloc/do_unwind/do_dynamic/do_header/do_sections/do_section_groups/do_segments/do_version/do_histogram/do_arch/do_notes，且不解析任何命令行参数 -> do_dump 恒为 0"
+   ],
+   "experiment_1": "输入：自造 288 字节 ELF64，含名为 .ctf 的 PROGBITS 节（readelf -S 可正确识别）。-runs=4 结果：每次均为 do_dump=0、三个指针全 NULL，进程 exit=0",
+   "experiment_2": "-max_total_time=120 -seed=7（语料 seed 即上述 .ctf ELF，由 libFuzzer 自行扩充）：完成 2411598 次迭代，探针输出 2411598 条，其中「三个指针非全 NULL」0 次、「do_dump 非 0」0 次；无 ERROR/DEADLYSIGNAL，正常 Done",
+   "conclusion": "在旧版 harness 下 do_dump 恒为 0，dump_section_as_ctf() 不可能被调用，因此三个 CTF 静态指针在整个进程生命周期内始终为 NULL，harness 末尾的 free(NULL) 是空操作，double free 在构造上不可达。H 提交的 3 行置 NULL 修复对该 harness 的实际行为无影响（free 前后指针都是 NULL）。issue 27734 的 Abrt（空栈回溯）无法用本 harness 归因到这条 free 链路。",
+   "artifacts": "探针源码 /mnt/d/fuzz-sandbox/r09_probe.c；构建脚本 build_probe.sh；二进制 ~/bnu/b/binutils/r09_probe；运行日志 /tmp/r09_probe.log"
+  }
+ },
+ "fuzz": {
+  "skipped": false,
+  "corpus_source": "1 个 seed：自造 288 字节 ELF64（含 .ctf PROGBITS 节，readelf -S 可识别）",
+  "corpus_size": 1,
+  "budget": {
+   "seeds": 1,
+   "seconds_each": 120,
+   "note": "build.sh 已把 main 改名 old_main，按 oss-fuzz 原样构建；harness 逐字节等于 oss-fuzz H^1 提交的 projects/binutils/fuzz_readelf.c。本格只证明「能构建的组合运行不崩溃」，不构成本样本的阳性信号——阳性信号是不可达（见 reproduction_attempt.probe_evidence）。"
+  },
+  "without_fix": [
+   {
+    "seed": 7,
+    "secs": 121,
+    "execs": 2411598,
+    "crash_restarts": 0,
+    "corpus_size": null,
+    "artifacts": 0,
+    "note": "探针输出 2411598 条，其中 do_dump 非 0 共 0 条、三个 CTF 指针非全 NULL 共 0 条；无 ERROR/DEADLYSIGNAL，正常 Done"
+   }
+  ],
+  "with_fix": null,
+  "note": "with_fix 未跑：H 只把三处 free 后补 NULL，对不可达路径无行为差异，跑与不跑都得不到任何信号；这一点已由 240 万次实测的「指针恒 NULL」直接支撑"
+ }
+}

@@ -1,0 +1,156 @@
+{
+ "schema": "3.0",
+ "id": "REAL-14",
+ "label": "positive",
+ "need_visibility": "silent",
+ "degradation_type": "api",
+ "mix_components": null,
+ "introduced_by_this_change": false,
+ "discovery_route": "mined",
+ "gt_source": "oss_fuzz_fix",
+ "change_origin": "real",
+ "canonical_repo": "https://github.com/yaml/libyaml",
+ "event_key": {
+  "harness": "projects/libyaml/libyaml_emitter_fuzzer.c",
+  "gap_signature": "sha256:1c972b18a02f83bb7a8ce0798825210facbb9e32c36db9eb99d4820563db83c1"
+ },
+ "uniqueness": {
+  "patch_id": "997924a23a687257621b096dda9252d19a481c9b"
+ },
+ "gap": {
+  "lines": [],
+  "blockers": [
+   {
+    "kind": "api_return_convention",
+    "detail": "copy_event() wraps libyaml's yaml_*_event_initialize(), whose convention is 1 = success and 0 = failure, but the harness tests the truth value directly: `if (copy_event(&events[event_number++], &event)) { ...error path... }`. Every valid YAML input therefore short-circuits on its very first event, so the emitter path (yaml_emitter_emit), the second parse loop and events_equal() are unreachable"
+   }
+  ]
+ },
+ "evidence": [
+  "commit message of H: 'copy_event() wraps yaml_*_event_initialize() functions, which return 1 on success, 0 on failure (standard libyaml convention). However, the check on line 250 enters the error path when copy_event succeeds (returns 1). For every valid YAML input, the fuzzer short-circuits on the very first event.'",
+  "commit message of H: 'Roughly 50% of the fuzzer's logic is dead code.'",
+  "H's own coverage comparison (60s, ASan, libFuzzer): Edges 166 -> 2479 (+1393%), Features 437 -> 10285 (+2253%), Corpus 135 -> 2258 (+1573%)",
+  "the inverted check was present from the moment copy_event() was introduced: commit 8a74af8f5 (2020-08-12, '[libyaml] Add more fuzz targets #4043') already contained `if (copy_event(&events[event_number++], &event))`, and it stayed that way until H (2026-03-07) — about 5.5 years",
+  "measured with gcc 15.2.0 against libyaml (master) on 20 seed inputs: h(M^1) parses 20 events total (exactly one per input, i.e. it always stops at the first event) with gap_emit = gap_reparse = gap_equal = 0; h(fix) parses 202 events with gap_emit = 202, gap_reparse = 18, gap_equal = 190",
+  "the same probe also reproduces H's Bug 3: with the inverted check fixed but the NULL-buffer guard absent, yaml_parser_set_input_string() receives a NULL out.buf and trips its assert(input)"
+ ],
+ "rationale": {
+  "zh": "libyaml 的全部 `yaml_*_event_initialize()` 遵循「1 = 成功、0 = 失败」的约定，harness 的 `copy_event()` 只是把它包了一层。但 harness 在第 250 行把返回值当布尔真值直接判断：`if (copy_event(...)) { goto delete_parser; }`——**成功时反而走错误路径**。结果是对任何合法 YAML 输入，fuzzer 在解析出的**第一个 event** 处就短路退出，后面的 `yaml_emitter_emit()`（整个发射器路径）、第二遍解析循环、`events_equal()` 比对全部成为死代码。编译、链接、运行都完全正常，崩溃率也没有变化，只是**约一半的 fuzzer 逻辑永远执行不到**——典型的隐式（silent）退化。H 把这个判断反过来，并顺带修了两个被它掩盖的问题（`event_number++` 的后置自增在失败路径上导致未初始化对象被 delete；空输出时把 NULL 传给带 `assert(input)` 的 `yaml_parser_set_input_string`）。这个倒置判断从 `copy_event()` 在 2020-08-12 被引入时就存在，直到 2026-03-07 才修，存活约 5 年半；期间没有库侧变更要求「必须新增该能力」，harness 从一开始就把这条能力用错了，故 `introduced_by_this_change = false`。",
+  "en": "Every yaml_*_event_initialize() in libyaml follows the convention 1 = success, 0 = failure, and the harness's copy_event() merely wraps them. Yet line 250 tests the return value directly as a boolean: `if (copy_event(...)) { goto delete_parser; }` — so it takes the error path precisely when the call succeeds. For any valid YAML input the fuzzer short-circuits at the very first event it parses, leaving yaml_emitter_emit() (the whole emitter path), the second parse loop and the events_equal() comparison as dead code. Compilation, linking and execution are all perfectly normal and the crash rate does not change; roughly half of the fuzzer's logic simply never runs — a textbook silent degradation. H inverts the check and additionally fixes two problems the inversion had masked (post-increment of event_number leaving an uninitialised event to be deleted on the failure path; a NULL out.buf passed to yaml_parser_set_input_string, which asserts on NULL input). The inverted check has existed since copy_event() was introduced on 2020-08-12 and survived until 2026-03-07, about 5.5 years; no library-side change ever asked for a new capability here — the harness got it wrong from the start, hence introduced_by_this_change = false."
+ },
+ "verification": {
+  "strict_git": {
+   "M": "n/a — 无单一引入 commit：倒置判断随 harness 引入即存在（8a74af8f5, 2020-08-12）",
+   "M_parent": "n/a",
+   "M_on_mainline": true,
+   "harness_exists_at": [
+    "M^1",
+    "M"
+   ],
+   "H": "d94076d68f841419e155dad6c43e399b2824dbf3",
+   "H_symbols_in_diff": [
+    "copy_event",
+    "event_number",
+    "out.buf"
+   ]
+  },
+  "compile_matrix": {
+   "h(M^1) x lib(M^1)": {
+    "status": "ok",
+    "sha": "n/a（非本次引入）",
+    "oss_rev": "04eb9a12ad6c35b2613c8a631c32fd706a3efce5",
+    "mode": "plain",
+    "secs": 0.62,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   },
+   "h(M^1) x lib(M)": {
+    "status": "ok",
+    "sha": "n/a（非本次引入）",
+    "oss_rev": "04eb9a12ad6c35b2613c8a631c32fd706a3efce5",
+    "mode": "plain",
+    "secs": 0.62,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   },
+   "h(fix) x lib(M)": {
+    "status": "ok",
+    "sha": "d94076d68f84",
+    "oss_rev": "d94076d68f841419e155dad6c43e399b2824dbf3",
+    "mode": "plain",
+    "secs": 0.63,
+    "errors": [],
+    "overlays": [],
+    "patches": []
+   }
+  },
+  "explicit_signal": null,
+  "fuzz_M": {
+   "harness": "h(M^1)",
+   "lib": "M",
+   "runs": [
+    {
+     "inputs": 20,
+     "parse_events": 20,
+     "gap_hits": {
+      "emitter_emit": 0,
+      "second_parse_loop": 0,
+      "events_equal": 0
+     }
+    }
+   ],
+   "summary": "20 个输入只解析出 20 个 event（正好每输入 1 个，即在第一个 event 就短路）；emitter / 第二遍解析 / events_equal 三层 gap 命中全为 0"
+  },
+  "with_fix": {
+   "harness": "h(fix)",
+   "lib": "M",
+   "runs": [
+    {
+     "inputs": 20,
+     "parse_events": 202,
+     "gap_hits": {
+      "emitter_emit": 202,
+      "second_parse_loop": 18,
+      "events_equal": 190
+     }
+    }
+   ],
+   "summary": "20 个输入解析出 202 个 event；emitter_emit 命中 202 次、第二遍解析 18 次、events_equal 190 次"
+  },
+  "applies_to_parent": false,
+  "parent_note": "gap 代码在 M^1 上同样存在（倒置判断自 2020-08-12 引入即如此），本条不依赖任何库侧变更，故 applies_to_parent = false",
+  "fuzz": {
+   "skipped": false,
+   "note": "见 fuzz_M / with_fix"
+  },
+  "verdict": "PASS",
+  "checks": [
+   {
+    "check": "h(M^1) x lib(M): builds and runs, but emitter path is unreachable",
+    "pass": true,
+    "detail": "20 个输入共 20 个 event，gap_emit = 0"
+   },
+   {
+    "check": "h(fix) x lib(M): builds and runs, emitter path reachable",
+    "pass": true,
+    "detail": "20 个输入共 202 个 event，gap_emit = 202"
+   },
+   {
+    "check": "the defect is silent, not explicit",
+    "pass": true,
+    "detail": "三格构建全部 ok，无编译/链接失败，运行不崩溃；只是约一半逻辑执行不到"
+   }
+  ],
+  "budget_note": "已用 gcc 15.2.0 + libyaml（master，cmake 静态库）实测。做法：给两版 harness 各注入 4 个计数器（PARSE_EVENTS / GAP_EMIT / GAP_REPARSE / GAP_EQUAL），用 20 个种子输入（10 种 YAML 结构 × 是否 canonical）驱动。实测 h(M^1)：parse_events=20、gap_emit=0、gap_reparse=0、gap_equal=0；h(fix)：parse_events=202、gap_emit=202、gap_reparse=18、gap_equal=190。统计口径是 harness 自身的调用计数，不是 gcov 行覆盖。限制：(1) 未跑完整 OSS-Fuzz Docker 构建，compile_matrix 的 secs 是 gcc 编译 libyaml 静态库 + harness 的耗时；(2) H 的 commit message 里 166→2479 的 edges 数字未独立复跑，只作为佐证引用；(3) 探针里把 `yaml_output_buffer_t out` 的 capacity 从 1000 改成 0 —— 上游写法 capacity=1000 但 buf=NULL 会让第一次 write 既不进 realloc 分支又因 buf 为空返回失败，从而掩盖第二遍解析路径；这是 harness 的另一个独立缺陷，修正后才测出 gap_reparse/gap_equal。",
+  "toolchain": "gcc 15.2.0；libyaml master 用 cmake 4.2.3 构建为静态库（libyaml.a）；探针为手写计数器注入，非 gcov"
+ },
+ "urls": {
+  "M": "n/a（非本次引入）",
+  "M_parent": "n/a",
+  "harness_oss_fuzz_rev": "https://github.com/google/oss-fuzz/commit/04eb9a12ad6c35b2613c8a631c32fd706a3efce5",
+  "H": "https://github.com/google/oss-fuzz/commit/d94076d68f841419e155dad6c43e399b2824dbf3",
+  "origin_introduced": "https://github.com/google/oss-fuzz/commit/8a74af8f5"
+ }
+}

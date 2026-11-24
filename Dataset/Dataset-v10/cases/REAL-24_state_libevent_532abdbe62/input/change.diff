@@ -1,0 +1,2247 @@
+diff --git a/projects/libevent/Dockerfile b/projects/libevent/Dockerfile
+index 77b1f77db9ac..303cacc119d3 100644
+--- a/projects/libevent/Dockerfile
++++ b/projects/libevent/Dockerfile
+@@ -19,4 +19,4 @@ RUN apt-get update && apt-get install -y cmake make
+ RUN git clone --depth 1 https://github.com/libevent/libevent.git libevent
+ RUN git clone --depth 1 https://github.com/google/fuzzing fuzzing
+ WORKDIR libevent
+-COPY build.sh run_tests.sh *.cc *.c *.dict $SRC/
++COPY build.sh run_tests.sh *.cc *.c *.h *.dict $SRC/
+diff --git a/projects/libevent/bufferevent_filter_fuzzer.cc b/projects/libevent/bufferevent_filter_fuzzer.cc
+new file mode 100644
+index 000000000000..7d77eead04a0
+--- /dev/null
++++ b/projects/libevent/bufferevent_filter_fuzzer.cc
+@@ -0,0 +1,405 @@
++/* Copyright 2026 Google LLC
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++      http://www.apache.org/licenses/LICENSE-2.0
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++/*
++ * Fuzzer for filtering bufferevents (bufferevent_filter.c) stacked on a
++ * socket bufferevent, and for the generic bufferevent machinery they share
++ * (bufferevent.c: watermarks, flush modes, read/write timeouts, triggers,
++ * fd replacement, freeing from inside a callback).
++ *
++ * Threat model: a remote peer on a stream connection controls the bytes
++ * that arrive, how they are segmented, when it half-closes or goes away,
++ * and how long it stays silent (timeouts). The application decodes the
++ * stream with a filter - the way libevent's filters are used for framing,
++ * compression or TLS - so the filter's decisions (BEV_OK / BEV_NEED_MORE /
++ * BEV_ERROR, how much it produces) follow the attacker's bytes. The
++ * application's own API calls are ordinary and valid.
++ *
++ * The existing bufferevent_fuzzer only creates filters with NULL (pass
++ * through) filter functions over fd-less or paired bufferevents and never
++ * flushes, times out, half-closes or replaces the fd, so the filter's
++ * flush / EOF / inbuf-watermark paths and bufferevent's generic timeout
++ * callbacks are never reached.
++ *
++ * The filter is a small streaming record codec: each record is a 1-byte
++ * length L and L payload bytes; L == 0xff is a protocol error, as is a
++ * truncated record at end of stream. Like a real decoder it emits partial
++ * payloads up to the limit it is given. The output side packs application
++ * data into records of a configurable size and emits an empty record when
++ * the stream is finished.
++ *
++ * Time is virtual (virtual_clock.h): libevent's clock stands still and the
++ * "tick" operation moves it forward to the earliest pending deadline, so
++ * every timer due then fires, exactly as if that much time had passed.
++ *
++ * Every input is self-contained, so a crash reproduces from its input alone
++ * in a fresh process and never depends on earlier inputs: the clock is
++ * reset, the socketpair, event_base and bufferevents are created for each
++ * input and destroyed at its end, and all harness globals are reset.
++ *
++ * Input layout (consumed in this order):
++ *   u8  cfg   bit0 defer callbacks, bit1 stack a second filter,
++ *             bit2 read callback leaves half the data buffered,
++ *             bit3 free the bufferevent from the event callback on EOF or
++ *             error, bits 4-7 output record size - 1
++ *   then up to MAX_OPS operations: u8 opcode + operands (see the switch)
++ */
++
++#include <signal.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/time.h>
++#include <unistd.h>
++
++#include <vector>
++
++#include <fuzzer/FuzzedDataProvider.h>
++
++#include "virtual_clock.h"
++
++extern "C" {
++#include "event2/buffer.h"
++#include "event2/bufferevent.h"
++#include "event2/bufferevent_compat.h" /* bufferevent_settimeout() */
++#include "event2/event.h"
++#include "event2/util.h"
++}
++
++#define MAX_OPS 48
++#define MAX_CHUNK 2048
++
++struct app_state {
++  struct bufferevent *top; /* NULL once freed */
++  bool leave_data;
++  bool free_on_eof;
++  size_t rec_size; /* payload bytes per output record */
++};
++static struct app_state g_app;
++
++/* Per-layer codec state: payload bytes still expected from the record
++ * currently being decoded. */
++struct codec {
++  struct app_state *app;
++  size_t in_remaining;
++  bool in_decode; /* decode_records() is running for this layer */
++};
++static struct codec g_codec[2];
++
++static void log_cb(int severity, const char *msg) {}
++
++extern "C" int LLVMFuzzerInitialize(int *argc, char ***argv) {
++  event_set_log_callback(log_cb);
++  signal(SIGPIPE, SIG_IGN);
++  return 0;
++}
++
++/* ---- the application's filter ----------------------------------------- */
++
++/* Streaming decoder: like a real decompressor or TLS layer it emits as
++ * much payload as the output limit allows and keeps its position inside
++ * the current record, so it never stalls while input is available and the
++ * consumer has room. */
++static enum bufferevent_filter_result
++decode_records_body(struct codec *c, struct evbuffer *src,
++                    struct evbuffer *dst, ev_ssize_t lim,
++                    enum bufferevent_flush_mode mode) {
++  bool produced = false;
++  while (evbuffer_get_length(src) > 0) {
++    if (c->in_remaining == 0) {
++      unsigned char len;
++      evbuffer_remove(src, &len, 1);
++      if (len == 0xff) return BEV_ERROR; /* malformed stream */
++      c->in_remaining = len;
++      produced = true;
++      continue;
++    }
++    if (lim == 0) break;
++    unsigned char buf[256];
++    size_t n = c->in_remaining;
++    if (n > evbuffer_get_length(src)) n = evbuffer_get_length(src);
++    if (lim > 0 && (size_t)lim < n) n = (size_t)lim;
++    evbuffer_remove(src, buf, n);
++    for (size_t i = 0; i < n; i++) buf[i] ^= 0x5a;
++    evbuffer_add(dst, buf, n);
++    c->in_remaining -= n;
++    if (lim > 0) lim -= (ev_ssize_t)n;
++    produced = true;
++  }
++  /* A truncated record at end of stream is a protocol error. */
++  if (mode == BEV_FINISHED && c->in_remaining > 0 &&
++      evbuffer_get_length(src) == 0)
++    return BEV_ERROR;
++  return produced ? BEV_OK : BEV_NEED_MORE;
++}
++
++static enum bufferevent_filter_result
++decode_records(struct evbuffer *src, struct evbuffer *dst, ev_ssize_t lim,
++               enum bufferevent_flush_mode mode, void *ctx) {
++  struct codec *c = (struct codec *)ctx;
++  /* A filter is a sequential stream transform: libevent must not call it
++   * again while the same call is still running (as it does when the
++   * filter's own evbuffer_add(dst) triggers the inbuf watermark callback).
++   * Real stateful filters such as zlib or framing codecs are corrupted by
++   * that, so report it at the point it happens rather than waiting for
++   * the corrupted state to cause a crash later. */
++  if (c->in_decode) {
++    fprintf(stderr, "libevent re-entered the input filter from inside "
++                    "itself (bufferevent_filtered_inbuf_cb)\n");
++    abort();
++  }
++  c->in_decode = true;
++  enum bufferevent_filter_result r =
++      decode_records_body(c, src, dst, lim, mode);
++  c->in_decode = false;
++  return r;
++}
++
++static enum bufferevent_filter_result
++encode_records(struct evbuffer *src, struct evbuffer *dst, ev_ssize_t lim,
++               enum bufferevent_flush_mode mode, void *ctx) {
++  struct codec *c = (struct codec *)ctx;
++  bool produced = false;
++  while (evbuffer_get_length(src) > 0) {
++    size_t n = evbuffer_get_length(src);
++    if (n > c->app->rec_size) n = c->app->rec_size;
++    if (lim >= 0) {
++      if (lim < 2) break;
++      if ((size_t)lim < n + 1) n = (size_t)lim - 1;
++    }
++    unsigned char buf[256];
++    buf[0] = (unsigned char)n;
++    evbuffer_remove(src, buf + 1, n);
++    for (size_t i = 1; i <= n; i++) buf[i] ^= 0x5a;
++    evbuffer_add(dst, buf, n + 1);
++    if (lim >= 0) lim -= (ev_ssize_t)(n + 1);
++    produced = true;
++  }
++  if (mode == BEV_FINISHED && evbuffer_get_length(src) == 0) {
++    unsigned char end = 0;
++    evbuffer_add(dst, &end, 1);
++    produced = true;
++  }
++  return produced ? BEV_OK : BEV_NEED_MORE;
++}
++
++/* ---- the application's callbacks --------------------------------------- */
++
++static void read_cb(struct bufferevent *bev, void *ctx) {
++  struct app_state *app = (struct app_state *)ctx;
++  struct evbuffer *in = bufferevent_get_input(bev);
++  size_t len = evbuffer_get_length(in);
++  /* Either consume everything, or behave like a parser that is waiting
++   * for more data and leaves part of it buffered (but always makes some
++   * progress, so a read high-watermark is eventually drained). */
++  size_t take = app->leave_data ? (len + 1) / 2 : len;
++  unsigned char buf[512];
++  while (take > 0) {
++    size_t n = take < sizeof(buf) ? take : sizeof(buf);
++    int got = evbuffer_remove(in, buf, n);
++    if (got <= 0) break;
++    take -= (size_t)got;
++  }
++}
++
++static void write_cb(struct bufferevent *bev, void *ctx) {}
++
++static void event_cb(struct bufferevent *bev, short what, void *ctx) {
++  struct app_state *app = (struct app_state *)ctx;
++  /* The usual pattern: drop the connection on EOF / error / timeout. */
++  if (app->free_on_eof &&
++      (what & (BEV_EVENT_EOF | BEV_EVENT_ERROR | BEV_EVENT_TIMEOUT)) &&
++      bev == app->top) {
++    bufferevent_free(bev);
++    app->top = NULL;
++  }
++}
++
++/* ---- harness ------------------------------------------------------------ */
++
++static void drain_peer(int peer) {
++  char buf[4096];
++  while (recv(peer, buf, sizeof(buf), MSG_DONTWAIT) > 0) {
++  }
++}
++
++extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
++  if (size < 2) return 0;
++  FuzzedDataProvider fdp(data, size);
++  uint8_t cfg = fdp.ConsumeIntegral<uint8_t>();
++
++  memset(&g_app, 0, sizeof(g_app));
++  memset(g_codec, 0, sizeof(g_codec));
++  g_codec[0].app = g_codec[1].app = &g_app;
++  g_app.leave_data = cfg & 4;
++  g_app.free_on_eof = cfg & 8;
++  g_app.rec_size = 1 + ((cfg >> 4) * 16);
++
++  int fds[2];
++  if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return 0;
++  evutil_make_socket_nonblocking(fds[0]);
++  evutil_make_socket_nonblocking(fds[1]);
++  int peer = fds[1];
++
++  vclock_reset();
++  struct event_base *base = event_base_new();
++  if (base) vclock_check_in_use();
++  if (!base) {
++    close(fds[0]);
++    close(fds[1]);
++    return 0;
++  }
++
++  int opts = BEV_OPT_CLOSE_ON_FREE;
++  if (cfg & 1) opts |= BEV_OPT_DEFER_CALLBACKS;
++  struct bufferevent *sock = bufferevent_socket_new(base, fds[0], opts);
++  struct bufferevent *top = NULL;
++  if (sock) {
++    top = bufferevent_filter_new(sock, decode_records, encode_records, opts,
++                                 NULL, &g_codec[0]);
++    if (!top) bufferevent_free(sock);
++  } else {
++    close(fds[0]);
++  }
++  if (top && (cfg & 2)) {
++    /* A second layer, e.g. compression on top of a record layer. */
++    struct bufferevent *outer = bufferevent_filter_new(
++        top, decode_records, encode_records, opts, NULL, &g_codec[1]);
++    if (outer)
++      top = outer;
++  }
++  if (!top) {
++    close(peer);
++    event_base_free(base);
++    return 0;
++  }
++  g_app.top = top;
++  bufferevent_setcb(top, read_cb, write_cb, event_cb, &g_app);
++  bufferevent_enable(top, EV_READ | EV_WRITE);
++
++  for (int op = 0; op < MAX_OPS && fdp.remaining_bytes() > 0 && g_app.top;
++       op++) {
++    top = g_app.top;
++    uint8_t opcode = fdp.ConsumeIntegral<uint8_t>();
++    switch (opcode % 12) {
++      case 0: { /* the peer sends bytes */
++        std::vector<uint8_t> chunk = fdp.ConsumeBytes<uint8_t>(
++            fdp.ConsumeIntegralInRange<uint16_t>(0, MAX_CHUNK));
++        if (peer >= 0 && !chunk.empty())
++          send(peer, chunk.data(), chunk.size(), MSG_NOSIGNAL);
++        break;
++      }
++      case 1: /* the peer reads what we sent */
++        if (peer >= 0) drain_peer(peer);
++        break;
++      case 2: { /* the application sends data */
++        std::vector<uint8_t> chunk = fdp.ConsumeBytes<uint8_t>(
++            fdp.ConsumeIntegralInRange<uint16_t>(0, MAX_CHUNK));
++        bufferevent_write(top, chunk.data(), chunk.size());
++        break;
++      }
++      case 3: { /* the application flushes */
++        uint8_t f = fdp.ConsumeIntegral<uint8_t>();
++        static const short io[] = {EV_READ, EV_WRITE, EV_READ | EV_WRITE};
++        static const enum bufferevent_flush_mode modes[] = {
++            BEV_NORMAL, BEV_FLUSH, BEV_FINISHED};
++        bufferevent_flush(top, io[f % 3], modes[(f / 3) % 3]);
++        break;
++      }
++      case 4: { /* enable / disable reading or writing */
++        uint8_t f = fdp.ConsumeIntegral<uint8_t>();
++        short what = (f & 1) ? EV_READ : EV_WRITE;
++        if (f & 2)
++          bufferevent_disable(top, what);
++        else
++          bufferevent_enable(top, what);
++        break;
++      }
++      case 5: { /* watermarks on the top layer or the one below it */
++        uint8_t f = fdp.ConsumeIntegral<uint8_t>();
++        size_t lo = fdp.ConsumeIntegralInRange<uint16_t>(0, 512);
++        size_t hi = fdp.ConsumeIntegralInRange<uint16_t>(0, 1024);
++        struct bufferevent *target = top;
++        if ((f & 4) && bufferevent_get_underlying(top))
++          target = bufferevent_get_underlying(top);
++        bufferevent_setwatermark(target, (f & 1) ? EV_READ : EV_WRITE, lo,
++                                 hi);
++        size_t glo, ghi;
++        bufferevent_getwatermark(target, (f & 2) ? EV_READ : EV_WRITE, &glo,
++                                 &ghi);
++        break;
++      }
++      case 6: { /* read / write timeouts */
++        uint8_t f = fdp.ConsumeIntegral<uint8_t>();
++        struct timeval rtv = {1 + (f & 3), 0};
++        struct timeval wtv = {1 + ((f >> 2) & 3), 0};
++        if (f & 0x40)
++          bufferevent_settimeout(top, (f & 0x10) ? 0 : 2,
++                                 (f & 0x20) ? 0 : 3);
++        else
++          bufferevent_set_timeouts(top, (f & 0x10) ? NULL : &rtv,
++                                   (f & 0x20) ? NULL : &wtv);
++        break;
++      }
++      case 7:
++      case 8: /* time passes: the next deadline is reached */
++        vclock_tick(base);
++        break;
++      case 9: { /* the peer half-closes or goes away */
++        if (peer < 0) break;
++        if (fdp.ConsumeBool()) {
++          shutdown(peer, SHUT_WR);
++        } else {
++          close(peer);
++          peer = -1;
++        }
++        break;
++      }
++      case 10: { /* the application pokes its callbacks */
++        uint8_t f = fdp.ConsumeIntegral<uint8_t>();
++        int topt = (f & 2) ? BEV_TRIG_DEFER_CALLBACKS : 0;
++        if (f & 4) topt |= BEV_TRIG_IGNORE_WATERMARKS;
++        if (f & 1)
++          bufferevent_trigger(top, (f & 8) ? EV_READ : EV_WRITE, topt);
++        else
++          bufferevent_trigger_event(top, BEV_EVENT_EOF, topt);
++        break;
++      }
++      case 11: { /* the application reconnects on a fresh socket */
++        int nfds[2];
++        if (socketpair(AF_UNIX, SOCK_STREAM, 0, nfds) != 0) break;
++        evutil_make_socket_nonblocking(nfds[0]);
++        evutil_make_socket_nonblocking(nfds[1]);
++        if (bufferevent_replacefd(top, nfds[0]) == 0) {
++          if (peer >= 0) close(peer);
++          peer = nfds[1];
++        } else {
++          close(nfds[0]);
++          close(nfds[1]);
++        }
++        bufferevent_get_enabled(top);
++        break;
++      }
++    }
++    event_base_loop(base, EVLOOP_NONBLOCK);
++  }
++
++  if (g_app.top) bufferevent_free(g_app.top);
++  g_app.top = NULL;
++  event_base_loop(base, EVLOOP_NONBLOCK);
++  if (peer >= 0) close(peer);
++  event_base_free(base);
++  return 0;
++}
+diff --git a/projects/libevent/bufferevent_socket_fuzzer.cc b/projects/libevent/bufferevent_socket_fuzzer.cc
+new file mode 100644
+index 000000000000..7d0d13cd831a
+--- /dev/null
++++ b/projects/libevent/bufferevent_socket_fuzzer.cc
+@@ -0,0 +1,303 @@
++/* Copyright 2026 Google LLC
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++      http://www.apache.org/licenses/LICENSE-2.0
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++/*
++ * Fuzzer for socket-backed bufferevents (bufferevent_sock.c) and the
++ * token-bucket rate limiter that sits in their read/write path
++ * (bufferevent_ratelim.c).
++ *
++ * Threat model: a remote peer on a stream connection decides what bytes
++ * arrive, how they are split into segments, when it stops reading and when
++ * it half-closes or resets the connection. The application around the
++ * bufferevent uses ordinary, valid configuration: watermarks, per-read and
++ * per-write caps, and per-connection and/or group rate limits.
++ *
++ * The existing bufferevent_fuzzer creates its socket bufferevents with
++ * fd == -1, so no byte ever moves through bufferevent_readcb() /
++ * bufferevent_writecb() and the rate-limit buckets are never drained. This
++ * harness gives the bufferevent one end of a real socketpair and plays the
++ * peer on the other end.
++ *
++ * Input layout (consumed in this order):
++ *   u8   opts        bit0 defer callbacks, bit1 per-connection rate limit,
++ *                    bit2 group rate limit, bit3 read callback leaves data
++ *                    in the input buffer, bit4 start by connecting to a
++ *                    loopback listener instead of using a socketpair
++ *   u16 x4           read rate, read burst, write rate, write burst
++ *   then up to MAX_OPS operations: u8 opcode + operands (see the switch)
++ *
++ * Every input is self-contained, so a crash or hang reproduces from its
++ * input alone in a fresh process and never depends on earlier inputs: each
++ * input gets its own event_base and sockets, and time is virtual
++ * (virtual_clock.h). The clock is reset for every input and only moves when
++ * the input says so (operation 11), so rate-limit refills and the
++ * bufferevent read/write timeouts happen at the same point every run.
++ */
++
++#include <arpa/inet.h>
++#include <netinet/in.h>
++#include <signal.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include <vector>
++
++#include <fuzzer/FuzzedDataProvider.h>
++
++extern "C" {
++#include "event2/buffer.h"
++#include "event2/bufferevent.h"
++#include "event2/event.h"
++#include "event2/util.h"
++}
++
++#include "virtual_clock.h"
++
++#define MAX_OPS 24
++#define MAX_CHUNK 4096
++
++static bool g_leave_data;
++
++static void log_cb(int severity, const char *msg) {}
++
++extern "C" int LLVMFuzzerInitialize(int *argc, char ***argv) {
++  event_set_log_callback(log_cb);
++  /* Like any network program: a peer that went away must surface as a
++   * write error, not kill the process. */
++  signal(SIGPIPE, SIG_IGN);
++  return 0;
++}
++
++static void read_cb(struct bufferevent *bev, void *ctx) {
++  struct evbuffer *input = bufferevent_get_input(bev);
++  size_t len = evbuffer_get_length(input);
++  /* Either consume everything, or behave like a parser that is waiting for
++   * more data and leaves half of it buffered. */
++  evbuffer_drain(input, g_leave_data ? len / 2 : len);
++}
++
++static void write_cb(struct bufferevent *bev, void *ctx) {}
++
++static void event_cb(struct bufferevent *bev, short what, void *ctx) {
++  if (what & BEV_EVENT_ERROR) (void)EVUTIL_SOCKET_ERROR();
++}
++
++static void drain_fd(int fd) {
++  char buf[4096];
++  while (fd >= 0 && recv(fd, buf, sizeof(buf), MSG_DONTWAIT) > 0) {
++  }
++}
++
++extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
++  if (size < 10) return 0;
++  FuzzedDataProvider fdp(data, size);
++
++  uint8_t opts = fdp.ConsumeIntegral<uint8_t>();
++  size_t read_rate = fdp.ConsumeIntegralInRange<uint16_t>(1, 8192);
++  size_t read_burst = read_rate + fdp.ConsumeIntegralInRange<uint16_t>(0, 8192);
++  size_t write_rate = fdp.ConsumeIntegralInRange<uint16_t>(1, 8192);
++  size_t write_burst =
++      write_rate + fdp.ConsumeIntegralInRange<uint16_t>(0, 8192);
++  g_leave_data = (opts & 8) != 0;
++
++  vclock_reset();
++  struct event_base *base = event_base_new();
++  if (!base) return 0;
++  vclock_check_in_use();
++
++  int peer = -1;   /* the remote end, driven by the fuzz input */
++  int lfd = -1;    /* listening socket for the connect() variant */
++  struct bufferevent *bev = NULL;
++  int bev_opts = BEV_OPT_CLOSE_ON_FREE | ((opts & 1) ? BEV_OPT_DEFER_CALLBACKS : 0);
++
++  if (opts & 16) {
++    /* Outgoing connection made by the bufferevent itself. */
++    struct sockaddr_in sin;
++    socklen_t slen = sizeof(sin);
++    memset(&sin, 0, sizeof(sin));
++    sin.sin_family = AF_INET;
++    sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    lfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
++    if (lfd < 0 || bind(lfd, (struct sockaddr *)&sin, sizeof(sin)) != 0 ||
++        listen(lfd, 4) != 0 ||
++        getsockname(lfd, (struct sockaddr *)&sin, &slen) != 0) {
++      if (lfd >= 0) close(lfd);
++      event_base_free(base);
++      return 0;
++    }
++    bev = bufferevent_socket_new(base, -1, bev_opts);
++    if (bev) {
++      bufferevent_setcb(bev, read_cb, write_cb, event_cb, NULL);
++      bufferevent_socket_connect(bev, (struct sockaddr *)&sin, sizeof(sin));
++      event_base_loop(base, EVLOOP_NONBLOCK);
++      peer = accept4(lfd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
++    }
++  } else {
++    int fds[2];
++    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
++                   fds) != 0) {
++      event_base_free(base);
++      return 0;
++    }
++    peer = fds[1];
++    bev = bufferevent_socket_new(base, fds[0], bev_opts);
++    if (!bev) close(fds[0]);
++  }
++
++  struct ev_token_bucket_cfg *cfg = NULL;
++  struct bufferevent_rate_limit_group *group = NULL;
++  bool has_limit = false; /* a per-connection limit is installed */
++  /* One millisecond per rate-limit tick (see operation 11). */
++  const struct timeval tick = {0, 1000};
++
++  if (!bev) goto cleanup;
++
++  cfg = ev_token_bucket_cfg_new(read_rate, read_burst, write_rate, write_burst,
++                                &tick);
++  if (cfg && (opts & 2))
++    has_limit = bufferevent_set_rate_limit(bev, cfg) == 0;
++  if (cfg && (opts & 4)) {
++    group = bufferevent_rate_limit_group_new(base, cfg);
++    if (group) bufferevent_add_to_rate_limit_group(bev, group);
++  }
++
++  bufferevent_setcb(bev, read_cb, write_cb, event_cb, NULL);
++  bufferevent_enable(bev, EV_READ | EV_WRITE);
++
++  for (int i = 0; i < MAX_OPS && fdp.remaining_bytes() > 0; i++) {
++    switch (fdp.ConsumeIntegralInRange<uint8_t>(0, 13)) {
++      case 0: { /* peer sends a segment */
++        std::vector<uint8_t> chunk = fdp.ConsumeBytes<uint8_t>(
++            fdp.ConsumeIntegralInRange<uint16_t>(0, MAX_CHUNK));
++        if (peer >= 0)
++          send(peer, chunk.data(), chunk.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
++        break;
++      }
++      case 1: { /* application writes */
++        std::vector<uint8_t> chunk = fdp.ConsumeBytes<uint8_t>(
++            fdp.ConsumeIntegralInRange<uint16_t>(0, MAX_CHUNK));
++        bufferevent_write(bev, chunk.data(), chunk.size());
++        break;
++      }
++      case 2: /* peer reads what it was sent */
++        drain_fd(peer);
++        break;
++      case 3: /* peer half-closes: EOF for the bufferevent */
++        if (peer >= 0) shutdown(peer, SHUT_WR);
++        break;
++      case 4: /* peer goes away */
++        if (peer >= 0) close(peer);
++        peer = -1;
++        break;
++      case 5: {
++        size_t lo = fdp.ConsumeIntegralInRange<uint16_t>(0, 2048);
++        size_t hi = lo + fdp.ConsumeIntegralInRange<uint16_t>(0, 2048);
++        bufferevent_setwatermark(
++            bev, fdp.ConsumeBool() ? EV_READ : EV_WRITE, lo, hi);
++        break;
++      }
++      case 6:
++        bufferevent_set_max_single_read(
++            bev, fdp.ConsumeIntegralInRange<uint16_t>(0, 4096));
++        bufferevent_set_max_single_write(
++            bev, fdp.ConsumeIntegralInRange<uint16_t>(0, 4096));
++        (void)bufferevent_get_max_single_read(bev);
++        (void)bufferevent_get_max_single_write(bev);
++        break;
++      case 7: {
++        short ev = fdp.ConsumeBool() ? EV_READ : EV_WRITE;
++        if (fdp.ConsumeBool())
++          bufferevent_disable(bev, ev);
++        else
++          bufferevent_enable(bev, ev);
++        break;
++      }
++      case 8:
++        bufferevent_flush(bev, EV_READ | EV_WRITE,
++                          fdp.ConsumeBool() ? BEV_FLUSH : BEV_FINISHED);
++        break;
++      case 9: /* the application charges extra bytes to the buckets */
++        /* Only valid while a per-connection limit is installed. */
++        if (has_limit) {
++          bufferevent_decrement_read_limit(
++              bev, fdp.ConsumeIntegralInRange<int16_t>(-4096, 4096));
++          bufferevent_decrement_write_limit(
++              bev, fdp.ConsumeIntegralInRange<int16_t>(-4096, 4096));
++        }
++        (void)bufferevent_get_read_limit(bev);
++        (void)bufferevent_get_write_limit(bev);
++        (void)bufferevent_get_max_to_read(bev);
++        (void)bufferevent_get_max_to_write(bev);
++        break;
++      case 10:
++        if (group) {
++          ev_uint64_t rd, wr;
++          bufferevent_rate_limit_group_decrement_read(
++              group, fdp.ConsumeIntegralInRange<int16_t>(-4096, 4096));
++          bufferevent_rate_limit_group_decrement_write(
++              group, fdp.ConsumeIntegralInRange<int16_t>(-4096, 4096));
++          bufferevent_rate_limit_group_set_min_share(
++              group, fdp.ConsumeIntegralInRange<uint16_t>(0, 4096));
++          (void)bufferevent_rate_limit_group_get_read_limit(group);
++          (void)bufferevent_rate_limit_group_get_write_limit(group);
++          bufferevent_rate_limit_group_get_totals(group, &rd, &wr);
++          bufferevent_rate_limit_group_reset_totals(group);
++        }
++        break;
++      case 11: /* time passes */
++        if (fdp.ConsumeBool())
++          /* exactly one rate-limit tick, so the buckets refill */
++          vclock_advance(base, &tick);
++        else
++          /* until the next timer is due: a refill, or a read/write
++           * timeout set with operation 13 */
++          vclock_tick(base);
++        break;
++      case 12: /* drop / restore the rate limits */
++        if (fdp.ConsumeBool()) {
++          struct ev_token_bucket_cfg *c = fdp.ConsumeBool() ? cfg : NULL;
++          if (bufferevent_set_rate_limit(bev, c) == 0) has_limit = c != NULL;
++        } else if (group) {
++          if (fdp.ConsumeBool())
++            bufferevent_remove_from_rate_limit_group(bev);
++          else
++            bufferevent_add_to_rate_limit_group(bev, group);
++        }
++        break;
++      case 13: {
++        struct timeval tv = {30, 0};
++        bool on = fdp.ConsumeBool();
++        bufferevent_set_timeouts(bev, on ? &tv : NULL, on ? &tv : NULL);
++        break;
++      }
++    }
++    event_base_loop(base, EVLOOP_NONBLOCK);
++  }
++
++cleanup:
++  if (bev) {
++    if (group) bufferevent_remove_from_rate_limit_group(bev);
++    bufferevent_free(bev);
++  }
++  /* Run the deferred finalizers before the limiter objects go away. */
++  event_base_loop(base, EVLOOP_NONBLOCK);
++  if (group) bufferevent_rate_limit_group_free(group);
++  if (cfg) ev_token_bucket_cfg_free(cfg);
++  if (peer >= 0) close(peer);
++  if (lfd >= 0) close(lfd);
++  event_base_free(base);
++  return 0;
++}
+diff --git a/projects/libevent/build.sh b/projects/libevent/build.sh
+index f262f911755b..23bbbe42331b 100755
+--- a/projects/libevent/build.sh
++++ b/projects/libevent/build.sh
+@@ -52,6 +52,10 @@ if [ "$FUZZING_ENGINE" != 'afl' ]; then
+   cp $SRC/ws_fuzzer.dict $OUT/ws_fuzzer.dict
+ fi
+ 
++# Dictionary for the evdns harnesses.
++cp $SRC/evdns_fuzzer.dict $OUT/evdns_client_fuzzer.dict
++cp $SRC/evdns_fuzzer.dict $OUT/evdns_server_fuzzer.dict
++
+ # Build the project tests for Chronos
+ mkdir -p $SRC/libevent/build-tests
+ cd $SRC/libevent/build-tests
+diff --git a/projects/libevent/dns_fuzzer.cc b/projects/libevent/dns_fuzzer.cc
+index 8d50487567a6..9d6378f98a91 100644
+--- a/projects/libevent/dns_fuzzer.cc
++++ b/projects/libevent/dns_fuzzer.cc
+@@ -82,6 +82,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+         /* Server-side request parsing (from dns_message_fuzzer.cc) */
+         int fds[2];
+         if (socketpair(AF_UNIX, SOCK_DGRAM, 0, fds) == 0) {
++            /* libevent requires non-blocking sockets: the server port reads
++             * until EAGAIN, so on a blocking socket every input stalls in
++             * recvfrom() until libFuzzer's alarm signal interrupts it. */
++            evutil_make_socket_nonblocking(fds[0]);
+             struct evdns_server_port *port =
+                 evdns_add_server_port_with_base(base, fds[0], 0, dns_server_cb, nullptr);
+             if (port) {
+diff --git a/projects/libevent/evdns_client_fuzzer.cc b/projects/libevent/evdns_client_fuzzer.cc
+new file mode 100644
+index 000000000000..d2e9cb2fbd0d
+--- /dev/null
++++ b/projects/libevent/evdns_client_fuzzer.cc
+@@ -0,0 +1,387 @@
++/* Copyright 2026 Google LLC
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++      http://www.apache.org/licenses/LICENSE-2.0
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++/*
++ * Fuzzer for the evdns stub-resolver (client side of evdns.c).
++ *
++ * Threat model: the application resolves a host name through libevent and a
++ * malicious (or spoofing, on-path) DNS server answers. The attacker sees the
++ * query, so it knows the transaction id and the (0x20 case-randomised)
++ * question, and controls every other byte of the reply, over UDP and - after
++ * a truncated reply or with "use-vc" - over TCP.
++ *
++ * The harness therefore plays the name server on loopback: it reads each
++ * query libevent sends, copies the transaction id (and optionally the
++ * question section) out of it and fills in the rest of the reply from the
++ * fuzz input. Without this, replies are discarded by the transaction-id and
++ * question checks at the top of reply_parse() and nothing behind them
++ * (answer/authority parsing, reply_handle(), search domains, CNAME handling,
++ * evdns_getaddrinfo() merging, the cache, TCP framing) is ever reached.
++ *
++ * Input layout (consumed in this order):
++ *   u8  cfg     resolver configuration, picked from a few representative
++ *               setups (bit0 no-cache, bit1 randomize-case off, bit2 EDNS,
++ *               bit3 search domain, bit4 hosts file, bit5 cancel at the end)
++ *   u8  kind    which lookup API is used (see switch below)
++ *   u8  qflags  DNS_QUERY_* / getaddrinfo hint selection
++ *   str name    host name to resolve (random-length string, <= 100 bytes)
++ *   then up to MAX_ROUNDS replies, each:
++ *     u8  rmode   bit0: echo the question section of the query
++ *                 bit1: (TCP) send the body raw, without the length prefix
++ *     u16 len     body length (0..MAX_BODY)
++ *     u8[len]     body: 10 bytes of header after the id (flags, counts),
++ *                 then the bytes that follow the (optional) echoed question
++ *
++ * Every input is self-contained, so a crash reproduces from its input alone
++ * in a fresh process and never depends on earlier inputs:
++ *  - the fake name server's UDP and TCP sockets are created for each input
++ *    and closed at its end, so nothing an earlier input sent or connected
++ *    can be read by a later one;
++ *  - time is virtual (virtual_clock.h) and reset for every input. It never
++ *    advances here, so no evdns timeout fires, exactly as before, but no
++ *    timer can fire because an input happened to run slowly either;
++ *  - at most 5 requests are in flight, which keeps evdns's in-flight table
++ *    to a single list in creation order. With more, requests are spread
++ *    over several lists by their random transaction id, and
++ *    evdns_base_free(dns, 1) would fail the A and AAAA halves of a
++ *    getaddrinfo lookup in an order that changes from run to run. A lookup
++ *    never has more than two requests in flight, so nothing is lost.
++ */
++
++#include <arpa/inet.h>
++#include <fcntl.h>
++#include <netinet/in.h>
++#include <signal.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include <string>
++#include <vector>
++
++#include <fuzzer/FuzzedDataProvider.h>
++
++extern "C" {
++#include "event2/dns.h"
++#include "event2/event.h"
++#include "event2/util.h"
++}
++
++#include "virtual_clock.h"
++
++#define MAX_ROUNDS 6
++#define MAX_BODY 2048
++
++/* The fake name server. Created for each input (see make_server_sockets). */
++static int g_udp = -1;
++static int g_tcp = -1;
++static char g_ns_addr[64];
++static char g_hosts_path[64];
++
++struct query_state {
++  int pending; /* number of callbacks that have not fired yet */
++};
++
++static void log_cb(int severity, const char *msg) {}
++
++static void resolve_cb(int result, char type, int count, int ttl,
++                       void *addresses, void *arg) {
++  struct query_state *st = (struct query_state *)arg;
++  st->pending--;
++  /* Touch the result the way an application would, so that a short or
++   * dangling result buffer is reported by the sanitizer. */
++  volatile unsigned char sink = 0;
++  if (result == DNS_ERR_NONE && addresses) {
++    const unsigned char *p = (const unsigned char *)addresses;
++    size_t n = 0;
++    if (type == DNS_IPv4_A) {
++      n = (size_t)count * 4;
++    } else if (type == DNS_IPv6_AAAA) {
++      n = (size_t)count * 16;
++    } else if (type == DNS_PTR && count > 0) {
++      n = strlen(*(char **)addresses);
++      p = (const unsigned char *)*(char **)addresses;
++    } else if (type == DNS_CNAME) {
++      n = strlen((const char *)addresses);
++    }
++    for (size_t i = 0; i < n; i++) sink ^= p[i];
++  }
++}
++
++static void gai_cb(int result, struct evutil_addrinfo *res, void *arg) {
++  struct query_state *st = (struct query_state *)arg;
++  st->pending--;
++  volatile size_t sink = 0;
++  for (struct evutil_addrinfo *ai = res; ai; ai = ai->ai_next) {
++    if (ai->ai_canonname) sink += strlen(ai->ai_canonname);
++    const unsigned char *p = (const unsigned char *)ai->ai_addr;
++    for (size_t i = 0; p && i < ai->ai_addrlen; i++) sink += p[i];
++  }
++  if (res) evutil_freeaddrinfo(res);
++}
++
++static int make_server_sockets(void) {
++  for (int attempt = 0; attempt < 16; attempt++) {
++    struct sockaddr_in sin;
++    socklen_t slen = sizeof(sin);
++    int one = 1;
++    int udp = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
++    int tcp = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
++    if (udp >= 0 && tcp >= 0) {
++      memset(&sin, 0, sizeof(sin));
++      sin.sin_family = AF_INET;
++      sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++      setsockopt(tcp, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
++      /* evdns talks UDP and TCP to the same address, so both sockets have to
++       * share one port number. */
++      if (bind(udp, (struct sockaddr *)&sin, sizeof(sin)) == 0 &&
++          getsockname(udp, (struct sockaddr *)&sin, &slen) == 0 &&
++          bind(tcp, (struct sockaddr *)&sin, sizeof(sin)) == 0 &&
++          listen(tcp, 16) == 0) {
++        g_udp = udp;
++        g_tcp = tcp;
++        snprintf(g_ns_addr, sizeof(g_ns_addr), "127.0.0.1:%d",
++                 ntohs(sin.sin_port));
++        return 0;
++      }
++    }
++    if (udp >= 0) close(udp);
++    if (tcp >= 0) close(tcp);
++  }
++  return -1;
++}
++
++static void close_server_sockets(void) {
++  if (g_udp >= 0) close(g_udp);
++  if (g_tcp >= 0) close(g_tcp);
++  g_udp = g_tcp = -1;
++}
++
++extern "C" int LLVMFuzzerInitialize(int *argc, char ***argv) {
++  event_set_log_callback(log_cb);
++  /* Like any network program: a peer that went away must surface as a
++   * write error, not kill the process. */
++  signal(SIGPIPE, SIG_IGN);
++
++  /* A fixed, trusted hosts file: it is application configuration, not
++   * attacker input. It lets evdns_getaddrinfo() take its hosts-file path. */
++  snprintf(g_hosts_path, sizeof(g_hosts_path), "/tmp/evdns_client_hosts.%d",
++           (int)getpid());
++  FILE *fp = fopen(g_hosts_path, "wb");
++  if (fp) {
++    fputs("127.0.0.1 localhost fuzzhost\n::1 localhost fuzzhost\n"
++          "10.1.2.3 a.example.com\n",
++          fp);
++    fclose(fp);
++  }
++  return 0;
++}
++
++/* Offset just behind the first question of a query, or 0 if malformed. */
++static size_t question_end(const uint8_t *q, size_t n) {
++  size_t i = 12;
++  while (i < n && q[i] != 0) {
++    if (q[i] > 63) return 0;
++    i += (size_t)q[i] + 1;
++  }
++  i += 1 + 4; /* root label, qtype, qclass */
++  return i <= n ? i : 0;
++}
++
++static std::vector<uint8_t> build_reply(const uint8_t *q, size_t n,
++                                        uint8_t rmode,
++                                        const std::vector<uint8_t> &body) {
++  std::vector<uint8_t> out;
++  size_t hdr = body.size() < 10 ? body.size() : 10;
++  out.push_back(q[0]); /* transaction id of the query */
++  out.push_back(q[1]);
++  out.insert(out.end(), body.begin(), body.begin() + hdr);
++  out.resize(12, 0);
++  if (rmode & 1) {
++    size_t qend = question_end(q, n);
++    if (qend > 12) out.insert(out.end(), q + 12, q + qend);
++  }
++  out.insert(out.end(), body.begin() + hdr, body.end());
++  return out;
++}
++
++extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
++  if (size < 4) return 0;
++  FuzzedDataProvider fdp(data, size);
++
++  uint8_t cfg = fdp.ConsumeIntegral<uint8_t>();
++  uint8_t kind = fdp.ConsumeIntegral<uint8_t>();
++  uint8_t qflags = fdp.ConsumeIntegral<uint8_t>();
++  std::string name = fdp.ConsumeRandomLengthString(100);
++  if (name.c_str()[0] == '\0') name = "www.example.com";
++
++  if (make_server_sockets() != 0) return 0;
++
++  vclock_reset();
++  struct event_base *base = event_base_new();
++  if (!base) {
++    close_server_sockets();
++    return 0;
++  }
++  vclock_check_in_use();
++  struct evdns_base *dns =
++      evdns_base_new(base, (cfg & 1) ? EVDNS_BASE_NO_CACHE : 0);
++  if (!dns) {
++    event_base_free(base);
++    close_server_sockets();
++    return 0;
++  }
++
++  /* One in-flight list, in creation order (see the header comment). */
++  evdns_base_set_option(dns, "max-inflight:", "5");
++  if (cfg & 2) evdns_base_set_option(dns, "randomize-case:", "0");
++  if (cfg & 4) evdns_base_set_option(dns, "edns-udp-size:", "4096");
++  if (cfg & 8) {
++    evdns_base_search_add(dns, "search.test");
++    evdns_base_search_add(dns, "b.test");
++    evdns_base_search_ndots_set(dns, 1);
++  }
++  if (cfg & 16) evdns_base_load_hosts(dns, g_hosts_path);
++  evdns_base_nameserver_ip_add(dns, g_ns_addr);
++
++  int flags = 0;
++  if (qflags & 1) flags |= DNS_QUERY_NO_SEARCH;
++  if (qflags & 2) flags |= DNS_QUERY_USEVC;
++  if (qflags & 4) flags |= DNS_QUERY_IGNTC;
++  if (qflags & 8) flags |= DNS_CNAME_CALLBACK;
++
++  struct query_state st = {0};
++  struct evdns_request *req = NULL;
++  struct evdns_getaddrinfo_request *gai = NULL;
++
++  switch (kind % 5) {
++    case 0:
++      st.pending = 1;
++      req = evdns_base_resolve_ipv4(dns, name.c_str(), flags, resolve_cb, &st);
++      break;
++    case 1:
++      st.pending = 1;
++      req = evdns_base_resolve_ipv6(dns, name.c_str(), flags, resolve_cb, &st);
++      break;
++    case 2: {
++      struct in_addr a;
++      a.s_addr = htonl(0x01020304);
++      st.pending = 1;
++      req = evdns_base_resolve_reverse(dns, &a, flags, resolve_cb, &st);
++      break;
++    }
++    case 3: {
++      struct in6_addr a6;
++      memset(&a6, 0, sizeof(a6));
++      a6.s6_addr[15] = 1;
++      st.pending = 1;
++      req = evdns_base_resolve_reverse_ipv6(dns, &a6, flags, resolve_cb, &st);
++      break;
++    }
++    case 4: {
++      static const int families[] = {AF_UNSPEC, AF_INET, AF_INET6, AF_UNSPEC};
++      struct evutil_addrinfo hints;
++      memset(&hints, 0, sizeof(hints));
++      hints.ai_family = families[(qflags >> 4) & 3];
++      hints.ai_socktype = SOCK_STREAM;
++      hints.ai_protocol = IPPROTO_TCP;
++      if (qflags & 64) hints.ai_flags |= EVUTIL_AI_CANONNAME;
++      st.pending = 1;
++      gai = evdns_getaddrinfo(dns, name.c_str(), "80", &hints, gai_cb, &st);
++      break;
++    }
++  }
++  /* The resolve functions return NULL without calling back on failure. */
++  if (kind % 5 != 4 && !req) st.pending = 0;
++
++  int conn = -1; /* TCP connection from the resolver, once accepted */
++  std::vector<uint8_t> tcp_in;
++
++  for (int round = 0; round < MAX_ROUNDS && fdp.remaining_bytes() > 0;
++       round++) {
++    uint8_t rmode = fdp.ConsumeIntegral<uint8_t>();
++    size_t len = fdp.ConsumeIntegralInRange<uint16_t>(0, MAX_BODY);
++    std::vector<uint8_t> body = fdp.ConsumeBytes<uint8_t>(len);
++
++    /* Let the resolver send its query / connect. */
++    event_base_loop(base, EVLOOP_NONBLOCK);
++
++    uint8_t q[4096];
++    struct sockaddr_in from;
++    socklen_t fromlen = sizeof(from);
++    ssize_t n = recvfrom(g_udp, q, sizeof(q), 0, (struct sockaddr *)&from,
++                         &fromlen);
++    if (n >= 12) {
++      /* One UDP query is answered per round; further queries (search
++       * domains, the AAAA half of getaddrinfo) wait for the next round. */
++      std::vector<uint8_t> out = build_reply(q, (size_t)n, rmode, body);
++      sendto(g_udp, out.data(), out.size(), 0, (struct sockaddr *)&from,
++             fromlen);
++    } else {
++      if (conn < 0) {
++        conn = accept4(g_tcp, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
++        if (conn >= 0) {
++          tcp_in.clear();
++          /* Let the resolver notice the connect and flush its query. */
++          event_base_loop(base, EVLOOP_NONBLOCK);
++        }
++      }
++      if (conn >= 0) {
++        ssize_t r;
++        while ((r = recv(conn, q, sizeof(q), 0)) > 0)
++          tcp_in.insert(tcp_in.end(), q, q + r);
++        if (r == 0) {
++          /* The resolver dropped the connection. */
++          close(conn);
++          conn = -1;
++          tcp_in.clear();
++        } else if (tcp_in.size() >= 2) {
++          size_t qlen = ((size_t)tcp_in[0] << 8) | tcp_in[1];
++          if (qlen >= 12 && tcp_in.size() >= 2 + qlen) {
++            std::vector<uint8_t> out =
++                build_reply(tcp_in.data() + 2, qlen, rmode, body);
++            tcp_in.erase(tcp_in.begin(), tcp_in.begin() + 2 + qlen);
++            if (!(rmode & 2)) {
++              uint8_t pfx[2] = {(uint8_t)(out.size() >> 8),
++                                (uint8_t)out.size()};
++              out.insert(out.begin(), pfx, pfx + 2);
++            }
++            send(conn, out.data(), out.size(), MSG_NOSIGNAL);
++          }
++        }
++      }
++    }
++
++    /* Let the resolver parse the reply and run the deferred callbacks. */
++    event_base_loop(base, EVLOOP_NONBLOCK);
++  }
++
++  /* An application giving up on the lookup. Only legal while the callback
++   * has not run: afterwards the request handle is gone. */
++  if ((cfg & 32) && st.pending > 0) {
++    if (req) evdns_cancel_request(dns, req);
++    if (gai) evdns_getaddrinfo_cancel(gai);
++    event_base_loop(base, EVLOOP_NONBLOCK);
++  }
++
++  if (conn >= 0) close(conn);
++  /* Fail whatever is still in flight, then run the resulting callbacks. */
++  evdns_base_free(dns, 1);
++  event_base_loop(base, EVLOOP_NONBLOCK);
++  event_base_free(base);
++  close_server_sockets();
++  return 0;
++}
+diff --git a/projects/libevent/evdns_failover_fuzzer.cc b/projects/libevent/evdns_failover_fuzzer.cc
+new file mode 100644
+index 000000000000..a840017c5a75
+--- /dev/null
++++ b/projects/libevent/evdns_failover_fuzzer.cc
+@@ -0,0 +1,567 @@
++/* Copyright 2026 Google LLC
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++      http://www.apache.org/licenses/LICENSE-2.0
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++/*
++ * Fuzzer for the time-driven part of the evdns stub resolver: retransmits,
++ * request timeouts, nameserver failure / probing / recovery, reassignment
++ * of requests between nameservers, the waiting queue, the getaddrinfo
++ * A/AAAA skew timer, cache TTL expiry, runtime nameserver addition and
++ * reconfiguration, and resolver shutdown.
++ *
++ * Threat model: the application resolves names through libevent against
++ * several nameservers. The DNS infrastructure it talks to (or an on-path
++ * attacker) decides, per query, whether and when a reply arrives, which
++ * nameserver answers, the response code, truncation, the TCP fallback
++ * behaviour and the reply bytes. The application's configuration is
++ * trusted and picked from a few representative setups.
++ *
++ * evdns_client_fuzzer answers every query from a single server without
++ * time ever passing, so none of the timer callbacks run and all of the
++ * nameserver bookkeeping (nameserver_failed(), nameserver_send_probe(),
++ * nameserver_probe_callback(), request_swap_ns(),
++ * retransmit_all_tcp_requests_for(), evdns_getaddrinfo_timeout_cb(),
++ * evdns_ttl_expired(), evdns_requests_pump_waiting_queue(),
++ * evdns_base_clear_nameservers_and_suspend(), evdns_base_free(), ...)
++ * stays unreached. Those paths juggle request ownership between lists and
++ * nameservers, which is where lifetime bugs live.
++ *
++ * Time is virtual (virtual_clock.h): libevent's clock stands still and the
++ * "tick" operation moves it forward to the earliest pending deadline, so
++ * every timer due then fires, exactly as if that much time had passed.
++ * This keeps every input fast (no sleeping) and its timer order a pure
++ * function of the input.
++ *
++ * Every input is self-contained, so a crash reproduces from its input alone
++ * in a fresh process and never depends on earlier inputs:
++ *  - the clock, the fake nameservers' sockets, the event_base and the
++ *    evdns_base are created or reset for each input and destroyed at its
++ *    end, and all harness globals are reset;
++ *  - the randomness inside evdns (transaction ids and 0x20 case
++ *    randomisation) does not affect behaviour: max-inflight is capped so
++ *    the in-flight requests are kept in one list in creation order instead
++ *    of being hashed by transaction id, the fake servers echo the id and
++ *    question from the query, and names are compared case-insensitively
++ *    when case randomisation is on.
++ *
++ * Input layout (consumed in this order):
++ *   u8  cfg   bits 0-1: number of nameservers - 1 (1..3)
++ *             bit2: no cache, bit3: search domains,
++ *             bit4: max-inflight 1 instead of 5 (both use the waiting
++ *                   queue; see the note where it is set),
++ *             bit5: max-timeouts 1 / attempts 1, bit6: randomize-case off
++ *             bit7: shut down with evdns_base_free(dns, 1), failing the
++ *                   outstanding lookups, instead of cancelling them first
++ *   then up to MAX_OPS operations: u8 opcode + operands (see the switch)
++ */
++
++#include <arpa/inet.h>
++#include <netinet/in.h>
++#include <signal.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include <string>
++#include <vector>
++
++#include <fuzzer/FuzzedDataProvider.h>
++
++#include "virtual_clock.h"
++
++extern "C" {
++#include "event2/dns.h"
++#include "event2/event.h"
++#include "event2/util.h"
++}
++
++#define NUM_NS 3
++#define MAX_REQS 8
++#define MAX_OPS 48
++#define MAX_BODY 1024
++
++/* The fake nameservers: UDP + TCP on the same loopback port. Created
++ * afresh for every input and closed at its end. */
++struct fake_ns {
++  int udp;
++  int tcp;
++  int conn; /* accepted TCP connection from the resolver, or -1 */
++  std::vector<uint8_t> tcp_in;
++  struct sockaddr_in addr;
++  char addr_str[64];
++};
++static struct fake_ns g_ns[NUM_NS];
++
++/* One slot per lookup the application started. */
++struct lookup {
++  int pending; /* 1 until the callback has run */
++  struct evdns_request *req;
++  struct evdns_getaddrinfo_request *gai;
++};
++static struct lookup g_lookups[MAX_REQS];
++
++static void log_cb(int severity, const char *msg) {}
++
++static void resolve_cb(int result, char type, int count, int ttl,
++                       void *addresses, void *arg) {
++  struct lookup *l = (struct lookup *)arg;
++  l->pending = 0;
++  l->req = NULL;
++  /* Touch the result the way an application would. */
++  volatile unsigned char sink = 0;
++  if (result == DNS_ERR_NONE && addresses) {
++    const unsigned char *p = (const unsigned char *)addresses;
++    size_t n = 0;
++    if (type == DNS_IPv4_A) {
++      n = (size_t)count * 4;
++    } else if (type == DNS_IPv6_AAAA) {
++      n = (size_t)count * 16;
++    } else if (type == DNS_PTR && count > 0) {
++      p = (const unsigned char *)*(char **)addresses;
++      n = strlen((const char *)p);
++    }
++    for (size_t i = 0; i < n; i++) sink ^= p[i];
++  }
++}
++
++static void gai_cb(int result, struct evutil_addrinfo *res, void *arg) {
++  struct lookup *l = (struct lookup *)arg;
++  l->pending = 0;
++  l->gai = NULL;
++  volatile size_t sink = 0;
++  for (struct evutil_addrinfo *ai = res; ai; ai = ai->ai_next) {
++    if (ai->ai_canonname) sink += strlen(ai->ai_canonname);
++    const unsigned char *p = (const unsigned char *)ai->ai_addr;
++    for (size_t i = 0; p && i < ai->ai_addrlen; i++) sink += p[i];
++  }
++  if (res) evutil_freeaddrinfo(res);
++}
++
++static int make_ns(struct fake_ns *ns) {
++  for (int attempt = 0; attempt < 16; attempt++) {
++    struct sockaddr_in sin;
++    socklen_t slen = sizeof(sin);
++    int one = 1;
++    int udp = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
++    int tcp = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
++    if (udp >= 0 && tcp >= 0) {
++      memset(&sin, 0, sizeof(sin));
++      sin.sin_family = AF_INET;
++      sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++      setsockopt(tcp, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
++      if (bind(udp, (struct sockaddr *)&sin, sizeof(sin)) == 0 &&
++          getsockname(udp, (struct sockaddr *)&sin, &slen) == 0 &&
++          bind(tcp, (struct sockaddr *)&sin, sizeof(sin)) == 0 &&
++          listen(tcp, 16) == 0) {
++        ns->udp = udp;
++        ns->tcp = tcp;
++        ns->conn = -1;
++        ns->addr = sin;
++        snprintf(ns->addr_str, sizeof(ns->addr_str), "127.0.0.1:%d",
++                 ntohs(sin.sin_port));
++        return 0;
++      }
++    }
++    if (udp >= 0) close(udp);
++    if (tcp >= 0) close(tcp);
++  }
++  return -1;
++}
++
++extern "C" int LLVMFuzzerInitialize(int *argc, char ***argv) {
++  event_set_log_callback(log_cb);
++  signal(SIGPIPE, SIG_IGN);
++  return 0;
++}
++
++static void close_servers(void) {
++  for (int i = 0; i < NUM_NS; i++) {
++    struct fake_ns *ns = &g_ns[i];
++    if (ns->conn >= 0) close(ns->conn);
++    if (ns->tcp >= 0) close(ns->tcp);
++    if (ns->udp >= 0) close(ns->udp);
++    ns->conn = ns->tcp = ns->udp = -1;
++    ns->tcp_in.clear();
++  }
++}
++
++/* Fresh sockets for every input, so nothing a previous input sent or left
++ * queued can reach this one. */
++static int open_servers(void) {
++  for (int i = 0; i < NUM_NS; i++) {
++    g_ns[i].udp = g_ns[i].tcp = g_ns[i].conn = -1;
++    g_ns[i].tcp_in.clear();
++  }
++  for (int i = 0; i < NUM_NS; i++) {
++    if (make_ns(&g_ns[i]) != 0) {
++      close_servers();
++      return -1;
++    }
++  }
++  return 0;
++}
++
++/* ---- reply construction ------------------------------------------------ */
++
++/* Offset just behind the first question of a query, or 0 if malformed. */
++static size_t question_end(const uint8_t *q, size_t n) {
++  size_t i = 12;
++  while (i < n && q[i] != 0) {
++    if (q[i] > 63) return 0;
++    i += (size_t)q[i] + 1;
++  }
++  i += 1 + 4; /* root label, qtype, qclass */
++  return i <= n ? i : 0;
++}
++
++static void put16(std::vector<uint8_t> &v, unsigned x) {
++  v.push_back((uint8_t)(x >> 8));
++  v.push_back((uint8_t)x);
++}
++
++/*
++ * Build the reply to query q according to rmode:
++ *   0: raw - id from the query, the rest of the header and everything after
++ *      the (optionally echoed) question come from the fuzz body
++ *   1: a well-formed positive answer of the queried type
++ *   2: an empty answer with a fuzz-chosen header (rcode / TC / counts)
++ * Bit 2 of rmode controls whether the question is echoed in mode 0.
++ */
++static std::vector<uint8_t> build_reply(const uint8_t *q, size_t n,
++                                        uint8_t rmode,
++                                        const std::vector<uint8_t> &body) {
++  std::vector<uint8_t> out;
++  size_t qend = question_end(q, n);
++  out.push_back(q[0]);
++  out.push_back(q[1]);
++  switch (rmode & 3) {
++    case 1: {
++      uint16_t qtype = qend >= 16 ? (uint16_t)((q[qend - 4] << 8) | q[qend - 3])
++                                  : 1;
++      uint8_t ttl = body.empty() ? 30 : body[0];
++      put16(out, 0x8180); /* response, RD, RA, NOERROR */
++      put16(out, qend ? 1 : 0);
++      put16(out, 1);
++      put16(out, 0);
++      put16(out, 0);
++      if (qend) out.insert(out.end(), q + 12, q + qend);
++      put16(out, 0xc00c); /* owner: the question name */
++      put16(out, qtype);
++      put16(out, 1);
++      put16(out, 0);
++      put16(out, ttl);
++      if (qtype == 28) {
++        static const uint8_t a6[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
++                                       0,    0,    0,    0,    0, 0, 0, 1};
++        put16(out, 16);
++        out.insert(out.end(), a6, a6 + 16);
++      } else if (qtype == 12 || qtype == 5) {
++        static const uint8_t nm[] = {4, 'h', 'o', 's', 't', 4,
++                                     't', 'e', 's', 't', 0};
++        put16(out, sizeof(nm));
++        out.insert(out.end(), nm, nm + sizeof(nm));
++      } else {
++        static const uint8_t a4[4] = {192, 0, 2, 1};
++        put16(out, 4);
++        out.insert(out.end(), a4, a4 + 4);
++      }
++      break;
++    }
++    case 2: {
++      uint8_t f = body.size() > 0 ? body[0] : 0;
++      uint8_t rc = body.size() > 1 ? body[1] : 2;
++      /* QR always set; opcode/AA/TC/RD from f; RA + rcode from rc. */
++      out.push_back((uint8_t)(0x80 | (f & 0x7f)));
++      out.push_back(rc);
++      put16(out, qend ? 1 : 0);
++      put16(out, 0);
++      put16(out, 0);
++      put16(out, 0);
++      if (qend) out.insert(out.end(), q + 12, q + qend);
++      break;
++    }
++    default: {
++      size_t hdr = body.size() < 10 ? body.size() : 10;
++      out.insert(out.end(), body.begin(), body.begin() + hdr);
++      out.resize(12, 0);
++      if ((rmode & 4) && qend) out.insert(out.end(), q + 12, q + qend);
++      out.insert(out.end(), body.begin() + hdr, body.end());
++      break;
++    }
++  }
++  return out;
++}
++
++/* Answer (or drop) the oldest UDP query waiting at nameserver ns. */
++static void serve_udp(struct fake_ns *ns, uint8_t rmode, bool drop,
++                      const std::vector<uint8_t> &body) {
++  uint8_t q[4096];
++  struct sockaddr_in from;
++  socklen_t fromlen = sizeof(from);
++  ssize_t n =
++      recvfrom(ns->udp, q, sizeof(q), 0, (struct sockaddr *)&from, &fromlen);
++  if (n < 12 || drop) return;
++  std::vector<uint8_t> out = build_reply(q, (size_t)n, rmode, body);
++  sendto(ns->udp, out.data(), out.size(), 0, (struct sockaddr *)&from,
++         fromlen);
++}
++
++/* Act as the TCP side of nameserver ns: accept, then answer one framed
++ * query or drop the connection. */
++static void serve_tcp(struct event_base *base, struct fake_ns *ns,
++                      uint8_t rmode, bool close_conn,
++                      const std::vector<uint8_t> &body) {
++  if (ns->conn < 0) {
++    ns->conn = accept4(ns->tcp, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
++    if (ns->conn < 0) return;
++    ns->tcp_in.clear();
++    event_base_loop(base, EVLOOP_NONBLOCK);
++  }
++  if (close_conn) {
++    close(ns->conn);
++    ns->conn = -1;
++    ns->tcp_in.clear();
++    return;
++  }
++  uint8_t buf[4096];
++  ssize_t r;
++  while ((r = recv(ns->conn, buf, sizeof(buf), 0)) > 0)
++    ns->tcp_in.insert(ns->tcp_in.end(), buf, buf + r);
++  if (r == 0) {
++    close(ns->conn);
++    ns->conn = -1;
++    ns->tcp_in.clear();
++    return;
++  }
++  if (ns->tcp_in.size() < 2) return;
++  size_t qlen = ((size_t)ns->tcp_in[0] << 8) | ns->tcp_in[1];
++  if (qlen < 12 || ns->tcp_in.size() < 2 + qlen) return;
++  std::vector<uint8_t> out =
++      build_reply(ns->tcp_in.data() + 2, qlen, rmode, body);
++  ns->tcp_in.erase(ns->tcp_in.begin(), ns->tcp_in.begin() + 2 + qlen);
++  uint8_t pfx[2] = {(uint8_t)(out.size() >> 8), (uint8_t)out.size()};
++  out.insert(out.begin(), pfx, pfx + 2);
++  send(ns->conn, out.data(), out.size(), MSG_NOSIGNAL);
++}
++
++static void add_nameserver(struct evdns_base *dns, int i) {
++  /* Exercise both ways of adding a nameserver. */
++  if (i == 2)
++    evdns_base_nameserver_sockaddr_add(dns, (struct sockaddr *)&g_ns[i].addr,
++                                       sizeof(g_ns[i].addr), 0);
++  else
++    evdns_base_nameserver_ip_add(dns, g_ns[i].addr_str);
++}
++
++static void start_lookup(struct evdns_base *dns, FuzzedDataProvider &fdp) {
++  uint8_t kind = fdp.ConsumeIntegral<uint8_t>();
++  std::string name = fdp.ConsumeRandomLengthString(64);
++  if (name.c_str()[0] == '\0') name = "www.example.com";
++  int slot = -1;
++  for (int i = 0; i < MAX_REQS; i++)
++    if (!g_lookups[i].pending) {
++      slot = i;
++      break;
++    }
++  if (slot < 0) return;
++  struct lookup *l = &g_lookups[slot];
++  int flags = 0;
++  if (kind & 0x10) flags |= DNS_QUERY_NO_SEARCH;
++  if (kind & 0x20) flags |= DNS_QUERY_USEVC;
++  if (kind & 0x40) flags |= DNS_QUERY_IGNTC;
++  l->pending = 1;
++  l->req = NULL;
++  l->gai = NULL;
++  switch (kind % 5) {
++    case 0:
++      l->req = evdns_base_resolve_ipv4(dns, name.c_str(), flags, resolve_cb, l);
++      break;
++    case 1:
++      l->req = evdns_base_resolve_ipv6(dns, name.c_str(), flags, resolve_cb, l);
++      break;
++    case 2: {
++      struct in_addr a;
++      a.s_addr = htonl(0xc0000201);
++      l->req = evdns_base_resolve_reverse(dns, &a, flags, resolve_cb, l);
++      break;
++    }
++    case 3: {
++      struct in6_addr a6;
++      memset(&a6, 0, sizeof(a6));
++      a6.s6_addr[15] = 1;
++      l->req = evdns_base_resolve_reverse_ipv6(dns, &a6, flags, resolve_cb, l);
++      break;
++    }
++    case 4: {
++      struct evutil_addrinfo hints;
++      memset(&hints, 0, sizeof(hints));
++      hints.ai_family = (kind & 0x80) ? AF_INET : AF_UNSPEC;
++      hints.ai_socktype = SOCK_STREAM;
++      hints.ai_flags = EVUTIL_AI_CANONNAME;
++      /* May call back synchronously and return NULL. */
++      l->gai = evdns_getaddrinfo(dns, name.c_str(), "53", &hints, gai_cb, l);
++      return;
++    }
++  }
++  /* The resolve functions return NULL without calling back on failure. */
++  if (!l->req) l->pending = 0;
++}
++
++extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
++  if (size < 2) return 0;
++  FuzzedDataProvider fdp(data, size);
++  uint8_t cfg = fdp.ConsumeIntegral<uint8_t>();
++
++  memset(g_lookups, 0, sizeof(g_lookups));
++  if (open_servers() != 0) return 0;
++
++  vclock_reset();
++  struct event_base *base = event_base_new();
++  if (!base) {
++    close_servers();
++    return 0;
++  }
++  vclock_check_in_use();
++  struct evdns_base *dns =
++      evdns_base_new(base, (cfg & 4) ? EVDNS_BASE_NO_CACHE : 0);
++  if (!dns) {
++    event_base_free(base);
++    close_servers();
++    return 0;
++  }
++
++  int nns = 1 + (cfg & 3) % NUM_NS;
++  if (cfg & 8) {
++    evdns_base_search_add(dns, "a.test");
++    evdns_base_search_add(dns, "b.test");
++    evdns_base_search_ndots_set(dns, 2);
++  }
++  /* At most 5 requests in flight keeps evdns's in-flight table to a single
++   * list (evdns.c keeps (max_inflight + 4) / 5 lists, hashed by the random
++   * transaction id), so requests are walked, retransmitted and timed out in
++   * the order they were made rather than in an order that changes from run
++   * to run. Further requests wait in the waiting queue. */
++  evdns_base_set_option(dns, "max-inflight:", (cfg & 16) ? "1" : "5");
++  if (cfg & 32) {
++    evdns_base_set_option(dns, "max-timeouts:", "1");
++    evdns_base_set_option(dns, "attempts:", "1");
++  } else {
++    evdns_base_set_option(dns, "max-timeouts:", "2");
++    evdns_base_set_option(dns, "attempts:", "3");
++  }
++  if (cfg & 64) evdns_base_set_option(dns, "randomize-case:", "0");
++  evdns_base_set_option(dns, "timeout:", "2.5");
++  evdns_base_set_option(dns, "getaddrinfo-allow-skew:", "0.5");
++  evdns_base_set_option(dns, "initial-probe-timeout:", "1");
++  evdns_base_set_option(dns, "max-probe-timeout:", "8");
++  evdns_base_set_option(dns, "probe-backoff-factor:", "2");
++  for (int i = 0; i < nns; i++) add_nameserver(dns, i);
++
++  for (int op = 0; op < MAX_OPS && fdp.remaining_bytes() > 0; op++) {
++    uint8_t opcode = fdp.ConsumeIntegral<uint8_t>();
++    switch (opcode % 8) {
++      case 0:
++        start_lookup(dns, fdp);
++        break;
++      case 1:   /* a nameserver answers (or drops) a UDP query */
++      case 2: { /* likewise over TCP */
++        uint8_t sel = fdp.ConsumeIntegral<uint8_t>();
++        size_t len = fdp.ConsumeIntegralInRange<uint16_t>(0, MAX_BODY);
++        std::vector<uint8_t> body = fdp.ConsumeBytes<uint8_t>(len);
++        struct fake_ns *ns = &g_ns[(sel & 3) % NUM_NS];
++        uint8_t rmode = sel >> 2;
++        bool drop = (rmode & 0x38) == 0x38;
++        if (opcode % 8 == 1)
++          serve_udp(ns, rmode, drop, body);
++        else
++          serve_tcp(base, ns, rmode, drop, body);
++        break;
++      }
++      case 3:
++      case 4:
++        /* Time passes: the next deadline is reached. */
++        vclock_tick(base);
++        break;
++      case 5: { /* the application gives up on a lookup */
++        struct lookup *l =
++            &g_lookups[fdp.ConsumeIntegral<uint8_t>() % MAX_REQS];
++        /* The handles stay valid until the callback runs; cancel each one
++         * at most once. */
++        if (l->pending) {
++          if (l->req) evdns_cancel_request(dns, l->req);
++          if (l->gai) evdns_getaddrinfo_cancel(l->gai);
++          l->req = NULL;
++          l->gai = NULL;
++        }
++        break;
++      }
++      case 6: { /* the application changes its nameserver configuration */
++        uint8_t f = fdp.ConsumeIntegral<uint8_t>();
++        if (f & 0x80) {
++          /* Reconfigure, e.g. after a network change: drop all
++           * nameservers, add the new set, resume. */
++          evdns_base_clear_nameservers_and_suspend(dns);
++          for (int i = 0; i < NUM_NS; i++)
++            if (f & (1 << i)) add_nameserver(dns, i);
++          evdns_base_resume(dns);
++        } else {
++          /* Add one more nameserver. */
++          add_nameserver(dns, (f & 3) % NUM_NS);
++        }
++        break;
++      }
++      case 7: { /* the application inspects its configuration */
++        int n = evdns_base_count_nameservers(dns);
++        struct sockaddr_storage ss;
++        int idx = fdp.ConsumeIntegralInRange<int>(0, 3);
++        evdns_base_get_nameserver_addr(dns, idx, (struct sockaddr *)&ss,
++                                       sizeof(ss));
++        evdns_base_get_nameserver_fd(dns, idx);
++        (void)n;
++        break;
++      }
++    }
++    event_base_loop(base, EVLOOP_NONBLOCK);
++  }
++
++  /* Shutdown, in one of the two ways an application does it. */
++  if (cfg & 0x80) {
++    /* Free the resolver and let it fail whatever is still in flight
++     * (DNS_ERR_SHUTDOWN callbacks), then keep running the loop. */
++    evdns_base_free(dns, 1);
++  } else {
++    /* Cancel the outstanding lookups, let the cancellation callbacks run,
++     * then free the resolver. */
++    for (int round = 0; round < 4; round++) {
++      bool any = false;
++      for (int i = 0; i < MAX_REQS; i++) {
++        struct lookup *l = &g_lookups[i];
++        if (!l->pending) continue;
++        any = true;
++        if (l->req) evdns_cancel_request(dns, l->req);
++        if (l->gai) evdns_getaddrinfo_cancel(l->gai);
++        l->req = NULL;
++        l->gai = NULL;
++      }
++      if (!any) break;
++      event_base_loop(base, EVLOOP_NONBLOCK);
++    }
++    evdns_base_free(dns, 0);
++  }
++  event_base_loop(base, EVLOOP_NONBLOCK);
++  event_base_free(base);
++  close_servers();
++  return 0;
++}
+diff --git a/projects/libevent/evdns_fuzzer.dict b/projects/libevent/evdns_fuzzer.dict
+new file mode 100644
+index 000000000000..bd040c3c9a73
+--- /dev/null
++++ b/projects/libevent/evdns_fuzzer.dict
+@@ -0,0 +1,43 @@
++# DNS wire-format fragments for evdns_client_fuzzer / evdns_server_fuzzer.
++
++# compression pointer to the first question name
++ptr_qname="\xc0\x0c"
++ptr_loop="\xc0\x00"
++ptr_fwd="\xc0\xff"
++root="\x00"
++max_label="\x3f"
++
++# <type><class IN>
++a_in="\x00\x01\x00\x01"
++ns_in="\x00\x02\x00\x01"
++cname_in="\x00\x05\x00\x01"
++soa_in="\x00\x06\x00\x01"
++ptr_in="\x00\x0c\x00\x01"
++txt_in="\x00\x10\x00\x01"
++aaaa_in="\x00\x1c\x00\x01"
++opt="\x00\x00\x29\x10\x00"
++
++# header flags
++resp_ok="\x81\x80"
++resp_nxdomain="\x81\x83"
++resp_servfail="\x81\x82"
++resp_refused="\x81\x85"
++resp_notimpl="\x81\x84"
++resp_truncated="\x83\x80"
++query_rd="\x01\x00"
++
++# rdlength
++rdlen4="\x00\x04"
++rdlen8="\x00\x08"
++rdlen16="\x00\x10"
++
++# counts
++one="\x00\x01"
++two="\x00\x02"
++
++# names
++"\x03www\x07example\x03com\x00"
++"\x07in-addr\x04arpa\x00"
++"\x03ip6\x04arpa\x00"
++"localhost"
++"fuzzhost"
+diff --git a/projects/libevent/evdns_server_fuzzer.cc b/projects/libevent/evdns_server_fuzzer.cc
+new file mode 100644
+index 000000000000..b9371686787f
+--- /dev/null
++++ b/projects/libevent/evdns_server_fuzzer.cc
+@@ -0,0 +1,253 @@
++/* Copyright 2026 Google LLC
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++      http://www.apache.org/licenses/LICENSE-2.0
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++/*
++ * Fuzzer for the evdns DNS server (server side of evdns.c).
++ *
++ * Threat model: an application uses libevent to run a DNS server and any
++ * remote client sends it requests, as UDP datagrams or as a TCP byte stream
++ * (2-byte length framed, possibly split or coalesced arbitrarily by the
++ * sender). The client controls every byte it sends.
++ *
++ * What an application does with a request is not attacker input, so the
++ * request callback here behaves like an ordinary small server: for each
++ * question it adds a record of the matching type whose owner name is the
++ * question name, optionally an NS/glue pair, and then responds or drops.
++ * That drives the response encoder (evdns_server_request_format_response(),
++ * dnsname_to_labels() and its compression table, truncation) with
++ * attacker-chosen names - the existing dns_fuzzer answers with an empty
++ * response and only over UDP, so neither the encoder nor the TCP transport
++ * (evdns_add_server_port_with_listener(), tcp_read_message()) is exercised.
++ *
++ * Input layout (consumed in this order):
++ *   u8  mode   bit0: TCP instead of UDP
++ *              bit1: (TCP) client closes before the server port is closed
++ *              bit2: (TCP) limit the port to one client connection and
++ *                    have a second client connect as well
++ *   u8  plan   how the server application answers (see request_cb)
++ *   then up to MAX_CHUNKS chunks, each:
++ *     u16 len  (0..MAX_CHUNK)
++ *     u8[len]  one UDP datagram, or the next slice of the TCP stream
++ */
++
++#include <arpa/inet.h>
++#include <netinet/in.h>
++#include <signal.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include <vector>
++
++#include <fuzzer/FuzzedDataProvider.h>
++
++extern "C" {
++#include "event2/dns.h"
++#include "event2/dns_struct.h"
++#include "event2/event.h"
++#include "event2/listener.h"
++#include "event2/util.h"
++}
++
++#define MAX_CHUNKS 8
++#define MAX_CHUNK 1500
++
++static uint8_t g_plan;
++
++static void log_cb(int severity, const char *msg) {}
++
++extern "C" int LLVMFuzzerInitialize(int *argc, char ***argv) {
++  event_set_log_callback(log_cb);
++  /* Like any network program: a peer that went away must surface as a
++   * write error, not kill the process. */
++  signal(SIGPIPE, SIG_IGN);
++  return 0;
++}
++
++/* A plain DNS server application. g_plan selects between a few ordinary
++ * behaviours:
++ *   bits 0-1  3: drop the request, otherwise respond
++ *   bit 2     set the AA flag
++ *   bit 3     add an NS record and glue (authority / additional sections)
++ *   bits 4-7  response code
++ */
++static void request_cb(struct evdns_server_request *req, void *arg) {
++  static const unsigned char v4[8] = {192, 0, 2, 1, 192, 0, 2, 2};
++  static const unsigned char v6[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
++                                       0,    0,    0,    0,    0, 0, 0, 1};
++  static const char txt[] = "\x0bhello world";
++
++  if ((g_plan & 3) == 3) {
++    evdns_server_request_drop(req);
++    return;
++  }
++
++  for (int i = 0; i < req->nquestions; i++) {
++    const struct evdns_server_question *q = req->questions[i];
++    switch (q->type) {
++      case EVDNS_TYPE_A:
++        evdns_server_request_add_a_reply(req, q->name, 2, v4, 300);
++        break;
++      case EVDNS_TYPE_AAAA:
++        evdns_server_request_add_aaaa_reply(req, q->name, 1, v6, 300);
++        break;
++      case EVDNS_TYPE_PTR:
++        evdns_server_request_add_ptr_reply(req, NULL, q->name,
++                                           "host.example.com", 300);
++        break;
++      case EVDNS_TYPE_CNAME:
++        evdns_server_request_add_cname_reply(req, q->name,
++                                             "target.example.com", 300);
++        break;
++      case EVDNS_TYPE_TXT:
++        evdns_server_request_add_reply(req, EVDNS_ANSWER_SECTION, q->name,
++                                       EVDNS_TYPE_TXT, EVDNS_CLASS_INET, 300,
++                                       sizeof(txt) - 1, 0, txt);
++        break;
++      default:
++        break;
++    }
++    if (g_plan & 8) {
++      evdns_server_request_add_reply(req, EVDNS_AUTHORITY_SECTION, q->name,
++                                     EVDNS_TYPE_NS, EVDNS_CLASS_INET, 60, -1,
++                                     1, "ns.example.com");
++      evdns_server_request_add_reply(req, EVDNS_ADDITIONAL_SECTION,
++                                     "ns.example.com", EVDNS_TYPE_A,
++                                     EVDNS_CLASS_INET, 60, 4, 0,
++                                     (const char *)v4);
++    }
++  }
++
++  if (g_plan & 4) evdns_server_request_set_flags(req, EVDNS_FLAGS_AA);
++
++  /* A negative return means the response could not be built and the request
++   * is still owned by the caller. */
++  if (evdns_server_request_respond(req, g_plan >> 4) < 0)
++    evdns_server_request_drop(req);
++}
++
++static void drain(int fd) {
++  char buf[4096];
++  while (recv(fd, buf, sizeof(buf), MSG_DONTWAIT) > 0) {
++  }
++}
++
++static void fuzz_udp(struct event_base *base, FuzzedDataProvider &fdp) {
++  int fds[2];
++  if (socketpair(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds))
++    return;
++  struct evdns_server_port *port =
++      evdns_add_server_port_with_base(base, fds[0], 0, request_cb, NULL);
++  if (!port) {
++    close(fds[0]);
++    close(fds[1]);
++    return;
++  }
++  for (int i = 0; i < MAX_CHUNKS && fdp.remaining_bytes() > 0; i++) {
++    size_t len = fdp.ConsumeIntegralInRange<uint16_t>(0, MAX_CHUNK);
++    std::vector<uint8_t> pkt = fdp.ConsumeBytes<uint8_t>(len);
++    send(fds[1], pkt.data(), pkt.size(), 0);
++    event_base_loop(base, EVLOOP_NONBLOCK);
++    drain(fds[1]);
++  }
++  /* Closes fds[0]. */
++  evdns_close_server_port(port);
++  close(fds[1]);
++}
++
++static void fuzz_tcp(struct event_base *base, FuzzedDataProvider &fdp,
++                     uint8_t mode) {
++  struct sockaddr_in sin;
++  socklen_t slen = sizeof(sin);
++  memset(&sin, 0, sizeof(sin));
++  sin.sin_family = AF_INET;
++  sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++
++  struct evconnlistener *listener = evconnlistener_new_bind(
++      base, NULL, NULL, LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, -1,
++      (struct sockaddr *)&sin, sizeof(sin));
++  if (!listener) return;
++  /* The port takes ownership of the listener. */
++  struct evdns_server_port *port =
++      evdns_add_server_port_with_listener(base, listener, 0, request_cb, NULL);
++  if (!port) {
++    evconnlistener_free(listener);
++    return;
++  }
++  if (mode & 4)
++    evdns_server_port_set_option(port, EVDNS_SOPT_TCP_MAX_CLIENTS, 1);
++
++  int client = -1;
++  if (getsockname(evconnlistener_get_fd(listener), (struct sockaddr *)&sin,
++                  &slen) == 0) {
++    client = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
++    if (client >= 0 &&
++        connect(client, (struct sockaddr *)&sin, sizeof(sin)) != 0) {
++      close(client);
++      client = -1;
++    }
++  }
++
++  int extra = -1;
++  if (client >= 0) {
++    /* Accept the connection. */
++    event_base_loop(base, EVLOOP_NONBLOCK);
++    if (mode & 4) {
++      /* A second client, which is over the connection limit. */
++      extra = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
++      if (extra >= 0)
++        (void)connect(extra, (struct sockaddr *)&sin, sizeof(sin));
++      event_base_loop(base, EVLOOP_NONBLOCK);
++    }
++    for (int i = 0; i < MAX_CHUNKS && fdp.remaining_bytes() > 0; i++) {
++      size_t len = fdp.ConsumeIntegralInRange<uint16_t>(0, MAX_CHUNK);
++      std::vector<uint8_t> chunk = fdp.ConsumeBytes<uint8_t>(len);
++      if (send(client, chunk.data(), chunk.size(),
++               MSG_NOSIGNAL | MSG_DONTWAIT) < 0)
++        break;
++      event_base_loop(base, EVLOOP_NONBLOCK);
++      drain(client);
++    }
++    if (mode & 2) {
++      close(client);
++      client = -1;
++      /* Deliver the EOF to the server. */
++      event_base_loop(base, EVLOOP_NONBLOCK);
++    }
++  }
++
++  evdns_close_server_port(port);
++  if (client >= 0) close(client);
++  if (extra >= 0) close(extra);
++}
++
++extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
++  if (size < 3) return 0;
++  FuzzedDataProvider fdp(data, size);
++  uint8_t mode = fdp.ConsumeIntegral<uint8_t>();
++  g_plan = fdp.ConsumeIntegral<uint8_t>();
++
++  struct event_base *base = event_base_new();
++  if (!base) return 0;
++
++  if (mode & 1)
++    fuzz_tcp(base, fdp, mode);
++  else
++    fuzz_udp(base, fdp);
++
++  event_base_loop(base, EVLOOP_NONBLOCK);
++  event_base_free(base);
++  return 0;
++}
+diff --git a/projects/libevent/listener_fuzzer.cc b/projects/libevent/listener_fuzzer.cc
+index c937108868f2..9441388fd725 100644
+--- a/projects/libevent/listener_fuzzer.cc
++++ b/projects/libevent/listener_fuzzer.cc
+@@ -59,6 +59,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+         flags, -1, (struct sockaddr*)&sin, sizeof(sin));
+     
+     if (lev) {
++        evutil_socket_t listen_fd;
+         evconnlistener_set_error_cb(lev, error_cb);
+ 
+         if (flags & LEV_OPT_DISABLED) {
+@@ -66,7 +67,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+         }
+ 
+         // Get the port we bound to
+-        evutil_socket_t listen_fd = evconnlistener_get_fd(lev);
++        listen_fd = evconnlistener_get_fd(lev);
+         struct sockaddr_in bound_sin;
+         socklen_t bound_sin_len = sizeof(bound_sin);
+         if (getsockname(listen_fd, (struct sockaddr*)&bound_sin, &bound_sin_len) == 0) {
+@@ -87,6 +88,12 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+             }
+         }
+         evconnlistener_free(lev);
++        /* Without LEV_OPT_CLOSE_ON_FREE the listening socket stays ours to
++         * close. Leaking it exhausts the fd limit after ~1000 inputs, after
++         * which accept() fails forever and the event loop never returns. */
++        if (!(flags & LEV_OPT_CLOSE_ON_FREE)) {
++            evutil_closesocket(listen_fd);
++        }
+     }
+ 
+     event_base_free(base);
+diff --git a/projects/libevent/virtual_clock.h b/projects/libevent/virtual_clock.h
+new file mode 100644
+index 000000000000..80df108f0007
+--- /dev/null
++++ b/projects/libevent/virtual_clock.h
+@@ -0,0 +1,173 @@
++/* Copyright 2026 Google LLC
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++      http://www.apache.org/licenses/LICENSE-2.0
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++/*
++ * Virtual time for libevent fuzzers.
++ *
++ * libevent reads its timer clock with clock_gettime(CLOCK_MONOTONIC_COARSE)
++ * (evutil_time.c, unless EVENT_BASE_FLAG_PRECISE_TIMER is set). This header
++ * replaces clock_gettime() for that one clock id with a clock that stands
++ * still until the harness advances it. Every other clock id, including the
++ * ones libFuzzer and the sanitizers use for their own timeouts, still goes
++ * to the kernel.
++ *
++ * With the real clock, two timers with the same duration get the same or
++ * different deadlines depending on whether a clock tick happened between
++ * them, so the order they fire in, and whether an input crashes, changed
++ * from run to run. With this clock every deadline is a pure function of the
++ * input:
++ *  - vclock_reset() puts the clock back to the same start value; call it at
++ *    the start of every input, before event_base_new();
++ *  - vclock_tick() moves the clock forward to the earliest pending deadline
++ *    and runs the loop, so every timer due at that instant fires, in
++ *    libevent's own order, exactly as if that much real time had passed.
++ * Timers never fire because the input happened to run slowly.
++ *
++ * libevent also reads the wall clock through gettimeofday(): every uncached
++ * clock read resyncs base->tv_clock_diff (CLOCK_SYNC_INTERVAL is -1), and
++ * event_base_gettimeofday_cached() feeds the token-bucket rate limiter's
++ * tick counter (bufferevent_ratelim.c). gettimeofday() is therefore replaced
++ * too, with a wall clock that moves in lockstep with the virtual monotonic
++ * clock, so the number of rate-limit ticks that pass is a function of the
++ * input as well.
++ *
++ * Include this from exactly one translation unit per fuzzer binary.
++ */
++
++#ifndef LIBEVENT_FUZZ_VIRTUAL_CLOCK_H
++#define LIBEVENT_FUZZ_VIRTUAL_CLOCK_H
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/syscall.h>
++#include <sys/time.h>
++#include <time.h>
++#include <unistd.h>
++
++extern "C" {
++#include "event2/event.h"
++#include "event2/util.h"
++}
++
++#if defined(__has_feature)
++#if __has_feature(memory_sanitizer)
++#include <sanitizer/msan_interface.h>
++#define VCLOCK_UNPOISON(p, n) __msan_unpoison((p), (n))
++#endif
++#endif
++#ifndef VCLOCK_UNPOISON
++#define VCLOCK_UNPOISON(p, n) ((void)0)
++#endif
++
++static struct timespec g_vclock;
++static unsigned long g_vclock_reads;
++
++extern "C" int clock_gettime(clockid_t id, struct timespec *ts) noexcept {
++  if (id == CLOCK_MONOTONIC_COARSE) {
++    *ts = g_vclock;
++    g_vclock_reads++;
++    return 0;
++  }
++  int r = (int)syscall(SYS_clock_gettime, id, ts);
++  if (r == 0) VCLOCK_UNPOISON(ts, sizeof(*ts));
++  return r;
++}
++
++#define VCLOCK_MONO_START 1000000
++#define VCLOCK_WALL_START 1700000000 /* 2023-11-14, any fixed value works */
++
++/* The wall clock: a fixed start date plus the virtual time elapsed. */
++extern "C" int gettimeofday(struct timeval *tv, void *tz) noexcept {
++  if (tv) {
++    tv->tv_sec = VCLOCK_WALL_START + (g_vclock.tv_sec - VCLOCK_MONO_START);
++    tv->tv_usec = g_vclock.tv_nsec / 1000;
++  }
++  if (tz) memset(tz, 0, sizeof(struct timezone));
++  return 0;
++}
++
++static void vclock_reset(void) {
++  g_vclock.tv_sec = VCLOCK_MONO_START;
++  g_vclock.tv_nsec = 0;
++}
++
++/* Time passes by exactly 'tv' (whether or not a timer is due then), and the
++ * loop runs so every timer due by then fires. */
++static void vclock_advance(struct event_base *base, const struct timeval *tv) {
++  long long ns = (long long)g_vclock.tv_nsec + tv->tv_usec * 1000LL;
++  g_vclock.tv_sec += tv->tv_sec + ns / 1000000000LL;
++  g_vclock.tv_nsec = ns % 1000000000LL;
++  event_base_loop(base, EVLOOP_NONBLOCK);
++}
++
++/* Call once after creating the first event_base: stop if libevent is not
++ * actually reading the virtual clock (e.g. it switched clock source), since
++ * the harness would then silently lose its determinism. */
++static void vclock_check_in_use(void) {
++  if (g_vclock_reads == 0) {
++    fprintf(stderr, "virtual_clock.h: libevent does not read "
++                    "CLOCK_MONOTONIC_COARSE; the virtual clock has no "
++                    "effect\n");
++    abort();
++  }
++}
++
++struct vclock_next {
++  const struct event *skip;
++  bool found;
++  struct timeval tv;
++};
++
++static int vclock_pick(const struct event_base *base, const struct event *ev,
++                       void *arg) {
++  struct vclock_next *n = (struct vclock_next *)arg;
++  struct timeval tv;
++  if (ev == n->skip || !event_pending(ev, EV_TIMEOUT, &tv)) return 0;
++  if (!n->found || evutil_timercmp(&tv, &n->tv, <)) {
++    n->found = true;
++    n->tv = tv;
++  }
++  return 0;
++}
++
++static void vclock_noop_cb(evutil_socket_t fd, short what, void *arg) {}
++
++/* Time passes until the earliest pending deadline is reached. */
++static void vclock_tick(struct event_base *base) {
++  /* event_pending() reports deadlines on the wall clock (monotonic deadline
++   * + an offset libevent takes from gettimeofday()). A reference timer due
++   * exactly 1 s from now, read in the same pass, turns them back into
++   * offsets from the virtual clock and cancels that offset out. */
++  struct timeval one = {1, 0};
++  struct timeval ref_tv;
++  struct event *ref = evtimer_new(base, vclock_noop_cb, NULL);
++  if (!ref) return;
++  evtimer_add(ref, &one);
++  event_pending(ref, EV_TIMEOUT, &ref_tv);
++  struct vclock_next n = {ref, false, {0, 0}};
++  event_base_foreach_event(base, vclock_pick, &n);
++  event_free(ref);
++  if (n.found) {
++    struct timeval delta;
++    evutil_timersub(&n.tv, &ref_tv, &delta);
++    evutil_timeradd(&delta, &one, &delta);
++    if (delta.tv_sec > 0 || (delta.tv_sec == 0 && delta.tv_usec > 0)) {
++      long long ns = (long long)g_vclock.tv_nsec + delta.tv_usec * 1000LL;
++      g_vclock.tv_sec += delta.tv_sec + ns / 1000000000LL;
++      g_vclock.tv_nsec = ns % 1000000000LL;
++    }
++  }
++  event_base_loop(base, EVLOOP_NONBLOCK);
++}
++
++#endif /* LIBEVENT_FUZZ_VIRTUAL_CLOCK_H */
