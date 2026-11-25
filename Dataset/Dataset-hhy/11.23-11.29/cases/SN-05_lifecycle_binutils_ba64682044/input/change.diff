@@ -1,0 +1,1183 @@
+diff --git a/gas/Makefile.am b/gas/Makefile.am
+index 4661a718214..dc5931252e4 100644
+--- a/gas/Makefile.am
++++ b/gas/Makefile.am
+@@ -68,6 +68,7 @@ GAS_CFILES = \
+ 	app.c \
+ 	as.c \
+ 	atof-generic.c \
++	codeview.c \
+ 	compress-debug.c \
+ 	cond.c \
+ 	depend.c \
+@@ -106,6 +107,7 @@ HFILES = \
+ 	bignum.h \
+ 	bit_fix.h \
+ 	cgen.h \
++	codeview.h \
+ 	compress-debug.h \
+ 	dwarf2dbg.h \
+ 	dw2gencfi.h \
+diff --git a/gas/Makefile.in b/gas/Makefile.in
+index 1e01f343f32..1b4f3132613 100644
+--- a/gas/Makefile.in
++++ b/gas/Makefile.in
+@@ -162,9 +162,9 @@ CONFIG_CLEAN_FILES = gdb.ini .gdbinit po/Makefile.in
+ CONFIG_CLEAN_VPATH_FILES =
+ PROGRAMS = $(noinst_PROGRAMS)
+ am__objects_1 = app.$(OBJEXT) as.$(OBJEXT) atof-generic.$(OBJEXT) \
+-	compress-debug.$(OBJEXT) cond.$(OBJEXT) depend.$(OBJEXT) \
+-	dwarf2dbg.$(OBJEXT) dw2gencfi.$(OBJEXT) ecoff.$(OBJEXT) \
+-	ehopt.$(OBJEXT) expr.$(OBJEXT) flonum-copy.$(OBJEXT) \
++	codeview.$(OBJEXT) compress-debug.$(OBJEXT) cond.$(OBJEXT) \
++	depend.$(OBJEXT) dwarf2dbg.$(OBJEXT) dw2gencfi.$(OBJEXT) \
++	ecoff.$(OBJEXT) ehopt.$(OBJEXT) expr.$(OBJEXT) flonum-copy.$(OBJEXT) \
+ 	flonum-konst.$(OBJEXT) flonum-mult.$(OBJEXT) frags.$(OBJEXT) \
+ 	gen-sframe.$(OBJEXT) hash.$(OBJEXT) input-file.$(OBJEXT) \
+ 	input-scrub.$(OBJEXT) listing.$(OBJEXT) literal.$(OBJEXT) \
+@@ -555,6 +555,7 @@ GAS_CFILES = \
+ 	app.c \
+ 	as.c \
+ 	atof-generic.c \
++	codeview.c \
+ 	compress-debug.c \
+ 	cond.c \
+ 	depend.c \
+@@ -592,6 +593,7 @@ HFILES = \
+ 	bignum.h \
+ 	bit_fix.h \
+ 	cgen.h \
++	codeview.h \
+ 	compress-debug.h \
+ 	dwarf2dbg.h \
+ 	dw2gencfi.h \
+@@ -1294,6 +1296,7 @@ distclean-compile:
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/as.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/atof-generic.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/cgen.Po@am__quote@
++@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/codeview.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/compress-debug.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/cond.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/depend.Po@am__quote@
+diff --git a/gas/as.c b/gas/as.c
+index 80a2cb9a418..74ffa71925f 100644
+--- a/gas/as.c
++++ b/gas/as.c
+@@ -42,6 +42,7 @@
+ #include "macro.h"
+ #include "dwarf2dbg.h"
+ #include "dw2gencfi.h"
++#include "codeview.h"
+ #include "bfdver.h"
+ #include "write.h"
+ 
+@@ -333,6 +334,10 @@ Options:\n\
+   --gdwarf-cie-version=<N> generate version 1, 3 or 4 DWARF CIEs\n"));
+   fprintf (stream, _("\
+   --gdwarf-sections       generate per-function section names for DWARF line information\n"));
++#ifdef TE_PE
++  fprintf (stream, _("\
++  --gcodeview             generate CodeView debugging information\n"));
++#endif
+   fprintf (stream, _("\
+   --hash-size=<N>         ignored\n"));
+   fprintf (stream, _("\
+@@ -483,6 +488,7 @@ parse_args (int * pargc, char *** pargv)
+       OPTION_GDWARF_5,
+       OPTION_GDWARF_SECTIONS, /* = STD_BASE + 20 */
+       OPTION_GDWARF_CIE_VERSION,
++      OPTION_GCODEVIEW,
+       OPTION_STRIP_LOCAL_ABSOLUTE,
+       OPTION_TRADITIONAL_FORMAT,
+       OPTION_WARN,
+@@ -545,6 +551,9 @@ parse_args (int * pargc, char *** pargv)
+     ,{"gdwarf2", no_argument, NULL, OPTION_GDWARF_2}
+     ,{"gdwarf-sections", no_argument, NULL, OPTION_GDWARF_SECTIONS}
+     ,{"gdwarf-cie-version", required_argument, NULL, OPTION_GDWARF_CIE_VERSION}
++#ifdef TE_PE
++    ,{"gcodeview", no_argument, NULL, OPTION_GCODEVIEW}
++#endif
+     ,{"gen-debug", no_argument, NULL, 'g'}
+     ,{"gstabs", no_argument, NULL, OPTION_GSTABS}
+     ,{"gstabs+", no_argument, NULL, OPTION_GSTABS_PLUS}
+@@ -870,6 +879,12 @@ This program has absolutely no warranty.\n"));
+ 	  flag_dwarf_sections = true;
+ 	  break;
+ 
++#ifdef TE_PE
++	case OPTION_GCODEVIEW:
++	  debug_type = DEBUG_CODEVIEW;
++	  break;
++#endif
++
+         case OPTION_GDWARF_CIE_VERSION:
+ 	  flag_dwarf_cie_version = atoi (optarg);
+           /* The available CIE versions are 1 (DWARF 2), 3 (DWARF 3), and 4
+@@ -1429,6 +1444,8 @@ main (int argc, char ** argv)
+     }
+ #endif
+ 
++  codeview_finish ();
++
+   /* If we've been collecting dwarf2 .debug_line info, either for
+      assembly debugging or on behalf of the compiler, emit it now.  */
+   dwarf2_finish ();
+diff --git a/gas/as.h b/gas/as.h
+index 23542e452b6..61f259f77c2 100644
+--- a/gas/as.h
++++ b/gas/as.h
+@@ -387,7 +387,8 @@ enum debug_info_type
+   DEBUG_STABS,
+   DEBUG_ECOFF,
+   DEBUG_DWARF,
+-  DEBUG_DWARF2
++  DEBUG_DWARF2,
++  DEBUG_CODEVIEW
+ };
+ 
+ extern enum debug_info_type debug_type;
+diff --git a/gas/codeview.c b/gas/codeview.c
+new file mode 100644
+index 00000000000..da7145659f5
+--- /dev/null
++++ b/gas/codeview.c
+@@ -0,0 +1,541 @@
++/* codeview.c - CodeView debug support
++   Copyright (C) 2022 Free Software Foundation, Inc.
++
++   This file is part of GAS, the GNU Assembler.
++
++   GAS is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3, or (at your option)
++   any later version.
++
++   GAS is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with GAS; see the file COPYING.  If not, write to the Free
++   Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
++   02110-1301, USA.  */
++
++#include "as.h"
++#include "codeview.h"
++#include "subsegs.h"
++#include "filenames.h"
++#include "md5.h"
++
++#ifdef TE_PE
++
++#define NUM_MD5_BYTES       	16
++
++#define FILE_ENTRY_PADDING	2
++#define FILE_ENTRY_LENGTH	(sizeof (struct file_checksum) + NUM_MD5_BYTES \
++				 + FILE_ENTRY_PADDING)
++
++struct line
++{
++  struct line *next;
++  unsigned int lineno;
++  addressT frag_offset;
++};
++
++struct line_file
++{
++  struct line_file *next;
++  unsigned int fileno;
++  struct line *lines_head, *lines_tail;
++  unsigned int num_lines;
++};
++
++struct line_block
++{
++  struct line_block *next;
++  segT seg;
++  unsigned int subseg;
++  fragS *frag;
++  symbolS *sym;
++  struct line_file *files_head, *files_tail;
++};
++
++struct source_file
++{
++  struct source_file *next;
++  unsigned int num;
++  char *filename;
++  uint32_t string_pos;
++  uint8_t md5[NUM_MD5_BYTES];
++};
++
++static struct line_block *blocks_head = NULL, *blocks_tail = NULL;
++static struct source_file *files_head = NULL, *files_tail = NULL;
++static unsigned int num_source_files = 0;
++
++/* Return the size of the current fragment (taken from dwarf2dbg.c).  */
++static offsetT
++get_frag_fix (fragS *frag, segT seg)
++{
++  frchainS *fr;
++
++  if (frag->fr_next)
++    return frag->fr_fix;
++
++  for (fr = seg_info (seg)->frchainP; fr; fr = fr->frch_next)
++    if (fr->frch_last == frag)
++      return (char *) obstack_next_free (&fr->frch_obstack) - frag->fr_literal;
++
++  abort ();
++}
++
++/* Emit a .secrel32 relocation.  */
++static void
++emit_secrel32_reloc (symbolS *sym)
++{
++  expressionS exp;
++
++  memset (&exp, 0, sizeof (exp));
++  exp.X_op = O_secrel;
++  exp.X_add_symbol = sym;
++  exp.X_add_number = 0;
++  emit_expr (&exp, sizeof (uint32_t));
++}
++
++/* Emit a .secidx relocation.  */
++static void
++emit_secidx_reloc (symbolS *sym)
++{
++  expressionS exp;
++
++  memset (&exp, 0, sizeof (exp));
++  exp.X_op = O_secidx;
++  exp.X_add_symbol = sym;
++  exp.X_add_number = 0;
++  emit_expr (&exp, sizeof (uint16_t));
++}
++
++/* Write the DEBUG_S_STRINGTABLE subsection.  */
++static void
++write_string_table (void)
++{
++  uint32_t len;
++  unsigned int padding;
++  char *ptr, *start;
++
++  len = 1;
++
++  for (struct source_file *sf = files_head; sf; sf = sf->next)
++    {
++      len += strlen (sf->filename) + 1;
++    }
++
++  if (len % 4)
++    padding = 4 - (len % 4);
++  else
++    padding = 0;
++
++  ptr = frag_more (sizeof (uint32_t) + sizeof (uint32_t) + len + padding);
++
++  bfd_putl32 (DEBUG_S_STRINGTABLE, ptr);
++  ptr += sizeof (uint32_t);
++  bfd_putl32 (len, ptr);
++  ptr += sizeof (uint32_t);
++
++  start = ptr;
++
++  *ptr = 0;
++  ptr++;
++
++  for (struct source_file *sf = files_head; sf; sf = sf->next)
++    {
++      size_t fn_len = strlen (sf->filename);
++
++      sf->string_pos = ptr - start;
++
++      memcpy(ptr, sf->filename, fn_len + 1);
++      ptr += fn_len + 1;
++    }
++
++  memset (ptr, 0, padding);
++}
++
++/* Write the DEBUG_S_FILECHKSMS subsection.  */
++static void
++write_checksums (void)
++{
++  uint32_t len;
++  char *ptr;
++
++  len = FILE_ENTRY_LENGTH * num_source_files;
++
++  ptr = frag_more (sizeof (uint32_t) + sizeof (uint32_t) + len);
++
++  bfd_putl32 (DEBUG_S_FILECHKSMS, ptr);
++  ptr += sizeof (uint32_t);
++  bfd_putl32 (len, ptr);
++  ptr += sizeof (uint32_t);
++
++  for (struct source_file *sf = files_head; sf; sf = sf->next)
++    {
++      struct file_checksum fc;
++
++      fc.file_id = sf->string_pos;
++      fc.checksum_length = NUM_MD5_BYTES;
++      fc.checksum_type = CHKSUM_TYPE_MD5;
++
++      memcpy (ptr, &fc, sizeof (struct file_checksum));
++      ptr += sizeof (struct file_checksum);
++
++      memcpy (ptr, sf->md5, NUM_MD5_BYTES);
++      ptr += NUM_MD5_BYTES;
++
++      memset (ptr, 0, FILE_ENTRY_PADDING);
++      ptr += FILE_ENTRY_PADDING;
++    }
++}
++
++/* Write the DEBUG_S_LINES subsection.  */
++static void
++write_lines_info (void)
++{
++  while (blocks_head)
++    {
++      struct line_block *lb;
++      struct line_file *lf;
++      uint32_t len;
++      uint32_t off;
++      char *ptr;
++
++      lb = blocks_head;
++
++      bfd_putl32 (DEBUG_S_LINES, frag_more (sizeof (uint32_t)));
++
++      len = sizeof (struct cv_lines_header);
++
++      for (lf = lb->files_head; lf; lf = lf->next)
++	{
++	  len += sizeof (struct cv_lines_block);
++	  len += sizeof (struct cv_line) * lf->num_lines;
++	}
++
++      bfd_putl32 (len, frag_more (sizeof (uint32_t)));
++
++      /* Write the header (struct cv_lines_header).  We can't use a struct
++	 for this as we're also emitting relocations.  */
++
++      emit_secrel32_reloc (lb->sym);
++      emit_secidx_reloc (lb->sym);
++
++      ptr = frag_more (len - sizeof (uint32_t) - sizeof (uint16_t));
++
++      /* Flags */
++      bfd_putl16 (0, ptr);
++      ptr += sizeof (uint16_t);
++
++      off = lb->files_head->lines_head->frag_offset;
++
++      /* Length of region */
++      bfd_putl32 (get_frag_fix (lb->frag, lb->seg) - off, ptr);
++      ptr += sizeof (uint32_t);
++
++      while (lb->files_head)
++	{
++	  struct cv_lines_block *block = (struct cv_lines_block *) ptr;
++
++	  lf = lb->files_head;
++
++	  bfd_putl32(lf->fileno * FILE_ENTRY_LENGTH, &block->file_id);
++	  bfd_putl32(lf->num_lines, &block->num_lines);
++	  bfd_putl32(sizeof (struct cv_lines_block)
++		     + (sizeof (struct cv_line) * lf->num_lines),
++		     &block->length);
++
++	  ptr += sizeof (struct cv_lines_block);
++
++	  while (lf->lines_head)
++	    {
++	      struct line *l;
++	      struct cv_line *l2 = (struct cv_line *) ptr;
++
++	      l = lf->lines_head;
++
++	      /* Only the bottom 24 bits of line_no actually encode the
++		 line number.  The top bit is a flag meaning "is
++		 a statement".  */
++
++	      bfd_putl32 (l->frag_offset - off, &l2->offset);
++	      bfd_putl32 (0x80000000 | (l->lineno & 0xffffff),
++			  &l2->line_no);
++
++	      lf->lines_head = l->next;
++
++	      free(l);
++
++	      ptr += sizeof (struct cv_line);
++	    }
++
++	  lb->files_head = lf->next;
++	  free (lf);
++	}
++
++      blocks_head = lb->next;
++
++      free (lb);
++    }
++}
++
++/* Return the CodeView constant for the selected architecture.  */
++static uint16_t
++target_processor (void)
++{
++  if (stdoutput->arch_info->arch != bfd_arch_i386)
++    return 0;
++
++  if (stdoutput->arch_info->mach & bfd_mach_x86_64)
++    return CV_CFL_X64;
++  else
++    return CV_CFL_80386;
++}
++
++/* Write the CodeView symbols, describing the object name and
++   assembler version.  */
++static void
++write_symbols_info (void)
++{
++  static const char assembler[] = "GNU AS " VERSION;
++
++  char *path = lrealpath (out_file_name);
++  char *path2 = remap_debug_filename (path);
++  size_t path_len, padding;
++  uint32_t len;
++  struct OBJNAMESYM objname;
++  struct COMPILESYM3 compile3;
++  char *ptr;
++
++  free (path);
++  path = path2;
++
++  path_len = strlen (path);
++
++  len = sizeof (struct OBJNAMESYM) + path_len + 1;
++  len += sizeof (struct COMPILESYM3) + sizeof (assembler);
++
++  if (len % 4)
++    padding = 4 - (len % 4);
++  else
++    padding = 0;
++
++  len += padding;
++
++  ptr = frag_more (sizeof (uint32_t) + sizeof (uint32_t) + len);
++
++  bfd_putl32 (DEBUG_S_SYMBOLS, ptr);
++  ptr += sizeof (uint32_t);
++  bfd_putl32 (len, ptr);
++  ptr += sizeof (uint32_t);
++
++  /* Write S_OBJNAME entry.  */
++
++  bfd_putl16 (sizeof (struct OBJNAMESYM) - sizeof (uint16_t) + path_len + 1,
++	      &objname.length);
++  bfd_putl16 (S_OBJNAME, &objname.type);
++  bfd_putl32 (0, &objname.signature);
++
++  memcpy (ptr, &objname, sizeof (struct OBJNAMESYM));
++  ptr += sizeof (struct OBJNAMESYM);
++  memcpy (ptr, path, path_len + 1);
++  ptr += path_len + 1;
++
++  free (path);
++
++  /* Write S_COMPILE3 entry.  */
++
++  bfd_putl16 (sizeof (struct COMPILESYM3) - sizeof (uint16_t)
++	      + sizeof (assembler) + padding, &compile3.length);
++  bfd_putl16 (S_COMPILE3, &compile3.type);
++  bfd_putl32 (CV_CFL_MASM, &compile3.flags);
++  bfd_putl16 (target_processor (), &compile3.machine);
++  bfd_putl16 (0, &compile3.frontend_major);
++  bfd_putl16 (0, &compile3.frontend_minor);
++  bfd_putl16 (0, &compile3.frontend_build);
++  bfd_putl16 (0, &compile3.frontend_qfe);
++  bfd_putl16 (0, &compile3.backend_major);
++  bfd_putl16 (0, &compile3.backend_minor);
++  bfd_putl16 (0, &compile3.backend_build);
++  bfd_putl16 (0, &compile3.backend_qfe);
++
++  memcpy (ptr, &compile3, sizeof (struct COMPILESYM3));
++  ptr += sizeof (struct COMPILESYM3);
++  memcpy (ptr, assembler, sizeof (assembler));
++  ptr += sizeof (assembler);
++
++  memset (ptr, 0, padding);
++}
++
++/* Processing of the file has finished, emit the .debug$S section.  */
++void
++codeview_finish (void)
++{
++  segT seg;
++
++  if (!blocks_head)
++    return;
++
++  seg = subseg_new (".debug$S", 0);
++
++  bfd_set_section_flags (seg, SEC_READONLY | SEC_NEVER_LOAD);
++
++  bfd_putl32 (CV_SIGNATURE_C13, frag_more (sizeof (uint32_t)));
++
++  write_string_table ();
++  write_checksums ();
++  write_lines_info ();
++  write_symbols_info ();
++}
++
++/* Assign a new index number for the given file, or return the existing
++   one if already assigned.  */
++static unsigned int
++get_fileno (const char *file)
++{
++  struct source_file *sf;
++  char *path = lrealpath (file);
++  char *path2 = remap_debug_filename (path);
++  size_t path_len;
++  FILE *f;
++
++  free (path);
++  path = path2;
++
++  path_len = strlen (path);
++
++  for (sf = files_head; sf; sf = sf->next)
++    {
++      if (path_len == strlen (sf->filename)
++	  && !filename_ncmp (sf->filename, path, path_len))
++	{
++	  free (path);
++	  return sf->num;
++	}
++    }
++
++  sf = xmalloc (sizeof (struct source_file));
++
++  sf->next = NULL;
++  sf->num = num_source_files;
++  sf->filename = path;
++
++  f = fopen (file, "r");
++  if (!f)
++    as_fatal (_("could not open %s for reading"), file);
++
++  if (md5_stream (f, sf->md5))
++    {
++      fclose(f);
++      as_fatal (_("md5_stream failed"));
++    }
++
++  fclose(f);
++
++  if (!files_head)
++    files_head = sf;
++  else
++    files_tail->next = sf;
++
++  files_tail = sf;
++
++  num_source_files++;
++
++  return num_source_files - 1;
++}
++
++/* Called for each new line in asm file.  */
++void
++codeview_generate_asm_lineno (void)
++{
++  const char *file;
++  unsigned int fileno;
++  unsigned int lineno;
++  struct line *l;
++  symbolS *sym = NULL;
++  struct line_block *lb;
++  struct line_file *lf;
++
++  file = as_where (&lineno);
++
++  fileno = get_fileno (file);
++
++  if (!blocks_tail || blocks_tail->frag != frag_now)
++    {
++      static int label_num = 0;
++      char name[32];
++
++      sprintf (name, ".Loc.%u", label_num);
++      label_num++;
++      sym = symbol_new (name, now_seg, frag_now, frag_now_fix ());
++
++      lb = xmalloc (sizeof (struct line_block));
++      lb->next = NULL;
++      lb->seg = now_seg;
++      lb->subseg = now_subseg;
++      lb->frag = frag_now;
++      lb->sym = sym;
++      lb->files_head = lb->files_tail = NULL;
++
++      if (!blocks_head)
++	blocks_head = lb;
++      else
++	blocks_tail->next = lb;
++
++      blocks_tail = lb;
++    }
++  else
++    {
++      lb = blocks_tail;
++    }
++
++  if (!lb->files_tail || lb->files_tail->fileno != fileno)
++    {
++      lf = xmalloc (sizeof (struct line_file));
++      lf->next = NULL;
++      lf->fileno = fileno;
++      lf->lines_head = lf->lines_tail = NULL;
++      lf->num_lines = 0;
++
++      if (!lb->files_head)
++	lb->files_head = lf;
++      else
++	lb->files_tail->next = lf;
++
++      lb->files_tail = lf;
++    }
++  else
++    {
++      lf = lb->files_tail;
++    }
++
++  l = xmalloc (sizeof (struct line));
++  l->next = NULL;
++  l->lineno = lineno;
++  l->frag_offset = frag_now_fix ();
++
++  if (!lf->lines_head)
++    lf->lines_head = l;
++  else
++    lf->lines_tail->next = l;
++
++  lf->lines_tail = l;
++  lf->num_lines++;
++}
++
++#else
++
++void
++codeview_finish (void)
++{
++}
++
++void
++codeview_generate_asm_lineno (void)
++{
++}
++
++#endif /* TE_PE */
+diff --git a/gas/codeview.h b/gas/codeview.h
+new file mode 100644
+index 00000000000..49272b6be9a
+--- /dev/null
++++ b/gas/codeview.h
+@@ -0,0 +1,104 @@
++/* codeview.h - CodeView debug support
++   Copyright (C) 2022 Free Software Foundation, Inc.
++
++   This file is part of GAS, the GNU Assembler.
++
++   GAS is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation; either version 3, or (at your option)
++   any later version.
++
++   GAS is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with GAS; see the file COPYING.  If not, write to the Free
++   Software Foundation, 51 Franklin Street - Fifth Floor, Boston, MA
++   02110-1301, USA.  */
++
++/* Header files referred to below can be found in Microsoft's PDB
++   repository: https://github.com/microsoft/microsoft-pdb.  */
++
++#ifndef GAS_CODEVIEW_H
++#define GAS_CODEVIEW_H
++
++#define CV_SIGNATURE_C13	4
++
++#define DEBUG_S_SYMBOLS		0xf1
++#define DEBUG_S_LINES		0xf2
++#define DEBUG_S_STRINGTABLE	0xf3
++#define DEBUG_S_FILECHKSMS	0xf4
++
++#define S_OBJNAME		0x1101
++#define S_COMPILE3		0x113c
++
++#define CV_CFL_MASM		0x03
++
++#define CV_CFL_80386		0x03
++#define CV_CFL_X64		0xD0
++
++#define CHKSUM_TYPE_MD5		1
++
++/* OBJNAMESYM in cvinfo.h */
++struct OBJNAMESYM
++{
++  uint16_t length;
++  uint16_t type;
++  uint32_t signature;
++};
++
++/* COMPILESYM3 in cvinfo.h */
++struct COMPILESYM3
++{
++  uint16_t length;
++  uint16_t type;
++  uint32_t flags;
++  uint16_t machine;
++  uint16_t frontend_major;
++  uint16_t frontend_minor;
++  uint16_t frontend_build;
++  uint16_t frontend_qfe;
++  uint16_t backend_major;
++  uint16_t backend_minor;
++  uint16_t backend_build;
++  uint16_t backend_qfe;
++} ATTRIBUTE_PACKED;
++
++/* filedata in dumpsym7.cpp */
++struct file_checksum
++{
++  uint32_t file_id;
++  uint8_t checksum_length;
++  uint8_t checksum_type;
++} ATTRIBUTE_PACKED;
++
++/* CV_DebugSLinesHeader_t in cvinfo.h */
++struct cv_lines_header
++{
++  uint32_t offset;
++  uint16_t section;
++  uint16_t flags;
++  uint32_t length;
++};
++
++/* CV_DebugSLinesFileBlockHeader_t in cvinfo.h */
++struct cv_lines_block
++{
++  uint32_t file_id;
++  uint32_t num_lines;
++  uint32_t length;
++};
++
++/* CV_Line_t in cvinfo.h */
++struct cv_line
++{
++  uint32_t offset;
++  uint32_t line_no;
++};
++
++extern void codeview_finish (void);
++extern void codeview_generate_asm_lineno (void);
++
++#endif
+diff --git a/gas/read.c b/gas/read.c
+index e23be666dde..17971db9df7 100644
+--- a/gas/read.c
++++ b/gas/read.c
+@@ -38,6 +38,7 @@
+ #include "obstack.h"
+ #include "ecoff.h"
+ #include "dw2gencfi.h"
++#include "codeview.h"
+ #include "wchar.h"
+ 
+ #include <limits.h>
+@@ -5965,6 +5966,9 @@ generate_lineno_debug (void)
+ 	 support that is required (calling dwarf2_emit_insn), we
+ 	 let dwarf2dbg.c call as_where on its own.  */
+       break;
++    case DEBUG_CODEVIEW:
++      codeview_generate_asm_lineno ();
++      break;
+     }
+ }
+ 
+diff --git a/gas/testsuite/gas/i386/codeview-lines.d b/gas/testsuite/gas/i386/codeview-lines.d
+new file mode 100644
+index 00000000000..68b279ee7af
+--- /dev/null
++++ b/gas/testsuite/gas/i386/codeview-lines.d
+@@ -0,0 +1,9 @@
++
++tmpdir/codeview-lines:     file format binary
++
++Contents of section .data:
++ 0000 00000000 00000000 04000000 00000000  ................
++ 0010 01000000 14000000 00000000 05000080  ................
++ 0020 18000000 02000000 1c000000 01000000  ................
++ 0030 01000080 02000000 02000080 00000000  ................
++ 0040 01000000 14000000 03000000 07000080  ................
+diff --git a/gas/testsuite/gas/i386/codeview.exp b/gas/testsuite/gas/i386/codeview.exp
+new file mode 100644
+index 00000000000..ed606c1d5d4
+--- /dev/null
++++ b/gas/testsuite/gas/i386/codeview.exp
+@@ -0,0 +1,324 @@
++# Copyright (C) 2022 Free Software Foundation, Inc.
++
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program; if not, write to the Free Software
++# Foundation, Inc., 51 Franklin Street - Fifth Floor, Boston, MA 02110-1301, USA.
++
++if { ![istarget "i*86-*-*"] && ![istarget "x86_64-*-*"] } then {
++    return
++}
++
++if { ![istarget "*-*-cygwin*"] && ![istarget "*-*-pe"]
++      && ![istarget "*-*-mingw*"] } then {
++    return
++}
++
++proc read_subsection { fi } {
++    set data [read $fi 4]
++    binary scan $data i type
++
++    set data [read $fi 4]
++    binary scan $data i len
++
++    set data [read $fi $len]
++
++    if { [expr $len % 4] != 0 } {
++	seek $fi [expr 4 - ($len % 4)] current
++    }
++
++    return [list $type $data]
++}
++
++proc check_file_checksums { chksums string_table } {
++    set off 0
++
++    # check first file
++
++    set data [string range $chksums $off [expr $off + 3]]
++    incr off 4
++    binary scan $data i string_off
++
++    set filename [string range $string_table $string_off [expr [string first \000 $string_table $string_off] - 1]]
++
++    if ![string match "*codeview1.s" $filename] {
++	fail "Incorrect filename for first source file"
++    } else {
++	pass "Correct filename for first source file"
++    }
++
++    set data [string range $chksums $off $off]
++    incr off
++    binary scan $data c hash_length
++
++    if { $hash_length != 16 } {
++	fail "Incorrect hash length"
++    } else {
++	pass "Correct hash length"
++    }
++
++    set data [string range $chksums $off $off]
++    incr off
++    binary scan $data c hash_type
++
++    if { $hash_type != 1 } {
++	fail "Incorrect hash type"
++    } else {
++	pass "Correct hash type"
++    }
++
++    set data [string range $chksums $off [expr $off + $hash_length - 1]]
++    incr off $hash_length
++    binary scan $data H* hash
++
++    if ![string equal $hash "5ddeeb7d506f830e5f56bb2eb43ad407"] {
++	fail "Incorrect MD5 hash"
++    } else {
++	pass "Correct MD5 hash"
++    }
++
++    # skip padding
++    if { [expr $off % 4] != 0 } {
++	incr off [expr 4 - ($off % 4)]
++    }
++
++    # check second file
++
++    set data [string range $chksums $off [expr $off + 3]]
++    incr off 4
++    binary scan $data i string_off
++
++    set filename [string range $string_table $string_off [expr [string first \000 $string_table $string_off] - 1]]
++
++    if ![string match "*codeview2.s" $filename] {
++	fail "Incorrect filename for second source file"
++    } else {
++	pass "Correct filename for second source file"
++    }
++
++    set data [string range $chksums $off $off]
++    incr off
++    binary scan $data c hash_length
++
++    if { $hash_length != 16 } {
++	fail "Incorrect hash length"
++    } else {
++	pass "Correct hash length"
++    }
++
++    set data [string range $chksums $off $off]
++    incr off
++    binary scan $data c hash_type
++
++    if { $hash_type != 1 } {
++	fail "Incorrect hash type"
++    } else {
++	pass "Correct hash type"
++    }
++
++    set data [string range $chksums $off [expr $off + $hash_length - 1]]
++    incr off $hash_length
++    binary scan $data H* hash
++
++    if ![string equal $hash "2fbd11b8193e62ec93d50b04dfb352a8"] {
++	fail "Incorrect MD5 hash"
++    } else {
++	pass "Correct MD5 hash"
++    }
++}
++
++proc check_lines { lines } {
++    global OBJDUMP
++    global srcdir
++    global subdir
++
++    set fi [open tmpdir/codeview-lines w]
++    fconfigure $fi -translation binary
++    puts -nonewline $fi $lines
++    close $fi
++
++    gas_host_run "$OBJDUMP -s --target=binary tmpdir/codeview-lines" ">& tmpdir/codeview-lines-text"
++
++    set exp [file_contents "$srcdir/$subdir/codeview-lines.d"]
++    set got [file_contents "tmpdir/codeview-lines-text"]
++
++    if [string equal $exp $got] {
++	pass "Correct lines info"
++    } else {
++	fail "Incorrect lines info"
++    }
++}
++
++proc check_objname { sym } {
++    binary scan $sym s type
++
++    if { $type != 0x1101 } {
++	fail "Symbol was not S_OBJNAME"
++	return
++    } else {
++	pass "Symbol was S_OBJNAME"
++    }
++
++    binary scan [string range $sym 2 5] i signature
++
++    if { $signature != 0 } {
++	fail "S_OBJNAME signature was not 0"
++	return
++    } else {
++	pass "S_OBJNAME signature was 0"
++    }
++
++    set filename [string range $sym 6 [expr [string first \000 $sym 6] - 1]]
++
++    if ![string match "*codeview1.o" $filename] {
++	fail "Incorrect object name in S_OBJNAME"
++    } else {
++	pass "Correct object name in S_OBJNAME"
++    }
++}
++
++proc check_compile3 { sym } {
++    binary scan $sym s type
++
++    if { $type != 0x113c } {
++	fail "Symbol was not S_COMPILE3"
++	return
++    } else {
++	pass "Symbol was S_COMPILE3"
++    }
++
++    set assembler_name [string range $sym 24 [expr [string first \000 $sym 24] - 1]]
++
++    if ![string match "GNU AS *" $assembler_name] {
++	fail "Incorrect assembler name"
++    } else {
++	pass "Correct assembler name"
++    }
++}
++
++proc check_symbols { symbols } {
++    set off 0
++
++    # check S_OBJNAME record
++
++    set data [string range $symbols $off [expr $off + 1]]
++    incr off 2
++    binary scan $data s sym_len
++
++    set sym [string range $symbols $off [expr $off + $sym_len - 1]]
++    incr off $sym_len
++
++    check_objname $sym
++
++    # check S_COMPILE3 record
++
++    set data [string range $symbols $off [expr $off + 1]]
++    incr off 2
++    binary scan $data s sym_len
++
++    set sym [string range $symbols $off [expr $off + $sym_len - 1]]
++    incr off $sym_len
++
++    check_compile3 $sym
++}
++
++gas_run codeview1.s "-gcodeview -I $srcdir/$subdir -o tmpdir/codeview1.o" ">&dump.out"
++
++if { [file size "dump.out"] != 0 } {
++    fail "Failed to assemble codeview1.s"
++    return
++} else {
++    pass "Assembled codeview1.s"
++}
++
++gas_host_run "$OBJCOPY --dump-section .debug\\\$S=tmpdir/codeview-debug tmpdir/codeview1.o" ">&dump.out"
++
++if { [file size "dump.out"] != 0 } {
++    fail "Failed to extract .debug\$S section from codeview1.o"
++    return
++} else {
++    pass "Extracted .debug\$S section from codeview1.o"
++}
++
++set fi [open tmpdir/codeview-debug]
++fconfigure $fi -translation binary
++
++# check signature
++
++set data [read $fi 4]
++binary scan $data i cv_sig
++
++if { $cv_sig != 4 } {
++    fail "Invalid CodeView signature"
++    close $fi
++    return
++} else {
++    pass "Correct CodeView signature"
++}
++
++# read string table (DEBUG_S_STRINGTABLE)
++
++set result [read_subsection $fi]
++
++if { [lindex $result 0] != 0xf3 } {
++    fail "Subsection was not string table"
++    close $fi
++    return
++} else {
++    pass "Read string table"
++}
++
++set string_table [lindex $result 1]
++
++# read file checksums (DEBUG_S_FILECHKSMS)
++
++set result [read_subsection $fi]
++
++if { [lindex $result 0] != 0xf4 } {
++    fail "Subsection was not file checksums"
++    close $fi
++    return
++} else {
++    pass "Read file checksums"
++}
++
++check_file_checksums [lindex $result 1] $string_table
++
++# read line info (DEBUG_S_LINES)
++
++set result [read_subsection $fi]
++
++if { [lindex $result 0] != 0xf2 } {
++    fail "Subsection was not line info"
++    close $fi
++    return
++} else {
++    pass "Read line info"
++}
++
++check_lines [lindex $result 1]
++
++# read CodeView symbols (DEBUG_S_SYMBOLS)
++
++set result [read_subsection $fi]
++
++if { [lindex $result 0] != 0xf1 } {
++    fail "Subsection was not symbols"
++    close $fi
++    return
++} else {
++    pass "Read symbols"
++}
++
++check_symbols [lindex $result 1]
++
++close $fi
+diff --git a/gas/testsuite/gas/i386/codeview1.s b/gas/testsuite/gas/i386/codeview1.s
+new file mode 100644
+index 00000000000..9a1018ad1cc
+--- /dev/null
++++ b/gas/testsuite/gas/i386/codeview1.s
+@@ -0,0 +1,7 @@
++.text
++
++.global main
++main:
++	int3
++	.include "codeview2.s"
++	int3
+diff --git a/gas/testsuite/gas/i386/codeview2.s b/gas/testsuite/gas/i386/codeview2.s
+new file mode 100644
+index 00000000000..f7947fa480e
+--- /dev/null
++++ b/gas/testsuite/gas/i386/codeview2.s
+@@ -0,0 +1,2 @@
++int3
++int3
