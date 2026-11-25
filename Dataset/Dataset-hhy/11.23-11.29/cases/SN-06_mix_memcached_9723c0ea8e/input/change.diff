@@ -1,0 +1,4064 @@
+diff --git a/Makefile.am b/Makefile.am
+index 4208331e7e..e91d39df3f 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -59,6 +59,7 @@ if ENABLE_PROXY
+ memcached_SOURCES += proto_proxy.c proto_proxy.h vendor/mcmc/mcmc.h \
+ 					 proxy_xxhash.c proxy.h \
+ 					 proxy_await.c proxy_ustats.c \
++					 proxy_ratelim.c \
+ 					 proxy_jump_hash.c proxy_request.c \
+ 					 proxy_network.c proxy_lua.c \
+ 					 proxy_config.c proxy_ring_hash.c \
+diff --git a/configure.ac b/configure.ac
+index d94f6fb786..e1d0c326bc 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -133,6 +133,9 @@ AC_ARG_ENABLE(proxy-uring,
+ AC_ARG_ENABLE(werror,
+   [AS_HELP_STRING([--enable-werror], [Enable -Werror])])
+ 
++AC_ARG_ENABLE(large-client-flags,
++  [AS_HELP_STRING([--enable-large-client-flags], [Change client flags from 32bit to 64bit EXPERIMENTAL])])
++
+ dnl **********************************************************************
+ dnl DETECT_SASL_CB_GETCONF
+ dnl
+@@ -252,6 +255,10 @@ if test "x$enable_proxy_uring" = "xyes"; then
+     CPPFLAGS="-Ivendor/liburing/src/include $CPPFLAGS"
+ fi
+ 
++if test "x$enable_large_client_flags" = "xyes"; then
++    AC_DEFINE([LARGE_CLIENT_FLAGS],1,[Set to nonzero if you want 64bit client flags])
++fi
++
+ AM_CONDITIONAL([BUILD_DTRACE],[test "$build_dtrace" = "yes"])
+ AM_CONDITIONAL([DTRACE_INSTRUMENT_OBJ],[test "$dtrace_instrument_obj" = "yes"])
+ AM_CONDITIONAL([ENABLE_SASL],[test "$enable_sasl" = "yes"])
+@@ -263,6 +270,7 @@ AM_CONDITIONAL([ENABLE_STATIC],[test "$enable_static" = "yes"])
+ AM_CONDITIONAL([DISABLE_UNIX_SOCKET],[test "$enable_unix_socket" = "no"])
+ AM_CONDITIONAL([ENABLE_PROXY],[test "$enable_proxy" = "yes"])
+ AM_CONDITIONAL([ENABLE_PROXY_URING],[test "$enable_proxy_uring" = "yes"])
++AM_CONDITIONAL([LARGE_CLIENT_FLAGS],[test "$enable_large_client_flags" = "yes"])
+ 
+ 
+ AC_SUBST(DTRACE)
+diff --git a/doc/protocol.txt b/doc/protocol.txt
+index cd476dbdbe..306f7651d7 100644
+--- a/doc/protocol.txt
++++ b/doc/protocol.txt
+@@ -555,7 +555,7 @@ The flags used by the 'mg' command are:
+ 
+ These flags can modify the item:
+ - N(token): vivify on miss, takes TTL as a argument
+-- R(token): if token is less than remaining TTL win for recache
++- R(token): if remaining TTL is less than token, win for recache
+ - T(token): update remaining TTL
+ 
+ These extra flags can be added to the response:
+@@ -1498,6 +1498,7 @@ other stats command.
+                     | bool     | If proxy is configured to use IO_URING.      |
+                     |          | NOTE: uring may be used if kernel too old    |
+ | memory_file       | char     | Warm restart memory file path, if enabled    |
++| client_flags_size | 32u      | Size in bytes of client flags                |
+ |-------------------+----------+----------------------------------------------|
+ 
+ 
+@@ -1599,7 +1600,8 @@ The server terminates this list with the line
+ END\r\n
+ 
+ 'size' is an approximate size of the item, within 32 bytes.
+-'count' is the amount of items that exist within that 32-byte range.
++'count' is the approximate amount of items that exist within that 32-byte
++range.
+ 
+ This is essentially a display of all of your items if there was a slab class
+ for every 32 bytes. You can use this to determine if adjusting the slab growth
+diff --git a/items.c b/items.c
+index 0401cd8838..df5e98f139 100644
+--- a/items.c
++++ b/items.c
+@@ -161,7 +161,7 @@ unsigned int do_get_lru_size(uint32_t id) {
+  *
+  * Returns the total size of the header.
+  */
+-static size_t item_make_header(const uint8_t nkey, const unsigned int flags, const int nbytes,
++static size_t item_make_header(const uint8_t nkey, const client_flags_t flags, const int nbytes,
+                      char *suffix, uint8_t *nsuffix) {
+     if (flags == 0) {
+         *nsuffix = 0;
+@@ -258,7 +258,7 @@ item_chunk *do_item_alloc_chunk(item_chunk *ch, const size_t bytes_remain) {
+     return nch;
+ }
+ 
+-item *do_item_alloc(const char *key, const size_t nkey, const unsigned int flags,
++item *do_item_alloc(const char *key, const size_t nkey, const client_flags_t flags,
+                     const rel_time_t exptime, const int nbytes) {
+     uint8_t nsuffix;
+     item *it = NULL;
+@@ -377,7 +377,7 @@ void item_free(item *it) {
+  * Returns true if an item will fit in the cache (its size does not exceed
+  * the maximum for a cache entry.)
+  */
+-bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
++bool item_size_ok(const size_t nkey, const client_flags_t flags, const int nbytes) {
+     char prefix[40];
+     uint8_t nsuffix;
+     if (nbytes < 2)
+diff --git a/items.h b/items.h
+index 16fc2a3337..b47ddc4b99 100644
+--- a/items.h
++++ b/items.h
+@@ -11,11 +11,11 @@ uint64_t get_cas_id(void);
+ void set_cas_id(uint64_t new_cas);
+ 
+ /*@null@*/
+-item *do_item_alloc(const char *key, const size_t nkey, const unsigned int flags, const rel_time_t exptime, const int nbytes);
++item *do_item_alloc(const char *key, const size_t nkey, const client_flags_t flags, const rel_time_t exptime, const int nbytes);
+ item_chunk *do_item_alloc_chunk(item_chunk *ch, const size_t bytes_remain);
+ item *do_item_alloc_pull(const size_t ntotal, const unsigned int id);
+ void item_free(item *it);
+-bool item_size_ok(const size_t nkey, const int flags, const int nbytes);
++bool item_size_ok(const size_t nkey, const client_flags_t flags, const int nbytes);
+ 
+ int  do_item_link(item *it, const uint32_t hv);     /** may fail if transgresses limits */
+ void do_item_unlink(item *it, const uint32_t hv);
+diff --git a/logger.c b/logger.c
+index 1ff7211b10..bfcbfea298 100644
+--- a/logger.c
++++ b/logger.c
+@@ -409,18 +409,25 @@ static void _logger_log_proxy_errbe(logentry *e, const entry_details *d, const v
+     char *errmsg = va_arg(ap, char *);
+     char *be_name = va_arg(ap, char *);
+     char *be_port = va_arg(ap, char *);
++    char *be_label = va_arg(ap, char *);
+     int be_depth = va_arg(ap, int);
+     char *be_rbuf = va_arg(ap, char *);
+     int be_rbuflen = va_arg(ap, int);
++    int be_retry = va_arg(ap, int);
+ 
+     struct logentry_proxy_errbe *le = (void *)e->data;
+     le->be_depth = be_depth;
++    le->retry = be_retry;
+     le->errlen = strlen(errmsg);
+     if (be_name && be_port) {
+         le->be_namelen = strlen(be_name);
+         le->be_portlen = strlen(be_port);
+     }
+ 
++    if (be_label) {
++        le->be_labellen = strlen(be_label);
++    }
++
+     le->be_rbuflen = be_rbuflen;
+     if (be_rbuflen > MAX_RBUF_READ) {
+         le->be_rbuflen = MAX_RBUF_READ;
+@@ -433,6 +440,8 @@ static void _logger_log_proxy_errbe(logentry *e, const entry_details *d, const v
+     data += le->be_namelen;
+     memcpy(data, be_port, le->be_portlen);
+     data += le->be_portlen;
++    memcpy(data, be_label, le->be_labellen);
++    data += le->be_labellen;
+     memcpy(data, be_rbuf, le->be_rbuflen);
+     data += le->be_rbuflen;
+ 
+@@ -450,14 +459,24 @@ static int _logger_parse_prx_errbe(logentry *e, char *scratch) {
+     data += le->be_namelen;
+     char *be_port = data;
+     data += le->be_portlen;
++    char *be_label = data;
++    data += le->be_labellen;
+     char *be_rbuf = data;
+ 
+     uriencode(be_rbuf, rbuf, le->be_rbuflen, MAX_RBUF_READ * 3);
+-    total = snprintf(scratch, LOGGER_PARSE_SCRATCH,
+-            "ts=%lld.%d gid=%llu type=proxy_backend error=%.*s name=%.*s port=%.*s depth=%d rbuf=%s\n",
+-            (long long int)e->tv.tv_sec, (int)e->tv.tv_usec, (unsigned long long) e->gid,
+-            (int)le->errlen, errmsg, (int)le->be_namelen, be_name,
+-            (int)le->be_portlen, be_port, le->be_depth, rbuf);
++    if (le->retry) {
++        total = snprintf(scratch, LOGGER_PARSE_SCRATCH,
++                "ts=%lld.%d gid=%llu type=proxy_backend error=%.*s name=%.*s port=%.*s label=%.*s retry=%d\n",
++                (long long int)e->tv.tv_sec, (int)e->tv.tv_usec, (unsigned long long) e->gid,
++                (int)le->errlen, errmsg, (int)le->be_namelen, be_name,
++                (int)le->be_portlen, be_port, (int)le->be_labellen, be_label, le->retry);
++    } else {
++        total = snprintf(scratch, LOGGER_PARSE_SCRATCH,
++                "ts=%lld.%d gid=%llu type=proxy_backend error=%.*s name=%.*s port=%.*s label=%.*s depth=%d rbuf=%s\n",
++                (long long int)e->tv.tv_sec, (int)e->tv.tv_usec, (unsigned long long) e->gid,
++                (int)le->errlen, errmsg, (int)le->be_namelen, be_name,
++                (int)le->be_portlen, be_port, (int)le->be_labellen, be_label, le->be_depth, rbuf);
++    }
+ 
+     return total;
+ }
+diff --git a/logger.h b/logger.h
+index 9d2630c95c..0b7b5fb4b2 100644
+--- a/logger.h
++++ b/logger.h
+@@ -140,8 +140,10 @@ struct logentry_proxy_errbe {
+     size_t errlen;
+     size_t be_namelen;
+     size_t be_portlen;
++    size_t be_labellen;
+     size_t be_rbuflen;
+     int be_depth;
++    int retry;
+     char data[];
+ };
+ #endif
+diff --git a/memcached.c b/memcached.c
+index 306a952b0c..5feb86f6d3 100644
+--- a/memcached.c
++++ b/memcached.c
+@@ -538,9 +538,20 @@ void conn_close_idle(conn *c) {
+     }
+ }
+ 
++static void _conn_event_readd(conn *c) {
++    c->ev_flags = EV_READ | EV_PERSIST;
++    event_set(&c->event, c->sfd, c->ev_flags, event_handler, (void *)c);
++    event_base_set(c->thread->base, &c->event);
++
++    // TODO: call conn_cleanup/fail/etc
++    if (event_add(&c->event, 0) == -1) {
++        perror("event_add");
++    }
++}
++
+ /* bring conn back from a sidethread. could have had its event base moved. */
+ void conn_worker_readd(conn *c) {
+-    if (c->state == conn_io_queue) {
++    if (c->io_queues_submitted) { // TODO: ensure this is safe?
+         c->io_queues_submitted--;
+         // If we're still waiting for other queues to return, don't re-add the
+         // connection yet.
+@@ -548,25 +559,29 @@ void conn_worker_readd(conn *c) {
+             return;
+         }
+     }
+-    c->ev_flags = EV_READ | EV_PERSIST;
+-    event_set(&c->event, c->sfd, c->ev_flags, event_handler, (void *)c);
+-    event_base_set(c->thread->base, &c->event);
+ 
+-    // TODO: call conn_cleanup/fail/etc
+-    if (event_add(&c->event, 0) == -1) {
+-        perror("event_add");
++    switch (c->state) {
++        case conn_closing:
++            // might be fixable: only need to do this because we can't do
++            // event_del() without the event being armed.
++            _conn_event_readd(c);
++            drive_machine(c);
++            break;
++        case conn_io_pending:
++            // The event listener was removed as more data showed up while
++            // waiting for the async response.
++            _conn_event_readd(c);
++            // Explicit fall-through.
++        case conn_io_queue:
++            conn_set_state(c, conn_io_resume);
++            // machine will know how to return based on secondary state.
++            drive_machine(c);
++            break;
++        default:
++            _conn_event_readd(c);
++            conn_set_state(c, conn_new_cmd);
+     }
+ 
+-    // side thread wanted us to close immediately.
+-    if (c->state == conn_closing) {
+-        drive_machine(c);
+-        return;
+-    } else if (c->state == conn_io_queue) {
+-        // machine will know how to return based on secondary state.
+-        drive_machine(c);
+-    } else {
+-        conn_set_state(c, conn_new_cmd);
+-    }
+ }
+ 
+ void thread_io_queue_add(LIBEVENT_THREAD *t, int type, void *ctx, io_queue_stack_cb cb) {
+@@ -969,7 +984,9 @@ static const char *state_text(enum conn_states state) {
+                                        "conn_mwrite",
+                                        "conn_closed",
+                                        "conn_watch",
+-                                       "conn_io_queue" };
++                                       "conn_io_queue",
++                                       "conn_io_resume",
++                                       "conn_io_pending" };
+     return statenames[state];
+ }
+ 
+@@ -1571,7 +1588,7 @@ enum store_item_type do_store_item(item *it, int comm, LIBEVENT_THREAD *t, const
+     enum cas_result { CAS_NONE, CAS_MATCH, CAS_BADVAL, CAS_STALE, CAS_MISS };
+ 
+     item *new_it = NULL;
+-    uint32_t flags;
++    client_flags_t flags;
+ 
+     /* Do the CAS test up front so we can apply to all store modes */
+     enum cas_result cas_res = CAS_NONE;
+@@ -2003,6 +2020,7 @@ void process_stat_settings(ADD_STAT add_stats, void *c) {
+ #endif
+     APPEND_STAT("num_napi_ids", "%s", settings.num_napi_ids);
+     APPEND_STAT("memory_file", "%s", settings.memory_file);
++    APPEND_STAT("client_flags_size", "%d", sizeof(client_flags_t));
+ }
+ 
+ static int nz_strcmp(int nzlength, const char *nz, const char *z) {
+@@ -2318,7 +2336,7 @@ enum delta_result_type do_add_delta(LIBEVENT_THREAD *t, const char *key, const s
+         do_item_update(it);
+     } else if (it->refcount > 1) {
+         item *new_it;
+-        uint32_t flags;
++        client_flags_t flags;
+         FLAGS_CONV(it, flags);
+         new_it = do_item_alloc(ITEM_key(it), it->nkey, flags, it->exptime, res + 2);
+         if (new_it == 0) {
+@@ -3336,7 +3354,6 @@ static void drive_machine(conn *c) {
+             }
+             if (c->io_queues_submitted != 0) {
+                 conn_set_state(c, conn_io_queue);
+-                event_del(&c->event);
+ 
+                 stop = true;
+                 break;
+@@ -3386,6 +3403,16 @@ static void drive_machine(conn *c) {
+             stop = true;
+             break;
+         case conn_io_queue:
++            /* Woke up while waiting for an async return, but not ready. */
++            event_del(&c->event);
++            conn_set_state(c, conn_io_pending);
++            stop = true;
++            break;
++        case conn_io_pending:
++            /* Should not be reachable */
++            assert(false);
++            break;
++        case conn_io_resume:
+             /* Complete our queued IO's from within the worker thread. */
+             conn_set_state(c, conn_mwrite);
+             break;
+@@ -4107,6 +4134,7 @@ static void usage(void) {
+            "   - worker_logbuf_size:  size in kilobytes of per-worker-thread buffer\n"
+            "                          read by background thread, then written to watchers. (default: %u)\n"
+            "   - track_sizes:         enable dynamic reports for 'stats sizes' command.\n"
++           "                          note that counts for each size are approximate.\n"
+            "   - no_hashexpand:       disables hash table expansion (dangerous)\n"
+            "   - modern:              enables options which will be default in future.\n"
+            "                          currently: nothing\n"
+@@ -4816,6 +4844,7 @@ int main (int argc, char **argv) {
+ #ifdef PROXY
+         PROXY_CONFIG,
+         PROXY_URING,
++        PROXY_MEMPROFILE,
+ #endif
+ #ifdef MEMCACHED_DEBUG
+         RELAXED_PRIVILEGES,
+@@ -4878,6 +4907,7 @@ int main (int argc, char **argv) {
+ #ifdef PROXY
+         [PROXY_CONFIG] = "proxy_config",
+         [PROXY_URING] = "proxy_uring",
++        [PROXY_MEMPROFILE] = "proxy_memprofile",
+ #endif
+ #ifdef MEMCACHED_DEBUG
+         [RELAXED_PRIVILEGES] = "relaxed_privileges",
+@@ -5640,6 +5670,9 @@ int main (int argc, char **argv) {
+             case PROXY_URING:
+                 settings.proxy_uring = true;
+                 break;
++            case PROXY_MEMPROFILE:
++                settings.proxy_memprofile = true;
++                break;
+ #endif
+ #ifdef MEMCACHED_DEBUG
+             case RELAXED_PRIVILEGES:
+@@ -5912,9 +5945,6 @@ int main (int argc, char **argv) {
+     /* daemonize if requested */
+     /* if we want to ensure our ability to dump core, don't chdir to / */
+     if (do_daemonize) {
+-        if (signal(SIGHUP, SIG_IGN) == SIG_ERR) {
+-            perror("Failed to ignore SIGHUP");
+-        }
+         if (daemonize(maxcore, settings.verbose) == -1) {
+             fprintf(stderr, "failed to daemon() in order to daemonize\n");
+             exit(EXIT_FAILURE);
+@@ -6056,7 +6086,7 @@ int main (int argc, char **argv) {
+     /* start up worker threads if MT mode */
+ #ifdef PROXY
+     if (settings.proxy_enabled) {
+-        settings.proxy_ctx = proxy_init(settings.proxy_uring);
++        settings.proxy_ctx = proxy_init(settings.proxy_uring, settings.proxy_memprofile);
+     }
+ #endif
+ #ifdef EXTSTORE
+diff --git a/memcached.h b/memcached.h
+index ba3544df0f..efe31032a5 100644
+--- a/memcached.h
++++ b/memcached.h
+@@ -49,6 +49,8 @@
+ #include "protocol_binary.h"
+ #include "cache.h"
+ #include "logger.h"
++#include "queue.h"
++#include "util.h"
+ 
+ #ifdef EXTSTORE
+ #include "crc32c.h"
+@@ -89,6 +91,15 @@
+ #define HASHPOWER_DEFAULT 16
+ #define HASHPOWER_MAX 32
+ 
++/* Abstract the size of an item's client flag suffix */
++#ifdef LARGE_CLIENT_FLAGS
++typedef uint64_t client_flags_t;
++#define safe_strtoflags safe_strtoull
++#else
++typedef uint32_t client_flags_t;
++#define safe_strtoflags safe_strtoul
++#endif
++
+ /*
+  * We only reposition items in the LRU queue if they haven't been repositioned
+  * in this many seconds. That saves us from churning on frequently-accessed
+@@ -131,12 +142,12 @@
+          + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+ 
+ #define ITEM_data(item) ((char*) &((item)->data) + (item)->nkey + 1 \
+-         + (((item)->it_flags & ITEM_CFLAGS) ? sizeof(uint32_t) : 0) \
++         + (((item)->it_flags & ITEM_CFLAGS) ? sizeof(client_flags_t) : 0) \
+          + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+ 
+ #define ITEM_ntotal(item) (sizeof(struct _stritem) + (item)->nkey + 1 \
+          + (item)->nbytes \
+-         + (((item)->it_flags & ITEM_CFLAGS) ? sizeof(uint32_t) : 0) \
++         + (((item)->it_flags & ITEM_CFLAGS) ? sizeof(client_flags_t) : 0) \
+          + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+ 
+ #define ITEM_clsid(item) ((item)->slabs_clsid & ~(3<<6))
+@@ -163,13 +174,13 @@
+ /** Item client flag conversion */
+ #define FLAGS_CONV(it, flag) { \
+     if ((it)->it_flags & ITEM_CFLAGS) { \
+-        flag = *((uint32_t *)ITEM_suffix((it))); \
++        flag = *((client_flags_t *)ITEM_suffix((it))); \
+     } else { \
+         flag = 0; \
+     } \
+ }
+ 
+-#define FLAGS_SIZE(item) (((item)->it_flags & ITEM_CFLAGS) ? sizeof(uint32_t) : 0)
++#define FLAGS_SIZE(item) (((item)->it_flags & ITEM_CFLAGS) ? sizeof(client_flags_t) : 0)
+ 
+ /**
+  * Callback for any function producing stats.
+@@ -204,6 +215,8 @@ enum conn_states {
+     conn_closed,     /**< connection is closed */
+     conn_watch,      /**< held by the logger thread as a watcher */
+     conn_io_queue,   /**< wait on async. process to get response object */
++    conn_io_resume,  /**< ready to resume mwrite after async work */
++    conn_io_pending, /**< got woken up while waiting for async work */
+     conn_max_state   /**< Max state value (used for assertion) */
+ };
+ 
+@@ -532,6 +545,7 @@ struct settings {
+ #ifdef PROXY
+     bool proxy_enabled;
+     bool proxy_uring; /* if the proxy should use io_uring */
++    bool proxy_memprofile; /* output detail of lua allocations */
+     char *proxy_startfile; /* lua file to run when workers start */
+     void *proxy_ctx; /* proxy's state context */
+ #endif
+@@ -639,7 +653,7 @@ typedef struct _strchunk {
+ #ifdef NEED_ALIGN
+ static inline char *ITEM_schunk(item *it) {
+     int offset = it->nkey + 1
+-        + ((it->it_flags & ITEM_CFLAGS) ? sizeof(uint32_t) : 0)
++        + ((it->it_flags & ITEM_CFLAGS) ? sizeof(client_flags_t) : 0)
+         + ((it->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0);
+     int remain = offset % 8;
+     if (remain != 0) {
+@@ -649,7 +663,7 @@ static inline char *ITEM_schunk(item *it) {
+ }
+ #else
+ #define ITEM_schunk(item) ((char*) &((item)->data) + (item)->nkey + 1 \
+-         + (((item)->it_flags & ITEM_CFLAGS) ? sizeof(uint32_t) : 0) \
++         + (((item)->it_flags & ITEM_CFLAGS) ? sizeof(client_flags_t) : 0) \
+          + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+ #endif
+ 
+@@ -667,6 +681,7 @@ typedef struct {
+ #define IO_QUEUE_EXTSTORE 1
+ #define IO_QUEUE_PROXY 2
+ 
++typedef STAILQ_HEAD(iop_head_s, _io_pending_t) iop_head_t;
+ typedef struct _io_pending_t io_pending_t;
+ typedef struct io_queue_s io_queue_t;
+ typedef void (*io_queue_stack_cb)(io_queue_t *q);
+@@ -690,17 +705,24 @@ typedef struct io_queue_cb_s {
+     int type;
+ } io_queue_cb_t;
+ 
+-typedef struct _mc_resp_bundle mc_resp_bundle;
+-typedef struct {
+-    pthread_t thread_id;        /* unique ID of this thread */
+-    struct event_base *base;    /* libevent handle this thread uses */
+-    struct event notify_event;  /* listen event for notify pipe */
++struct thread_notify {
++    struct event notify_event;  /* listen event for notify pipe or eventfd */
+ #ifdef HAVE_EVENTFD
+     int notify_event_fd;        /* notify counter */
+ #else
+     int notify_receive_fd;      /* receiving end of notify pipe */
+     int notify_send_fd;         /* sending end of notify pipe */
+ #endif
++};
++
++typedef struct _mc_resp_bundle mc_resp_bundle;
++typedef struct {
++    pthread_t thread_id;        /* unique ID of this thread */
++    struct event_base *base;    /* libevent handle this thread uses */
++    struct thread_notify n;     /* for thread notification */
++    struct thread_notify ion;   /* for thread IO object notification */
++    pthread_mutex_t ion_lock;   /* mutex for ion_head */
++    iop_head_t ion_head;        /* queue for IO object return */
+     int cur_sfd;                /* client fd for logging commands */
+     int thread_baseid;          /* which "number" thread this is for data offsets */
+     struct thread_stats stats;  /* Stats generated by this thread */
+@@ -725,6 +747,7 @@ typedef struct {
+     void *proxy_user_stats;
+     void *proxy_int_stats;
+     void *proxy_event_thread; // worker threads can also be proxy IO threads
++    struct event *proxy_gc_timer; // periodic GC pushing.
+     pthread_mutex_t proxy_limit_lock;
+     uint64_t proxy_active_req_limit;
+     uint64_t proxy_buffer_memory_limit; // protected by limit_lock
+@@ -785,6 +808,7 @@ struct _io_pending_t {
+     mc_resp *resp; // associated response object
+     io_queue_cb return_cb; // called on worker thread.
+     io_queue_cb finalize_cb; // called back on the worker thread.
++    STAILQ_ENTRY(_io_pending_t) iop_next; // queue chain.
+     char data[120];
+ };
+ 
+@@ -941,7 +965,6 @@ extern int daemonize(int nochdir, int noclose);
+ #include "crawler.h"
+ #include "trace.h"
+ #include "hash.h"
+-#include "util.h"
+ 
+ /*
+  * Functions such as the libevent-related calls that need to do cross-thread
+@@ -968,7 +991,7 @@ enum delta_result_type add_delta(LIBEVENT_THREAD *t, const char *key,
+ void accept_new_conns(const bool do_accept);
+ void  conn_close_idle(conn *c);
+ void  conn_close_all(void);
+-item *item_alloc(const char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
++item *item_alloc(const char *key, size_t nkey, client_flags_t flags, rel_time_t exptime, int nbytes);
+ #define DO_UPDATE true
+ #define DONT_UPDATE false
+ item *item_get(const char *key, const size_t nkey, LIBEVENT_THREAD *t, const bool do_update);
+diff --git a/proto_proxy.c b/proto_proxy.c
+index 890ed2d329..e8c0ceae08 100644
+--- a/proto_proxy.c
++++ b/proto_proxy.c
+@@ -12,12 +12,28 @@
+ 
+ #define PROCESS_MULTIGET true
+ #define PROCESS_NORMAL false
++#define PROXY_GC_BACKGROUND_SECONDS 2
+ static void proxy_process_command(conn *c, char *command, size_t cmdlen, bool multiget);
+ static void mcp_queue_io(conn *c, mc_resp *resp, int coro_ref, lua_State *Lc);
++static void *mcp_profile_alloc(void *ud, void *ptr, size_t osize, size_t nsize);
+ 
+ /******** EXTERNAL FUNCTIONS ******/
+ // functions starting with _ are breakouts for the public functions.
+ 
++// We want to ensure we slowly iterate through VM memory in two cases:
++// - If using the newer zero-allocation API, old backends will never close
++// after reload.
++// - If the server is completely idle and user is issuing reloads, they will
++// be confused when old backends do not close.
++// So every few seconds we push one minimal GC step.
++static void proxy_gc_poke(evutil_socket_t fd, short event, void *arg) {
++    LIBEVENT_THREAD *t = arg;
++    lua_State *L = t->L;
++    struct timeval next = { PROXY_GC_BACKGROUND_SECONDS, 0 };
++    lua_gc(L, LUA_GCSTEP, 0);
++    evtimer_add(t->proxy_gc_timer, &next);
++}
++
+ bool proxy_bufmem_checkadd(LIBEVENT_THREAD *t, int len) {
+     bool oom = false;
+     pthread_mutex_lock(&t->proxy_limit_lock);
+@@ -89,7 +105,7 @@ void process_proxy_stats(void *arg, ADD_STAT add_stats, conn *c) {
+ 
+     // return all of the user generated stats
+     for (int x = 0; x < us->num_stats; x++) {
+-        if (us->names[x]) {
++        if (us->names[x] && us->names[x][0]) {
+             snprintf(key_str, STAT_KEY_LEN-1, "user_%s", us->names[x]);
+             APPEND_STAT(key_str, "%llu", (unsigned long long)counters[x]);
+         }
+@@ -135,9 +151,10 @@ void process_proxy_stats(void *arg, ADD_STAT add_stats, conn *c) {
+ }
+ 
+ // start the centralized lua state and config thread.
+-void *proxy_init(bool use_uring) {
++void *proxy_init(bool use_uring, bool proxy_memprofile) {
+     proxy_ctx_t *ctx = calloc(1, sizeof(proxy_ctx_t));
+     ctx->use_uring = use_uring;
++    ctx->memprofile = proxy_memprofile; // FIXME: take from argument.
+ 
+     pthread_mutex_init(&ctx->config_lock, NULL);
+     pthread_cond_init(&ctx->config_cond, NULL);
+@@ -156,9 +173,19 @@ void *proxy_init(bool use_uring) {
+     ctx->tunables.connect.tv_sec = 5;
+     ctx->tunables.retry.tv_sec = 3;
+     ctx->tunables.read.tv_sec = 3;
++    ctx->tunables.flap_backoff_ramp = 1.5;
++    ctx->tunables.flap_backoff_max = 3600;
++    ctx->tunables.max_ustats = MAX_USTATS_DEFAULT;
+ 
+     STAILQ_INIT(&ctx->manager_head);
+-    lua_State *L = luaL_newstate();
++    lua_State *L = NULL;
++    if (ctx->memprofile) {
++        struct mcp_memprofile *prof = calloc(1, sizeof(struct mcp_memprofile));
++        prof->id = ctx->memprofile_thread_counter++;
++        L = lua_newstate(mcp_profile_alloc, prof);
++    } else {
++        L = luaL_newstate();
++    }
+     ctx->proxy_state = L;
+     luaL_openlibs(L);
+     // NOTE: might need to differentiate the libs yes?
+@@ -197,7 +224,15 @@ void proxy_thread_init(void *ctx, LIBEVENT_THREAD *thr) {
+     thr->proxy_ctx = ctx;
+ 
+     // Initialize the lua state.
+-    lua_State *L = luaL_newstate();
++    proxy_ctx_t *pctx = ctx;
++    lua_State *L = NULL;
++    if (pctx->memprofile) {
++        struct mcp_memprofile *prof = calloc(1, sizeof(struct mcp_memprofile));
++        prof->id = pctx->memprofile_thread_counter++;
++        L = lua_newstate(mcp_profile_alloc, prof);
++    } else {
++        L = luaL_newstate();
++    }
+     thr->L = L;
+     luaL_openlibs(L);
+     proxy_register_libs(ctx, thr, L);
+@@ -206,6 +241,10 @@ void proxy_thread_init(void *ctx, LIBEVENT_THREAD *thr) {
+         thr->proxy_rng[x] = rand();
+     }
+ 
++    thr->proxy_gc_timer = evtimer_new(thr->base, proxy_gc_poke, thr);
++    // kick off the timer loop.
++    proxy_gc_poke(0, 0, thr);
++
+     // Create a proxy event thread structure to piggyback on the worker.
+     proxy_event_thread_t *t = calloc(1, sizeof(proxy_event_thread_t));
+     thr->proxy_event_thread = t;
+@@ -268,7 +307,6 @@ void proxy_submit_cb(io_queue_t *q) {
+             be->depth++;
+             if (!be->stacked) {
+                 be->stacked = true;
+-                be->be_next.stqe_next = NULL; // paranoia
+                 STAILQ_INSERT_TAIL(&w_head, be, be_next);
+             }
+         }
+@@ -280,13 +318,18 @@ void proxy_submit_cb(io_queue_t *q) {
+     q->stack_ctx = NULL;
+ 
+     if (!STAILQ_EMPTY(&head)) {
++        bool do_notify = false;
+         P_DEBUG("%s: submitting queue to IO thread\n", __func__);
+         // Transfer request stack to event thread.
+         pthread_mutex_lock(&e->mutex);
++        if (STAILQ_EMPTY(&e->io_head_in)) {
++            do_notify = true;
++        }
+         STAILQ_CONCAT(&e->io_head_in, &head);
+         // No point in holding the lock since we're not doing a cond signal.
+         pthread_mutex_unlock(&e->mutex);
+ 
++        if (do_notify) {
+         // Signal to check queue.
+ #ifdef USE_EVENTFD
+         uint64_t u = 1;
+@@ -300,6 +343,7 @@ void proxy_submit_cb(io_queue_t *q) {
+             assert(1 == 0);
+         }
+ #endif
++        }
+     }
+ 
+     if (!STAILQ_EMPTY(&w_head)) {
+@@ -489,14 +533,6 @@ void proxy_lua_error(lua_State *L, const char *s) {
+     lua_error(L);
+ }
+ 
+-void proxy_lua_ferror(lua_State *L, const char *fmt, ...) {
+-    va_list ap;
+-    va_start(ap, fmt);
+-    lua_pushfstring(L, fmt, ap);
+-    va_end(ap);
+-    lua_error(L);
+-}
+-
+ // Need a custom function so we can prefix lua strings easily.
+ void proxy_out_errstring(mc_resp *resp, char *type, const char *str) {
+     size_t len;
+@@ -721,6 +757,12 @@ int proxy_run_coroutine(lua_State *Lc, mc_resp *resp, io_pending_proxy_t *p, con
+     return 0;
+ }
+ 
++// basically any data before the first key.
++// max is like 15ish plus spaces. we can be more strict about how many spaces
++// to expect because any client spamming space is being deliberately stupid
++// anyway.
++#define MAX_CMD_PREFIX 20
++
+ static void proxy_process_command(conn *c, char *command, size_t cmdlen, bool multiget) {
+     assert(c != NULL);
+     LIBEVENT_THREAD *thr = c->thread;
+@@ -793,12 +835,18 @@ static void proxy_process_command(conn *c, char *command, size_t cmdlen, bool mu
+     if (!multiget && pr.cmd_type == CMD_TYPE_GET && pr.has_space) {
+         uint32_t keyoff = pr.tokens[pr.keytoken];
+         while (pr.klen != 0) {
+-            char temp[KEY_MAX_LENGTH + 30];
++            char temp[KEY_MAX_LENGTH + MAX_CMD_PREFIX + 30];
+             char *cur = temp;
+             // Core daemon can abort the entire command if one key is bad, but
+             // we cannot from the proxy. Instead we have to inject errors into
+             // the stream. This should, thankfully, be rare at least.
+-            if (pr.klen > KEY_MAX_LENGTH) {
++            if (pr.tokens[pr.keytoken] > MAX_CMD_PREFIX) {
++                if (!resp_start(c)) {
++                    conn_set_state(c, conn_closing);
++                    return;
++                }
++                proxy_out_errstring(c->resp, PROXY_CLIENT_ERROR, "malformed request");
++            } else if (pr.klen > KEY_MAX_LENGTH) {
+                 if (!resp_start(c)) {
+                     conn_set_state(c, conn_closing);
+                     return;
+@@ -1024,6 +1072,85 @@ static void mcp_queue_io(conn *c, mc_resp *resp, int coro_ref, lua_State *Lc) {
+     return;
+ }
+ 
++static void *mcp_profile_alloc(void *ud, void *ptr, size_t osize,
++                                            size_t nsize) {
++    struct mcp_memprofile *prof = ud;
++    struct timespec now;
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    enum mcp_memprofile_types t = mcp_memp_free;
++    if (ptr == NULL) {
++        switch (osize) {
++            case LUA_TSTRING:
++                t = mcp_memp_string;
++                //fprintf(stderr, "alloc string: %ld\n", nsize);
++                break;
++            case LUA_TTABLE:
++                t = mcp_memp_table;
++                //fprintf(stderr, "alloc table: %ld\n", nsize);
++                break;
++            case LUA_TFUNCTION:
++                t = mcp_memp_func;
++                //fprintf(stderr, "alloc func: %ld\n", nsize);
++                break;
++            case LUA_TUSERDATA:
++                t = mcp_memp_userdata;
++                //fprintf(stderr, "alloc userdata: %ld\n", nsize);
++                break;
++            case LUA_TTHREAD:
++                t = mcp_memp_thread;
++                //fprintf(stderr, "alloc thread: %ld\n", nsize);
++                break;
++            default:
++                t = mcp_memp_default;
++                //fprintf(stderr, "alloc osize: %ld nsize: %ld\n", osize, nsize);
++        }
++        prof->allocs[t]++;
++        prof->alloc_bytes[t] += nsize;
++    } else {
++        if (nsize != 0) {
++            prof->allocs[mcp_memp_realloc]++;
++            prof->alloc_bytes[mcp_memp_realloc] += nsize;
++        } else {
++            prof->allocs[mcp_memp_free]++;
++            prof->alloc_bytes[mcp_memp_free] += osize;
++        }
++        //fprintf(stderr, "realloc: osize: %ld nsize: %ld\n", osize, nsize);
++    }
++
++    if (now.tv_sec != prof->last_status.tv_sec) {
++        prof->last_status.tv_sec = now.tv_sec;
++        fprintf(stderr, "MEMPROF[%d]:\tstring[%llu][%llu] table[%llu][%llu] func[%llu][%llu] udata[%llu][%llu] thr[%llu][%llu] def[%llu][%llu] realloc[%llu][%llu] free[%llu][%llu]\n",
++                prof->id,
++                (unsigned long long)prof->allocs[1],
++                (unsigned long long)prof->alloc_bytes[1],
++                (unsigned long long)prof->allocs[2],
++                (unsigned long long)prof->alloc_bytes[2],
++                (unsigned long long)prof->allocs[3],
++                (unsigned long long)prof->alloc_bytes[3],
++                (unsigned long long)prof->allocs[4],
++                (unsigned long long)prof->alloc_bytes[4],
++                (unsigned long long)prof->allocs[5],
++                (unsigned long long)prof->alloc_bytes[5],
++                (unsigned long long)prof->allocs[6],
++                (unsigned long long)prof->alloc_bytes[6],
++                (unsigned long long)prof->allocs[7],
++                (unsigned long long)prof->alloc_bytes[7],
++                (unsigned long long)prof->allocs[0],
++                (unsigned long long)prof->alloc_bytes[0]);
++        for (int x = 0; x < 8; x++) {
++            prof->allocs[x] = 0;
++            prof->alloc_bytes[x] = 0;
++        }
++    }
++
++    if (nsize == 0) {
++        free(ptr);
++        return NULL;
++    } else {
++        return realloc(ptr, nsize);
++    }
++}
++
+ // Common lua debug command.
+ __attribute__((unused)) void dump_stack(lua_State *L) {
+     int top = lua_gettop(L);
+diff --git a/proto_proxy.h b/proto_proxy.h
+index c8608da7d0..41c0bbee42 100644
+--- a/proto_proxy.h
++++ b/proto_proxy.h
+@@ -9,7 +9,7 @@ int try_read_command_proxy(conn *c);
+ void complete_nread_proxy(conn *c);
+ void proxy_cleanup_conn(conn *c);
+ void proxy_thread_init(void *ctx, LIBEVENT_THREAD *thr);
+-void *proxy_init(bool proxy_uring);
++void *proxy_init(bool proxy_uring, bool proxy_memprofile);
+ // TODO: need better names or a better interface for these. can be confusing
+ // to reason about the order.
+ void proxy_start_reload(void *arg);
+diff --git a/proto_text.c b/proto_text.c
+index 75c32ec8fd..b39b837ea6 100644
+--- a/proto_text.c
++++ b/proto_text.c
+@@ -529,7 +529,7 @@ static inline int make_ascii_get_suffix(char *suffix, item *it, bool return_cas,
+         *p = '0';
+         p++;
+     } else {
+-        p = itoa_u32(*((uint32_t *) ITEM_suffix(it)), p);
++        p = itoa_u64(*((client_flags_t *) ITEM_suffix(it)), p);
+     }
+     *p = ' ';
+     p = itoa_u32(nbytes-2, p+1);
+@@ -917,7 +917,7 @@ struct _meta_flags {
+     rel_time_t exptime;
+     rel_time_t autoviv_exptime;
+     rel_time_t recache_time;
+-    uint32_t client_flags;
++    client_flags_t client_flags;
+     uint64_t req_cas_id;
+     uint64_t delta; // ma
+     uint64_t initial; // ma
+@@ -1012,7 +1012,7 @@ static int _meta_flag_preparse(token_t *tokens, const size_t start,
+                 break;
+             // mset-related.
+             case 'F':
+-                if (!safe_strtoul(tokens[i].value+1, &of->client_flags)) {
++                if (!safe_strtoflags(tokens[i].value+1, &of->client_flags)) {
+                     of->has_error = true;
+                 }
+                 break;
+@@ -1196,7 +1196,7 @@ static void process_mget_command(conn *c, token_t *tokens, const size_t ntokens)
+                         *p = '0';
+                         p++;
+                     } else {
+-                        p = itoa_u32(*((uint32_t *) ITEM_suffix(it)), p);
++                        p = itoa_u64(*((client_flags_t *) ITEM_suffix(it)), p);
+                     }
+                     break;
+                 case 'l':
+@@ -1944,7 +1944,7 @@ static void process_marithmetic_command(conn *c, token_t *tokens, const size_t n
+ static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm, bool handle_cas) {
+     char *key;
+     size_t nkey;
+-    unsigned int flags;
++    client_flags_t flags;
+     int32_t exptime_int = 0;
+     rel_time_t exptime = 0;
+     int vlen;
+@@ -1963,7 +1963,7 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
+     key = tokens[KEY_TOKEN].value;
+     nkey = tokens[KEY_TOKEN].length;
+ 
+-    if (! (safe_strtoul(tokens[2].value, (uint32_t *)&flags)
++    if (! (safe_strtoflags(tokens[2].value, &flags)
+            && safe_strtol(tokens[3].value, &exptime_int)
+            && safe_strtol(tokens[4].value, (int32_t *)&vlen))) {
+         out_string(c, "CLIENT_ERROR bad command line format");
+diff --git a/proxy.h b/proxy.h
+index 307435e450..b8a1bd5c0f 100644
+--- a/proxy.h
++++ b/proxy.h
+@@ -70,6 +70,24 @@
+ // FIXME (v2): do include dir properly.
+ #include "vendor/mcmc/mcmc.h"
+ 
++enum mcp_memprofile_types {
++    mcp_memp_free = 0,
++    mcp_memp_string,
++    mcp_memp_table,
++    mcp_memp_func,
++    mcp_memp_userdata,
++    mcp_memp_thread,
++    mcp_memp_default,
++    mcp_memp_realloc,
++};
++
++struct mcp_memprofile {
++    struct timespec last_status; // for per-second prints on status
++    int id;
++    uint64_t allocs[8];
++    uint64_t alloc_bytes[8];
++};
++
+ // Note: value created from thin air. Could be shorter.
+ #define MCP_REQUEST_MAXLEN KEY_MAX_LENGTH * 2
+ 
+@@ -181,13 +199,13 @@ struct proxy_tunables {
+     struct timeval connect;
+     struct timeval retry; // wait time before retrying a dead backend
+     struct timeval read;
+-#ifdef HAVE_LIBURING
+-    struct __kernel_timespec connect_ur;
+-    struct __kernel_timespec retry_ur;
+-    struct __kernel_timespec read_ur;
+-#endif // HAVE_LIBURING
++    struct timeval flap; // need to stay connected this long or it's flapping
++    float flap_backoff_ramp; // factorial for retry time
++    uint32_t flap_backoff_max; // don't backoff longer than this.
+     int backend_failure_limit;
++    int max_ustats; // limit the ustats index.
+     bool tcp_keepalive;
++    bool down; // backend is forced into a down/bad state.
+ };
+ 
+ typedef STAILQ_HEAD(pool_head_s, mcp_pool_s) pool_head_t;
+@@ -210,6 +228,8 @@ typedef struct {
+     bool worker_failed; // covered by worker_lock as well.
+     bool use_uring; // use IO_URING for backend connections.
+     bool loading; // bool indicating an active config load.
++    bool memprofile; // indicate if we want to profile lua memory.
++    uint8_t memprofile_thread_counter;
+     struct proxy_global_stats global_stats;
+     struct proxy_user_stats user_stats;
+     struct proxy_tunables tunables; // NOTE: updates covered by stats_lock
+@@ -277,6 +297,7 @@ struct mcp_parser_s {
+     uint8_t keytoken; // because GAT. sigh. also cmds without a key.
+     uint32_t parsed; // how far into the request we parsed already
+     uint32_t reqlen; // full length of request buffer.
++    uint32_t endlen; // index to the start of \r\n or \n
+     int vlen;
+     uint32_t klen; // length of key.
+     uint16_t tokens[PARSER_MAX_TOKENS]; // offsets for start of each token
+@@ -315,6 +336,7 @@ struct mcp_backend_label_s {
+     char port[MAX_PORTLEN+1];
+     char label[MAX_LABELLEN+1];
+     size_t llen; // cache label length for small speedup in pool creation.
++    int conncount; // number of sockets to make.
+     struct proxy_tunables tunables;
+ };
+ 
+@@ -327,16 +349,15 @@ struct mcp_backend_wrap_s {
+     mcp_backend_t *be;
+ };
+ 
+-// FIXME: inline the mcmc client data.
+-// TODO: event_thread -> something? union of owner type?
+-struct mcp_backend_s {
++struct mcp_backendconn_s {
++    mcp_backend_t *be_parent; // find the wrapper.
++    int self; // our index into the parent array.
+     int depth; // total number of requests in queue
+     int pending_read; // number of requests written to socket, pending read.
+     int failed_count; // number of fails (timeouts) in a row
++    int flap_count; // number of times we've "flapped" into bad state.
+     proxy_event_thread_t *event_thread; // event thread owning this backend.
+     void *client; // mcmc client
+-    STAILQ_ENTRY(mcp_backend_s) be_next; // stack for backends
+-    STAILQ_ENTRY(mcp_backend_s) beconn_next; // stack for connecting conns
+     io_head_t io_head; // stack of requests.
+     io_pending_proxy_t *io_next; // next request to write.
+     char *rbuf; // statically allocated read buffer.
+@@ -345,23 +366,32 @@ struct mcp_backend_s {
+     struct event write_event; // libevent: only used when socket wbuf full
+     struct event timeout_event; // libevent: alarm for pending reads
+     struct proxy_tunables tunables;
+-#ifdef HAVE_LIBURING
+-    proxy_event_t ur_rd_ev; // liburing.
+-    proxy_event_t ur_wr_ev; // need a separate event/cb for writing/polling
+-    proxy_event_t ur_te_ev; // for timeout handling
+-#endif
++    struct timeval last_failed; // time the backend was last reset.
+     enum mcp_backend_states state; // readback state machine
+     int connect_flags; // flags to pass to mcmc_connect
+-    bool transferred; // if beconn has been shipped to owner thread.
+     bool connecting; // in the process of an asynch connection.
+     bool validating; // in process of validating a new backend connection.
+     bool can_write; // recently got a WANT_WRITE or are connecting.
+-    bool stacked; // if backend already queued for syscalls.
+     bool bad; // timed out, marked as bad.
+-    bool use_io_thread; // note if this backend is worker-local or not.
+     struct iovec write_iovs[BE_IOV_MAX]; // iovs to stage batched writes
++};
++
++// TODO: move depth and flags to a second top level array so we can make index
++// decisions from fewer memory stalls.
++struct mcp_backend_s {
++    int conncount; // total number of connections managed.
++    int depth; // temporary depth counter for io_head
++    bool transferred; // if beconn has been shipped to owner thread.
++    bool use_io_thread; // note if this backend is worker-local or not.
++    bool stacked; // if backend already queued for syscalls.
++    STAILQ_ENTRY(mcp_backend_s) beconn_next; // stack for connecting conns
++    STAILQ_ENTRY(mcp_backend_s) be_next; // stack for backends
++    io_head_t io_head; // stack of inbound requests.
+     char name[MAX_NAMELEN+1];
+     char port[MAX_PORTLEN+1];
++    char label[MAX_LABELLEN+1];
++    struct proxy_tunables tunables; // this gets copied a few times for speed.
++    struct mcp_backendconn_s be[];
+ };
+ typedef STAILQ_HEAD(be_head_s, mcp_backend_s) be_head_t;
+ typedef STAILQ_HEAD(beconn_head_s, mcp_backend_s) beconn_head_t;
+@@ -431,6 +461,7 @@ struct _io_pending_proxy_t {
+     mc_resp *resp;
+     io_queue_cb return_cb; // called on worker thread.
+     io_queue_cb finalize_cb; // called back on the worker thread.
++    STAILQ_ENTRY(io_pending_t) iop_next; // queue chain.
+     // original struct ends here
+ 
+     int io_type; // extstore IO or backend IO
+@@ -451,6 +482,7 @@ struct _io_pending_proxy_t {
+         };
+         // backend request IO
+         struct {
++            // FIXME: use top level next chain
+             struct _io_pending_proxy_t *next; // stack for IO submission
+             STAILQ_ENTRY(_io_pending_proxy_t) io_next; // stack for backends
+             int mcpres_ref; // mcp.res reference used for await()
+@@ -492,6 +524,7 @@ struct mcp_pool_s {
+     int phc_ref;
+     int self_ref; // TODO (v2): double check that this is needed.
+     int pool_size;
++    int pool_be_total; // can be different from pool size for worker IO
+     bool use_iothread;
+     mcp_pool_be_t pool[];
+ };
+@@ -508,6 +541,7 @@ bool proxy_bufmem_checkadd(LIBEVENT_THREAD *t, int len);
+ void proxy_init_event_thread(proxy_event_thread_t *t, proxy_ctx_t *ctx, struct event_base *base);
+ void *proxy_event_thread(void *arg);
+ void proxy_run_backend_queue(be_head_t *head);
++struct mcp_backendconn_s *proxy_choose_beconn(mcp_backend_t *be);
+ 
+ // await interface
+ enum mcp_await_e {
+@@ -528,12 +562,17 @@ int mcplib_internal(lua_State *L);
+ int mcplib_internal_run(lua_State *L, conn *c, mc_resp *top_resp, int coro_ref);
+ 
+ // user stats interface
++#define MAX_USTATS_DEFAULT 1024
+ int mcplib_add_stat(lua_State *L);
+ int mcplib_stat(lua_State *L);
+ size_t _process_request_next_key(mcp_parser_t *pr);
+ int process_request(mcp_parser_t *pr, const char *command, size_t cmdlen);
+ mcp_request_t *mcp_new_request(lua_State *L, mcp_parser_t *pr, const char *command, size_t cmdlen);
+ 
++// rate limit interfaces
++int mcplib_ratelim_tbf(lua_State *L);
++int mcplib_ratelim_tbf_call(lua_State *L);
++
+ // request interface
+ int mcplib_request(lua_State *L);
+ int mcplib_request_command(lua_State *L);
+@@ -554,7 +593,12 @@ mcp_backend_t *mcplib_pool_proxy_call_helper(lua_State *L, mcp_pool_proxy_t *pp,
+ void mcp_request_attach(lua_State *L, mcp_request_t *rq, io_pending_proxy_t *p);
+ int mcp_request_render(mcp_request_t *rq, int idx, const char *tok, size_t len);
+ void proxy_lua_error(lua_State *L, const char *s);
+-void proxy_lua_ferror(lua_State *L, const char *fmt, ...);
++#define proxy_lua_ferror(L, fmt, ...) \
++    do { \
++        lua_pushfstring(L, fmt, __VA_ARGS__); \
++        lua_error(L); \
++    } while (0)
++
+ #define PROXY_SERVER_ERROR "SERVER_ERROR "
+ #define PROXY_CLIENT_ERROR "CLIENT_ERROR "
+ void proxy_out_errstring(mc_resp *resp, char *type, const char *str);
+diff --git a/proxy_config.c b/proxy_config.c
+index b3ec6c1375..cfe43b1308 100644
+--- a/proxy_config.c
++++ b/proxy_config.c
+@@ -136,6 +136,7 @@ static void *_proxy_config_thread(void *arg) {
+ 
+     logger_create();
+     pthread_mutex_lock(&ctx->config_lock);
++    pthread_cond_signal(&ctx->config_cond);
+     while (1) {
+         ctx->loading = false;
+         pthread_cond_wait(&ctx->config_cond, &ctx->config_lock);
+@@ -203,6 +204,8 @@ int _start_proxy_config_threads(proxy_ctx_t *ctx) {
+         return -1;
+     }
+     thread_setname(ctx->config_tid, "mc-prx-config");
++    // Avoid returning until the config thread has actually started.
++    pthread_cond_wait(&ctx->config_cond, &ctx->config_lock);
+     pthread_mutex_unlock(&ctx->config_lock);
+ 
+     pthread_mutex_lock(&ctx->manager_lock);
+@@ -309,7 +312,7 @@ static void _copy_config_table(lua_State *from, lua_State *to, LIBEVENT_THREAD *
+                 lua_pop(from, 2);
+             }
+             if (!found) {
+-                proxy_lua_ferror(from, "unhandled userdata type in configuration table\n");
++                proxy_lua_error(from, "unhandled userdata type in configuration table\n");
+             }
+             break;
+         case LUA_TNUMBER:
+diff --git a/proxy_internal.c b/proxy_internal.c
+index 64164dcbe5..29bcabb3cd 100644
+--- a/proxy_internal.c
++++ b/proxy_internal.c
+@@ -209,7 +209,7 @@ static inline int make_ascii_get_suffix(char *suffix, item *it, bool return_cas,
+         *p = '0';
+         p++;
+     } else {
+-        p = itoa_u32(*((uint32_t *) ITEM_suffix(it)), p);
++        p = itoa_u64(*((client_flags_t *) ITEM_suffix(it)), p);
+     }
+     *p = ' ';
+     p = itoa_u32(nbytes-2, p+1);
+@@ -309,7 +309,7 @@ static void process_get_cmd(LIBEVENT_THREAD *t, mcp_parser_t *pr, mc_resp *resp,
+ static void process_update_cmd(LIBEVENT_THREAD *t, mcp_parser_t *pr, mc_resp *resp, int comm, bool handle_cas) {
+     const char *key = &pr->request[pr->tokens[pr->keytoken]];
+     size_t nkey = pr->klen;
+-    unsigned int flags;
++    client_flags_t flags;
+     int32_t exptime_int = 0;
+     rel_time_t exptime = 0;
+     uint64_t req_cas_id = 0;
+@@ -326,7 +326,7 @@ static void process_update_cmd(LIBEVENT_THREAD *t, mcp_parser_t *pr, mc_resp *re
+     // tokens simply end with a space or carriage return/newline, so we either
+     // need custom functions or validate harder that these calls won't bite us
+     // later.
+-    if (! (safe_strtoul(&pr->request[pr->tokens[2]], (uint32_t *)&flags)
++    if (! (safe_strtoflags(&pr->request[pr->tokens[2]], &flags)
+            && safe_strtol(&pr->request[pr->tokens[3]], &exptime_int))) {
+         pout_string(resp, "CLIENT_ERROR bad command line format");
+         return;
+@@ -592,7 +592,7 @@ struct _meta_flags {
+     rel_time_t exptime;
+     rel_time_t autoviv_exptime;
+     rel_time_t recache_time;
+-    uint32_t client_flags;
++    client_flags_t client_flags;
+     uint64_t req_cas_id;
+     uint64_t delta; // ma
+     uint64_t initial; // ma
+@@ -689,7 +689,7 @@ static int _meta_flag_preparse(mcp_parser_t *pr, const size_t start,
+                 break;
+             // mset-related.
+             case 'F':
+-                if (!safe_strtoul(&pr->request[pr->tokens[i]+1], &of->client_flags)) {
++                if (!safe_strtoflags(&pr->request[pr->tokens[i]+1], &of->client_flags)) {
+                     of->has_error = true;
+                 }
+                 break;
+@@ -860,7 +860,7 @@ static void process_mget_cmd(LIBEVENT_THREAD *t, mcp_parser_t *pr, mc_resp *resp
+                         *p = '0';
+                         p++;
+                     } else {
+-                        p = itoa_u32(*((uint32_t *) ITEM_suffix(it)), p);
++                        p = itoa_u64(*((client_flags_t *) ITEM_suffix(it)), p);
+                     }
+                     break;
+                 case 'l':
+@@ -1052,11 +1052,10 @@ static void process_mset_cmd(LIBEVENT_THREAD *t, mcp_parser_t *pr, mc_resp *resp
+     assert(t != NULL);
+     char *p = resp->wbuf;
+     int tlen = 0;
+-    rel_time_t exptime = 0;
+ 
+     //WANT_TOKENS_MIN(ntokens, 3);
+ 
+-    if (nkey > KEY_MAX_LENGTH) {
++    if (nkey > KEY_MAX_LENGTH || pr->ntokens < 3) {
+         pout_string(resp, "CLIENT_ERROR bad command line format");
+         return;
+     }
+@@ -1067,11 +1066,6 @@ static void process_mset_cmd(LIBEVENT_THREAD *t, mcp_parser_t *pr, mc_resp *resp
+         return;
+     }
+ 
+-    if (pr->ntokens == 3) {
+-        pout_errstring(resp, "CLIENT_ERROR bad command line format");
+-        return;
+-    }
+-
+     // We need to at least try to get the size to properly slurp bad bytes
+     // after an error.
+     // we pass in the first token that should be a flag.
+@@ -1079,6 +1073,7 @@ static void process_mset_cmd(LIBEVENT_THREAD *t, mcp_parser_t *pr, mc_resp *resp
+         goto error;
+     }
+ 
++    rel_time_t exptime = of.exptime;
+     // "mode switch" to alternative commands
+     switch (of.mode) {
+         case 0:
+diff --git a/proxy_lua.c b/proxy_lua.c
+index 8023b1a034..0271c34abc 100644
+--- a/proxy_lua.c
++++ b/proxy_lua.c
+@@ -11,6 +11,23 @@
+ // normal library open:
+ // int luaopen_mcp(lua_State *L) { }
+ 
++static lua_Integer _mcplib_backend_get_waittime(lua_Number secondsf) {
++    lua_Integer secondsi = (lua_Integer) secondsf;
++    lua_Number subseconds = secondsf - secondsi;
++    if (subseconds >= 0.5) {
++        // Yes, I know this rounding is probably wrong. it's close enough.
++        // Rounding functions have tricky portability and whole-integer
++        // rounding is at least simpler to reason about.
++        secondsi++;
++    }
++    if (secondsi < 1) {
++        secondsi = 1;
++    }
++    return secondsi;
++}
++
++// end util funcs.
++
+ static int mcplib_response_elapsed(lua_State *L) {
+     mcp_resp_t *r = luaL_checkudata(L, -1, "mcp.response");
+     lua_pushinteger(L, r->elapsed);
+@@ -126,7 +143,9 @@ static int mcplib_backend_wrap_gc(lua_State *L) {
+         // Since we're running in the config thread it could just busy poll
+         // until the connection was picked up.
+         assert(be->transferred);
+-        proxy_event_thread_t *e = be->event_thread;
++        // There has to be at least one connection, and the event_thread will
++        // always be the same.
++        proxy_event_thread_t *e = be->be[0].event_thread;
+         pthread_mutex_lock(&e->mutex);
+         STAILQ_INSERT_TAIL(&e->beconn_head_in, be, beconn_next);
+         pthread_mutex_unlock(&e->mutex);
+@@ -173,6 +192,7 @@ static int mcplib_backend(lua_State *L) {
+     const char *port;
+     // copy global defaults for tunables.
+     memcpy(&be->tunables, &ctx->tunables, sizeof(be->tunables));
++    be->conncount = 1; // one connection per backend as default.
+ 
+     if (lua_istable(L, 1)) {
+ 
+@@ -226,6 +246,19 @@ static int mcplib_backend(lua_State *L) {
+         }
+         lua_pop(L, 1);
+ 
++        // TODO (v2): print deprecation warning.
++        if (lua_getfield(L, 1, "retrytimeout") != LUA_TNIL) {
++            be->tunables.retry.tv_sec =
++                _mcplib_backend_get_waittime(luaL_checknumber(L, -1));
++        }
++        lua_pop(L, 1);
++
++        if (lua_getfield(L, 1, "retrywaittime") != LUA_TNIL) {
++            be->tunables.retry.tv_sec =
++                _mcplib_backend_get_waittime(luaL_checknumber(L, -1));
++        }
++        lua_pop(L, 1);
++
+         if (lua_getfield(L, 1, "retrytimeout") != LUA_TNIL) {
+             lua_Number secondsf = luaL_checknumber(L, -1);
+             lua_Integer secondsi = (lua_Integer) secondsf;
+@@ -246,6 +279,52 @@ static int mcplib_backend(lua_State *L) {
+         }
+         lua_pop(L, 1);
+ 
++        if (lua_getfield(L, 1, "down") != LUA_TNIL) {
++            int down = lua_toboolean(L, -1);
++            be->tunables.down = down;
++        }
++        lua_pop(L, 1);
++
++        if (lua_getfield(L, 1, "flaptime") != LUA_TNIL) {
++            lua_Number secondsf = luaL_checknumber(L, -1);
++            lua_Integer secondsi = (lua_Integer) secondsf;
++            lua_Number subseconds = secondsf - secondsi;
++
++            be->tunables.flap.tv_sec = secondsi;
++            be->tunables.flap.tv_usec = MICROSECONDS(subseconds);
++        }
++        lua_pop(L, 1);
++
++        if (lua_getfield(L, 1, "flapbackofframp") != LUA_TNIL) {
++            float ramp = luaL_checknumber(L, -1);
++            if (ramp <= 1.1) {
++                ramp = 1.1;
++            }
++            be->tunables.flap_backoff_ramp = ramp;
++        }
++        lua_pop(L, 1);
++
++        if (lua_getfield(L, 1, "flapbackoffmax") != LUA_TNIL) {
++            luaL_checknumber(L, -1);
++            uint32_t max = lua_tointeger(L, -1);
++            be->tunables.flap_backoff_max = max;
++        }
++        lua_pop(L, 1);
++
++        if (lua_getfield(L, 1, "connections") != LUA_TNIL) {
++            int c = luaL_checkinteger(L, -1);
++            if (c <= 0) {
++                proxy_lua_error(L, "backend connections argument must be >= 0");
++                return 0;
++            } else if (c > 8) {
++                proxy_lua_error(L, "backend connections argument must be <= 8");
++                return 0;
++            }
++
++            be->conncount = c;
++        }
++        lua_pop(L, 1);
++
+     } else {
+         label = luaL_checklstring(L, 1, &llen);
+         name = luaL_checklstring(L, 2, &nlen);
+@@ -293,6 +372,7 @@ static mcp_backend_wrap_t *_mcplib_backend_checkcache(lua_State *L, mcp_backend_
+         mcp_backend_wrap_t *be_orig = luaL_checkudata(L, -1, "mcp.backendwrap");
+         if (strncmp(be_orig->be->name, bel->name, MAX_NAMELEN) == 0
+                 && strncmp(be_orig->be->port, bel->port, MAX_PORTLEN) == 0
++                && be_orig->be->conncount == bel->conncount
+                 && memcmp(&be_orig->be->tunables, &bel->tunables, sizeof(bel->tunables)) == 0) {
+             // backend is the same, return it.
+             return be_orig;
+@@ -315,7 +395,7 @@ static mcp_backend_wrap_t *_mcplib_make_backendconn(lua_State *L, mcp_backend_la
+     luaL_getmetatable(L, "mcp.backendwrap");
+     lua_setmetatable(L, -2); // set metatable to userdata.
+ 
+-    mcp_backend_t *be = calloc(1, sizeof(mcp_backend_t));
++    mcp_backend_t *be = calloc(1, sizeof(mcp_backend_t) + sizeof(struct mcp_backendconn_s) * bel->conncount);
+     if (be == NULL) {
+         proxy_lua_error(L, "out of memory allocating backend connection");
+         return NULL;
+@@ -324,45 +404,49 @@ static mcp_backend_wrap_t *_mcplib_make_backendconn(lua_State *L, mcp_backend_la
+ 
+     strncpy(be->name, bel->name, MAX_NAMELEN+1);
+     strncpy(be->port, bel->port, MAX_PORTLEN+1);
++    strncpy(be->label, bel->label, MAX_LABELLEN+1);
+     memcpy(&be->tunables, &bel->tunables, sizeof(bel->tunables));
++    be->conncount = bel->conncount;
+     STAILQ_INIT(&be->io_head);
+-    be->state = mcp_backend_read;
+-
+-    // this leaves a permanent buffer on the backend, which is fine
+-    // unless you have billions of backends.
+-    // we can later optimize for pulling buffers from idle backends.
+-    be->rbuf = malloc(READ_BUFFER_SIZE);
+-    if (be->rbuf == NULL) {
+-        proxy_lua_error(L, "out of memory allocating backend");
+-        return NULL;
+-    }
+ 
+-    // initialize libevent.
+-    memset(&be->main_event, 0, sizeof(be->main_event));
+-    memset(&be->write_event, 0, sizeof(be->write_event));
+-    memset(&be->timeout_event, 0, sizeof(be->timeout_event));
++    for (int x = 0; x < bel->conncount; x++) {
++        struct mcp_backendconn_s *bec = &be->be[x];
++        bec->be_parent = be;
++        memcpy(&bec->tunables, &bel->tunables, sizeof(bel->tunables));
++        STAILQ_INIT(&bec->io_head);
++        bec->state = mcp_backend_read;
++
++        // this leaves a permanent buffer on the backend, which is fine
++        // unless you have billions of backends.
++        // we can later optimize for pulling buffers from idle backends.
++        bec->rbuf = malloc(READ_BUFFER_SIZE);
++        if (bec->rbuf == NULL) {
++            proxy_lua_error(L, "out of memory allocating backend");
++            return NULL;
++        }
+ 
+-    // initialize the client
+-    be->client = malloc(mcmc_size(MCMC_OPTION_BLANK));
+-    if (be->client == NULL) {
+-        proxy_lua_error(L, "out of memory allocating backend");
+-        return NULL;
+-    }
+-    // TODO (v2): no way to change the TCP_KEEPALIVE state post-construction.
+-    // This is a trivial fix if we ensure a backend's owning event thread is
+-    // set before it can be used in the proxy, as it would have access to the
+-    // tunables structure. _reset_bad_backend() may not have its event thread
+-    // set 100% of the time and I don't want to introduce a crash right now,
+-    // so I'm writing this overly long comment. :)
+-    int flags = MCMC_OPTION_NONBLOCK;
+-    STAT_L(ctx);
+-    if (ctx->tunables.tcp_keepalive) {
+-        flags |= MCMC_OPTION_TCP_KEEPALIVE;
+-    }
+-    STAT_UL(ctx);
+-    be->connect_flags = flags;
++        // initialize the client
++        bec->client = malloc(mcmc_size(MCMC_OPTION_BLANK));
++        if (bec->client == NULL) {
++            proxy_lua_error(L, "out of memory allocating backend");
++            return NULL;
++        }
++        // TODO (v2): no way to change the TCP_KEEPALIVE state post-construction.
++        // This is a trivial fix if we ensure a backend's owning event thread is
++        // set before it can be used in the proxy, as it would have access to the
++        // tunables structure. _reset_bad_backend() may not have its event thread
++        // set 100% of the time and I don't want to introduce a crash right now,
++        // so I'm writing this overly long comment. :)
++        int flags = MCMC_OPTION_NONBLOCK;
++        STAT_L(ctx);
++        if (ctx->tunables.tcp_keepalive) {
++            flags |= MCMC_OPTION_TCP_KEEPALIVE;
++        }
++        STAT_UL(ctx);
++        bec->connect_flags = flags;
+ 
+-    be->event_thread = e;
++        bec->event_thread = e;
++    }
+     pthread_mutex_lock(&e->mutex);
+     STAILQ_INSERT_TAIL(&e->beconn_head_in, be, beconn_next);
+     pthread_mutex_unlock(&e->mutex);
+@@ -398,7 +482,7 @@ static int mcplib_pool_gc(lua_State *L) {
+     assert(p->refcount == 0);
+     pthread_mutex_destroy(&p->lock);
+ 
+-    for (int x = 0; x < p->pool_size; x++) {
++    for (int x = 0; x < p->pool_be_total; x++) {
+         if (p->pool[x].ref) {
+             luaL_unref(L, LUA_REGISTRYINDEX, p->pool[x].ref);
+         }
+@@ -590,6 +674,7 @@ static int mcplib_pool(lua_State *L) {
+     // Zero the memory before use, so we can realibly use __gc to clean up
+     memset(p, 0, plen);
+     p->pool_size = n;
++    p->pool_be_total = n * workers;
+     p->use_iothread = true;
+     // TODO (v2): Nicer if this is fetched from mcp.default_key_hash
+     p->key_hasher = XXH3_64bits_withSeed;
+@@ -827,20 +912,24 @@ static int mcplib_backend_connect_timeout(lua_State *L) {
+     return 0;
+ }
+ 
+-static int mcplib_backend_retry_timeout(lua_State *L) {
++static int mcplib_backend_retry_waittime(lua_State *L) {
+     lua_Number secondsf = luaL_checknumber(L, -1);
+-    lua_Integer secondsi = (lua_Integer) secondsf;
+-    lua_Number subseconds = secondsf - secondsi;
+     proxy_ctx_t *ctx = PROXY_GET_CTX(L);
++    lua_Integer secondsi = _mcplib_backend_get_waittime(secondsf);
+ 
+     STAT_L(ctx);
+     ctx->tunables.retry.tv_sec = secondsi;
+-    ctx->tunables.retry.tv_usec = MICROSECONDS(subseconds);
++    ctx->tunables.retry.tv_usec = 0;
+     STAT_UL(ctx);
+ 
+     return 0;
+ }
+ 
++// TODO (v2): deprecation notice print when using this function.
++static int mcplib_backend_retry_timeout(lua_State *L) {
++    return mcplib_backend_retry_waittime(L);
++}
++
+ static int mcplib_backend_read_timeout(lua_State *L) {
+     lua_Number secondsf = luaL_checknumber(L, -1);
+     lua_Integer secondsi = (lua_Integer) secondsf;
+@@ -855,6 +944,65 @@ static int mcplib_backend_read_timeout(lua_State *L) {
+     return 0;
+ }
+ 
++static int mcplib_backend_flap_time(lua_State *L) {
++    lua_Number secondsf = luaL_checknumber(L, -1);
++    lua_Integer secondsi = (lua_Integer) secondsf;
++    lua_Number subseconds = secondsf - secondsi;
++    proxy_ctx_t *ctx = PROXY_GET_CTX(L);
++
++    STAT_L(ctx);
++    ctx->tunables.flap.tv_sec = secondsi;
++    ctx->tunables.flap.tv_usec = MICROSECONDS(subseconds);
++    STAT_UL(ctx);
++
++    return 0;
++}
++
++static int mcplib_backend_flap_backoff_ramp(lua_State *L) {
++    float factor = luaL_checknumber(L, -1);
++    proxy_ctx_t *ctx = PROXY_GET_CTX(L);
++    if (factor <= 1.1) {
++        factor = 1.1;
++    }
++
++    STAT_L(ctx);
++    ctx->tunables.flap_backoff_ramp = factor;
++    STAT_UL(ctx);
++
++    return 0;
++}
++
++static int mcplib_backend_flap_backoff_max(lua_State *L) {
++    luaL_checknumber(L, -1);
++    uint32_t max = lua_tointeger(L, -1);
++    proxy_ctx_t *ctx = PROXY_GET_CTX(L);
++
++    STAT_L(ctx);
++    ctx->tunables.flap_backoff_max = max;
++    STAT_UL(ctx);
++
++    return 0;
++}
++
++static int mcplib_stat_limit(lua_State *L) {
++    proxy_ctx_t *ctx = PROXY_GET_CTX(L);
++    int limit = luaL_checkinteger(L, -1);
++
++    if (limit == 0) {
++        limit = MAX_USTATS_DEFAULT;
++    }
++    if (limit > MAX_USTATS_DEFAULT) {
++        fprintf(stderr, "PROXY WARNING: setting ustats limit above default may cause performance problems\n");
++    }
++
++    // lock isn't necessary as this is only used from the config thread.
++    // keeping the lock call for code consistency.
++    STAT_L(ctx);
++    ctx->tunables.max_ustats = limit;
++    STAT_UL(ctx);
++    return 0;
++}
++
+ static int mcplib_active_req_limit(lua_State *L) {
+     proxy_ctx_t *ctx = PROXY_GET_CTX(L);
+     uint64_t limit = luaL_checkinteger(L, -1);
+@@ -1221,14 +1369,24 @@ int proxy_register_libs(void *ctx, LIBEVENT_THREAD *t, void *state) {
+         {NULL, NULL}
+     };
+ 
++    const struct luaL_Reg mcplib_ratelim_tbf_m[] = {
++        {"__call", mcplib_ratelim_tbf_call},
++        {NULL, NULL}
++    };
++
+     const struct luaL_Reg mcplib_f_config [] = {
+         {"pool", mcplib_pool},
+         {"backend", mcplib_backend},
+         {"add_stat", mcplib_add_stat},
++        {"stat_limit", mcplib_stat_limit},
+         {"backend_connect_timeout", mcplib_backend_connect_timeout},
+         {"backend_retry_timeout", mcplib_backend_retry_timeout},
++        {"backend_retry_waittime", mcplib_backend_retry_waittime},
+         {"backend_read_timeout", mcplib_backend_read_timeout},
+         {"backend_failure_limit", mcplib_backend_failure_limit},
++        {"backend_flap_time", mcplib_backend_flap_time},
++        {"backend_flap_backoff_ramp", mcplib_backend_flap_backoff_ramp},
++        {"backend_flap_backoff_max", mcplib_backend_flap_backoff_max},
+         {"tcp_keepalive", mcplib_tcp_keepalive},
+         {"active_req_limit", mcplib_active_req_limit},
+         {"buffer_memory_limit", mcplib_buffer_memory_limit},
+@@ -1245,6 +1403,7 @@ int proxy_register_libs(void *ctx, LIBEVENT_THREAD *t, void *state) {
+         {"log_reqsample", mcplib_log_reqsample},
+         {"stat", mcplib_stat},
+         {"request", mcplib_request},
++        {"ratelim_tbf", mcplib_ratelim_tbf},
+         {NULL, NULL}
+     };
+     // VM's have void* extra space in the VM by default for fast-access to a
+@@ -1273,6 +1432,12 @@ int proxy_register_libs(void *ctx, LIBEVENT_THREAD *t, void *state) {
+         luaL_setfuncs(L, mcplib_pool_proxy_m, 0); // register methods
+         lua_pop(L, 1); // drop the hash selector metatable
+ 
++        luaL_newmetatable(L, "mcp.ratelim_tbf");
++        lua_pushvalue(L, -1); // duplicate metatable.
++        lua_setfield(L, -2, "__index"); // mt.__index = mt
++        luaL_setfuncs(L, mcplib_ratelim_tbf_m, 0); // register methods
++        lua_pop(L, 1);
++
+         luaL_newlibtable(L, mcplib_f_routes);
+     } else {
+         // Change the extra space override for the configuration VM to just point
+diff --git a/proxy_network.c b/proxy_network.c
+index b34bbd4f49..44675b422b 100644
+--- a/proxy_network.c
++++ b/proxy_network.c
+@@ -44,25 +44,24 @@ static void proxy_backend_handler(const int fd, const short which, void *arg);
+ static void proxy_beconn_handler(const int fd, const short which, void *arg);
+ static void proxy_event_handler(evutil_socket_t fd, short which, void *arg);
+ static void proxy_event_beconn(evutil_socket_t fd, short which, void *arg);
+-static int _prep_pending_write(mcp_backend_t *be);
+-static void _post_pending_write(mcp_backend_t *be, ssize_t sent);
+-static int _flush_pending_write(mcp_backend_t *be);
++static int _prep_pending_write(struct mcp_backendconn_s *be);
++static void _post_pending_write(struct mcp_backendconn_s *be, ssize_t sent);
++static int _flush_pending_write(struct mcp_backendconn_s *be);
+ static void _cleanup_backend(mcp_backend_t *be);
+-static int _reset_bad_backend(mcp_backend_t *be, enum proxy_be_failures err);
+-static void _backend_failed(mcp_backend_t *be);
+-static void _set_main_event(mcp_backend_t *be, struct event_base *base, int flags, struct timeval *t, event_callback_fn callback);
+-static void _stop_main_event(mcp_backend_t *be);
+-static void _start_write_event(mcp_backend_t *be);
+-static void _stop_write_event(mcp_backend_t *be);
+-static void _start_timeout_event(mcp_backend_t *be);
+-static void _stop_timeout_event(mcp_backend_t *be);
+-static int proxy_backend_drive_machine(mcp_backend_t *be);
++static void _reset_bad_backend(struct mcp_backendconn_s *be, enum proxy_be_failures err);
++static void _set_main_event(struct mcp_backendconn_s *be, struct event_base *base, int flags, struct timeval *t, event_callback_fn callback);
++static void _stop_main_event(struct mcp_backendconn_s *be);
++static void _start_write_event(struct mcp_backendconn_s *be);
++static void _stop_write_event(struct mcp_backendconn_s *be);
++static void _start_timeout_event(struct mcp_backendconn_s *be);
++static void _stop_timeout_event(struct mcp_backendconn_s *be);
++static int proxy_backend_drive_machine(struct mcp_backendconn_s *be);
+ 
+ /* Helper routines common to io_uring and libevent modes */
+ 
+ // TODO (v3): doing an inline syscall here, not ideal for uring mode.
+ // leaving for now since this should be extremely uncommon.
+-static int _beconn_send_validate(mcp_backend_t *be) {
++static int _beconn_send_validate(struct mcp_backendconn_s *be) {
+     const char *str = "version\r\n";
+     const ssize_t len = strlen(str);
+ 
+@@ -81,24 +80,24 @@ static int _beconn_send_validate(mcp_backend_t *be) {
+     return 1;
+ }
+ 
+-// FIXME: make _backend_failed conditionally use _ur() so we can have one call
+-// in the code and reuse more code like this.
+-static int _proxy_beconn_checkconnect(mcp_backend_t *be) {
++static int _proxy_beconn_checkconnect(struct mcp_backendconn_s *be) {
+     int err = 0;
+     // We were connecting, now ensure we're properly connected.
+     if (mcmc_check_nonblock_connect(be->client, &err) != MCMC_OK) {
+-        P_DEBUG("%s: backend failed to connect (%s:%s)\n", __func__, be->name, be->port);
++        P_DEBUG("%s: backend failed to connect (%s:%s)\n", __func__, be->be_parent->name, be->be_parent->port);
+         // kick the bad backend, clear the queue, retry later.
+         // FIXME (v2): if a connect fails, anything currently in the queue
+         // should be safe to hold up until their timeout.
+         _reset_bad_backend(be, P_BE_FAIL_CONNECTING);
+-        _backend_failed(be);
+         return -1;
+     }
+-    P_DEBUG("%s: backend connected (%s:%s)\n", __func__, be->name, be->port);
++    P_DEBUG("%s: backend connected (%s:%s)\n", __func__, be->be_parent->name, be->be_parent->port);
+     be->connecting = false;
+     be->state = mcp_backend_read;
+     be->bad = false;
++    // seed the failure time for the flap check.
++    gettimeofday(&be->last_failed, NULL);
++    be->depth = 0; // was set to INT_MAX if bad, need to reset.
+     be->failed_count = 0;
+ 
+     be->validating = true;
+@@ -106,7 +105,6 @@ static int _proxy_beconn_checkconnect(mcp_backend_t *be) {
+ 
+     if (_beconn_send_validate(be) == -1) {
+         _reset_bad_backend(be, P_BE_FAIL_BADVALIDATE);
+-        _backend_failed(be);
+         return -1;
+     } else {
+         // buffer should be empty during validation stage.
+@@ -115,7 +113,39 @@ static int _proxy_beconn_checkconnect(mcp_backend_t *be) {
+     }
+ }
+ 
+-static int _proxy_event_handler_dequeue(proxy_event_thread_t *t) {
++// Use a simple heuristic to choose a backend connection socket out of a list
++// of sockets.
++struct mcp_backendconn_s *proxy_choose_beconn(mcp_backend_t *be) {
++    struct mcp_backendconn_s *bec = &be->be[0];
++    if (be->conncount != 1) {
++        int depth = INT_MAX;
++        // TODO: to computationally limit + ensure each connection stays
++        // somewhat warm:
++        // - remember idx of last conn used.
++        // - if next idx has a lower depth, use that one instead
++        // - tick idx (and reset if necessary)
++        // else under low loads only the first conn will ever get used (which
++        // is normally good; but sometimes bad if using stateful firewalls)
++        for (int x = 0; x < be->conncount; x++) {
++            if (be->be[x].depth == 0) {
++                bec = &be->be[x];
++                break;
++            } else if (be->be[x].depth < depth) {
++                depth = bec->depth;
++                bec = &be->be[x];
++            }
++        }
++    }
++
++    // drop new requests onto end of conn's io-head, reset the backend one.
++    STAILQ_CONCAT(&bec->io_head, &be->io_head);
++    bec->depth += be->depth;
++    be->depth = 0;
++
++    return bec;
++}
++
++static void _proxy_event_handler_dequeue(proxy_event_thread_t *t) {
+     io_head_t head;
+ 
+     STAILQ_INIT(&head);
+@@ -126,8 +156,6 @@ static int _proxy_event_handler_dequeue(proxy_event_thread_t *t) {
+     STAILQ_CONCAT(&head, &t->io_head_in);
+     pthread_mutex_unlock(&t->mutex);
+ 
+-    int io_count = 0;
+-    int be_count = 0;
+     while (!STAILQ_EMPTY(&head)) {
+         io_pending_proxy_t *io = STAILQ_FIRST(&head);
+         io->flushed = false;
+@@ -138,55 +166,79 @@ static int _proxy_event_handler_dequeue(proxy_event_thread_t *t) {
+         io->io_next.stqe_next = NULL;
+ 
+         mcp_backend_t *be = io->backend;
+-        // So the backend can retrieve its event base.
+-        if (be->bad) {
+-            P_DEBUG("%s: fast failing request to bad backend\n", __func__);
+-            io->client_resp->status = MCMC_ERR;
+-            return_io_pending((io_pending_t *)io);
+-            continue;
+-        }
+         STAILQ_INSERT_TAIL(&be->io_head, io, io_next);
+         be->depth++;
+-        io_count++;
+         if (!be->stacked) {
+             be->stacked = true;
+-            // more paranoia about be_next not being overwritten
+-            be->be_next.stqe_next = NULL;
+             STAILQ_INSERT_TAIL(&t->be_head, be, be_next);
+-            be_count++;
+         }
+     }
+-    //P_DEBUG("%s: io/be counts for syscalls [%d/%d]\n", __func__, io_count, be_count);
+-    return io_count;
+ }
+ 
+ static void _cleanup_backend(mcp_backend_t *be) {
+-    // remove any pending events.
+-    int pending = event_pending(&be->main_event, EV_READ|EV_WRITE|EV_TIMEOUT, NULL);
+-    if ((pending & (EV_READ|EV_WRITE|EV_TIMEOUT)) != 0) {
+-        event_del(&be->main_event); // an error to call event_del() without event.
+-    }
+-    pending = event_pending(&be->write_event, EV_READ|EV_WRITE|EV_TIMEOUT, NULL);
+-    if ((pending & (EV_READ|EV_WRITE|EV_TIMEOUT)) != 0) {
+-        event_del(&be->write_event); // an error to call event_del() without event.
+-    }
+-    pending = event_pending(&be->timeout_event, EV_TIMEOUT, NULL);
+-    if ((pending & (EV_TIMEOUT)) != 0) {
+-        event_del(&be->timeout_event); // an error to call event_del() without event.
+-    }
++    for (int x = 0; x < be->conncount; x++) {
++        struct mcp_backendconn_s *bec = &be->be[x];
++        // remove any pending events.
++        if (!be->tunables.down) {
++            int pending = event_pending(&bec->main_event, EV_READ|EV_WRITE|EV_TIMEOUT, NULL);
++            if ((pending & (EV_READ|EV_WRITE|EV_TIMEOUT)) != 0) {
++                event_del(&bec->main_event); // an error to call event_del() without event.
++            }
++            pending = event_pending(&bec->write_event, EV_READ|EV_WRITE|EV_TIMEOUT, NULL);
++            if ((pending & (EV_READ|EV_WRITE|EV_TIMEOUT)) != 0) {
++                event_del(&bec->write_event); // an error to call event_del() without event.
++            }
++            pending = event_pending(&bec->timeout_event, EV_TIMEOUT, NULL);
++            if ((pending & (EV_TIMEOUT)) != 0) {
++                event_del(&bec->timeout_event); // an error to call event_del() without event.
++            }
+ 
+-    // - assert on empty queue
+-    assert(STAILQ_EMPTY(&be->io_head));
++            // - assert on empty queue
++            assert(STAILQ_EMPTY(&bec->io_head));
+ 
+-    mcmc_disconnect(be->client);
+-    // - free be->client
+-    free(be->client);
+-    // - free be->rbuf
+-    free(be->rbuf);
+-    // - free *be
++            mcmc_disconnect(bec->client);
++        }
++        // - free be->client
++        free(bec->client);
++        // - free be->rbuf
++        free(bec->rbuf);
++    }
++    // free once parent has had all connections closed off.
+     free(be);
+ }
+ 
++static void _setup_backend(mcp_backend_t *be) {
++    for (int x = 0; x < be->conncount; x++) {
++        struct mcp_backendconn_s *bec = &be->be[x];
++        if (be->tunables.down) {
++            // backend is "forced" into a bad state. never connect or
++            // otherwise attempt to use it.
++            be->be[x].bad = true;
++            be->be[x].depth = UINT_MAX / 2;
++            continue;
++        }
++        // assign the initial events to the backend, so we don't have to
++        // constantly check if they were initialized yet elsewhere.
++        // note these events will not fire until event_add() is called.
++        int status = mcmc_connect(bec->client, be->name, be->port, bec->connect_flags);
++        event_assign(&bec->main_event, bec->event_thread->base, mcmc_fd(bec->client), EV_WRITE|EV_TIMEOUT, proxy_beconn_handler, bec);
++        event_assign(&bec->write_event, bec->event_thread->base, mcmc_fd(bec->client), EV_WRITE|EV_TIMEOUT, proxy_backend_handler, bec);
++        event_assign(&bec->timeout_event, bec->event_thread->base, -1, EV_TIMEOUT, proxy_backend_handler, bec);
++
++        if (status == MCMC_CONNECTING || status == MCMC_CONNECTED) {
++            // if we're already connected for some reason, still push it
++            // through the connection handler to keep the code unified. It
++            // will auto-wake because the socket is writeable.
++            bec->connecting = true;
++            bec->can_write = false;
++            // kick off the event we intialized above.
++            event_add(&bec->main_event, &bec->tunables.connect);
++        } else {
++            _reset_bad_backend(bec, P_BE_FAIL_CONNECTING);
++        }
++    }
++}
++
+ // event handler for injecting backends for processing
+ // currently just for initiating connections the first time.
+ static void proxy_event_beconn(evutil_socket_t fd, short which, void *arg) {
+@@ -231,26 +283,7 @@ static void proxy_event_beconn(evutil_socket_t fd, short which, void *arg) {
+             _cleanup_backend(be);
+         } else {
+             be->transferred = true;
+-            // assign the initial events to the backend, so we don't have to
+-            // constantly check if they were initialized yet elsewhere.
+-            // note these events will not fire until event_add() is called.
+-            int status = mcmc_connect(be->client, be->name, be->port, be->connect_flags);
+-            event_assign(&be->main_event, be->event_thread->base, mcmc_fd(be->client), EV_WRITE|EV_TIMEOUT, proxy_beconn_handler, be);
+-            event_assign(&be->write_event, be->event_thread->base, mcmc_fd(be->client), EV_WRITE|EV_TIMEOUT, proxy_backend_handler, be);
+-            event_assign(&be->timeout_event, be->event_thread->base, -1, EV_TIMEOUT, proxy_backend_handler, be);
+-
+-            if (status == MCMC_CONNECTING || status == MCMC_CONNECTED) {
+-                // if we're already connected for some reason, still push it
+-                // through the connection handler to keep the code unified. It
+-                // will auto-wake because the socket is writeable.
+-                be->connecting = true;
+-                be->can_write = false;
+-                // kick off the event we intialized above.
+-                event_add(&be->main_event, &be->tunables.connect);
+-            } else {
+-                _reset_bad_backend(be, P_BE_FAIL_CONNECTING);
+-                _backend_failed(be);
+-            }
++            _setup_backend(be);
+         }
+     }
+ }
+@@ -260,33 +293,34 @@ void proxy_run_backend_queue(be_head_t *head) {
+     STAILQ_FOREACH(be, head, be_next) {
+         be->stacked = false;
+         int flags = 0;
++        struct mcp_backendconn_s *bec = proxy_choose_beconn(be);
+ 
+-        if (be->bad) {
++        if (bec->bad) {
+             // flush queue if backend is still bad.
+-            // TODO: duplicated from _reset_bad_backend()
+             io_pending_proxy_t *io = NULL;
+-            while (!STAILQ_EMPTY(&be->io_head)) {
+-                io = STAILQ_FIRST(&be->io_head);
+-                STAILQ_REMOVE_HEAD(&be->io_head, io_next);
++            P_DEBUG("%s: fast failing request to bad backend (%s:%s) depth: %d\n", __func__, be->name, be->port, bec->depth);
++            while (!STAILQ_EMPTY(&bec->io_head)) {
++                io = STAILQ_FIRST(&bec->io_head);
++                STAILQ_REMOVE_HEAD(&bec->io_head, io_next);
+                 io->client_resp->status = MCMC_ERR;
+-                be->depth--;
++                io->client_resp->resp.code = MCMC_CODE_SERVER_ERROR;
++                bec->depth--;
+                 return_io_pending((io_pending_t *)io);
+             }
+-        } else if (be->connecting || be->validating) {
++        } else if (bec->connecting || bec->validating) {
+             P_DEBUG("%s: deferring IO pending connecting (%s:%s)\n", __func__, be->name, be->port);
+         } else {
+-            flags = _flush_pending_write(be);
++            flags = _flush_pending_write(bec);
+ 
+             if (flags == -1) {
+-                _reset_bad_backend(be, P_BE_FAIL_WRITING);
+-                _backend_failed(be);
++                _reset_bad_backend(bec, P_BE_FAIL_WRITING);
+             } else if (flags & EV_WRITE) {
+                 // only get here because we need to kick off the write handler
+-                _start_write_event(be);
++                _start_write_event(bec);
+             }
+ 
+-            if (be->pending_read) {
+-                _start_timeout_event(be);
++            if (bec->pending_read) {
++                _start_timeout_event(bec);
+             }
+ 
+         }
+@@ -318,10 +352,7 @@ static void proxy_event_handler(evutil_socket_t fd, short which, void *arg) {
+     }
+ #endif
+ 
+-    if (_proxy_event_handler_dequeue(t) == 0) {
+-        //P_DEBUG("%s: no IO's to complete\n", __func__);
+-        return;
+-    }
++    _proxy_event_handler_dequeue(t);
+ 
+     // Re-walk each backend and check set event as required.
+     proxy_run_backend_queue(&t->be_head);
+@@ -339,7 +370,7 @@ void *proxy_event_thread(void *arg) {
+     return NULL;
+ }
+ 
+-static void _set_main_event(mcp_backend_t *be, struct event_base *base, int flags, struct timeval *t, event_callback_fn callback) {
++static void _set_main_event(struct mcp_backendconn_s *be, struct event_base *base, int flags, struct timeval *t, event_callback_fn callback) {
+     int pending = event_pending(&be->main_event, EV_READ|EV_WRITE, NULL);
+     if ((pending & (EV_READ|EV_WRITE)) != 0) {
+         event_del(&be->main_event); // replace existing event.
+@@ -350,7 +381,7 @@ static void _set_main_event(mcp_backend_t *be, struct event_base *base, int flag
+     event_add(&be->main_event, t);
+ }
+ 
+-static void _stop_main_event(mcp_backend_t *be) {
++static void _stop_main_event(struct mcp_backendconn_s *be) {
+     int pending = event_pending(&be->main_event, EV_READ|EV_WRITE, NULL);
+     if ((pending & (EV_READ|EV_WRITE|EV_TIMEOUT)) == 0) {
+         return;
+@@ -358,7 +389,7 @@ static void _stop_main_event(mcp_backend_t *be) {
+     event_del(&be->write_event);
+ }
+ 
+-static void _start_write_event(mcp_backend_t *be) {
++static void _start_write_event(struct mcp_backendconn_s *be) {
+     int pending = event_pending(&be->main_event, EV_WRITE, NULL);
+     if ((pending & (EV_WRITE|EV_TIMEOUT)) != 0) {
+         return;
+@@ -367,7 +398,7 @@ static void _start_write_event(mcp_backend_t *be) {
+     event_add(&be->write_event, &be->tunables.read);
+ }
+ 
+-static void _stop_write_event(mcp_backend_t *be) {
++static void _stop_write_event(struct mcp_backendconn_s *be) {
+     int pending = event_pending(&be->main_event, EV_WRITE, NULL);
+     if ((pending & (EV_WRITE|EV_TIMEOUT)) == 0) {
+         return;
+@@ -377,7 +408,7 @@ static void _stop_write_event(mcp_backend_t *be) {
+ 
+ // handle the read timeouts with a side event, so we can stick with a
+ // persistent listener (optimization + catch disconnects faster)
+-static void _start_timeout_event(mcp_backend_t *be) {
++static void _start_timeout_event(struct mcp_backendconn_s *be) {
+     int pending = event_pending(&be->timeout_event, EV_TIMEOUT, NULL);
+     if ((pending & (EV_TIMEOUT)) != 0) {
+         return;
+@@ -385,7 +416,7 @@ static void _start_timeout_event(mcp_backend_t *be) {
+     event_add(&be->timeout_event, &be->tunables.read);
+ }
+ 
+-static void _stop_timeout_event(mcp_backend_t *be) {
++static void _stop_timeout_event(struct mcp_backendconn_s *be) {
+     int pending = event_pending(&be->timeout_event, EV_TIMEOUT, NULL);
+     if ((pending & (EV_TIMEOUT)) == 0) {
+         return;
+@@ -393,7 +424,7 @@ static void _stop_timeout_event(mcp_backend_t *be) {
+     event_del(&be->timeout_event);
+ }
+ 
+-static void _drive_machine_next(mcp_backend_t *be, io_pending_proxy_t *p) {
++static void _drive_machine_next(struct mcp_backendconn_s *be, io_pending_proxy_t *p) {
+     struct timeval end;
+     // set the head here. when we break the head will be correct.
+     STAILQ_REMOVE_HEAD(&be->io_head, io_next);
+@@ -415,7 +446,7 @@ static void _drive_machine_next(mcp_backend_t *be, io_pending_proxy_t *p) {
+ // NOTES:
+ // - mcp_backend_read: grab req_stack_head, do things
+ // read -> next, want_read -> next | read_end, etc.
+-static int proxy_backend_drive_machine(mcp_backend_t *be) {
++static int proxy_backend_drive_machine(struct mcp_backendconn_s *be) {
+     bool stop = false;
+     io_pending_proxy_t *p = NULL;
+     int flags = 0;
+@@ -681,8 +712,8 @@ static int proxy_backend_drive_machine(mcp_backend_t *be) {
+     return flags;
+ }
+ 
+-static void _backend_reconnect(mcp_backend_t *be) {
+-    int status = mcmc_connect(be->client, be->name, be->port, be->connect_flags);
++static void _backend_reconnect(struct mcp_backendconn_s *be) {
++    int status = mcmc_connect(be->client, be->be_parent->name, be->be_parent->port, be->connect_flags);
+     if (status == MCMC_CONNECTED) {
+         // TODO (v2): unexpected but lets let it be here.
+         be->connecting = false;
+@@ -704,7 +735,7 @@ static void _backend_reconnect(mcp_backend_t *be) {
+ 
+ // All we need to do here is schedule the backend to attempt to connect again.
+ static void proxy_backend_retry_handler(const int fd, const short which, void *arg) {
+-    mcp_backend_t *be = arg;
++    struct mcp_backendconn_s *be = arg;
+     assert(which & EV_TIMEOUT);
+     struct timeval tmp_time = be->tunables.connect;
+     _backend_reconnect(be);
+@@ -715,15 +746,37 @@ static void proxy_backend_retry_handler(const int fd, const short which, void *a
+ // clear.
+ // TODO (v2): extra counter for "backend connect tries" so it's still possible
+ // to see dead backends exist
+-static void _backend_failed(mcp_backend_t *be) {
+-    if (++be->failed_count > be->tunables.backend_failure_limit) {
+-        struct timeval tmp_time = be->tunables.retry;
++static void _backend_reschedule(struct mcp_backendconn_s *be) {
++    bool failed = false;
++    struct timeval tmp_time = {0};
++    long int retry_time = be->tunables.retry.tv_sec;
++    char *badtext = "markedbad";
++    if (be->flap_count > be->tunables.backend_failure_limit) {
++        // reduce retry frequency to avoid noise.
++        float backoff = retry_time;
++        for (int x = 0; x < be->flap_count; x++) {
++            backoff *= be->tunables.flap_backoff_ramp;
++        }
++        retry_time = (uint32_t)backoff;
++
++        if (retry_time > be->tunables.flap_backoff_max) {
++            retry_time = be->tunables.flap_backoff_max;
++        }
++        badtext = "markedbadflap";
++        failed = true;
++    } else if (be->failed_count > be->tunables.backend_failure_limit) {
++        failed = true;
++    }
++    tmp_time.tv_sec = retry_time;
++
++    if (failed) {
+         if (!be->bad) {
+             P_DEBUG("%s: marking backend as bad\n", __func__);
+             STAT_INCR(be->event_thread->ctx, backend_marked_bad, 1);
+-            LOGGER_LOG(NULL, LOG_PROXYEVENTS, LOGGER_PROXY_BE_ERROR, NULL, "markedbad", be->name, be->port, 0, NULL, 0);
++            LOGGER_LOG(NULL, LOG_PROXYEVENTS, LOGGER_PROXY_BE_ERROR, NULL, badtext, be->be_parent->name, be->be_parent->port, be->be_parent->label, 0, NULL, 0, retry_time);
+         }
+         be->bad = true;
++        be->depth = INT_MAX/2; // fast-path cache for "bad" marker
+        _set_main_event(be, be->event_thread->base, EV_TIMEOUT, &tmp_time, proxy_backend_retry_handler);
+     } else {
+         struct timeval tmp_time = be->tunables.connect;
+@@ -733,6 +786,46 @@ static void _backend_failed(mcp_backend_t *be) {
+     }
+ }
+ 
++static void _backend_flap_check(struct mcp_backendconn_s *be, enum proxy_be_failures err) {
++    struct timeval now;
++    struct timeval *flap = &be->tunables.flap;
++
++    switch (err) {
++        case P_BE_FAIL_TIMEOUT:
++        case P_BE_FAIL_DISCONNECTED:
++        case P_BE_FAIL_WRITING:
++        case P_BE_FAIL_READING:
++            if (flap->tv_sec != 0 || flap->tv_usec != 0) {
++                struct timeval delta = {0};
++                int64_t subsec = 0;
++                gettimeofday(&now, NULL);
++                delta.tv_sec = now.tv_sec - be->last_failed.tv_sec;
++                subsec = now.tv_usec - be->last_failed.tv_usec;
++                if (subsec < 0) {
++                    // tv_usec is specced as "at least" [-1, 1000000]
++                    // so to guarantee lower negatives we need this temp var.
++                    delta.tv_sec--;
++                    subsec += 1000000;
++                    delta.tv_usec = subsec;
++                }
++
++                if (flap->tv_sec < delta.tv_sec ||
++                    (flap->tv_sec == delta.tv_sec && flap->tv_usec < delta.tv_usec)) {
++                    // delta is larger than our flap range. reset the flap counter.
++                    be->flap_count = 0;
++                } else {
++                    // seems like we flapped again.
++                    be->flap_count++;
++                }
++                be->last_failed = now;
++            }
++            break;
++        default:
++            // only perform a flap check on network related errors.
++            break;
++    }
++}
++
+ // TODO (v2): add a second argument for assigning a specific error to all pending
+ // IO's (ie; timeout).
+ // The backend has gotten into a bad state (timed out, protocol desync, or
+@@ -741,7 +834,7 @@ static void _backend_failed(mcp_backend_t *be) {
+ // Note that some types of errors may not require flushing the queue and
+ // should be fixed as they're figured out.
+ // _must_ be called from within the event thread.
+-static int _reset_bad_backend(mcp_backend_t *be, enum proxy_be_failures err) {
++static void _reset_bad_backend(struct mcp_backendconn_s *be, enum proxy_be_failures err) {
+     io_pending_proxy_t *io = NULL;
+     P_DEBUG("%s: resetting bad backend: %s\n", __func__, proxy_be_failure_text[err]);
+     // Can't use STAILQ_FOREACH() since return_io_pending() free's the current
+@@ -753,6 +846,7 @@ static int _reset_bad_backend(mcp_backend_t *be, enum proxy_be_failures err) {
+         // TODO (v2): Unsure if this is the best way of surfacing errors to lua,
+         // but will do for V1.
+         io->client_resp->status = MCMC_ERR;
++        io->client_resp->resp.code = MCMC_CODE_SERVER_ERROR;
+         be->depth--;
+         return_io_pending((io_pending_t *)io);
+     }
+@@ -762,23 +856,26 @@ static int _reset_bad_backend(mcp_backend_t *be, enum proxy_be_failures err) {
+ 
+     // Only log if we don't already know it's messed up.
+     if (!be->bad) {
+-        LOGGER_LOG(NULL, LOG_PROXYEVENTS, LOGGER_PROXY_BE_ERROR, NULL, proxy_be_failure_text[err], be->name, be->port, depth, be->rbuf, be->rbufused);
++        LOGGER_LOG(NULL, LOG_PROXYEVENTS, LOGGER_PROXY_BE_ERROR, NULL, proxy_be_failure_text[err], be->be_parent->name, be->be_parent->port, be->be_parent->label, depth, be->rbuf, be->rbufused, 0);
+     }
+ 
+     // reset buffer to blank state.
+     be->rbufused = 0;
+     be->pending_read = 0;
+-    // allow the _backend_failed() routine to connect when ready.
++    // clear events so the reconnect handler can re-arm them with a few fd.
+     _stop_write_event(be);
+     _stop_main_event(be);
+     _stop_timeout_event(be);
+     mcmc_disconnect(be->client);
+     // we leave the main event alone, because be_failed() always overwrites.
+ 
+-    return 0;
++    // check failure counters and schedule a retry.
++    be->failed_count++;
++    _backend_flap_check(be, err);
++    _backend_reschedule(be);
+ }
+ 
+-static int _prep_pending_write(mcp_backend_t *be) {
++static int _prep_pending_write(struct mcp_backendconn_s *be) {
+     struct iovec *iovs = be->write_iovs;
+     io_pending_proxy_t *io = NULL;
+     int iovused = 0;
+@@ -806,7 +903,7 @@ static int _prep_pending_write(mcp_backend_t *be) {
+ }
+ 
+ // returns true if any pending writes were fully flushed.
+-static void _post_pending_write(mcp_backend_t *be, ssize_t sent) {
++static void _post_pending_write(struct mcp_backendconn_s *be, ssize_t sent) {
+     io_pending_proxy_t *io = be->io_next;
+     if (io == NULL) {
+         io = STAILQ_FIRST(&be->io_head);
+@@ -855,7 +952,7 @@ static void _post_pending_write(mcp_backend_t *be, ssize_t sent) {
+     }
+ }
+ 
+-static int _flush_pending_write(mcp_backend_t *be) {
++static int _flush_pending_write(struct mcp_backendconn_s *be) {
+     int flags = 0;
+     // Allow us to be called with an empty stack to prevent dev errors.
+     if (STAILQ_EMPTY(&be->io_head)) {
+@@ -887,7 +984,7 @@ static int _flush_pending_write(mcp_backend_t *be) {
+ // Libevent handler for backends in a connecting state.
+ static void proxy_beconn_handler(const int fd, const short which, void *arg) {
+     assert(arg != NULL);
+-    mcp_backend_t *be = arg;
++    struct mcp_backendconn_s *be = arg;
+     int flags = EV_TIMEOUT;
+     struct timeval tmp_time = be->tunables.read;
+ 
+@@ -898,7 +995,6 @@ static void proxy_beconn_handler(const int fd, const short which, void *arg) {
+         } else {
+             _reset_bad_backend(be, P_BE_FAIL_READVALIDATE);
+         }
+-        _backend_failed(be);
+         return;
+     }
+ 
+@@ -917,7 +1013,6 @@ static void proxy_beconn_handler(const int fd, const short which, void *arg) {
+             int res = _flush_pending_write(be);
+             if (res == -1) {
+                 _reset_bad_backend(be, P_BE_FAIL_WRITING);
+-                _backend_failed(be);
+                 return;
+             }
+             flags |= res;
+@@ -943,13 +1038,11 @@ static void proxy_beconn_handler(const int fd, const short which, void *arg) {
+                 }
+ 
+                 _reset_bad_backend(be, P_BE_FAIL_READVALIDATE);
+-                _backend_failed(be);
+                 return;
+             }
+ 
+             if (r.code != MCMC_CODE_VERSION) {
+                 _reset_bad_backend(be, P_BE_FAIL_BADVALIDATE);
+-                _backend_failed(be);
+                 return;
+             }
+ 
+@@ -958,13 +1051,11 @@ static void proxy_beconn_handler(const int fd, const short which, void *arg) {
+         } else if (read == 0) {
+             // not connected or error.
+             _reset_bad_backend(be, P_BE_FAIL_DISCONNECTED);
+-            _backend_failed(be);
+             return;
+         } else if (read == -1) {
+             // sit on epoll again.
+             if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                 _reset_bad_backend(be, P_BE_FAIL_READING);
+-                _backend_failed(be);
+                 return;
+             }
+             _set_main_event(be, be->event_thread->base, EV_READ, &tmp_time, proxy_beconn_handler);
+@@ -975,7 +1066,6 @@ static void proxy_beconn_handler(const int fd, const short which, void *arg) {
+         int res = _flush_pending_write(be);
+         if (res == -1) {
+             _reset_bad_backend(be, P_BE_FAIL_WRITING);
+-            _backend_failed(be);
+             return;
+         }
+         if (flags & EV_WRITE) {
+@@ -996,12 +1086,11 @@ static void proxy_beconn_handler(const int fd, const short which, void *arg) {
+ // If we end up resetting a backend, it will get put back into a connecting
+ // state.
+ static void proxy_backend_handler(const int fd, const short which, void *arg) {
+-    mcp_backend_t *be = arg;
++    struct mcp_backendconn_s *be = arg;
+ 
+     if (which & EV_TIMEOUT) {
+         P_DEBUG("%s: timeout received, killing backend queue\n", __func__);
+         _reset_bad_backend(be, P_BE_FAIL_TIMEOUT);
+-        _backend_failed(be);
+         return;
+     }
+ 
+@@ -1010,7 +1099,6 @@ static void proxy_backend_handler(const int fd, const short which, void *arg) {
+         int res = _flush_pending_write(be);
+         if (res == -1) {
+             _reset_bad_backend(be, P_BE_FAIL_WRITING);
+-            _backend_failed(be);
+             return;
+         }
+         if (res & EV_WRITE) {
+@@ -1030,19 +1118,16 @@ static void proxy_backend_handler(const int fd, const short which, void *arg) {
+             int res = proxy_backend_drive_machine(be);
+             if (res != 0) {
+                 _reset_bad_backend(be, res);
+-                _backend_failed(be);
+                 return;
+             }
+         } else if (read == 0) {
+             // not connected or error.
+             _reset_bad_backend(be, P_BE_FAIL_DISCONNECTED);
+-            _backend_failed(be);
+             return;
+         } else if (read == -1) {
+             // sit on epoll again.
+             if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                 _reset_bad_backend(be, P_BE_FAIL_READING);
+-                _backend_failed(be);
+                 return;
+             }
+         }
+diff --git a/proxy_ratelim.c b/proxy_ratelim.c
+new file mode 100644
+index 0000000000..ec92dfc90c
+--- /dev/null
++++ b/proxy_ratelim.c
+@@ -0,0 +1,78 @@
++/* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
++
++#include "proxy.h"
++
++// No GC necessary.
++struct mcp_ratelim_tbf {
++    uint32_t bucket;
++    uint32_t limit;
++    uint32_t fill_rate; // tokens to add per tick rate
++    uint32_t tick_rate; // in milliseconds
++    int64_t last_update; // time in milliseconds
++};
++
++#define TIMEVAL_TO_MILLIS(n) (n.tv_usec / 1000 + n.tv_sec * (uint64_t)1000)
++
++static lua_Integer _tbf_check(lua_State *L, char *key) {
++    lua_Integer n = 0;
++    if (lua_getfield(L, 1, key) != LUA_TNIL) {
++        n = lua_tointeger(L, -1);
++        if (n < 0 || n > UINT_MAX-1) {
++            proxy_lua_error(L, "mcp.ratelim_tbf: arguments must be unsigned 32 bit integer");
++        }
++    }
++    lua_pop(L, 1); // pops value or nil.
++    return n;
++}
++
++int mcplib_ratelim_tbf(lua_State *L) {
++    struct mcp_ratelim_tbf *lim = lua_newuserdatauv(L, sizeof(*lim), 0);
++    struct timeval now;
++    memset(lim, 0, sizeof(*lim));
++    luaL_setmetatable(L, "mcp.ratelim_tbf");
++
++    luaL_checktype(L, 1, LUA_TTABLE);
++    lim->limit = _tbf_check(L, "limit");
++    lim->fill_rate = _tbf_check(L, "fillrate");
++    lim->tick_rate = _tbf_check(L, "tickrate");
++
++    // seed the token bucket filter.
++    lim->bucket = lim->limit;
++    gettimeofday(&now, NULL);
++    lim->last_update = TIMEVAL_TO_MILLIS(now);
++    return 1;
++}
++
++int mcplib_ratelim_tbf_call(lua_State *L) {
++    struct mcp_ratelim_tbf *lim = luaL_checkudata(L, 1, "mcp.ratelim_tbf");
++    luaL_checktype(L, 2, LUA_TNUMBER);
++    int take = lua_tointeger(L, 2);
++    struct timeval now;
++    uint64_t now_millis = 0;
++    uint64_t delta = 0;
++
++    gettimeofday(&now, NULL);
++    now_millis = TIMEVAL_TO_MILLIS(now);
++    delta = now_millis - lim->last_update;
++
++    if (delta > lim->tick_rate) {
++        // find how many ticks to add to the bucket.
++        uint32_t toadd = delta / lim->tick_rate;
++        // advance time up to the most recent tick.
++        lim->last_update += toadd * lim->tick_rate;
++        // add tokens to the bucket
++        lim->bucket += toadd * lim->fill_rate;
++        if (lim->bucket > lim->limit) {
++            lim->bucket = lim->limit;
++        }
++    }
++
++    if (lim->bucket > take) {
++        lim->bucket -= take;
++        lua_pushboolean(L, 1);
++    } else {
++        lua_pushboolean(L, 0);
++    }
++
++    return 1;
++}
+diff --git a/proxy_request.c b/proxy_request.c
+index b13d815b33..c491da40ed 100644
+--- a/proxy_request.c
++++ b/proxy_request.c
+@@ -9,7 +9,7 @@
+ // where we later scan or directly feed data into API's.
+ static int _process_tokenize(mcp_parser_t *pr, const size_t max) {
+     const char *s = pr->request;
+-    int len = pr->reqlen - 2;
++    int len = pr->endlen;
+ 
+     // since multigets can be huge, we can't purely judge reqlen against this
+     // limit, but we also can't index past it since the tokens are shorts.
+@@ -93,7 +93,7 @@ static int _process_request_key(mcp_parser_t *pr) {
+ // Returns the offset for the next key.
+ size_t _process_request_next_key(mcp_parser_t *pr) {
+     const char *cur = pr->request + pr->parsed;
+-    int remain = pr->reqlen - pr->parsed - 2;
++    int remain = pr->endlen - pr->parsed;
+ 
+     // chew off any leading whitespace.
+     while (remain) {
+@@ -126,7 +126,7 @@ static int _process_request_metaflags(mcp_parser_t *pr, int token) {
+         return 0;
+     }
+     const char *cur = pr->request + pr->tokens[token];
+-    const char *end = pr->request + pr->reqlen - 2;
++    const char *end = pr->request + pr->endlen;
+ 
+     // We blindly convert flags into bits, since the range of possible
+     // flags is deliberately < 64.
+@@ -294,15 +294,25 @@ int process_request(mcp_parser_t *pr, const char *command, size_t cmdlen) {
+         return -1;
+     }
+ 
+-    const char *s = memchr(command, ' ', cmdlen-2);
++    // Commands can end with bare '\n's. Depressingly I intended to be strict
++    // with a \r\n requirement but never did this and need backcompat.
++    // In this case we _know_ \n is at cmdlen because we can't enter this
++    // function otherwise.
++    if (cm[cmdlen-2] == '\r') {
++        pr->endlen = cmdlen - 2;
++    } else {
++        pr->endlen = cmdlen - 1;
++    }
++
++    const char *s = memchr(command, ' ', pr->endlen);
+     if (s != NULL) {
+         cl = s - command;
+     } else {
+-        cl = cmdlen - 2;
++        cl = pr->endlen;
+     }
+     pr->keytoken = 0;
+     pr->has_space = false;
+-    pr->parsed = cl + 1;
++    pr->parsed = cl;
+     pr->request = command;
+     pr->reqlen = cmdlen;
+     int token_max = PARSER_MAX_TOKENS;
+diff --git a/proxy_ustats.c b/proxy_ustats.c
+index 9e6baa3309..24fc523b79 100644
+--- a/proxy_ustats.c
++++ b/proxy_ustats.c
+@@ -7,14 +7,14 @@
+ int mcplib_add_stat(lua_State *L) {
+     int idx = luaL_checkinteger(L, -2);
+     const char *name = luaL_checkstring(L, -1);
++    proxy_ctx_t *ctx = PROXY_GET_CTX(L);
+ 
+     if (idx < 1) {
+         proxy_lua_error(L, "stat index must be 1 or higher");
+         return 0;
+     }
+-    // max user counters? 1024? some weird number.
+-    if (idx > 1024) {
+-        proxy_lua_error(L, "stat index must be 1024 or less");
++    if (idx > ctx->tunables.max_ustats) {
++        proxy_lua_ferror(L, "stat index must be %d or less", ctx->tunables.max_ustats);
+         return 0;
+     }
+     // max name length? avoids errors if something huge gets thrown in.
+@@ -31,8 +31,6 @@ int mcplib_add_stat(lua_State *L) {
+         }
+     }
+ 
+-    proxy_ctx_t *ctx = PROXY_GET_CTX(L);
+-
+     STAT_L(ctx);
+     struct proxy_user_stats *us = &ctx->user_stats;
+ 
+diff --git a/storage.c b/storage.c
+index 9ae904e637..5f2fb4874e 100644
+--- a/storage.c
++++ b/storage.c
+@@ -31,6 +31,7 @@ typedef struct _io_pending_storage_t {
+     mc_resp *resp;
+     io_queue_cb return_cb;    // called on worker thread.
+     io_queue_cb finalize_cb;  // called back on the worker thread.
++    STAILQ_ENTRY(io_pending_t) iop_next; // queue chain.
+                               /* original struct ends here */
+     item *hdr_it;             /* original header item. */
+     obj_io io_ctx;            /* embedded extstore IO header */
+@@ -247,7 +248,7 @@ int storage_get_item(conn *c, item *it, mc_resp *resp) {
+     bool chunked = false;
+     if (ntotal > settings.slab_chunk_size_max) {
+         // Pull a chunked item header.
+-        uint32_t flags;
++        client_flags_t flags;
+         FLAGS_CONV(it, flags);
+         new_it = item_alloc(ITEM_key(it), it->nkey, flags, it->exptime, it->nbytes);
+         assert(new_it == NULL || (new_it->it_flags & ITEM_CHUNKED));
+@@ -491,7 +492,7 @@ static int storage_write(void *storage, const int clsid, const int item_age) {
+     item *it = it_info.it;
+     /* First, storage for the header object */
+     size_t orig_ntotal = ITEM_ntotal(it);
+-    uint32_t flags;
++    client_flags_t flags;
+     if ((it->it_flags & ITEM_HDR) == 0 &&
+             (item_age == 0 || current_time - it->time > item_age)) {
+         FLAGS_CONV(it, flags);
+@@ -855,8 +856,32 @@ static void storage_compact_readback(void *storage, logger *l,
+                         hdr->offset = io.offset;
+                         rescues++;
+                     } else {
+-                        lost++;
+-                        // TODO: re-alloc and replace header.
++                        // re-alloc and replace header.
++                        client_flags_t flags;
++                        FLAGS_CONV(hdr_it, flags);
++                        item *new_it = do_item_alloc(ITEM_key(hdr_it), hdr_it->nkey, flags, hdr_it->exptime, sizeof(item_hdr));
++                        if (new_it) {
++                            // need to preserve the original item flags, but we
++                            // start unlinked, with linked being added during
++                            // item_replace below.
++                            new_it->it_flags = hdr_it->it_flags & (~ITEM_LINKED);
++                            new_it->time = hdr_it->time;
++                            new_it->nbytes = hdr_it->nbytes;
++
++                            // copy the hdr data.
++                            item_hdr *new_hdr = (item_hdr *) ITEM_data(new_it);
++                            new_hdr->page_version = io.page_version;
++                            new_hdr->page_id = io.page_id;
++                            new_hdr->offset = io.offset;
++
++                            // replace the item in the hash table.
++                            item_replace(hdr_it, new_it, hv);
++                            ITEM_set_cas(new_it, (settings.use_cas) ? ITEM_get_cas(hdr_it) : 0);
++                            do_item_remove(new_it); // release our reference.
++                            rescues++;
++                        } else {
++                            lost++;
++                        }
+                     }
+                 } else {
+                     lost++;
+diff --git a/t/flags.t b/t/flags.t
+index 11a3e41b6e..68f51b55ad 100755
+--- a/t/flags.t
++++ b/t/flags.t
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env perl
+ 
+ use strict;
+-use Test::More tests => 8;
++use Test::More;
+ use FindBin qw($Bin);
+ use lib "$Bin/lib";
+ use MemcachedTest;
+@@ -9,10 +9,20 @@ use MemcachedTest;
+ my $server = new_memcached();
+ my $sock = $server->sock;
+ 
++my @fset = (0, 123, 2**16-1, 2**31);
++my $stats = mem_stats($sock, "settings");
++if ($stats->{client_flags_size} == 8) {
++    note "extra tests for large flags";
++    push(@fset, 2**32);
++    push(@fset, 2**48);
++}
++
+ # set foo (and should get it)
+-for my $flags (0, 123, 2**16-1, 2**31) {
++for my $flags (@fset) {
+     print $sock "set foo $flags 0 6\r\nfooval\r\n";
+     is(scalar <$sock>, "STORED\r\n", "stored foo");
+     mem_get_is({ sock => $sock,
+                  flags => $flags }, "foo", "fooval", "got flags $flags back");
+ }
++
++done_testing();
+diff --git a/t/metaget.t b/t/metaget.t
+index 22863ec33d..adad15cc30 100644
+--- a/t/metaget.t
++++ b/t/metaget.t
+@@ -177,6 +177,23 @@ my $sock = $server->sock;
+     like(scalar <$sock>, qr/^HD ka\r\n/, "k flag");
+ }
+ 
++{
++    note "client flags";
++    my @fset = (0, 123, 2**16-1, 2**31);
++    my $stats = mem_stats($sock, "settings");
++    if ($stats->{client_flags_size} == 8) {
++        note "extra tests for large flags";
++        push(@fset, 2**32);
++        push(@fset, 2**48);
++    }
++    for my $flags (@fset) {
++        print $sock "ms a 1 F$flags\r\n1\r\n";
++        is(scalar <$sock>, "HD\r\n", "client flags $flags set");
++        my $res = mget($sock, 'a', 'f');
++        is(get_flag($res, 'f'), $flags, "client flags $flags returned");
++    }
++}
++
+ {
+     note "basic mset CAS";
+     my $key = "msetcas";
+diff --git a/t/proxy.t b/t/proxy.t
+deleted file mode 100644
+index 4a86d83133..0000000000
+--- a/t/proxy.t
++++ /dev/null
+@@ -1,263 +0,0 @@
+-#!/usr/bin/env perl
+-
+-use strict;
+-use warnings;
+-use Test::More;
+-use FindBin qw($Bin);
+-use lib "$Bin/lib";
+-use Carp qw(croak);
+-use MemcachedTest;
+-
+-# TODO: to module?
+-# or "gettimedrun" etc
+-use Cwd;
+-my $builddir = getcwd;
+-
+-if (!supports_proxy()) {
+-    plan skip_all => 'proxy not enabled';
+-    exit 0;
+-}
+-
+-# TODO: the lua file has hardcoded ports. any way to make this dynamic?
+-# TODO: once basic tests are done, actually split out the instances rather
+-# than the shared backend; validate keys go where they should be going.
+-
+-# FIXME: this listend on unix socket still. either need a manual runner or a
+-# fix upstream.
+-my @srv = ();
+-for (2 .. 6) {
+-    my $srv = run_server("-p 1121$_", 11210 + $_);
+-    push(@srv, $srv);
+-}
+-#my $sock = $srv->sock;
+-
+-my $p_srv = new_memcached('-o proxy_config=./t/startfile.lua');
+-my $p_sock = $p_srv->sock;
+-
+-# hack to help me use T_MEMD_USE_DAEMON for proxy.
+-#print STDERR "Sleeping\n";
+-#sleep 900;
+-
+-# cmds to test:
+-# - noreply for main text commands?
+-# meta:
+-# me
+-# mn
+-# mg
+-# ms
+-# md
+-# ma
+-# - noreply?
+-# stats
+-# pass-thru?
+-
+-# incr/decr
+-{
+-    print $p_sock "set /foo/num 0 0 1\r\n1\r\n";
+-    is(scalar <$p_sock>, "STORED\r\n", "stored num");
+-    mem_get_is($p_sock, "/foo/num", 1, "stored 1");
+-
+-    print $p_sock "incr /foo/num 1\r\n";
+-    is(scalar <$p_sock>, "2\r\n", "+ 1 = 2");
+-    mem_get_is($p_sock, "/foo/num", 2);
+-
+-    print $p_sock "incr /foo/num 8\r\n";
+-    is(scalar <$p_sock>, "10\r\n", "+ 8 = 10");
+-    mem_get_is($p_sock, "/foo/num", 10);
+-
+-    print $p_sock "decr /foo/num 1\r\n";
+-    is(scalar <$p_sock>, "9\r\n", "- 1 = 9");
+-
+-    print $p_sock "decr /foo/num 9\r\n";
+-    is(scalar <$p_sock>, "0\r\n", "- 9 = 0");
+-
+-    print $p_sock "decr /foo/num 5\r\n";
+-    is(scalar <$p_sock>, "0\r\n", "- 5 = 0");
+-}
+-
+-# gat
+-{
+-    # cache miss
+-    print $p_sock "gat 10 /foo/foo1\r\n";
+-    is(scalar <$p_sock>, "END\r\n", "cache miss");
+-
+-    # set /foo/foo1 and /foo/foo2 (and should get it)
+-    print $p_sock "set /foo/foo1 0 2 7\r\nfooval1\r\n";
+-    is(scalar <$p_sock>, "STORED\r\n", "stored foo");
+-
+-    print $p_sock "set /foo/foo2 0 2 7\r\nfooval2\r\n";
+-    is(scalar <$p_sock>, "STORED\r\n", "stored /foo/foo2");
+-
+-    # get and touch it with cas
+-    print $p_sock "gats 10 /foo/foo1 /foo/foo2\r\n";
+-    like(scalar <$p_sock>, qr/VALUE \/foo\/foo1 0 7 (\d+)\r\n/, "get and touch foo1 with cas regexp success");
+-    is(scalar <$p_sock>, "fooval1\r\n","value");
+-    like(scalar <$p_sock>, qr/VALUE \/foo\/foo2 0 7 (\d+)\r\n/, "get and touch foo2 with cas regexp success");
+-    is(scalar <$p_sock>, "fooval2\r\n","value");
+-    is(scalar <$p_sock>, "END\r\n", "end");
+-
+-    # get and touch it without cas
+-    print $p_sock "gat 10 /foo/foo1 /foo/foo2\r\n";
+-    like(scalar <$p_sock>, qr/VALUE \/foo\/foo1 0 7\r\n/, "get and touch foo1 without cas regexp success");
+-    is(scalar <$p_sock>, "fooval1\r\n","value");
+-    like(scalar <$p_sock>, qr/VALUE \/foo\/foo2 0 7\r\n/, "get and touch foo2 without cas regexp success");
+-    is(scalar <$p_sock>, "fooval2\r\n","value");
+-    is(scalar <$p_sock>, "END\r\n", "end");
+-}
+-
+-# gets/cas
+-{
+-    print $p_sock "add /foo/moo 0 0 6\r\nmooval\r\n";
+-    is(scalar <$p_sock>, "STORED\r\n", "stored mooval");
+-    mem_get_is($p_sock, "/foo/moo", "mooval");
+-
+-    # check-and-set (cas) failure case, try to set value with incorrect cas unique val
+-    print $p_sock "cas /foo/moo 0 0 6 0\r\nMOOVAL\r\n";
+-    is(scalar <$p_sock>, "EXISTS\r\n", "check and set with invalid id");
+-
+-    # test "gets", grab unique ID
+-    print $p_sock "gets /foo/moo\r\n";
+-    # VALUE moo 0 6 3084947704
+-    #
+-    my @retvals = split(/ /, scalar <$p_sock>);
+-    my $data = scalar <$p_sock>; # grab data
+-    my $dot  = scalar <$p_sock>; # grab dot on line by itself
+-    is($retvals[0], "VALUE", "get value using 'gets'");
+-    my $unique_id = $retvals[4];
+-    # clean off \r\n
+-    $unique_id =~ s/\r\n$//;
+-    ok($unique_id =~ /^\d+$/, "unique ID '$unique_id' is an integer");
+-    # now test that we can store moo with the correct unique id
+-    print $p_sock "cas /foo/moo 0 0 6 $unique_id\r\nMOOVAL\r\n";
+-    is(scalar <$p_sock>, "STORED\r\n");
+-    mem_get_is($p_sock, "/foo/moo", "MOOVAL");
+-}
+-
+-# touch
+-{
+-    print $p_sock "set /foo/t 0 2 6\r\nfooval\r\n";
+-    is(scalar <$p_sock>, "STORED\r\n", "stored foo");
+-    mem_get_is($p_sock, "/foo/t", "fooval");
+-
+-    # touch it
+-    print $p_sock "touch /foo/t 10\r\n";
+-    is(scalar <$p_sock>, "TOUCHED\r\n", "touched foo");
+-
+-    # don't need to sleep/validate the touch worked. We're testing the
+-    # protocol, not the functionality.
+-}
+-
+-# command endings
+-# NOTE: memcached always allowed [\r]\n for single command lines, but payloads
+-# (set/etc) require exactly \r\n as termination.
+-# doc/protocol.txt has always specified \r\n for command/response.
+-# Proxy is more strict than normal server in this case.
+-{
+-    my $s = $srv[0]->sock;
+-    print $s "version\n";
+-    like(<$s>, qr/VERSION/, "direct server version cmd with just newline");
+-    print $p_sock "version\n";
+-    like(<$p_sock>, qr/CLIENT_ERROR/, "proxy version cmd with just newline");
+-    print $p_sock "version\r\n";
+-    like(<$p_sock>, qr/VERSION/, "proxy version cmd with full CRLF");
+-}
+-
+-# set through proxy.
+-{
+-    print $p_sock "set /foo/z 0 0 5\r\nhello\r\n";
+-    is(scalar <$p_sock>, "STORED\r\n", "stored test value through proxy");
+-    # ensure it's fetchable.
+-    mem_get_is($p_sock, "/foo/z", "hello");
+-    # delete it.
+-    print $p_sock "delete /foo/z\r\n";
+-    is(scalar <$p_sock>, "DELETED\r\n", "removed test value");
+-    # ensure it's deleted.
+-    mem_get_is($p_sock, "/foo/z", undef);
+-}
+-
+-# test add.
+-{
+-    print $p_sock "add /foo/a 0 0 3\r\nmoo\r\n";
+-    is(scalar <$p_sock>, "STORED\r\n", "add test value through proxy");
+-    # ensure it's fetchable
+-    mem_get_is($p_sock, "/foo/a", "moo");
+-    # check re-adding fails.
+-    print $p_sock "add /foo/a 0 0 3\r\ngoo\r\n";
+-    is(scalar <$p_sock>, "NOT_STORED\r\n", "re-add fails");
+-    # ensure we still hae the old value
+-    mem_get_is($p_sock, "/foo/a", "moo");
+-}
+-
+-# pipelined set.
+-{
+-    my $str = "set /foo/k 0 0 5\r\nhello\r\n";
+-    print $p_sock "$str$str$str$str$str";
+-    is(scalar <$p_sock>, "STORED\r\n", "stored test value through proxy");
+-    is(scalar <$p_sock>, "STORED\r\n", "stored test value through proxy");
+-    is(scalar <$p_sock>, "STORED\r\n", "stored test value through proxy");
+-    is(scalar <$p_sock>, "STORED\r\n", "stored test value through proxy");
+-    is(scalar <$p_sock>, "STORED\r\n", "stored test value through proxy");
+-}
+-
+-# Load some keys through proxy.
+-my $bdata = 'x' x 256000;
+-{
+-    for (1..20) {
+-        print $p_sock "set /foo/a$_ 0 0 2\r\nhi\r\n";
+-        is(scalar <$p_sock>, "STORED\r\n", "stored test value");
+-        print $p_sock "set /bar/b$_ 0 0 2\r\nhi\r\n";
+-        is(scalar <$p_sock>, "STORED\r\n", "stored test value");
+-    }
+-
+-    # load a couple larger values
+-    for (1..4) {
+-        print $p_sock "set /foo/big$_ 0 0 256000\r\n$bdata\r\n";
+-        is(scalar <$p_sock>, "STORED\r\n", "stored big value");
+-    }
+-    diag "set large values";
+-}
+-
+-# fetch through proxy.
+-{
+-    for (1..20) {
+-        mem_get_is($p_sock, "/foo/a$_", "hi");
+-    }
+-    diag "fetched small values";
+-    mem_get_is($p_sock, "/foo/big1", $bdata);
+-    diag "fetched big value";
+-}
+-
+-sub run_server {
+-    my ($args, $port) = @_;
+-
+-    my $exe = get_memcached_exe();
+-
+-    my $childpid = fork();
+-
+-    my $root = '';
+-    $root = "-u root" if ($< == 0);
+-
+-    # test build requires more privileges
+-    $args .= " -o relaxed_privileges";
+-
+-    my $cmd = "$builddir/timedrun 120 $exe $root $args";
+-
+-    unless($childpid) {
+-        exec $cmd;
+-        exit; # NOTREACHED
+-    }
+-
+-    for (1..20) {
+-        my $conn = IO::Socket::INET->new(PeerAddr => "127.0.0.1:$port");
+-        if ($conn) {
+-            return Memcached::Handle->new(pid  => $childpid,
+-                conn => $conn,
+-                host => "127.0.0.1",
+-                port => $port);
+-        }
+-        select undef, undef, undef, 0.10;
+-    }
+-    croak "Failed to start server.";
+-}
+-
+-done_testing();
+diff --git a/t/proxyantiflap.lua b/t/proxyantiflap.lua
+new file mode 100644
+index 0000000000..b8a76c6630
+--- /dev/null
++++ b/t/proxyantiflap.lua
+@@ -0,0 +1,26 @@
++if reload_count == nil then
++    reload_count = 0
++end
++
++function mcp_config_pools()
++    mcp.backend_read_timeout(0.25)
++    mcp.backend_connect_timeout(5)
++    mcp.backend_flap_time(30) -- need a long time to reset the flap counter
++    mcp.backend_flap_backoff_ramp(1.2) -- very slow ramp
++    mcp.backend_retry_waittime(1) -- a quick retry for the test.
++    mcp.backend_failure_limit(2) -- reduced from default to speed up test.
++
++    reload_count = reload_count + 1
++    local arg = { label = 'b1', host = '127.0.0.1', port = 11799 }
++
++    if reload_count == 1 then
++        return mcp.pool({mcp.backend(arg)})
++    elseif reload_count == 2 then
++        mcp.backend_flap_time(2)
++        return mcp.pool({mcp.backend(arg)})
++    end
++end
++
++function mcp_config_routes(pool)
++    mcp.attach(mcp.CMD_MG, function(r) return pool(r) end)
++end
+diff --git a/t/proxyantiflap.t b/t/proxyantiflap.t
+new file mode 100644
+index 0000000000..a9390bcbd0
+--- /dev/null
++++ b/t/proxyantiflap.t
+@@ -0,0 +1,147 @@
++#!/usr/bin/env perl
++
++use strict;
++use warnings;
++use Test::More;
++use FindBin qw($Bin);
++use lib "$Bin/lib";
++use Carp qw(croak);
++use MemcachedTest;
++use IO::Select;
++use IO::Socket qw(AF_INET SOCK_STREAM);
++
++if (!supports_proxy()) {
++    plan skip_all => 'proxy not enabled';
++    exit 0;
++}
++
++# Set up some server sockets.
++sub mock_server {
++    my $port = shift;
++    my $srv = IO::Socket->new(
++        Domain => AF_INET,
++        Type => SOCK_STREAM,
++        Proto => 'tcp',
++        LocalHost => '127.0.0.1',
++        LocalPort => $port,
++        ReusePort => 1,
++        Listen => 5) || die "IO::Socket: $@";
++    return $srv;
++}
++
++sub accept_backend {
++    my $srv = shift;
++    my $be = $srv->accept();
++    $be->autoflush(1);
++    ok(defined $be, "mock backend created");
++    like(<$be>, qr/version/, "received version command");
++    print $be "VERSION 1.0.0-mock\r\n";
++
++    return $be;
++}
++
++# Put a version command down the pipe to ensure the socket is clear.
++# client version commands skip the proxy code
++sub check_version {
++    my $ps = shift;
++    print $ps "version\r\n";
++    like(<$ps>, qr/VERSION /, "version received");
++}
++
++sub wait_reload {
++    my $w = shift;
++    like(<$w>, qr/ts=(\S+) gid=\d+ type=proxy_conf status=start/, "reload started");
++    like(<$w>, qr/ts=(\S+) gid=\d+ type=proxy_conf status=done/, "reload completed");
++}
++
++# We just need a single backend here; there's no logical difference if it's in
++# a cluster or not.
++note "making mock servers";
++my $msrv = mock_server(11799);
++
++# Start up a clean server.
++my $p_srv = new_memcached('-o proxy_config=./t/proxyantiflap.lua');
++my $ps = $p_srv->sock;
++$ps->autoflush(1);
++
++{
++    my $watcher = $p_srv->new_sock;
++    print $watcher "watch proxyevents\n";
++    is(<$watcher>, "OK\r\n", "watcher enabled");
++
++    my $be = accept_backend($msrv);
++    my $s = IO::Select->new();
++    $s->add($be);
++
++    # Make some backend requests but refuse to answer.
++    for (1 .. 3) {
++        print $ps "mg foo\r\n";
++        # Block until we error and reconnect.
++        is(scalar <$ps>, "SERVER_ERROR backend failure\r\n", "request cancelled");
++        like(<$watcher>, qr/error=timeout/, "timeout error log");
++        $be = accept_backend($msrv);
++    }
++    print $ps "mg bar\r\n";
++    # Block until we error and reconnect.
++    is(scalar <$ps>, "SERVER_ERROR backend failure\r\n", "request cancelled");
++    $be = accept_backend($msrv);
++    like(<$watcher>, qr/error=markedbadflap name=\S+ port=\S+ label=b\d+ retry=1/, "got caught flapping");
++
++    print $ps "mg baz\r\n";
++    is(scalar <$be>, "mg baz\r\n", "backend does reconnect and still works");
++    print $be "HD\r\n";
++    is(scalar <$ps>, "HD\r\n", "client still works post-flap");
++
++    # clear error logs.
++    like(<$watcher>, qr/error=timeout/, "timeout error log");
++    like(<$watcher>, qr/error=markedbadflap name=\S+ port=\S+ label=b\d+ retry=2/, "re-flapped, longer retry");
++    $p_srv->reload();
++    wait_reload($watcher);
++
++    # Hold the previous backend so its descriptor doesn't log
++    my $oldbe = $be;
++
++    # This should reset the flap counter as the backend description changes.
++    $be = accept_backend($msrv);
++
++    check_version($ps);
++
++    # Make some backend requests but refuse to answer.
++    for (1 .. 3) {
++        print $ps "mg foo\r\n";
++        # Block until we error and reconnect.
++        is(scalar <$ps>, "SERVER_ERROR backend failure\r\n", "request cancelled");
++        like(<$watcher>, qr/error=timeout/, "timeout error log");
++        $be = accept_backend($msrv);
++    }
++    print $ps "mg bar\r\n";
++    # Block until we error and reconnect.
++    is(scalar <$ps>, "SERVER_ERROR backend failure\r\n", "request cancelled");
++    like(<$watcher>, qr/error=markedbadflap/, "got caught flapping");
++
++    $be = accept_backend($msrv);
++
++    like(<$watcher>, qr/error=timeout/, "previous backend goes away");
++    like(<$watcher>, qr/error=markedbadflap/, "still considered flapping");
++    check_version($ps);
++
++    # verify the new backend works.
++    print $ps "mg baz\r\n";
++    is(scalar <$be>, "mg baz\r\n", "backend does work");
++    print $be "HD\r\n";
++    is(scalar <$ps>, "HD\r\n", "client still works");
++
++    # Now wait and see if the next failure causes a flap or not.
++    sleep 3;
++
++    print $ps "mg bar\r\n";
++    # Block until we error and reconnect.
++    is(scalar <$ps>, "SERVER_ERROR backend failure\r\n", "request cancelled");
++
++    like(<$watcher>, qr/error=timeout/, "normal timeout error");
++    # This will pause until readvalidate fails, so we can be sure a flap error
++    # didn't follow the timeout error.
++    unlike(<$watcher>, qr/error=markedbadflap/, "didn't flap again");
++}
++
++done_testing();
+diff --git a/t/proxyconfig.lua b/t/proxyconfig.lua
+index 8e0193d67e..e4b676f7c0 100644
+--- a/t/proxyconfig.lua
++++ b/t/proxyconfig.lua
+@@ -39,6 +39,34 @@ function mcp_config_pools(old)
+             test = mcp.pool({b1, b2, b3}, { iothread = false })
+         }
+         return pools
++    elseif mode == "connections" then
++        local b1 = mcp.backend({ label = "b1c", host = "127.0.0.1", port = 11511,
++                               connections = 3})
++        local pools = {
++            test = mcp.pool({b1})
++        }
++        return pools
++    elseif mode == "connectionsreload" then
++        local b1 = mcp.backend({ label = "b1c", host = "127.0.0.1", port = 11511,
++                               connections = 1})
++        local pools = {
++            test = mcp.pool({b1})
++        }
++        return pools
++    elseif mode == "down" then
++        local down = mcp.backend({ label = "down", host = "127.0.0.1", port = 11517,
++                                   down = true })
++        local pools = {
++            test = mcp.pool({down})
++        }
++        return pools
++    elseif mode == "notdown" then
++        local down = mcp.backend({ label = "down", host = "127.0.0.1", port = 11517,
++                                   down = false })
++        local pools = {
++            test = mcp.pool({down})
++        }
++        return pools
+     end
+ end
+ 
+diff --git a/t/proxyconfig.t b/t/proxyconfig.t
+index be6d4ce26c..53305fac50 100644
+--- a/t/proxyconfig.t
++++ b/t/proxyconfig.t
+@@ -70,6 +70,17 @@ sub wait_reload {
+     like(<$w>, qr/ts=(\S+) gid=\d+ type=proxy_conf status=done/, "reload completed");
+ }
+ 
++# Not looking for a clear pipeline, just when a reload finishes.
++sub wait_reload_relaxed {
++    my $w = shift;
++    while (my $line = <$w>) {
++        if ($line =~ m/type=proxy_conf status=done/) {
++            last;
++        }
++    }
++    pass("reload complete");
++}
++
+ my @mocksrvs = ();
+ #diag "making mock servers";
+ for my $port (11511, 11512, 11513) {
+@@ -186,6 +197,128 @@ my @holdbe = (); # avoid having the backends immediately disconnect and pollute
+     is(scalar @readable, 0, "no new sockets");
+ }
+ 
++#diag "testing multiple connections";
++{
++    write_modefile('return "connections"');
++    $p_srv->reload();
++    wait_reload($watcher);
++
++    # Should get 3 new connetions for the first server.
++    my $msrv = $mocksrvs[0];
++    my @bes = ();
++    for (1 .. 3) {
++        my $be = $msrv->accept();
++        $be->autoflush(1);
++        ok(defined $be, "mock backend created");
++        push(@bes, $be);
++    }
++
++    my $s = IO::Select->new();
++
++    for my $be (@bes) {
++        $s->add($be);
++        like(<$be>, qr/version/, "received version command");
++        print $be "VERSION 1.0.0-mock\r\n";
++    }
++
++    # Command should only go to the first socket we created in N tries
++    for (1 .. 5) {
++        my $cmd = "mg foo$_ v\r\n";
++        print $ps $cmd;
++        my @readable = $s->can_read(0.25);
++        my $be = $bes[0];
++        is(scalar <$be>, $cmd, "get passthrough");
++        print $be "EN\r\n";
++        is(scalar <$ps>, "EN\r\n", "miss received");
++    }
++    my @readable = $s->can_read(0.25);
++    is(scalar @readable, 0, "rest of connections are idle still");
++
++    # Pipelined commands should all go to the first socket
++    print $ps "mg f1 v\r\nmg f2 v\r\nmg f3 v\r\n";
++    @readable = $s->can_read(0.25);
++    is(scalar @readable, 1, "only one backend woke up");
++    {
++        my $be = $bes[0];
++        for (1 .. 3) {
++            is(scalar <$be>, "mg f$_ v\r\n", "mg to connection $_");
++            print $be "EN\r\n";
++        }
++        for (1 .. 3) {
++            is(scalar <$ps>, "EN\r\n", "miss $_ from backend");
++        }
++    }
++
++    # Rest of sockets should be used when backend depth is nonzero
++    # need two more client sockets.
++    # client will be in conn_iowait, so if we write more requests down the
++    # same socket it won't go anywhere.
++    my $ps2 = $p_srv->new_sock;
++    my $ps3 = $p_srv->new_sock;
++    my @psocks = ($ps, $ps2, $ps3);
++    for (1 .. 3) {
++        my $psc = $psocks[$_ - 1];
++        my $be = $bes[$_ - 1];
++        print $psc "mg f$_ v\r\n";
++        is(scalar <$be>, "mg f$_ v\r\n", "trying all connections");
++    }
++    for my $be (@bes) {
++        print $be "EN\r\n";
++    }
++    for my $psc (@psocks) {
++        is(scalar <$psc>, "EN\r\n", "miss from backend");
++    }
++
++    # Verify the backend changes if we only change the connection count.
++    write_modefile('return "connectionsreload"');
++    $p_srv->reload();
++    wait_reload($watcher);
++
++    my $ms = IO::Select->new();
++    $ms->add($msrv);
++    @readable = $ms->can_read(0.25);
++    is(scalar @readable, 1, "listener became readable after changing conncount");
++    $bes[0] = accept_backend($readable[0]);
++}
++
++{
++    note("Testing down backends");
++    $watcher = $p_srv->new_sock;
++    print $watcher "watch proxyevents\n";
++    is(<$watcher>, "OK\r\n", "watcher enabled");
++
++    # Make a dedicated mock server for the down host.
++    my $msrv = mock_server(11517);
++
++    write_modefile('return "down"');
++    $p_srv->reload();
++    wait_reload_relaxed($watcher);
++
++    my $ms = IO::Select->new();
++    $ms->add($msrv);
++    my @readable = $ms->can_read(0.25);
++    is(scalar @readable, 0, "listener did not become readable for down backend");
++
++    print $ps "mg toast\r\n";
++    is(scalar <$ps>, "SERVER_ERROR backend failure\r\n", "client received SERVER_ERROR");
++
++    write_modefile('return "notdown"');
++    $p_srv->reload();
++    wait_reload_relaxed($watcher);
++
++    @readable = $ms->can_read(0.25);
++    is(scalar @readable, 1, "listener did become readable for backend that was down");
++
++    my $be = accept_backend($readable[0]);
++
++    print $ps "mg toast\r\n";
++    is(scalar <$be>, "mg toast\r\n", "backend works");
++    print $be "HD\r\n";
++    is(scalar <$ps>, "HD\r\n", "backned to client works");
++
++    check_version($ps);
++}
++
+ # Disconnect the existing sockets
+ @mbe = ();
+ @holdbe = ();
+diff --git a/t/proxyinternal.t b/t/proxyinternal.t
+index 8ff6cbb84b..f70cd84095 100644
+--- a/t/proxyinternal.t
++++ b/t/proxyinternal.t
+@@ -74,6 +74,16 @@ $ps->autoflush(1);
+ #    print $be "VERSION 1.0.0-mock\r\n";
+ #}
+ 
++{
++    print $ps "ms /b/a 2\r\nhi\r\n";
++    is(scalar <$ps>, "HD\r\n", "bare ms command works");
++
++    print $ps "ms /b/a 2 T100\r\nhi\r\n";
++    is(scalar <$ps>, "HD\r\n", "set ms with a TTL");
++    print $ps "mg /b/a t\r\n";
++    isnt(scalar <$ps>, "HD t-1\r\n");
++}
++
+ note "ascii multiget";
+ {
+     # First test all miss.
+diff --git a/t/proxylimits.t b/t/proxylimits.t
+index 61a13d674b..6143f20ec5 100644
+--- a/t/proxylimits.t
++++ b/t/proxylimits.t
+@@ -213,7 +213,10 @@ check_version($ps);
+ 
+     my $stats = mem_stats($ps, 'proxy');
+     my $used = $stats->{buffer_memory_used};
+-    cmp_ok($used, '<', 1000, 'pre: buffer memory usage not inflated');
++    # check a very high number at first. The next batch of requests should
++    # kick the GC enough times to free memory from the previous set of tests.
++    # The rest should be much lower.
++    cmp_ok($used, '<', 1000000, 'pre: buffer memory usage not inflated');
+ 
+     my $cmd = "get foo\r\n";
+     for (1 .. 100) {
+@@ -232,7 +235,7 @@ check_version($ps);
+     $used = $stats->{buffer_memory_used};
+     cmp_ok($used, '<', 1000, 'mid: buffer memory usage not inflated');
+ 
+-    my $cmd = "get foo foo foo foo\r\n";
++    $cmd = "get foo foo foo foo\r\n";
+     for (1 .. 50) {
+         print $ps $cmd;
+         for (1 .. 4) {
+@@ -252,7 +255,7 @@ check_version($ps);
+     $used = $stats->{buffer_memory_used};
+     cmp_ok($used, '<', 1000, 'multiget: buffer memory usage not inflated');
+ 
+-    my $cmd = "get foo\r\n";
++    $cmd = "get foo\r\n";
+     for (1 .. 200) {
+         print $ps $cmd;
+         {
+diff --git a/t/proxyratelim.lua b/t/proxyratelim.lua
+new file mode 100644
+index 0000000000..672f0aeb09
+--- /dev/null
++++ b/t/proxyratelim.lua
+@@ -0,0 +1,19 @@
++
++function mcp_config_pools()
++    return {}
++end
++
++function mcp_config_routes(t)
++    -- limit is an arbitrary token count (bytes, requests, etc)
++    -- fillrate is tokens per tickrate
++    -- tickrate is milliseconds
++    local tbf = mcp.ratelim_tbf({limit = 50, fillrate = 4, tickrate = 500})
++
++    mcp.attach(mcp.CMD_MG, function(r)
++        if tbf(15) then
++            return "HD\r\n"
++        else
++            return "SERVER_ERROR slow down\r\n"
++        end
++    end)
++end
+diff --git a/t/proxyratelim.t b/t/proxyratelim.t
+new file mode 100644
+index 0000000000..bf45fbe7cd
+--- /dev/null
++++ b/t/proxyratelim.t
+@@ -0,0 +1,38 @@
++#!/usr/bin/env perl
++
++use strict;
++use warnings;
++use Test::More;
++use FindBin qw($Bin);
++use lib "$Bin/lib";
++use Carp qw(croak);
++use MemcachedTest;
++use IO::Socket qw(AF_INET SOCK_STREAM);
++use IO::Select;
++
++if (!supports_proxy()) {
++    plan skip_all => 'proxy not enabled';
++    exit 0;
++}
++
++my $p_srv = new_memcached('-o proxy_config=./t/proxyratelim.lua');
++my $ps = $p_srv->sock;
++$ps->autoflush(1);
++
++{
++    my $x = 10;
++    while ($x--) {
++        print $ps "mg na\r\n";
++        my $res = scalar <$ps>;
++        last if $res =~ m/SERVER_ERROR/;
++    }
++    cmp_ok($x, '>', 0, "hit rate limit without trying too many times");
++    sleep 0.5;
++    print $ps "mg na\r\n";
++    is(scalar <$ps>, "SERVER_ERROR slow down\r\n", "still blocked after short sleep");
++    sleep 3;
++    print $ps "mg na\r\n";
++    is(scalar <$ps>, "HD\r\n", "not blocked after longer sleep");
++}
++
++done_testing();
+diff --git a/t/proxyunits.lua b/t/proxyunits.lua
+index 9061b98f73..2541c1df64 100644
+--- a/t/proxyunits.lua
++++ b/t/proxyunits.lua
+@@ -2,6 +2,7 @@ function mcp_config_pools(oldss)
+     local srv = mcp.backend
+     mcp.backend_read_timeout(0.5)
+     mcp.backend_connect_timeout(5)
++    mcp.backend_retry_timeout(5)
+ 
+     -- Single backend for zones to ease testing.
+     -- For purposes of this config the proxy is always "zone 1" (z1)
+@@ -13,12 +14,18 @@ function mcp_config_pools(oldss)
+     local b2z = {b2}
+     local b3z = {b3}
+ 
++    local dead = srv('dead', '127.9.9.9', 11011);
++
++    local no_label = srv('', '127.0.0.1', 11414)
++
+     -- convert the backends to pools.
+     -- as per a normal full config see simple.lua or t/startfile.lua
+     local zones = {
+         z1 = mcp.pool(b1z),
+         z2 = mcp.pool(b2z),
+         z3 = mcp.pool(b3z),
++        dead = mcp.pool({dead}),
++        no_label = mcp.pool({no_label})
+     }
+ 
+     return zones
+@@ -120,6 +127,10 @@ function mcp_config_routes(zones)
+         return zones.z1(r)
+     end
+ 
++    pfx_get["nolabel"] = function(r)
++        return zones.no_label(r)
++    end
++
+     pfx_mg["ntokens"] = function(r)
+         return "VA 1 C123 v\r\n" .. r:ntokens() .. "\r\n"
+     end
+@@ -398,6 +409,12 @@ function mcp_config_routes(zones)
+         return res
+     end
+ 
++    pfx_get["logreqstest"] = function(r)
++        local res = zones.z1(r)
++        mcp.log_reqsample(150, 0, true, r, res, "logsampletest")
++        return res
++    end
++
+     -- tell caller what we got back via a fake response
+     pfx_get["awaitbasic"] = function(r)
+         local vals = {}
+@@ -506,10 +523,7 @@ function mcp_config_routes(zones)
+ 
+     -- testing different styles of building the table argument for mcp.await()
+     pfx_get["awaitfastgood"] = function(r)
+-        local all_zones = {}
+-        for k, v in pairs(zones) do
+-            all_zones[k] = v
+-        end
++        local all_zones = { zones.z1, zones.z2, zones.z3 }
+ 
+         local restable = mcp.await(r, all_zones, 2, mcp.AWAIT_FASTGOOD)
+ 
+@@ -526,10 +540,7 @@ function mcp_config_routes(zones)
+     end
+ 
+     pfx_set["awaitfastgood"] = function(r)
+-        local all_zones = {}
+-        for _, v in pairs(zones) do
+-            table.insert(all_zones, v)
+-        end
++        local all_zones = { zones.z1, zones.z2, zones.z3 }
+ 
+         local restable = mcp.await(r, all_zones, 2)
+         local count = 0
+@@ -550,6 +561,19 @@ function mcp_config_routes(zones)
+         return rtable[3]
+     end
+ 
++    pfx_get["dead"] = function(r)
++        return zones.dead(r)
++    end
++
++   pfx_get["deadrespcode"] = function(r)
++       local res = zones.dead(r)
++
++       if res:code() == mcp.MCMC_CODE_SERVER_ERROR then
++         return "ERROR code_correct\r\n"
++       end
++       return "ERROR code_incorrect: " .. res:code() .. "\r\n"
++   end
++
+     mcp.attach(mcp.CMD_GET, toproute_factory(pfx_get, "get"))
+     mcp.attach(mcp.CMD_SET, toproute_factory(pfx_set, "set"))
+     mcp.attach(mcp.CMD_TOUCH, toproute_factory(pfx_touch, "touch"))
+diff --git a/t/proxyunits.t b/t/proxyunits.t
+index bebe26a514..fe0a04b304 100644
+--- a/t/proxyunits.t
++++ b/t/proxyunits.t
+@@ -151,6 +151,24 @@ sub proxy_test {
+         print $ps "$_\r\n";
+         is(scalar <$ps>, "CLIENT_ERROR parsing request\r\n", "$_ got CLIENT_ERROR for too few tokens");
+     }
++
++    my $space = ' ' x 200;
++    print $ps "get$space key key\r\n";
++    is(scalar <$ps>, "CLIENT_ERROR malformed request\r\n");
++    is(scalar <$ps>, "CLIENT_ERROR malformed request\r\n");
++    is(scalar <$ps>, "END\r\n"); # god damn multiget syntax.
++}
++
++{
++    note("Test dead backend");
++    my $start = int(time());
++    print $ps "get /dead/foo\r\n";
++    is(scalar <$ps>, "SERVER_ERROR backend failure\r\n", "Backend failed");
++    my $end = int(time());
++    cmp_ok($end - $start, '<', 3, "backend failed immediately");
++
++    print $ps "get /deadrespcode/foo\r\n";
++    is(scalar <$ps>, "ERROR code_correct\r\n", "Backend had correct response code on failure");
+ }
+ 
+ # Basic test with a backend; write a request to the client socket, read it
+@@ -184,7 +202,7 @@ sub proxy_test {
+     is(scalar <$ps>, "SERVER_ERROR backend failure\r\n", "backend failure error");
+ 
+     # verify a particular proxy event logline is received
+-    like(<$w>, qr/ts=(\S+) gid=\d+ type=proxy_backend error=timeout name=127.0.0.1 port=\d+ depth=1 rbuf=EN/, "got backend error log line");
++    like(<$w>, qr/ts=(\S+) gid=\d+ type=proxy_backend error=timeout name=127.0.0.1 port=\d+ label=b\d+ depth=1 rbuf=EN/, "got backend error log line");
+ 
+     # backend is disconnected due to the error, so we have to re-establish it.
+     $mbe[0] = accept_backend($mocksrvs[0]);
+@@ -210,11 +228,37 @@ sub proxy_test {
+     is(scalar <$ps>, "ok\r\n", "got data back");
+     is(scalar <$ps>, "END\r\n", "got end string");
+ 
+-    like(<$w>, qr/ts=(\S+) gid=\d+ type=proxy_backend error=trailingdata name=127.0.0.1 port=\d+ depth=0 rbuf=garbage/, "got backend error log line");
++    like(<$w>, qr/ts=(\S+) gid=\d+ type=proxy_backend error=trailingdata name=127.0.0.1 port=\d+ label=b\d+ depth=0 rbuf=garbage/, "got backend error log line");
+ 
+     $mbe[0] = accept_backend($mocksrvs[0]);
+ }
+ 
++{
++    note("Test proxyevents for a backend without a label");
++
++    my $msrv_nolabel = mock_server(11414);
++    ok(defined $msrv_nolabel, "mock server with no label created");
++    my $mbe_nolabel = accept_backend($msrv_nolabel);
++
++    # Trigger a proxyevent error by adding trailing data ("garbage") to the
++    # backend response.
++    my $w = $p_srv->new_sock;
++    print $w "watch proxyevents\n";
++    is(<$w>, "OK\r\n", "watcher enabled");
++
++    print $ps "get /nolabel/c\r\n";
++    is(scalar <$mbe_nolabel>, "get /nolabel/c\r\n", "get passthrough");
++    # Set off a "trailing data" error
++    print $mbe_nolabel "VALUE /nolabel/c 0 2\r\nok\r\nEND\r\ngarbage";
++
++    is(scalar <$ps>, "VALUE /nolabel/c 0 2\r\n", "got value back");
++    is(scalar <$ps>, "ok\r\n", "got data back");
++    is(scalar <$ps>, "END\r\n", "got end string");
++
++    # Verify a proxy event logline is received with empty label
++    like(<$w>, qr/ts=(\S+) gid=\d+ type=proxy_backend error=trailingdata name=127.0.0.1 port=11414 label= depth=0 rbuf=garbage/, "got backend error log line");
++}
++
+ note("Test bugfix for missingend:" . __LINE__);
+ 
+ # This is an example of a test which will only pass before a bugfix is issued.
+@@ -244,7 +288,7 @@ SKIP: {
+ 
+     is(scalar <$ps>, "SERVER_ERROR backend failure\r\n");
+ 
+-    like(<$w>, qr/ts=(\S+) gid=\d+ type=proxy_backend error=missingend name=127.0.0.1 port=\d+ depth=1 rbuf=/, "got missingend error log line");
++    like(<$w>, qr/ts=(\S+) gid=\d+ type=proxy_backend error=missingend name=127.0.0.1 port=\d+ label=b\d+ depth=1 rbuf=/, "got missingend error log line");
+ 
+     $mbe[0] = accept_backend($mocksrvs[0]);
+ }
+@@ -298,6 +342,44 @@ SKIP: {
+ 
+     is(scalar <$ps>, "STORED\r\n", "got STORED from set");
+ 
++    # set (large value)
++    my $datasize = 256000;
++    my $data = 'x' x $datasize;
++    $cmd = "set /b/a 0 0 $datasize";
++    print $ps "$cmd\r\n$data\r\n";
++    is(scalar <$be>, "$cmd\r\n", "set passthrough (large value)");
++    is(scalar <$be>, "$data\r\n", "set value (large value)");
++    print $be "STORED\r\n";
++
++    is(scalar <$ps>, "STORED\r\n", "got STORED from set (large value)");
++
++    # set (pipelined)
++    my $num_repetitions = 5;
++    $cmd = "set /b/a 0 0 2";
++    $data = "ab";
++    my $req_ps = "$cmd\r\n$data\r\n";
++    my $resp_be = "STORED\r\n";
++
++    my $repeated_req_ps = "";
++    my $repeated_resp_be = "";
++    for (1..$num_repetitions) {
++        $repeated_req_ps = $repeated_req_ps . $req_ps;
++        $repeated_resp_be = $repeated_resp_be . $resp_be;
++    }
++
++    print $ps $repeated_req_ps;
++
++    for (1..$num_repetitions) {
++        is(scalar <$be>, "$cmd\r\n", "set passthrough (repeated)");
++        is(scalar <$be>, "$data\r\n", "set value (repeated)");
++    }
++
++    print $be $repeated_resp_be;
++
++    for (1..$num_repetitions) {
++        is(scalar <$ps>, "STORED\r\n", "got STORED from set (repeated)");
++    }
++
+     # Basic get
+     $cmd = "get /b/a\r\n";
+     print $ps $cmd;
+@@ -308,6 +390,18 @@ SKIP: {
+     is(scalar <$ps>, "hi\r\n", "get data");
+     is(scalar <$ps>, "END\r\n", "get end");
+ 
++    # get (large value)
++    $datasize = 256000;
++    $data = 'x' x $datasize;
++    $cmd = "get /b/a\r\n";
++    print $ps $cmd;
++    is(scalar <$be>, $cmd, "get passthrough (large value)");
++    print $be "VALUE /b/a 0 $datasize\r\n$data\r\nEND\r\n";
++
++    is(scalar <$ps>, "VALUE /b/a 0 $datasize\r\n", "get rline (large value)");
++    is(scalar <$ps>, "$data\r\n", "get data (large value)");
++    is(scalar <$ps>, "END\r\n", "get end (large value)");
++
+     # touch
+     $cmd = "touch /b/a 50\r\n";
+     print $ps $cmd;
+@@ -336,6 +430,14 @@ SKIP: {
+     is(scalar <$ps>, "hi\r\n", "gat data");
+     is(scalar <$ps>, "END\r\n", "gat end");
+ 
++    # gat (cache miss)
++    $cmd = "gat 10 /b/a\r\n";
++    print $ps $cmd;
++    is(scalar <$be>, $cmd, "gat passthrough");
++    print $be "END\r\n";
++
++    is(scalar <$ps>, "END\r\n", "gat end, cache miss");
++
+     # gats
+     $cmd = "gats 11 /b/a\r\n";
+     print $ps $cmd;
+@@ -355,6 +457,15 @@ SKIP: {
+ 
+     is(scalar <$ps>, "STORED\r\n", "got STORED from cas");
+ 
++    # cas (already exists failure)
++    $cmd = "cas /b/a 0 0 3 6";
++    print $ps "$cmd\r\nabc\r\n";
++    is(scalar <$be>, "$cmd\r\n", "cas passthrough");
++    is(scalar <$be>, "abc\r\n", "cas value");
++    print $be "EXISTS\r\n";
++
++    is(scalar <$ps>, "EXISTS\r\n", "got EXISTS from cas");
++
+     # add
+     $cmd = "add /b/a 0 0 2";
+     print $ps "$cmd\r\nhi\r\n";
+@@ -364,6 +475,15 @@ SKIP: {
+ 
+     is(scalar <$ps>, "STORED\r\n", "got STORED from add");
+ 
++    # add (re-add failure)
++    $cmd = "add /b/a 0 0 4";
++    print $ps "$cmd\r\nabcd\r\n";
++    is(scalar <$be>, "$cmd\r\n", "add passthrough");
++    is(scalar <$be>, "abcd\r\n", "add value");
++    print $be "NOT_STORED\r\n";
++
++    is(scalar <$ps>, "NOT_STORED\r\n", "got STORED from add");
++
+     # delete
+     $cmd = "delete /b/a\r\n";
+     print $ps $cmd;
+@@ -991,6 +1111,21 @@ check_sanity($ps);
+ 
+     # test log_req with nil res (should be 0's in places)
+     # log_reqsample()
++    $cmd = "get /logreqstest/a\r\n";
++    print $ps $cmd;
++    is(scalar <$be>, $cmd, "got passthru for logsamp");
++    print $be "END\r\n";
++    is(scalar <$ps>, "END\r\n", "got END from log test");
++
++    $cmd = "get /logreqstest/b\r\n";
++    print $ps $cmd;
++    is(scalar <$be>, $cmd, "got passthru for logsamp");
++
++    # cause the sampler time limit to trigger.
++    sleep 0.3;
++    print $be "END\r\n";
++    is(scalar <$ps>, "END\r\n", "got END from log test");
++    like(<$watcher>, qr/ts=(\S+) gid=\d+ type=proxy_req elapsed=\d+ type=105 code=17 status=0 be=127.0.0.1:11411 detail=logsampletest req=get \/logreqstest\/b/, "only got b request from log sample");
+ }
+ 
+ # Basic proxy stats validation
+diff --git a/t/proxyustats.lua b/t/proxyustats.lua
+index e0302cb8cf..bcc50f557c 100644
+--- a/t/proxyustats.lua
++++ b/t/proxyustats.lua
+@@ -8,11 +8,19 @@ function mcp_config_pools(old)
+     mcp.backend_read_timeout(4)
+     mcp.backend_connect_timeout(5)
+     local pfx, f, l = string.match(config, "(%S+)%s*(%S+)%s*(%S+)")
+-    local first = tonumber(f)
+-    local last = tonumber(l)
+-    while first <= last do
+-        mcp.add_stat(first, pfx .. first)
+-        first = first + 1
++    if pfx == "mask1" then
++        mcp.add_stat(1, "maska")
++        mcp.add_stat(2, "maskb")
++    elseif pfx == "mask2" then
++        mcp.add_stat(1, "")
++        mcp.add_stat(2, "maskb")
++    else
++        local first = tonumber(f)
++        local last = tonumber(l)
++        while first <= last do
++            mcp.add_stat(first, pfx .. first)
++            first = first + 1
++        end
+     end
+ 
+     return {}
+diff --git a/t/proxyustats.t b/t/proxyustats.t
+index 0d5e340fbf..0129b7c232 100644
+--- a/t/proxyustats.t
++++ b/t/proxyustats.t
+@@ -220,6 +220,27 @@ subtest 'negative ustat value underflow' => sub {
+     isnt($stats->{user_a1}, -1, "user_a1 is not -1");
+ };
+ 
++subtest 'mask off stat after reload' => sub {
++    restart_memcached();
++
++    write_config('return "mask1 1 1"');
++    $p_srv->reload();
++    wait_reload($watcher);
++
++    my $s1 = mem_stats($ps, 'proxy');
++    is($s1->{"user_maska"}, 0, "maska is 0");
++    is($s1->{"user_maskb"}, 0, "maskb is 0");
++
++    write_config('return "mask2 1 1"');
++    $p_srv->reload();
++    wait_reload($watcher);
++
++    my $s2 = mem_stats($ps, 'proxy');
++
++    is($s2->{"user_maska"}, undef, "maska is gone");
++    is($s2->{"user_maskb"}, 0, "maskb is 0");
++};
++
+ done_testing();
+ 
+ END {
+diff --git a/testapp.c b/testapp.c
+index 387a84715c..c21b357375 100644
+--- a/testapp.c
++++ b/testapp.c
+@@ -393,6 +393,14 @@ static enum test_return test_safe_strtoul(void) {
+        assert(!safe_strtoul("4294967296", &val)); // 2**32
+     */
+     assert(!safe_strtoul("-1", &val));  // negative
++
++    // huge number, with a negative sign _past_ the value
++    if (sizeof(unsigned long) > 4) {
++        assert(safe_strtoul("18446744073709551615\r\nextrastring-morestring", &val));
++    } else {
++        assert(safe_strtoul("4294967295\r\nextrastring-morestring", &val));
++    }
++
+     return TEST_PASS;
+ }
+ 
+@@ -413,6 +421,9 @@ static enum test_return test_safe_strtoull(void) {
+     assert(val == 18446744073709551615ULL);
+     assert(!safe_strtoull("18446744073709551616", &val)); // 2**64
+     assert(!safe_strtoull("-1", &val));  // negative
++
++    // huge number, with a negative sign _past_ the value
++    assert(safe_strtoull("18446744073709551615\r\nextrastring-morestring", &val));
+     return TEST_PASS;
+ }
+ 
+diff --git a/thread.c b/thread.c
+index ee120fac1c..b1ece2dc29 100644
+--- a/thread.c
++++ b/thread.c
+@@ -38,7 +38,6 @@ enum conn_queue_item_modes {
+     queue_timeout,    /* socket sfd timed out */
+     queue_redispatch, /* return conn from side thread */
+     queue_stop,       /* exit thread */
+-    queue_return_io,  /* returning a pending IO object immediately */
+ #ifdef PROXY
+     queue_proxy_reload, /* signal proxy to reload worker VM */
+ #endif
+@@ -109,6 +108,7 @@ static CQ_ITEM *cqi_new(CQ *cq);
+ static void cq_push(CQ *cq, CQ_ITEM *item);
+ 
+ static void thread_libevent_process(evutil_socket_t fd, short which, void *arg);
++static void thread_libevent_ionotify(evutil_socket_t fd, short which, void *arg);
+ 
+ /* item_lock() must be held for an item before any modifications to either its
+  * associated hash bucket, or the structure itself.
+@@ -341,13 +341,13 @@ static void notify_worker(LIBEVENT_THREAD *t, CQ_ITEM *item) {
+     cq_push(t->ev_queue, item);
+ #ifdef HAVE_EVENTFD
+     uint64_t u = 1;
+-    if (write(t->notify_event_fd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {
++    if (write(t->n.notify_event_fd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {
+         perror("failed writing to worker eventfd");
+         /* TODO: This is a fatal problem. Can it ever happen temporarily? */
+     }
+ #else
+     char buf[1] = "c";
+-    if (write(t->notify_send_fd, buf, 1) != 1) {
++    if (write(t->n.notify_send_fd, buf, 1) != 1) {
+         perror("Failed writing to notify pipe");
+         /* TODO: This is a fatal problem. Can it ever happen temporarily? */
+     }
+@@ -401,6 +401,23 @@ void accept_new_conns(const bool do_accept) {
+ }
+ /****************************** LIBEVENT THREADS *****************************/
+ 
++static void setup_thread_notify(LIBEVENT_THREAD *me, struct thread_notify *tn,
++        void(*cb)(int, short, void *)) {
++#ifdef HAVE_EVENTFD
++    event_set(&tn->notify_event, tn->notify_event_fd,
++              EV_READ | EV_PERSIST, cb, me);
++#else
++    event_set(&tn->notify_event, tn->notify_receive_fd,
++              EV_READ | EV_PERSIST, cb, me);
++#endif
++    event_base_set(me->base, &tn->notify_event);
++
++    if (event_add(&tn->notify_event, 0) == -1) {
++        fprintf(stderr, "Can't monitor libevent notify pipe\n");
++        exit(1);
++    }
++}
++
+ /*
+  * Set up a thread's information.
+  */
+@@ -421,19 +438,10 @@ static void setup_thread(LIBEVENT_THREAD *me) {
+     }
+ 
+     /* Listen for notifications from other threads */
+-#ifdef HAVE_EVENTFD
+-    event_set(&me->notify_event, me->notify_event_fd,
+-              EV_READ | EV_PERSIST, thread_libevent_process, me);
+-#else
+-    event_set(&me->notify_event, me->notify_receive_fd,
+-              EV_READ | EV_PERSIST, thread_libevent_process, me);
+-#endif
+-    event_base_set(me->base, &me->notify_event);
+-
+-    if (event_add(&me->notify_event, 0) == -1) {
+-        fprintf(stderr, "Can't monitor libevent notify pipe\n");
+-        exit(1);
+-    }
++    setup_thread_notify(me, &me->n, thread_libevent_process);
++    setup_thread_notify(me, &me->ion, thread_libevent_ionotify);
++    pthread_mutex_init(&me->ion_lock, NULL);
++    STAILQ_INIT(&me->ion_head);
+ 
+     me->ev_queue = malloc(sizeof(struct conn_queue));
+     if (me->ev_queue == NULL) {
+@@ -527,14 +535,52 @@ static void *worker_libevent(void *arg) {
+     return NULL;
+ }
+ 
++// Syscalls can be expensive enough that handling a few of them once here can
++// save both throughput and overall latency.
++#define MAX_PIPE_EVENTS 32
++
++// dedicated worker thread notify system for IO objects.
++static void thread_libevent_ionotify(evutil_socket_t fd, short which, void *arg) {
++    LIBEVENT_THREAD *me = arg;
++    uint64_t ev_count = 0;
++    iop_head_t head;
++
++    STAILQ_INIT(&head);
++#ifdef HAVE_EVENTFD
++    if (read(fd, &ev_count, sizeof(uint64_t)) != sizeof(uint64_t)) {
++        if (settings.verbose > 0)
++            fprintf(stderr, "Can't read from libevent pipe\n");
++        return;
++    }
++#else
++    char buf[MAX_PIPE_EVENTS];
++
++    ev_count = read(fd, buf, MAX_PIPE_EVENTS);
++    if (ev_count == 0) {
++        if (settings.verbose > 0)
++            fprintf(stderr, "Can't read from libevent pipe\n");
++        return;
++    }
++#endif
++
++    // pull entire queue and zero the thread head.
++    // need to do this after reading a syscall as we are only guaranteed to
++    // get syscalls if the queue is empty.
++    pthread_mutex_lock(&me->ion_lock);
++    STAILQ_CONCAT(&head, &me->ion_head);
++    pthread_mutex_unlock(&me->ion_lock);
++
++    while (!STAILQ_EMPTY(&head)) {
++        io_pending_t *io = STAILQ_FIRST(&head);
++        STAILQ_REMOVE_HEAD(&head, iop_next);
++        conn_io_queue_return(io);
++    }
++}
+ 
+ /*
+  * Processes an incoming "connection event" item. This is called when
+  * input arrives on the libevent wakeup pipe.
+  */
+-// Syscalls can be expensive enough that handling a few of them once here can
+-// save both throughput and overall latency.
+-#define MAX_PIPE_EVENTS 32
+ static void thread_libevent_process(evutil_socket_t fd, short which, void *arg) {
+     LIBEVENT_THREAD *me = arg;
+     CQ_ITEM *item;
+@@ -615,10 +661,6 @@ static void thread_libevent_process(evutil_socket_t fd, short which, void *arg)
+                 /* asked to stop */
+                 event_base_loopexit(me->base, NULL);
+                 break;
+-            case queue_return_io:
+-                /* getting an individual IO object back */
+-                conn_io_queue_return(item->io);
+-                break;
+ #ifdef PROXY
+             case queue_proxy_reload:
+                 proxy_worker_reload(settings.proxy_ctx, me);
+@@ -777,19 +819,32 @@ void proxy_reload_notify(LIBEVENT_THREAD *t) {
+ #endif
+ 
+ void return_io_pending(io_pending_t *io) {
+-    CQ_ITEM *item = cqi_new(io->thread->ev_queue);
+-    if (item == NULL) {
+-        // TODO: how can we avoid this?
+-        // In the main case I just loop, since a malloc failure here for a
+-        // tiny object that's generally in a fixed size queue is going to
+-        // implode shortly.
+-        return;
++    bool do_notify = false;
++    LIBEVENT_THREAD *t = io->thread;
++    pthread_mutex_lock(&t->ion_lock);
++    if (STAILQ_EMPTY(&t->ion_head)) {
++        do_notify = true;
+     }
++    STAILQ_INSERT_TAIL(&t->ion_head, io, iop_next);
++    pthread_mutex_unlock(&t->ion_lock);
+ 
+-    item->mode = queue_return_io;
+-    item->io = io;
+-
+-    notify_worker(io->thread, item);
++    // skip the syscall if there was already data in the queue, as it's
++    // already been notified.
++    if (do_notify) {
++#ifdef HAVE_EVENTFD
++        uint64_t u = 1;
++        if (write(t->ion.notify_event_fd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {
++            perror("failed writing to worker eventfd");
++            /* TODO: This is a fatal problem. Can it ever happen temporarily? */
++        }
++#else
++        char buf[1] = "c";
++        if (write(t->ion.notify_send_fd, buf, 1) != 1) {
++            perror("Failed writing to notify pipe");
++            /* TODO: This is a fatal problem. Can it ever happen temporarily? */
++        }
++#endif
++    }
+ }
+ 
+ /* This misses the allow_new_conns flag :( */
+@@ -808,7 +863,7 @@ void sidethread_conn_close(conn *c) {
+ /*
+  * Allocates a new item.
+  */
+-item *item_alloc(const char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
++item *item_alloc(const char *key, size_t nkey, client_flags_t flags, rel_time_t exptime, int nbytes) {
+     item *it;
+     /* do_item_alloc handles its own locks */
+     it = do_item_alloc(key, nkey, flags, exptime, nbytes);
+@@ -1013,6 +1068,25 @@ void slab_stats_aggregate(struct thread_stats *stats, struct slab_stats *out) {
+     }
+ }
+ 
++static void memcached_thread_notify_init(struct thread_notify *tn) {
++#ifdef HAVE_EVENTFD
++        tn->notify_event_fd = eventfd(0, EFD_NONBLOCK);
++        if (tn->notify_event_fd == -1) {
++            perror("failed creating eventfd for worker thread");
++            exit(1);
++        }
++#else
++        int fds[2];
++        if (pipe(fds)) {
++            perror("Can't create notify pipe");
++            exit(1);
++        }
++
++        tn->notify_receive_fd = fds[0];
++        tn->notify_send_fd = fds[1];
++#endif
++}
++
+ /*
+  * Initializes the thread subsystem, creating various worker threads.
+  *
+@@ -1072,22 +1146,8 @@ void memcached_thread_init(int nthreads, void *arg) {
+     }
+ 
+     for (i = 0; i < nthreads; i++) {
+-#ifdef HAVE_EVENTFD
+-        threads[i].notify_event_fd = eventfd(0, EFD_NONBLOCK);
+-        if (threads[i].notify_event_fd == -1) {
+-            perror("failed creating eventfd for worker thread");
+-            exit(1);
+-        }
+-#else
+-        int fds[2];
+-        if (pipe(fds)) {
+-            perror("Can't create notify pipe");
+-            exit(1);
+-        }
+-
+-        threads[i].notify_receive_fd = fds[0];
+-        threads[i].notify_send_fd = fds[1];
+-#endif
++        memcached_thread_notify_init(&threads[i].n);
++        memcached_thread_notify_init(&threads[i].ion);
+ #ifdef EXTSTORE
+         threads[i].storage = arg;
+ #endif
+diff --git a/util.c b/util.c
+index 5072ae1f61..1afb570fe8 100644
+--- a/util.c
++++ b/util.c
+@@ -61,7 +61,7 @@ bool safe_strtoull(const char *str, uint64_t *out) {
+             /* only check for negative signs in the uncommon case when
+              * the unsigned number is so big that it's negative as a
+              * signed number. */
+-            if (strchr(str, '-') != NULL) {
++            if (memchr(str, '-', endptr - str) != NULL) {
+                 return false;
+             }
+         }
+@@ -91,7 +91,7 @@ bool safe_strtoull_hex(const char *str, uint64_t *out) {
+             /* only check for negative signs in the uncommon case when
+              * the unsigned number is so big that it's negative as a
+              * signed number. */
+-            if (strchr(str, '-') != NULL) {
++            if (memchr(str, '-', endptr - str) != NULL) {
+                 return false;
+             }
+         }
+@@ -136,7 +136,7 @@ bool safe_strtoul(const char *str, uint32_t *out) {
+             /* only check for negative signs in the uncommon case when
+              * the unsigned number is so big that it's negative as a
+              * signed number. */
+-            if (strchr(str, '-') != NULL) {
++            if (memchr(str, '-', endptr - str) != NULL) {
+                 return false;
+             }
+         }
+diff --git a/vendor/Makefile b/vendor/Makefile
+index 04360ea586..e73d2162a4 100644
+--- a/vendor/Makefile
++++ b/vendor/Makefile
+@@ -1,5 +1,5 @@
+ all:
+-	cd lua && $(MAKE) all CFLAGS="-g" && cd ..
++	cd lua && $(MAKE) all MYCFLAGS="-g" && cd ..
+ 	cd mcmc && $(MAKE) all && cd ..
+ 
+ clean:
